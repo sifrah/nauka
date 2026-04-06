@@ -223,12 +223,12 @@ mod tests {
     #[test]
     fn save_overwrites_previous() {
         let (_d, db) = temp_db();
-        let mut state = make_state();
+        let state = make_state();
         state.save(&db).unwrap();
 
         // Modify and save again
         state.save(&db).unwrap();
 
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        let _loaded = FabricState::load(&db).unwrap().unwrap();
     }
 }
