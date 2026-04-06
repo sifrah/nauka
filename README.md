@@ -1,10 +1,53 @@
 # Nauka
 
 [![CI](https://github.com/sifrah/nauka/actions/workflows/ci.yml/badge.svg)](https://github.com/sifrah/nauka/actions/workflows/ci.yml)
+[![Nightly](https://github.com/sifrah/nauka/actions/workflows/nightly.yml/badge.svg)](https://github.com/sifrah/nauka/actions/workflows/nightly.yml)
 [![Docs](https://github.com/sifrah/nauka/actions/workflows/docs.yml/badge.svg)](https://sifrah.github.io/nauka/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 An open-source platform that turns bare-metal servers into a programmable cloud.
+
+## Install
+
+```bash
+curl -fsSL https://github.com/sifrah/nauka/raw/main/scripts/install.sh | sh
+```
+
+Other channels:
+
+```bash
+# Beta (pre-release, tested)
+curl -fsSL https://github.com/sifrah/nauka/raw/main/scripts/install.sh | sh -s -- --beta
+
+# Nightly (latest from main, may break)
+curl -fsSL https://github.com/sifrah/nauka/raw/main/scripts/install.sh | sh -s -- --nightly
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/sifrah/nauka.git && cd nauka
+cargo build --release
+# Binary at target/release/nauka
+```
+
+Requires Rust stable (version pinned in [rust-toolchain.toml](rust-toolchain.toml)).
+
+## Quick Start
+
+```bash
+# Server 1: create a mesh and start peering listener
+nauka hypervisor init --region eu --zone fsn1 --peering
+
+# Server 2: join the mesh
+nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1
+
+# Check status
+nauka hypervisor status
+
+# List all nodes
+nauka hypervisor list
+```
 
 ## What is Nauka?
 
@@ -25,23 +68,7 @@ Nauka is a **CLI orchestrator** — not a daemon. It configures system services 
 | Storage | — | Planned — ZeroFS, S3-backed block devices |
 | Org / IAM | — | Planned — multi-tenant, RBAC |
 
-## Quick Start
-
-```bash
-# Server 1: create a mesh and start peering listener
-nauka hypervisor init --region eu --zone fsn1 --peering
-
-# Server 2: join the mesh
-nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1
-
-# Check status
-nauka hypervisor status
-
-# List all nodes
-nauka hypervisor list
-```
-
-## How it works
+## Architecture
 
 ```
                       ┌──────────────────────────────┐
@@ -81,22 +108,10 @@ The CLI binary in `bin/nauka` composes these crates and contains no logic of its
 
 ## Documentation
 
-- **[User Documentation](https://sifrah.github.io/nauka/)** — Starlight site with guides for every module
-- **[REST API Reference](https://sifrah.github.io/nauka/rest/)** — Interactive Scalar UI (auto-generated from ResourceDefs)
-- **[Rust API Reference](https://sifrah.github.io/nauka/api/nauka_core/)** — rustdoc for all crates
-
-## Install
-
-### From source
-
-```bash
-git clone https://github.com/sifrah/nauka.git
-cd nauka
-cargo build --release
-# Binary is at target/release/nauka
-```
-
-Requires Rust stable (version pinned in [rust-toolchain.toml](rust-toolchain.toml)).
+- **[User Documentation](https://sifrah.github.io/nauka/stable/)** — Starlight site with guides for every module
+- **[REST API Reference](https://sifrah.github.io/nauka/stable/rest/)** — Interactive Scalar UI (auto-generated from ResourceDefs)
+- **[Rust API Reference](https://sifrah.github.io/nauka/stable/api/nauka_core/)** — rustdoc for all crates
+- **[Release Process](RELEASING.md)** — nightly / beta / stable channels
 
 ## Contributing
 
