@@ -191,10 +191,8 @@ mod tests {
     fn constants_sensible() {
         assert_eq!(DEFAULT_INTERVAL_SECS, 30);
         assert_eq!(DEFAULT_STALE_THRESHOLD_SECS, 300);
-        assert!(
-            DEFAULT_STALE_THRESHOLD_SECS > DEFAULT_INTERVAL_SECS,
-            "threshold must exceed interval"
-        );
+        // Verify threshold > interval at compile time
+        const _: () = assert!(DEFAULT_STALE_THRESHOLD_SECS > DEFAULT_INTERVAL_SECS);
     }
 
     #[test]
