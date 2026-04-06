@@ -71,21 +71,32 @@ pub async fn broadcast_new_peer(
     (successes, failures)
 }
 
-/// Send a single PeerAnnounce to one peer.
+/// Send a single PeerAnnounce to one peer (over TLS).
 async fn send_announce(addr: &str, announce: &PeerAnnounce) -> Result<(), NaukaError> {
     let timeout = Duration::from_secs(ANNOUNCE_TIMEOUT_SECS);
 
-    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
+    let tcp_stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
         .await
         .map_err(|_| NaukaError::timeout("announce connection", ANNOUNCE_TIMEOUT_SECS))?
         .map_err(|e| NaukaError::network(format!("announce connect failed: {e}")))?;
+
+    // TLS handshake (TOFU — same model as peering)
+    let tls_config = super::tls::client_config();
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
+    let server_name = rustls::pki_types::ServerName::try_from("nauka-peering")
+        .map_err(|e| NaukaError::internal(format!("TLS server name: {e}")))?;
+
+    let mut stream = connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| NaukaError::network(format!("announce TLS handshake failed: {e}")))?;
 
     write_json(&mut stream, announce).await?;
 
     Ok(())
 }
 
-/// Listen for peer announcements and apply them.
+/// Listen for peer announcements and apply them (over TLS).
 ///
 /// Runs on wg_port + 2. When an announcement arrives:
 /// 1. Add the new peer to our PeerList
@@ -101,11 +112,23 @@ pub async fn listen(
         .await
         .map_err(|e| NaukaError::internal(format!("failed to bind announce port: {e}")))?;
 
-    tracing::info!(addr = %bind_addr, "announce listener started");
+    let tls_config = super::tls::server_config()?;
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+
+    tracing::info!(addr = %bind_addr, "announce listener started (TLS)");
 
     loop {
         match listener.accept().await {
-            Ok((mut stream, peer_addr)) => {
+            Ok((tcp_stream, peer_addr)) => {
+                // TLS handshake
+                let mut stream = match tls_acceptor.accept(tcp_stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(peer = %peer_addr, error = %e, "announce TLS handshake failed");
+                        continue;
+                    }
+                };
+
                 let db = match db_opener() {
                     Ok(db) => db,
                     Err(e) => {
@@ -136,7 +159,7 @@ pub async fn listen(
 
 /// Handle a single peer announcement.
 async fn handle_announce(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin),
     db: &nauka_state::LayerDb,
 ) -> Result<String, NaukaError> {
     let announce: PeerAnnounce = read_json(stream).await?;

@@ -23,7 +23,7 @@ A region is the unit of storage configuration in Nauka. Every region corresponds
 
 The `s3_endpoint` field must start with `http://` or `https://`. All other non-optional fields must be non-empty. Nauka validates this before saving.
 
-Credentials are stored as plain text in the local state file. They are passed to ZeroFS at runtime through environment variables in the systemd unit — they are never written into the ZeroFS TOML config file.
+Credentials are stored in the local state file and written directly into the ZeroFS TOML config file. Both are protected with `0600` permissions (owner-readable only).
 
 ## RegionRegistry
 

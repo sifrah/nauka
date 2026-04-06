@@ -9,16 +9,31 @@ The `ops` module is where the work actually happens. Every high-level `nauka hv`
 
 ## InitConfig
 
-`init` and `join` accept an `InitConfig` struct that consolidates all the parameters that influence how the node is set up:
+`init` accepts an `InitConfig` struct and `join` accepts a `JoinConfig` struct that consolidate all parameters:
+
+**InitConfig:**
 
 | Field | Flag | Description |
 |---|---|---|
-| `name` | `--name` | Unique node name within the mesh |
+| `node_name` | `--name` | Node name (defaults to hostname if omitted) |
 | `region` | `--region` | Region identifier (e.g., `us-east`) |
 | `zone` | `--zone` | Availability zone (e.g., `us-east-1a`) |
-| `mode` | `--mode` | Network backend: `wireguard` (default), `direct`, or `mock` |
-| `interface` | `--interface` | WireGuard interface name (default: `nauka0`) |
+| `port` | `--port` | Listen port (also uses port+1 for peering, port+2 for announce) |
+| `network_mode` | `--mode` | Network backend: `wireguard` (default), `direct`, or `mock` |
+| `fabric_interface` | `--interface` | Physical network interface (e.g., `eth1`). Auto-detected if omitted |
 | `endpoint` | `--endpoint` | This node's public endpoint (`host:port`) advertised to peers |
+
+**JoinConfig:**
+
+| Field | Flag | Description |
+|---|---|---|
+| `target` | `--target` | IP or IP:port of an existing node (required) |
+| `node_name` | `--name` | Node name (defaults to hostname if omitted) |
+| `region` | `--region` | Region identifier |
+| `zone` | `--zone` | Availability zone |
+| `port` | `--port` | Listen port |
+| `pin` | `--pin` | PIN for auto-accept |
+| `network_mode` | `--mode` | Network backend |
 
 The `--mode` flag selects the [network backend](/nauka/layers/hypervisor/fabric/backend). All nodes in a cluster should use the same mode.
 
@@ -56,20 +71,21 @@ If any step fails, init cleans up (stops and uninstalls the service, removes sta
 
 **What it does:**
 
-1. Connects to the target's peering port (WG port + 1) via TCP
-2. Sends a `JoinRequest` with name, region, zone, WG pubkey, and PIN
-3. Receives a `JoinResponse` containing the mesh secret, the `/48` prefix, and the full peer list
-4. Creates a `HypervisorIdentity` for this node using the received mesh data
-5. Installs and starts the WireGuard service with all received peers pre-configured
-6. Persists `FabricState`
+1. Ensures the network backend is installed via `backend.ensure_installed()`
+2. Connects to the target's peering port (WG port + 1) via TLS+TCP
+3. Sends a `JoinRequest` with name, region, zone, WG pubkey, and PIN
+4. Receives a `JoinResponse` containing the mesh secret, the `/48` prefix, and the full peer list
+5. Creates a `HypervisorIdentity` for this node using the received mesh data
+6. Sets up the network via `backend.setup()` with all received peers pre-configured
+7. Persists `FabricState` (including `network_mode`)
 
 **Usage:**
 
 ```sh
-nauka hv join --target 203.0.113.10 --name web-02 --region us-east --zone us-east-1a
+nauka hv join --target 203.0.113.10 --pin G7CCZX --name web-02 --region us-east --zone us-east-1a
 ```
 
-The target must be a running Nauka hypervisor. You need the PIN displayed when the mesh was initialized.
+The `--name` flag is optional (defaults to hostname). The target must be a running Nauka hypervisor with peering active. You need the PIN displayed when the mesh was initialized.
 
 ## listen_for_peers
 
@@ -105,7 +121,7 @@ nauka hv status
 
 ## start
 
-`start` enables and starts the `wg-quick@nauka0` systemd service. If the service is already running, the command succeeds without doing anything. State must exist (i.e. the node must have been initialized) for start to work.
+`start` starts all hypervisor services: fabric (network), control plane (PD + TiKV), and storage (ZeroFS regions). If a service is already running, it is skipped. Warnings are printed for any service that fails to start. State must exist (i.e. the node must have been initialized) for start to work.
 
 ```sh
 nauka hv start
@@ -113,7 +129,7 @@ nauka hv start
 
 ## stop
 
-`stop` stops the `wg-quick@nauka0` service. The WireGuard interface is brought down, and all peer tunnels are closed. State is preserved — you can `start` again to reconnect.
+`stop` stops all hypervisor services in reverse order: storage first, then control plane, then fabric. State is preserved — you can `start` again to reconnect.
 
 ```sh
 nauka hv stop
@@ -125,9 +141,9 @@ nauka hv stop
 
 **What it does:**
 
-1. Stops the WireGuard service
-2. Uninstalls the service and config files
-3. Removes the `nauka0` interface if it still exists
+1. Stops and removes all storage services (ZeroFS instances)
+2. Deregisters this node's TiKV store from PD, then uninstalls control plane services
+3. Tears down the fabric network via the backend
 4. Deletes `FabricState` from the database
 
 After `leave`, the node is clean. Other nodes will detect it as `Unreachable` and eventually mark it `Removed`. To rejoin, run `nauka hv join` again.

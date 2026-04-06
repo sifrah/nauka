@@ -13,15 +13,18 @@ The server listens on **WireGuard port + 1**. If your WireGuard port is 51820, t
 
 For each incoming connection, the server follows this sequence:
 
-1. **Accept TCP connection** from the joiner
-2. **Read JoinRequest** (length-prefixed JSON)
-3. **Validate PIN** — if wrong, close the connection immediately
-4. **Open the database** to read current `FabricState`
-5. **Build JoinResponse** with the mesh secret, prefix, and current peer list
-6. **Send JoinResponse** to the joiner
-7. **Add the new peer** to local `FabricState` and persist it
-8. **Announce the new peer** to all existing peers via `PeerAnnounce`
-9. **Close the connection**
+1. **Accept TCP connection** and perform **TLS handshake** (self-signed cert, TOFU model)
+2. **Read JoinRequest** (length-prefixed JSON over TLS)
+3. **Check rate limit** — IPs with too many failed PIN attempts are blocked for 10 minutes
+4. **Validate PIN** — if wrong, send rejection and record failure
+5. **Validate peer fields** — reject names, keys, or endpoints containing control characters
+6. **Open the database** to read current `FabricState`
+7. **Build JoinResponse** with the mesh secret, prefix, and current peer list
+8. **Send JoinResponse** to the joiner
+9. **Update WireGuard config** with the new peer (before persisting state — no split-brain)
+10. **Persist the new peer** to local `FabricState`
+11. **Announce the new peer** to all existing peers via TLS `PeerAnnounce` on port wg_port+2
+12. **Close the connection**
 
 ## Per-request database open
 
@@ -31,11 +34,11 @@ Opening per-request adds a small amount of latency to joins, but joins are rare 
 
 ## Announcing new peers
 
-After a join completes, the server connects to each existing peer's peering port and sends a `PeerAnnounce` message containing the new node's `Peer` record. Each existing peer then:
+After a join completes, the server connects to each existing peer's announce port (wg_port+2) over TLS and sends a `PeerAnnounce` message. Each existing peer then:
 
 - Adds the new node to its own `PeerList`
-- Calls `wg set nauka0 peer ...` to add the peer to the live interface
-- Rewrites `nauka0.conf` to persist the change across restarts
+- Updates the WireGuard config and applies it via `wg syncconf`
+- Persists state to disk
 
 This means a new node is fully connected to the whole mesh within seconds of a successful join — no manual configuration on other nodes is needed.
 

@@ -152,34 +152,47 @@ pub fn run() -> DoctorReport {
 fn check_fabric(report: &mut DoctorReport, state: &Option<fabric::state::FabricState>) {
     let checks = report.add_section("Fabric");
 
-    // wireguard-tools installed
-    if cmd_exists("wg") {
-        checks.push(ok("wireguard-tools", "installed"));
-    } else {
-        checks.push(fail("wireguard-tools", "not installed"));
+    let network_mode = state
+        .as_ref()
+        .map(|s| s.network_mode)
+        .unwrap_or_default();
+    let backend = fabric::backend::create_backend(network_mode);
+
+    match network_mode {
+        fabric::backend::NetworkMode::WireGuard => {
+            // wireguard-tools installed
+            if cmd_exists("wg") {
+                checks.push(ok("wireguard-tools", "installed"));
+            } else {
+                checks.push(fail("wireguard-tools", "not installed"));
+            }
+
+            // Config file
+            if Path::new("/etc/wireguard/nauka0.conf").exists() {
+                checks.push(ok("wg config", "/etc/wireguard/nauka0.conf exists"));
+            } else {
+                checks.push(fail("wg config", "missing"));
+            }
+        }
+        fabric::backend::NetworkMode::Direct => {
+            checks.push(ok("network mode", "direct (no tunnel)"));
+        }
+        fabric::backend::NetworkMode::Mock => {
+            checks.push(ok("network mode", "mock (testing)"));
+        }
     }
 
-    // Interface up
-    if fabric::wg::interface_exists() {
-        checks.push(ok("nauka0 interface", "up"));
+    // Interface/service up (backend-agnostic)
+    if backend.is_up() {
+        checks.push(ok("fabric network", "up"));
     } else {
-        checks.push(fail("nauka0 interface", "down"));
+        checks.push(fail("fabric network", "down"));
     }
 
-    // Systemd service
-    if fabric::service::is_active() {
-        checks.push(ok("wg service", "active"));
-    } else if fabric::service::is_installed() {
-        checks.push(warn("wg service", "installed but stopped"));
+    if backend.is_active() {
+        checks.push(ok("fabric service", "active"));
     } else {
-        checks.push(fail("wg service", "not installed"));
-    }
-
-    // Config file
-    if Path::new("/etc/wireguard/nauka0.conf").exists() {
-        checks.push(ok("wg config", "/etc/wireguard/nauka0.conf exists"));
-    } else {
-        checks.push(fail("wg config", "missing"));
+        checks.push(warn("fabric service", "stopped"));
     }
 
     // Peer health

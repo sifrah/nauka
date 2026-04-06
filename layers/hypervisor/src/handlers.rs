@@ -23,6 +23,10 @@ pub fn resource_def() -> ResourceDef {
         .action("init", "Initialize a new cluster")
         .op(|op| {
             op.with_arg(OperationArg::optional(
+                "name",
+                FieldDef::string("name", "Node name (defaults to hostname)"),
+            ))
+            .with_arg(OperationArg::optional(
                 "region",
                 FieldDef::string("region", "Region label").with_default("default"),
             ))
@@ -32,7 +36,7 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_arg(OperationArg::optional(
                 "port",
-                FieldDef::integer("port", "WireGuard listen port").with_default("51820"),
+                FieldDef::integer("port", "Listen port (also uses port+1 for peering, port+2 for announce)").with_default("51820"),
             ))
             .with_arg(OperationArg::optional(
                 "mode",
@@ -70,6 +74,10 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("target", "IP or IP:port of an existing node"),
             ))
             .with_arg(OperationArg::optional(
+                "name",
+                FieldDef::string("name", "Node name (defaults to hostname)"),
+            ))
+            .with_arg(OperationArg::optional(
                 "pin",
                 FieldDef::string("pin", "PIN for auto-accept"),
             ))
@@ -83,7 +91,12 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_arg(OperationArg::optional(
                 "port",
-                FieldDef::integer("port", "WireGuard listen port").with_default("51820"),
+                FieldDef::integer("port", "Listen port (also uses port+1 for peering, port+2 for announce)").with_default("51820"),
+            ))
+            .with_arg(OperationArg::optional(
+                "mode",
+                FieldDef::string("mode", "Network mode: wireguard (default), direct, mock")
+                    .with_default("wireguard"),
             ))
             .with_output(OutputKind::Resource)
             .with_example(
@@ -92,9 +105,9 @@ pub fn resource_def() -> ResourceDef {
         })
         .action("status", "Show hypervisor status")
         .op(|op| op.with_output(OutputKind::Resource))
-        .action("start", "Start the WireGuard service")
-        .action("stop", "Stop the WireGuard service")
-        .action("leave", "Leave the cluster, uninstall WireGuard service")
+        .action("start", "Start hypervisor services (fabric, storage, tikv)")
+        .action("stop", "Stop hypervisor services (fabric, storage, tikv)")
+        .action("leave", "Leave the cluster and uninstall services")
         .op(|op| op.with_confirm())
         // CRUD
         .list()
@@ -117,11 +130,12 @@ pub fn resource_def() -> ResourceDef {
         // Table
         .column("NAME", "name")
         .column("REGION", "region")
+        .column("ZONE", "zone")
         .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
         .column("CPU", "cpu")
         .column("MEMORY", "memory")
         .column("VMs", "vms")
-        .empty_message("No hypervisors found. Initialize with: nauka hypervisor init --name <mesh>")
+        .empty_message("No hypervisors found. Initialize with: nauka hypervisor init")
         .detail_section(
             None,
             vec![
@@ -202,11 +216,18 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
     let endpoint = req.fields.get("endpoint").cloned();
 
-    let node_name = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .map(|h| h.to_lowercase())
-        .unwrap_or_else(|| "node".to_string());
+    let node_name = req
+        .fields
+        .get("name")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .map(|h| h.to_lowercase())
+                .unwrap_or_else(|| "node".to_string())
+        });
 
     let peering = req
         .fields
@@ -226,12 +247,13 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     };
     let result = fabric::ops::init(&db, &init_cfg)?;
 
-    // Bootstrap control plane (TiKV) on the mesh
-    // Don't rollback fabric on timeout — PD/TiKV will eventually start via systemd restart
-    if let Err(e) = controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6) {
-        tracing::warn!(error = %e, "control plane bootstrap issue (services may still be starting)");
-        eprintln!("  Warning: control plane setup incomplete: {e}");
-        eprintln!("  Services will continue starting in background via systemd.");
+    // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
+    if network_mode == fabric::NetworkMode::WireGuard {
+        if let Err(e) = controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6) {
+            tracing::warn!(error = %e, "control plane bootstrap issue (services may still be starting)");
+            eprintln!("  Warning: control plane setup incomplete: {e}");
+            eprintln!("  Services will continue starting in background via systemd.");
+        }
     }
 
     eprintln!();
@@ -240,7 +262,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     eprintln!("  name     {}", result.hypervisor.name);
     eprintln!("  id       {}", result.hypervisor.id.as_str());
     eprintln!("  mesh     {}", result.mesh.id);
-    eprintln!("  region   {} · {}", region, zone);
+    eprintln!("  region   {region}/{zone}");
     eprintln!("  address  {}", result.hypervisor.mesh_ipv6);
     eprintln!("  pin      {}", result.pin);
     eprintln!();
@@ -267,8 +289,10 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
         eprintln!("  {} node(s) joined.", accepted);
     } else {
-        eprintln!("  To accept joins, run:");
-        eprintln!("  Or on another node:");
+        eprintln!("  To accept joins on this node:");
+        eprintln!("    nauka hypervisor peering");
+        eprintln!();
+        eprintln!("  Or from another node:");
         eprintln!(
             "    nauka hypervisor join --target <this-ip> --pin {}",
             result.pin
@@ -278,8 +302,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": result.hypervisor.name,
         "id": result.hypervisor.id.as_str(),
-        "mesh_id": result.hypervisor.id.as_str(),
-        "region": format!("{} · {}", region, zone),
+        "region": region,
         "zone": zone,
         "mesh_ipv6": result.hypervisor.mesh_ipv6.to_string(),
         "state": "available",
@@ -310,42 +333,67 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .unwrap_or(51820);
     let pin = req.fields.get("pin").map(|s| s.as_str());
 
-    let node_name = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .map(|h| h.to_lowercase())
-        .unwrap_or_else(|| "node".to_string());
+    let network_mode: fabric::NetworkMode = req
+        .fields
+        .get("mode")
+        .map(|s| s.as_str())
+        .unwrap_or("wireguard")
+        .parse()
+        .unwrap_or_default();
+
+    let node_name = req
+        .fields
+        .get("name")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .map(|h| h.to_lowercase())
+                .unwrap_or_else(|| "node".to_string())
+        });
 
     let db = open_db()?;
-    let result = fabric::ops::join(&db, &target, &node_name, region, zone, port, pin).await?;
+    let join_cfg = fabric::ops::JoinConfig {
+        target: &target,
+        node_name: &node_name,
+        region,
+        zone,
+        port,
+        pin,
+        network_mode,
+    };
+    let result = fabric::ops::join(&db, &join_cfg).await?;
 
-    // Join control plane — build PD endpoints from peers' mesh addresses
-    let state = fabric::state::FabricState::load(&db)
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
-    let pd_endpoints: Vec<String> = state
-        .peers
-        .peers
-        .iter()
-        .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
-        .collect();
-    let peer_count = state.peers.len();
-    if let Err(e) = controlplane::ops::join(
-        &node_name,
-        &result.hypervisor.mesh_ipv6,
-        &pd_endpoints,
-        peer_count,
-    ) {
-        tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
-        eprintln!("  Warning: control plane setup incomplete: {e}");
-        eprintln!("  Services will continue starting in background via systemd.");
+    // Join control plane — only in WireGuard mode
+    if network_mode == fabric::NetworkMode::WireGuard {
+        let state = fabric::state::FabricState::load(&db)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
+        let pd_endpoints: Vec<String> = state
+            .peers
+            .peers
+            .iter()
+            .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
+            .collect();
+        let peer_count = state.peers.len();
+        if let Err(e) = controlplane::ops::join(
+            &node_name,
+            &result.hypervisor.mesh_ipv6,
+            &pd_endpoints,
+            peer_count,
+        ) {
+            tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
+            eprintln!("  Warning: control plane setup incomplete: {e}");
+            eprintln!("  Services will continue starting in background via systemd.");
+        }
     }
 
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": result.hypervisor.name,
         "id": result.hypervisor.id.as_str(),
-        "mesh_id": result.hypervisor.id.as_str(),
-        "region": format!("{} · {}", region, zone),
+        "region": region,
         "zone": zone,
         "mesh_ipv6": result.hypervisor.mesh_ipv6.to_string(),
         "state": "available",
@@ -414,7 +462,6 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": s.hypervisor_name,
         "id": s.hypervisor_id,
-        "mesh_id": s.hypervisor_id,
         "region": s.region,
         "zone": s.zone,
         "mesh_ipv6": s.mesh_ipv6,
@@ -436,9 +483,12 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
 async fn handle_start() -> anyhow::Result<OperationResponse> {
     let db = open_db()?;
     fabric::ops::start(&db)?;
-    let _ = controlplane::ops::start();
-    let db = open_db()?;
-    let _ = storage::ops::start_all(&db);
+    if let Err(e) = controlplane::ops::start() {
+        eprintln!("  Warning: control plane start failed: {e}");
+    }
+    if let Err(e) = storage::ops::start_all(&db) {
+        eprintln!("  Warning: storage start failed: {e}");
+    }
     Ok(OperationResponse::Message("services started.".into()))
 }
 
@@ -488,12 +538,13 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
         None => return Ok(OperationResponse::ResourceList(vec![])),
     };
 
-    let wg_up = fabric::wg::interface_exists();
-    let self_state = if wg_up { "available" } else { "down" };
+    let backend = fabric::backend::create_backend(state.network_mode);
+    let self_state = if backend.is_up() { "available" } else { "down" };
 
     let mut items = vec![serde_json::json!({
         "name": state.hypervisor.name,
-        "region": format!("{}/{}", state.hypervisor.region, state.hypervisor.zone),
+        "region": state.hypervisor.region,
+        "zone": state.hypervisor.zone,
         "state": self_state,
         "cpu": "0/0",
         "memory": "0/0",
@@ -503,7 +554,8 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
     for peer in &state.peers.peers {
         items.push(serde_json::json!({
             "name": peer.name,
-            "region": format!("{}/{}", peer.region, peer.zone),
+            "region": peer.region,
+            "zone": peer.zone,
             "state": format!("{:?}", peer.status).to_lowercase(),
             "cpu": "0/0",
             "memory": "0/0",
@@ -523,6 +575,8 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("not initialized"))?;
 
+    let backend = fabric::backend::create_backend(state.network_mode);
+
     if state.hypervisor.name == name {
         return Ok(OperationResponse::Resource(serde_json::json!({
             "name": state.hypervisor.name,
@@ -530,7 +584,7 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
             "region": state.hypervisor.region,
             "zone": state.hypervisor.zone,
             "mesh_ipv6": state.hypervisor.mesh_ipv6.to_string(),
-            "state": if fabric::wg::interface_exists() { "available" } else { "down" },
+            "state": if backend.is_up() { "available" } else { "down" },
         })));
     }
 

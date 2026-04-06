@@ -28,8 +28,8 @@ ZeroFS installation is triggered automatically when a storage region is first ad
 type = "s3"
 endpoint = "<s3_endpoint>"
 bucket = "<s3_bucket>"
-access_key = "${ZEROFS_S3_ACCESS_KEY}"   # injected at runtime via env var
-secret_key = "${ZEROFS_S3_SECRET_KEY}"   # injected at runtime via env var
+access_key = "<s3_access_key>"
+secret_key = "<s3_secret_key>"
 
 [cache]
 path = "/var/lib/nauka/zerofs/<region>"
@@ -48,16 +48,13 @@ enabled = true
 bind = "127.0.0.1"
 ```
 
-**S3 credentials are never written into the config file.** The config uses `${ZEROFS_S3_ACCESS_KEY}` and `${ZEROFS_S3_SECRET_KEY}` as placeholders. The actual values are injected through `Environment=` directives in the systemd unit, which is created with permissions `0600` (owner-readable only).
-
-The TOML config file itself is also written with `0600` permissions to prevent other users from reading the endpoint and bucket details.
+S3 credentials are written directly into the TOML config file. The file is created with `0600` permissions (owner-readable only) to protect the credentials.
 
 ## Systemd units
 
 Each region gets a systemd unit at `/etc/systemd/system/nauka-zerofs-<region>.service`. The unit:
 
 - Depends on `network-online.target` and `nauka-wg.service` (the mesh must be up)
-- Sets `ZEROFS_S3_ACCESS_KEY` and `ZEROFS_S3_SECRET_KEY` as environment variables
 - Runs `zerofs run -c /etc/nauka/zerofs/<region>.toml`
 - Restarts on failure with a 5-second backoff
 

@@ -37,17 +37,17 @@ Create a new mesh and initialize this server as the first hypervisor.
 nauka hv init --name web-01 --region us-east --zone us-east-1a
 ```
 
-This generates the mesh secret (a `syf_sk_...` token), creates the WireGuard service, and starts it. Save the mesh secret — other nodes need it to join.
+The `--name` flag is optional — if omitted, the hostname is used. This generates the mesh secret (a `syf_sk_...` token), creates the WireGuard service, and starts it. A PIN is printed for other nodes to join.
 
 ### join
 
 Add this server to an existing mesh by connecting to a peer that is already a member.
 
 ```sh
-nauka hv join --target 203.0.113.10 --name web-02 --region us-east --zone us-east-1a
+nauka hv join --target 203.0.113.10 --pin G7CCZX --name web-02 --region us-east --zone us-east-1a
 ```
 
-The join command connects to the target's peering port, authenticates with the mesh PIN, receives the mesh secret and existing peer list, then brings up the WireGuard service with all known peers configured.
+The join command connects to the target's peering port, authenticates with the mesh PIN, receives the mesh secret and existing peer list, then brings up the network service with all known peers configured.
 
 ### status
 
@@ -59,7 +59,7 @@ nauka hv status
 
 ### start / stop
 
-Start or stop the WireGuard service on this node. Both commands are idempotent — running start on an already-running node is safe.
+Start or stop all hypervisor services (fabric, control plane, storage) on this node. Both commands are idempotent — running start on an already-running node is safe.
 
 ```sh
 nauka hv start
@@ -68,7 +68,7 @@ nauka hv stop
 
 ### leave
 
-Gracefully remove this node from the mesh. Stops and uninstalls the WireGuard service, removes the interface, and deletes local state.
+Gracefully remove this node from the mesh. Stops and uninstalls all services (fabric, control plane, storage) and deletes local state.
 
 ```sh
 nauka hv leave
@@ -116,10 +116,10 @@ nauka hv init --name web-01 --mode wireguard
 nauka hv join --target 203.0.113.10 --name web-02 --mode direct
 ```
 
-Two additional flags control the WireGuard interface:
+Two additional flags control network configuration:
 
-- `--interface` — override the interface name (default: `nauka0`)
-- `--endpoint` — explicitly set this node's public endpoint (`host:port`) advertised to peers
+- `--interface` — specify the physical network interface for fabric traffic (e.g., `eth1`). Auto-detected if omitted. Used in direct mode to determine routing.
+- `--endpoint` — explicitly set this node's public endpoint (`host:port`) advertised to peers. Auto-detected if omitted.
 
 ## Sub-modules
 

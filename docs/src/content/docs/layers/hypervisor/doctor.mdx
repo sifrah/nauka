@@ -17,16 +17,20 @@ Doctor runs four sections in sequence. Each section reports individual checks as
 
 ### Fabric
 
-Checks the WireGuard mesh connectivity layer:
+Checks the mesh connectivity layer. The checks adapt to the configured network mode (wireguard, direct, or mock):
+
+**WireGuard mode:**
 
 | Check | Pass condition |
 |---|---|
 | wireguard-tools | `wg` binary is present on PATH |
-| nauka0 interface | The `nauka0` interface is up |
-| wg service | `wg-quick@nauka0` systemd service is active |
 | wg config | `/etc/wireguard/nauka0.conf` exists |
+| fabric network | The network backend reports the interface is up |
+| fabric service | The network backend reports the service is active |
 | peers | All configured peers are reachable |
 | mesh ping | ICMPv6 ping to a sample of up to 3 peers responds |
+
+**Direct/Mock mode:** WireGuard-specific checks are replaced by a single "network mode" check confirming the active backend.
 
 If the node has no peers yet (freshly initialized), the peer checks report OK rather than a warning.
 

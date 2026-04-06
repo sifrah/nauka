@@ -5,17 +5,21 @@ sidebar:
   order: 6
 ---
 
-The `service` module manages the WireGuard systemd service that keeps the mesh tunnel running persistently. It generates the WireGuard configuration file and the systemd unit, and provides operations to install, start, stop, and remove them.
+The `service` module manages the WireGuard systemd service that keeps the mesh tunnel running persistently. It generates the WireGuard configuration file and a custom systemd unit, and provides operations to install, start, stop, and remove them.
+
+:::note
+This module is now a re-export of `fabric::wireguard::service`, which contains the canonical implementation. The two modules are identical — use whichever import path is convenient.
+:::
 
 ## Service name and files
 
-| Item             | Path                                   |
-|------------------|----------------------------------------|
-| Service name     | `wg-quick@nauka0`                     |
-| WireGuard config | `/etc/wireguard/nauka0.conf`          |
-| systemd unit     | Managed by `wg-quick` (standard)      |
+| Item             | Path                                     |
+|------------------|------------------------------------------|
+| Service name     | `nauka-wg`                               |
+| WireGuard config | `/etc/wireguard/nauka0.conf`             |
+| systemd unit     | `/etc/systemd/system/nauka-wg.service`   |
 
-The `wg-quick@nauka0` service is a standard systemd instantiated unit provided by `wireguard-tools`. Nauka writes the configuration file that `wg-quick` reads; it does not create a custom unit file.
+Nauka writes both the WireGuard config and a custom systemd unit (Type=oneshot, RemainAfterExit=yes) that wraps `wg-quick up/down`.
 
 ## The WireGuard config
 
@@ -24,20 +28,14 @@ The `wg-quick@nauka0` service is a standard systemd instantiated unit provided b
 ```ini
 [Interface]
 PrivateKey = <this node's WG private key>
-Address = fd12:3456:789a::1/48
 ListenPort = 51820
+Address = fd12:3456:789a::1/128
 
 [Peer]
 PublicKey = <peer pubkey>
 AllowedIPs = fd12:3456:789a::2/128
+PersistentKeepalive = 25
 Endpoint = 203.0.113.20:51820
-PersistentKeepalive = 25
-
-[Peer]
-PublicKey = <peer pubkey>
-AllowedIPs = fd12:3456:789a::3/128
-Endpoint = 203.0.113.30:51820
-PersistentKeepalive = 25
 ```
 
 Every known peer gets a `[Peer]` section. `AllowedIPs` is set to the peer's single mesh IPv6 address (`/128`), which means only mesh traffic is routed over the tunnel — not the peer's entire internet traffic.
@@ -46,46 +44,28 @@ Every known peer gets a `[Peer]` section. `AllowedIPs` is set to the peer's sing
 
 ### install
 
-Writes `nauka0.conf` to `/etc/wireguard/` with `0600` permissions (readable only by root). Called at the end of `init` and `join`, after the identity and peer list are ready.
+Writes `nauka0.conf` to `/etc/wireguard/` with `0600` permissions (readable only by root) and the systemd unit to `/etc/systemd/system/`. Called at the end of `init` and `join`, after the identity and peer list are ready.
 
 ### enable_and_start
 
 Enables the service at boot and starts it immediately:
 
 ```sh
-systemctl enable wg-quick@nauka0
-systemctl start wg-quick@nauka0
+systemctl enable --now nauka-wg
 ```
 
-### start
+### start / stop
 
-Starts the service without enabling it at boot. Used by `nauka hv start` for a one-off restart without changing the boot configuration.
-
-### stop
-
-Stops the service:
-
-```sh
-systemctl stop wg-quick@nauka0
-```
-
-The tunnel goes down and all peer connections are dropped. Configuration files are left in place.
+Start or stop the service without changing the boot configuration.
 
 ### update_config
 
-Rewrites `nauka0.conf` from the current `FabricState` and reloads the service. Called when a `PeerAnnounce` arrives and the running node needs to persist the new peer to disk (in addition to the live `wg set` that the [wg module](/nauka/layers/hypervisor/fabric/wg) performs).
+Rewrites `nauka0.conf` from the current `FabricState` and applies changes via `wg syncconf` (live reload without tearing down the interface). If `wg syncconf` fails, falls back to a full service restart.
 
 ### uninstall
 
-Stops and disables the service, then removes `nauka0.conf`:
-
-```sh
-systemctl disable --now wg-quick@nauka0
-rm /etc/wireguard/nauka0.conf
-```
-
-Called by `nauka hv leave` as part of the full cleanup sequence.
+Stops and disables the service, then removes both the unit file and `nauka0.conf`. Called by `nauka hv leave` as part of the full cleanup sequence.
 
 ## Permissions
 
-All operations that write to `/etc/wireguard/` or invoke `systemctl` require root. Nauka expects to be run as root on hypervisor nodes. If you are not root, these operations will fail with a permissions error.
+All operations that write to `/etc/wireguard/` or invoke `systemctl` require root. Nauka expects to be run as root on hypervisor nodes.

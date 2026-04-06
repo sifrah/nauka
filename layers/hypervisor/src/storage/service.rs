@@ -70,8 +70,8 @@ pub fn generate_config(region: &RegionStorage) -> String {
 type = "s3"
 endpoint = "{endpoint}"
 bucket = "{bucket}"
-access_key = "${{ZEROFS_S3_ACCESS_KEY}}"
-secret_key = "${{ZEROFS_S3_SECRET_KEY}}"
+access_key = "{access_key}"
+secret_key = "{secret_key}"
 region = "{s3_region}"
 
 [cache]
@@ -96,6 +96,8 @@ bind = "127.0.0.1"
         region = region.region,
         endpoint = region.s3_endpoint,
         bucket = region.s3_bucket,
+        access_key = region.s3_access_key,
+        secret_key = region.s3_secret_key,
         s3_region = if region.s3_region.is_empty() {
             "auto"
         } else {
@@ -106,7 +108,7 @@ bind = "127.0.0.1"
 }
 
 /// Generate systemd unit for a region's ZeroFS instance.
-fn generate_unit(region: &str, access_key: &str, secret_key: &str) -> String {
+fn generate_unit(region: &str) -> String {
     let conf_path = format!("{ZEROFS_CONF_DIR}/{region}.toml");
     format!(
         r#"[Unit]
@@ -116,8 +118,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=ZEROFS_S3_ACCESS_KEY={access_key}
-Environment=ZEROFS_S3_SECRET_KEY={secret_key}
 ExecStart={ZEROFS_BIN} run -c {conf_path}
 Restart=on-failure
 RestartSec=5
@@ -162,17 +162,9 @@ pub fn install_region(config: &RegionStorage) -> Result<(), NaukaError> {
         );
     }
 
-    // Write systemd unit (creds in env vars — not in config file)
-    let unit = generate_unit(&config.region, &config.s3_access_key, &config.s3_secret_key);
+    // Write systemd unit
+    let unit = generate_unit(&config.region);
     std::fs::write(unit_path(&config.region), &unit).map_err(NaukaError::from)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            unit_path(&config.region),
-            std::fs::Permissions::from_mode(0o600),
-        );
-    }
 
     run_systemctl(&["daemon-reload"])?;
 
@@ -274,16 +266,15 @@ mod tests {
         assert!(conf.contains("[cache]"));
         assert!(conf.contains("[encryption]"));
         assert!(conf.contains("lz4"));
-        // Credentials use env vars, not hardcoded
-        assert!(conf.contains("${ZEROFS_S3_ACCESS_KEY}"));
-        assert!(!conf.contains("AKID123"));
+        // Credentials are in the config (file is 0o600)
+        assert!(conf.contains("AKID123"));
+        assert!(conf.contains("SECRET456"));
     }
 
     #[test]
-    fn generate_unit_has_creds_in_env() {
-        let unit = generate_unit("eu", "AKID", "SECRET");
-        assert!(unit.contains("ZEROFS_S3_ACCESS_KEY=AKID"));
-        assert!(unit.contains("ZEROFS_S3_SECRET_KEY=SECRET"));
+    fn generate_unit_no_inline_creds() {
+        let unit = generate_unit("eu");
+        assert!(!unit.contains("ZEROFS_S3_ACCESS_KEY"));
         assert!(unit.contains("zerofs run"));
         assert!(unit.contains("nauka-wg.service"));
     }

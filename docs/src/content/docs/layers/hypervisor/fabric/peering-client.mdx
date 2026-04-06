@@ -12,14 +12,15 @@ You do not use the peering client directly — it is invoked automatically by th
 ## What the client does
 
 1. **Resolves the target** — takes the `--target` address from `nauka hv join` and connects to `target:(wg_port + 1)` over TCP
-2. **Sends a JoinRequest** — includes this node's name, region, zone, WireGuard public key, listen port, endpoint, and PIN
-3. **Reads the JoinResponse** — waits for the accepting node to reply
-4. **Checks acceptance** — if `accepted` is `false`, the client returns an error and the join aborts
-5. **Returns the response** to the ops layer, which uses it to complete setup
+2. **TLS handshake** — establishes a TLS connection using the TOFU model (accepts any server certificate; the PIN provides authentication)
+3. **Sends a JoinRequest** — includes this node's name, region, zone, WireGuard public key, listen port, endpoint, and PIN
+4. **Reads the JoinResponse** — waits for the accepting node to reply
+5. **Checks acceptance** — if `accepted` is `false`, the client returns an error and the join aborts
+6. **Returns the response** to the ops layer, which uses it to complete setup
 
 ## Wire protocol
 
-The client uses the same length-prefixed JSON protocol as the server. Each message is preceded by a 4-byte big-endian length. The client writes the JoinRequest, then reads the JoinResponse in a single TCP round trip.
+The client uses TLS over TCP with length-prefixed JSON framing. Each message is preceded by a 4-byte big-endian length. The client writes the JoinRequest, then reads the JoinResponse in a single round trip.
 
 There is no retry logic in the client itself. If the connection fails or the response cannot be read, the error is returned to the ops layer. The user sees a clear error and can retry `nauka hv join` manually.
 

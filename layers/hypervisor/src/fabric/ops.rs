@@ -165,51 +165,54 @@ pub struct JoinResult {
     pub peer_count: usize,
 }
 
+/// Configuration for fabric join.
+pub struct JoinConfig<'a> {
+    pub target: &'a str,
+    pub node_name: &'a str,
+    pub region: &'a str,
+    pub zone: &'a str,
+    pub port: u16,
+    pub pin: Option<&'a str>,
+    pub network_mode: super::backend::NetworkMode,
+}
+
 /// Join an existing cluster.
 ///
 /// 1. TCP connect to target → peering exchange
 /// 2. Receive mesh secret + peer list
 /// 3. Create hypervisor identity from received mesh prefix
-/// 4. Install WireGuard service with all peers
-/// 5. Start the service
-/// 6. Persist state
-pub async fn join(
-    db: &LayerDb,
-    target: &str,
-    node_name: &str,
-    region: &str,
-    zone: &str,
-    port: u16,
-    pin: Option<&str>,
-) -> Result<JoinResult, NaukaError> {
+/// 4. Setup network via backend
+/// 5. Persist state
+pub async fn join(db: &LayerDb, cfg: &JoinConfig<'_>) -> Result<JoinResult, NaukaError> {
     // Check not already initialized
     if FabricState::exists(db).map_err(|e| NaukaError::internal(e.to_string()))? {
         return Err(NaukaError::conflict(
             "hypervisor",
-            node_name,
+            cfg.node_name,
             "already initialized. Run 'nauka hypervisor leave' first.",
         ));
     }
 
-    // Ensure WireGuard is installed
-    service::ensure_wireguard()?;
+    // Ensure backend is installed
+    let backend = super::backend::create_backend(cfg.network_mode);
+    backend.ensure_installed()?;
 
     // Build join request
     // We need a temporary keypair to send in the request
     let (wg_private, wg_public) = nauka_core::crypto::generate_wg_keypair();
 
     let request = super::peering::JoinRequest {
-        name: node_name.to_string(),
-        region: region.to_string(),
-        zone: zone.to_string(),
+        name: cfg.node_name.to_string(),
+        region: cfg.region.to_string(),
+        zone: cfg.zone.to_string(),
         wg_public_key: wg_public.clone(),
-        wg_port: port,
+        wg_port: cfg.port,
         endpoint: None, // will be discovered by the target
-        pin: pin.map(|s| s.to_string()),
+        pin: cfg.pin.map(|s| s.to_string()),
     };
 
     // TCP peering exchange
-    let response = super::peering_client::join(target, request).await?;
+    let response = super::peering_client::join(cfg.target, request).await?;
 
     // Extract mesh info from response
     let secret_str = response
@@ -227,20 +230,20 @@ pub async fn join(
     let mesh_ipv6 = nauka_core::addressing::derive_node_address(&prefix, &pub_bytes);
 
     // Validate our identity
-    nauka_core::validate::name(node_name)?;
-    nauka_core::validate::region(region)?;
-    nauka_core::validate::zone(zone)?;
-    nauka_core::validate::port(port)?;
+    nauka_core::validate::name(cfg.node_name)?;
+    nauka_core::validate::region(cfg.region)?;
+    nauka_core::validate::zone(cfg.zone)?;
+    nauka_core::validate::port(cfg.port)?;
 
     // Build hypervisor identity
     let hv = HypervisorIdentity {
         id: nauka_core::id::HypervisorId::generate(),
-        name: node_name.to_string(),
-        region: region.to_string(),
-        zone: zone.to_string(),
+        name: cfg.node_name.to_string(),
+        region: cfg.region.to_string(),
+        zone: cfg.zone.to_string(),
         wg_private_key: wg_private.clone(),
         wg_public_key: wg_public,
-        wg_port: port,
+        wg_port: cfg.port,
         endpoint: None,
         fabric_interface: String::new(),
         mesh_ipv6,
@@ -258,7 +261,7 @@ pub async fn join(
     };
 
     // Extract target IP for endpoint discovery
-    let target_ip = target.split(':').next().unwrap_or(target).to_string();
+    let target_ip = cfg.target.split(':').next().unwrap_or(cfg.target).to_string();
 
     // Build peer list from response (acceptor + existing peers)
     let mut peers = PeerList::new();
@@ -292,23 +295,20 @@ pub async fn join(
 
     let peer_count = peers.len();
 
-    // Build WireGuard peer configs
-    let peers_for_wg: Vec<_> = peers
+    // Build backend peer configs
+    let backend_peers: Vec<super::backend::BackendPeer> = peers
         .peers
         .iter()
-        .map(|p| {
-            (
-                p.wg_public_key.clone(),
-                "25".to_string(),
-                p.mesh_ipv6,
-                p.endpoint.clone(),
-            )
+        .map(|p| super::backend::BackendPeer {
+            public_key: p.wg_public_key.clone(),
+            endpoint: p.endpoint.clone(),
+            mesh_ipv6: p.mesh_ipv6,
+            keepalive_secs: 25,
         })
         .collect();
 
-    // Install and start WireGuard with all peers
-    service::install(&wg_private, port, &mesh_ipv6, &peers_for_wg)?;
-    service::enable_and_start()?;
+    // Setup network via backend (install + start)
+    backend.setup(&wg_private, cfg.port, &mesh_ipv6, &backend_peers)?;
 
     // Persist state
     let state = FabricState {
@@ -316,7 +316,7 @@ pub async fn join(
         hypervisor: hv.clone(),
         secret: secret_str,
         peers,
-        network_mode: super::backend::NetworkMode::default(), // Join inherits WG for now
+        network_mode: cfg.network_mode,
     };
     state
         .save(db)

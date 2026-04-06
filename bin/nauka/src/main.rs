@@ -103,13 +103,10 @@ async fn main() -> Result<()> {
         Some(("serve", sub_matches)) => serve(sub_matches).await,
         Some((sub_name, sub_matches)) => {
             if let Some(reg) = registry.find(sub_name) {
-                if let Some((op_name, op_matches)) = sub_matches.subcommand() {
-                    dispatch(reg, op_name, op_matches).await
-                } else {
-                    anyhow::bail!(
-                        "specify a subcommand. Run 'nauka {sub_name} --help' for details."
-                    );
-                }
+                let (op_name, op_matches) = sub_matches
+                    .subcommand()
+                    .expect("subcommand enforced by clap");
+                dispatch(reg, op_name, op_matches).await
             } else {
                 anyhow::bail!("unknown command: {sub_name}");
             }

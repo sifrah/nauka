@@ -34,17 +34,18 @@ There are no conditionals in handlers. There is no state read or written in hand
 
 The `ResourceDef` is where all commands, subcommands, and their arguments are declared. For the hypervisor, this includes:
 
-| Command   | Arguments                                 |
-|-----------|-------------------------------------------|
-| `init`    | `--name`, `--region`, `--zone`            |
-| `join`    | `--target`, `--name`, `--region`, `--zone`|
-| `status`  | _(none)_                                  |
-| `start`   | _(none)_                                  |
-| `stop`    | _(none)_                                  |
-| `leave`   | _(none)_                                  |
-| `peering` | _(none)_                                  |
-| `list`    | _(none)_                                  |
-| `get`     | `<name>`                                  |
+| Command   | Arguments                                                          |
+|-----------|---------------------------------------------------------------------|
+| `init`    | `--name`, `--region`, `--zone`, `--port`, `--mode`, `--interface`, `--endpoint`, `--peering` |
+| `join`    | `--target` (required), `--name`, `--pin`, `--region`, `--zone`, `--port`, `--mode` |
+| `status`  | _(none)_                                                           |
+| `start`   | _(none)_                                                           |
+| `stop`    | _(none)_                                                           |
+| `leave`   | _(none)_                                                           |
+| `peering` | `--timeout`                                                        |
+| `list`    | _(none)_                                                           |
+| `get`     | `<name>`                                                           |
+| `doctor`  | _(none)_                                                           |
 
 The framework reads this definition to generate help text, validate inputs, and route requests to the right handler.
 

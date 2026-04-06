@@ -7,7 +7,10 @@ use super::ResourceDef;
 
 /// Generate a complete clap [`Command`] from a [`ResourceDef`].
 pub fn generate_command(def: &ResourceDef) -> Command {
-    let mut cmd = Command::new(def.identity.cli_name).about(def.identity.description);
+    let mut cmd = Command::new(def.identity.cli_name)
+        .about(def.identity.description)
+        .subcommand_required(true)
+        .arg_required_else_help(true);
 
     for alias in def.identity.aliases {
         cmd = cmd.visible_alias(alias);
