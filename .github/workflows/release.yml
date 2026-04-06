@@ -159,7 +159,6 @@ jobs:
         if: matrix.target != 'aarch64-unknown-linux-musl'
         env:
           NAUKA_VERSION: ${{ needs.version.outputs.next }}
-          OPENSSL_STATIC: '1'
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build (cross)
