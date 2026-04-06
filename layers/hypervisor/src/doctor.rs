@@ -152,10 +152,7 @@ pub fn run() -> DoctorReport {
 fn check_fabric(report: &mut DoctorReport, state: &Option<fabric::state::FabricState>) {
     let checks = report.add_section("Fabric");
 
-    let network_mode = state
-        .as_ref()
-        .map(|s| s.network_mode)
-        .unwrap_or_default();
+    let network_mode = state.as_ref().map(|s| s.network_mode).unwrap_or_default();
     let backend = fabric::backend::create_backend(network_mode);
 
     match network_mode {

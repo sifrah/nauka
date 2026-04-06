@@ -36,7 +36,11 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_arg(OperationArg::optional(
                 "port",
-                FieldDef::integer("port", "Listen port (also uses port+1 for peering, port+2 for announce)").with_default("51820"),
+                FieldDef::integer(
+                    "port",
+                    "Listen port (also uses port+1 for peering, port+2 for announce)",
+                )
+                .with_default("51820"),
             ))
             .with_arg(OperationArg::optional(
                 "mode",
@@ -91,7 +95,11 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_arg(OperationArg::optional(
                 "port",
-                FieldDef::integer("port", "Listen port (also uses port+1 for peering, port+2 for announce)").with_default("51820"),
+                FieldDef::integer(
+                    "port",
+                    "Listen port (also uses port+1 for peering, port+2 for announce)",
+                )
+                .with_default("51820"),
             ))
             .with_arg(OperationArg::optional(
                 "mode",

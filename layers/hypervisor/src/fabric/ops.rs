@@ -261,7 +261,12 @@ pub async fn join(db: &LayerDb, cfg: &JoinConfig<'_>) -> Result<JoinResult, Nauk
     };
 
     // Extract target IP for endpoint discovery
-    let target_ip = cfg.target.split(':').next().unwrap_or(cfg.target).to_string();
+    let target_ip = cfg
+        .target
+        .split(':')
+        .next()
+        .unwrap_or(cfg.target)
+        .to_string();
 
     // Build peer list from response (acceptor + existing peers)
     let mut peers = PeerList::new();
