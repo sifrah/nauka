@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+    branches: [main, v2]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Secret scanning ────────────────────────────────────────
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+  # ── Validate .gitignore contains critical patterns ─────────
+  gitignore:
+    name: Validate .gitignore
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check critical patterns exist in .gitignore
+        run: |
+          missing=0
+          for pattern in ".nauka" "state.json" "*.redb" "*.pem" "*.key"; do
+            if ! grep -qF "$pattern" .gitignore; then
+              echo "MISSING from .gitignore: $pattern"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::.gitignore is missing critical patterns"
+            exit 1
+          fi
+          echo "All critical patterns present in .gitignore"
+
+  # ── Format check (workspace-wide, once) ──────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  # ── Discover all crates dynamically ──────────────────────
+  discover:
+    name: Discover crates
+    runs-on: ubuntu-latest
+    outputs:
+      crates: ${{ steps.find.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        run: |
+          # Find all Cargo.toml in layers/ and bin/, extract crate names
+          crates="[]"
+          for toml in $(find layers bin -name Cargo.toml 2>/dev/null | sort); do
+            dir=$(dirname "$toml")
+            name=$(grep '^name' "$toml" | head -1 | sed 's/name *= *"\(.*\)"/\1/')
+            if [ -n "$name" ]; then
+              crates=$(echo "$crates" | jq -c --arg name "$name" --arg dir "$dir" '. + [{"name": $name, "dir": $dir}]')
+            fi
+          done
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
+          echo "Found crates:"
+          echo "$crates" | jq .
+
+  # ── Clippy + Test per crate (parallel) ───────────────────
+  check:
+    name: ${{ matrix.crate.name }}
+    needs: [fmt, discover]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: ${{ fromJson(needs.discover.outputs.crates) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.crate.name }}
+
+      - name: Clippy
+        run: cargo clippy -p ${{ matrix.crate.name }} --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p ${{ matrix.crate.name }}
+        # Note: integration tests requiring root/WireGuard are #[ignore]d
+        # and not run in CI. Run locally with: sudo cargo test -- --ignored

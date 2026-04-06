@@ -1,0 +1,183 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'layers/**/*.rs'
+      - 'bin/**/*.rs'
+      - 'Cargo.toml'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Channel to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - beta
+          - rc
+          - stable
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # ── Resolve channel from trigger ───────────────────────────
+  resolve-channel:
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.ch.outputs.channel }}
+    steps:
+      - name: Determine channel
+        id: ch
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            case "$TAG" in
+              *-dev.*)  echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
+              *-beta.*) echo "channel=beta"   >> "$GITHUB_OUTPUT" ;;
+              *-rc.*)   echo "channel=rc"     >> "$GITHUB_OUTPUT" ;;
+              *)        echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+  # ── Build docs for this channel ────────────────────────────
+  build:
+    needs: resolve-channel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync docs from layers
+        run: bash scripts/sync-docs.sh
+
+      - name: Generate OpenAPI spec
+        run: cargo run --bin nauka-openapi --release > docs/public/openapi.json
+
+      - name: Build Starlight site
+        working-directory: docs
+        env:
+          DOCS_CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
+        run: |
+          npm ci
+          npx astro build
+
+      - name: Build Rust API docs
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "--default-theme ayu"
+
+      - name: Copy rustdoc into site
+        run: cp -r target/doc docs/dist/api
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-channel
+          path: docs/dist
+
+  # ── Merge into full site and deploy ────────────────────────
+  deploy:
+    needs: [resolve-channel, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Download the existing live site so we don't wipe other channels
+      - name: Download current site
+        run: |
+          mkdir -p _site
+          # Fetch current Pages content; if the site doesn't exist yet, start empty
+          curl -fsSL -o /tmp/site.tar "https://sifrah.github.io/nauka/index.html" 2>/dev/null || true
+          # Use GitHub Pages API to download the full deployment artifact
+          PAGES_URL=$(curl -fsSL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages" \
+            | jq -r '.html_url // empty') || true
+          if [ -n "$PAGES_URL" ]; then
+            # Download each known channel from the live site
+            for ch in stable beta dev rc; do
+              mkdir -p "_site/${ch}"
+              # Best-effort recursive download of existing channel
+              wget -q -r -np -nH --cut-dirs=1 -P "_site/${ch}" \
+                "${PAGES_URL}${ch}/" 2>/dev/null || true
+            done
+            # Also grab the root index if it exists
+            curl -fsSL -o "_site/index.html" "${PAGES_URL}index.html" 2>/dev/null || true
+          fi
+
+      # Overlay the freshly built channel
+      - name: Download built channel
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-channel
+          path: _channel
+
+      - name: Merge channel into site
+        env:
+          CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
+        run: |
+          rm -rf "_site/${CHANNEL}"
+          cp -r _channel "_site/${CHANNEL}"
+
+      - name: Generate root index.html
+        run: |
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta http-equiv="refresh" content="0; url=stable/">
+            <link rel="canonical" href="stable/">
+            <title>Nauka — Documentation</title>
+            <style>
+              body { font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
+              .container { text-align: center; }
+              h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+              p { color: #94a3b8; }
+              a { color: #60a5fa; text-decoration: none; margin: 0 0.75rem; font-weight: 500; }
+              a:hover { text-decoration: underline; }
+              .channels { margin-top: 1.5rem; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>Nauka</h1>
+              <p>Redirecting to <a href="stable/">stable</a> documentation&hellip;</p>
+              <div class="channels">
+                <a href="stable/">stable</a>
+                <a href="beta/">beta</a>
+                <a href="dev/">dev</a>
+              </div>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

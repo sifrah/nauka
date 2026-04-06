@@ -1,0 +1,18 @@
+[package]
+name = "nauka-state"
+description = "State persistence for Nauka — local JSON + distributed TiKV"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+dirs = "5"
+tikv-client = "0.4"
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

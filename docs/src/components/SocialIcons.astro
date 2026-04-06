@@ -1,0 +1,19 @@
+---
+// Override Starlight's SocialIcons to prepend a version picker.
+// Re-exports the default SocialIcons after the picker.
+import Default from '@astrojs/starlight/components/SocialIcons.astro';
+import VersionPicker from './VersionPicker.astro';
+---
+
+<div class="header-extras">
+  <VersionPicker />
+  <Default />
+</div>
+
+<style>
+  .header-extras {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+</style>

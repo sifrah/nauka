@@ -1,0 +1,28 @@
+---
+// REST API Reference — Scalar UI powered by OpenAPI spec
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nauka REST API</title>
+    <meta name="description" content="Nauka REST API Reference" />
+    <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
+  </head>
+  <body>
+    <script
+      id="api-reference"
+      data-url={`${import.meta.env.BASE_URL}openapi.json`}
+      data-configuration={JSON.stringify({
+        theme: 'kepler',
+        layout: 'modern',
+        darkMode: true,
+        hideDownloadButton: false,
+        metaData: {
+          title: 'Nauka REST API',
+        },
+      })}
+    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>

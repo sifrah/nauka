@@ -1,0 +1,31 @@
+[package]
+name = "nauka"
+description = "Nauka — turn dedicated servers into a programmable cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nauka"
+path = "src/main.rs"
+
+[[bin]]
+name = "nauka-openapi"
+path = "src/openapi.rs"
+
+[dependencies]
+nauka-core = { path = "../../layers/core" }
+nauka-state = { path = "../../layers/state" }
+nauka-hypervisor = { path = "../../layers/hypervisor" }
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+http = "1"
+tower.workspace = true
+rustls = { version = "0.23", features = ["ring"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = "0.2"
