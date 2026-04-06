@@ -9,6 +9,9 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
