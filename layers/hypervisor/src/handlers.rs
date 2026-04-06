@@ -131,6 +131,13 @@ pub fn resource_def() -> ResourceDef {
             .with_example("nauka hypervisor peering")
         })
         .action("doctor", "Diagnose hypervisor health")
+        .action("announce-listen", "Run the announce listener (internal)")
+        .op(|op| {
+            op.with_arg(OperationArg::optional(
+                "port",
+                FieldDef::integer("port", "Announce listen port").with_default("51822"),
+            ))
+        })
         // Future
         .action("drain", "Evacuate all VMs before maintenance")
         .op(|op| op.with_confirm())
@@ -172,6 +179,7 @@ pub fn handler() -> HandlerFn {
                 "join" => handle_join(req).await,
                 "peering" => handle_peering(req).await,
                 "doctor" => handle_doctor().await,
+                "announce-listen" => handle_announce_listen(req).await,
                 "drain" => Ok(OperationResponse::Message("drain: not yet implemented".into())),
                 "enable" => Ok(OperationResponse::Message("enable: not yet implemented".into())),
                 other => Ok(OperationResponse::Message(format!("unknown: {other}"))),
@@ -264,6 +272,13 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         }
     }
 
+    // Install persistent announce listener (don't start if --peering will run its own)
+    if !peering {
+        if let Err(e) = fabric::announce::install_service(port) {
+            tracing::warn!(error = %e, "announce service install failed");
+        }
+    }
+
     eprintln!();
     eprintln!("  Hypervisor initialized");
     eprintln!();
@@ -296,6 +311,11 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .await?;
 
         eprintln!("  {} node(s) joined.", accepted);
+
+        // Peering session ended — install announce service for persistent listening
+        if let Err(e) = fabric::announce::install_service(port) {
+            tracing::warn!(error = %e, "announce service install failed");
+        }
     } else {
         eprintln!("  To accept joins on this node:");
         eprintln!("    nauka hypervisor peering");
@@ -395,6 +415,43 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
             eprintln!("  Warning: control plane setup incomplete: {e}");
             eprintln!("  Services will continue starting in background via systemd.");
+        }
+    }
+
+    // Install persistent announce listener
+    if let Err(e) = fabric::announce::install_service(port) {
+        tracing::warn!(error = %e, "announce service install failed");
+    }
+
+    // Self-announce to all peers (ensures they know about us even if the
+    // peering server's announce arrived before their listener was ready).
+    // Re-read state after a delay to include peers discovered via incoming announces.
+    {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Re-open DB to get latest state (may include peers from incoming announces)
+        let db = open_db()?;
+        let state = fabric::state::FabricState::load(&db)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
+        let self_info = fabric::peering::PeerInfo {
+            name: state.hypervisor.name.clone(),
+            region: state.hypervisor.region.clone(),
+            zone: state.hypervisor.zone.clone(),
+            wg_public_key: state.hypervisor.wg_public_key.clone(),
+            wg_port: state.hypervisor.wg_port,
+            endpoint: state.hypervisor.endpoint.clone(),
+            mesh_ipv6: state.hypervisor.mesh_ipv6,
+        };
+        let peers: Vec<_> = state.peers.peers.clone();
+        let (ok, fail) = fabric::announce::broadcast_new_peer(
+            &self_info,
+            &state.hypervisor.name,
+            &peers,
+            state.hypervisor.wg_port,
+        )
+        .await;
+        if ok > 0 || fail > 0 {
+            tracing::info!(successes = ok, failures = fail, "self-announce to peers");
         }
     }
 
@@ -501,6 +558,7 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
 async fn handle_start() -> anyhow::Result<OperationResponse> {
     let db = open_db()?;
     fabric::ops::start(&db)?;
+    let _ = fabric::announce::start_service();
     if let Err(e) = controlplane::ops::start() {
         eprintln!("  Warning: control plane: {e}");
     }
@@ -508,6 +566,30 @@ async fn handle_start() -> anyhow::Result<OperationResponse> {
         eprintln!("  Warning: storage: {e}");
     }
     Ok(OperationResponse::Message("all services started.".into()))
+}
+
+async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<OperationResponse> {
+    let port: u16 = req
+        .fields
+        .get("port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(51822);
+
+    let bind_addr: std::net::SocketAddr = format!("[::]:{port}")
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid port"))?;
+
+    let db_opener = || {
+        let dir = nauka_core::process::nauka_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        nauka_state::LayerDb::open("hypervisor")
+            .map_err(|e| nauka_core::error::NaukaError::internal(e.to_string()))
+    };
+
+    // This blocks forever (until killed by systemd)
+    fabric::announce::listen(db_opener, bind_addr).await?;
+
+    Ok(OperationResponse::None)
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
@@ -520,6 +602,7 @@ async fn handle_stop() -> anyhow::Result<OperationResponse> {
     let db = open_db()?;
     let _ = storage::ops::stop_all(&db);
     let _ = controlplane::ops::stop();
+    let _ = fabric::announce::stop_service();
     fabric::ops::stop(&db)?;
     Ok(OperationResponse::Message("all services stopped.".into()))
 }
@@ -541,6 +624,9 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
     } else {
         let _ = controlplane::ops::leave();
     }
+
+    // Announce listener
+    let _ = fabric::announce::uninstall_service();
 
     // Fabric last (notifies peers, then tears down mesh)
     fabric::ops::leave(&db).await?;

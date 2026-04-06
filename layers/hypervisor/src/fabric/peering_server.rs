@@ -169,9 +169,17 @@ async fn handle_join(
         validate_peer_field(ep, "endpoint")?;
     }
 
-    // If the joiner didn't specify an endpoint, use their TCP source IP + WG port
+    // If the joiner didn't specify an endpoint, use their TCP source IP + WG port.
+    // Convert IPv4-mapped IPv6 (::ffff:x.x.x.x) back to plain IPv4 for WireGuard.
     if req.endpoint.is_none() {
-        req.endpoint = Some(format!("{}:{}", peer_addr.ip(), req.wg_port));
+        let ip = match peer_addr.ip() {
+            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => std::net::IpAddr::V4(v4),
+                None => std::net::IpAddr::V6(v6),
+            },
+            other => other,
+        };
+        req.endpoint = Some(format!("{ip}:{}", req.wg_port));
     }
 
     if !super::peering::validate_pin(expected_pin, req.pin.as_deref()) {
@@ -306,6 +314,7 @@ async fn handle_join(
 
     if !announce_targets.is_empty() {
         tokio::spawn(async move {
+            // First attempt — some peers may not have their announce listener yet
             let (ok, fail) = super::announce::broadcast_new_peer(
                 &new_peer_info,
                 &announcer_name,
@@ -317,8 +326,55 @@ async fn handle_join(
                 tracing::info!(
                     successes = ok,
                     failures = fail,
-                    "peer announcement broadcast complete"
+                    "announce broadcast (attempt 1)"
                 );
+            }
+
+            // Retry after delay: re-read DB to get ALL peers (including concurrent joins),
+            // then announce each peer to all others that might not know about it yet.
+            if fail > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+                let db = {
+                    let dir = nauka_core::process::nauka_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    match nauka_state::LayerDb::open("hypervisor") {
+                        Ok(db) => db,
+                        Err(_) => return,
+                    }
+                };
+                let state = match super::state::FabricState::load(&db).ok().flatten() {
+                    Some(s) => s,
+                    None => return,
+                };
+
+                // For each peer, announce it to all OTHER peers
+                for peer in &state.peers.peers {
+                    let info = super::peering::PeerInfo {
+                        name: peer.name.clone(),
+                        region: peer.region.clone(),
+                        zone: peer.zone.clone(),
+                        wg_public_key: peer.wg_public_key.clone(),
+                        wg_port: peer.wg_port,
+                        endpoint: peer.endpoint.clone(),
+                        mesh_ipv6: peer.mesh_ipv6,
+                    };
+                    let targets: Vec<_> = state
+                        .peers
+                        .peers
+                        .iter()
+                        .filter(|p| p.wg_public_key != peer.wg_public_key)
+                        .cloned()
+                        .collect();
+                    let _ = super::announce::broadcast_new_peer(
+                        &info,
+                        &announcer_name,
+                        &targets,
+                        wg_port,
+                    )
+                    .await;
+                }
+                tracing::info!("full mesh reconciliation complete");
             }
         });
     }

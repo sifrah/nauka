@@ -330,6 +330,99 @@ async fn handle_peer_announce(
     Ok(peer_name)
 }
 
+// ═══════════════════════════════════════════════════
+// Announce listener systemd service
+// ═══════════════════════════════════════════════════
+
+const ANNOUNCE_SERVICE: &str = "nauka-announce";
+const ANNOUNCE_UNIT_PATH: &str = "/etc/systemd/system/nauka-announce.service";
+
+/// Generate the systemd unit for the persistent announce listener.
+fn generate_announce_unit(port: u16) -> String {
+    let announce_port = port + ANNOUNCE_PORT_OFFSET;
+    format!(
+        r#"[Unit]
+Description=Nauka Peer Announce Listener
+After=network-online.target nauka-wg.service
+Wants=network-online.target
+Requires=nauka-wg.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nauka hypervisor announce-listen --port {announce_port}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"#
+    )
+}
+
+/// Install and start the announce listener service.
+pub fn install_service(wg_port: u16) -> Result<(), NaukaError> {
+    std::fs::write(ANNOUNCE_UNIT_PATH, generate_announce_unit(wg_port))
+        .map_err(NaukaError::from)?;
+    run_systemctl(&["daemon-reload"])?;
+    run_systemctl(&["enable", "--now", ANNOUNCE_SERVICE])?;
+    Ok(())
+}
+
+/// Start the announce listener service.
+pub fn start_service() -> Result<(), NaukaError> {
+    if !is_service_installed() {
+        return Ok(());
+    }
+    run_systemctl(&["start", ANNOUNCE_SERVICE])
+}
+
+/// Stop the announce listener service.
+pub fn stop_service() -> Result<(), NaukaError> {
+    if !is_service_installed() {
+        return Ok(());
+    }
+    let _ = run_systemctl(&["stop", ANNOUNCE_SERVICE]);
+    Ok(())
+}
+
+/// Uninstall the announce listener service.
+pub fn uninstall_service() -> Result<(), NaukaError> {
+    let _ = run_systemctl(&["disable", "--now", ANNOUNCE_SERVICE]);
+    let _ = std::fs::remove_file(ANNOUNCE_UNIT_PATH);
+    let _ = run_systemctl(&["daemon-reload"]);
+    Ok(())
+}
+
+/// Check if the service is installed.
+pub fn is_service_installed() -> bool {
+    std::path::Path::new(ANNOUNCE_UNIT_PATH).exists()
+}
+
+/// Check if the service is active.
+pub fn is_service_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", ANNOUNCE_SERVICE])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn run_systemctl(args: &[&str]) -> Result<(), NaukaError> {
+    let output = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .map_err(|e| NaukaError::internal(format!("systemctl failed: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "systemctl {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
