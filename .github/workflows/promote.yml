@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_tag:
-        description: 'Source tag to promote (e.g., v2.1.0-dev.47)'
+        description: 'Source tag to promote (e.g. v0.1.0-nightly.5)'
         required: true
         type: string
       target_channel:
@@ -13,8 +13,10 @@ on:
         type: choice
         options:
           - beta
-          - rc
           - stable
+
+permissions:
+  contents: write
 
 jobs:
   promote:
@@ -25,6 +27,30 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Validate source tag
+        run: |
+          if ! git rev-parse "${{ inputs.source_tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.source_tag }} does not exist"
+            exit 1
+          fi
+
+      - name: Validate promotion path
+        run: |
+          TAG="${{ inputs.source_tag }}"
+          CHANNEL="${{ inputs.target_channel }}"
+
+          if [ "$CHANNEL" = "beta" ]; then
+            if ! echo "$TAG" | grep -qE '\-nightly\.'; then
+              echo "::error::Can only promote nightly → beta (got $TAG)"
+              exit 1
+            fi
+          elif [ "$CHANNEL" = "stable" ]; then
+            if ! echo "$TAG" | grep -qE '\-beta\.'; then
+              echo "::error::Can only promote beta → stable (got $TAG)"
+              exit 1
+            fi
+          fi
 
       - name: Calculate target version
         id: version
@@ -38,21 +64,17 @@ jobs:
           if [ "$CHANNEL" = "stable" ]; then
             TARGET_TAG="v${BASE}"
           else
-            # Count existing releases in target channel
-            N=$(git tag --list "v${BASE}-${CHANNEL}.*" | wc -l)
+            N=$(git tag --list "v${BASE}-${CHANNEL}.*" | wc -l | tr -d ' ')
             N=$((N + 1))
             TARGET_TAG="v${BASE}-${CHANNEL}.${N}"
           fi
 
-          # Check tag doesn't exist
           if git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
-            echo "Tag $TARGET_TAG already exists!"
+            echo "::error::Tag $TARGET_TAG already exists"
             exit 1
           fi
 
-          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
-          echo "target=$TARGET_TAG" >> "$GITHUB_OUTPUT"
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
           echo "Promoting $SOURCE → $TARGET_TAG"
 
       - name: Download source artifacts
@@ -65,24 +87,20 @@ jobs:
       - name: Create promoted release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ steps.version.outputs.tag }}
+          CHANNEL: ${{ inputs.target_channel }}
         run: |
-          TARGET="${{ steps.version.outputs.target }}"
-          CHANNEL="${{ steps.version.outputs.channel }}"
-
-          # Create tag at the same commit as source
           SOURCE_SHA=$(git rev-list -n 1 "${{ inputs.source_tag }}")
-          git tag "$TARGET" "$SOURCE_SHA"
-          git push origin "$TARGET"
+          git tag "$TARGET_TAG" "$SOURCE_SHA"
+          git push origin "$TARGET_TAG"
 
-          # Determine if this is a pre-release or latest
           PRERELEASE="--prerelease"
           if [ "$CHANNEL" = "stable" ]; then
             PRERELEASE="--latest"
           fi
 
-          # Create release with same artifacts
-          gh release create "$TARGET" \
-            --title "$TARGET" \
+          gh release create "$TARGET_TAG" \
+            --title "$TARGET_TAG" \
             $PRERELEASE \
-            --notes "Promoted from ${{ inputs.source_tag }} to $CHANNEL channel" \
+            --notes "Promoted from ${{ inputs.source_tag }} to ${CHANNEL}" \
             artifacts/*

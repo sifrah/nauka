@@ -17,9 +17,8 @@ on:
         required: true
         type: choice
         options:
-          - dev
+          - nightly
           - beta
-          - rc
           - stable
 
 permissions:
@@ -42,16 +41,15 @@ jobs:
         id: ch
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "channel=dev" >> "$GITHUB_OUTPUT"
+            echo "channel=nightly" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
             case "$TAG" in
-              *-dev.*)  echo "channel=dev"    >> "$GITHUB_OUTPUT" ;;
-              *-beta.*) echo "channel=beta"   >> "$GITHUB_OUTPUT" ;;
-              *-rc.*)   echo "channel=rc"     >> "$GITHUB_OUTPUT" ;;
-              *)        echo "channel=stable" >> "$GITHUB_OUTPUT" ;;
+              *-nightly.*) echo "channel=nightly" >> "$GITHUB_OUTPUT" ;;
+              *-beta.*)    echo "channel=beta"    >> "$GITHUB_OUTPUT" ;;
+              *)           echo "channel=stable"  >> "$GITHUB_OUTPUT" ;;
             esac
           fi
 
@@ -103,31 +101,23 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # Download the existing live site so we don't wipe other channels
       - name: Download current site
         run: |
           mkdir -p _site
-          # Fetch current Pages content; if the site doesn't exist yet, start empty
-          curl -fsSL -o /tmp/site.tar "https://sifrah.github.io/nauka/index.html" 2>/dev/null || true
-          # Use GitHub Pages API to download the full deployment artifact
           PAGES_URL=$(curl -fsSL \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/pages" \
             | jq -r '.html_url // empty') || true
           if [ -n "$PAGES_URL" ]; then
-            # Download each known channel from the live site
-            for ch in stable beta dev rc; do
+            for ch in stable beta nightly; do
               mkdir -p "_site/${ch}"
-              # Best-effort recursive download of existing channel
               wget -q -r -np -nH --cut-dirs=1 -P "_site/${ch}" \
                 "${PAGES_URL}${ch}/" 2>/dev/null || true
             done
-            # Also grab the root index if it exists
             curl -fsSL -o "_site/index.html" "${PAGES_URL}index.html" 2>/dev/null || true
           fi
 
-      # Overlay the freshly built channel
       - name: Download built channel
         uses: actions/download-artifact@v4
         with:
@@ -168,7 +158,7 @@ jobs:
               <div class="channels">
                 <a href="stable/">stable</a>
                 <a href="beta/">beta</a>
-                <a href="dev/">dev</a>
+                <a href="nightly/">nightly</a>
               </div>
             </div>
           </body>
