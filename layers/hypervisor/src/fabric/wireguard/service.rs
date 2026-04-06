@@ -36,7 +36,10 @@ pub fn ensure_wireguard() -> Result<(), NaukaError> {
     } else if which("yum") {
         ("yum", &["install", "-y", "-q", "wireguard-tools"])
     } else if which("pacman") {
-        ("pacman", &["-S", "--noconfirm", "--quiet", "wireguard-tools"])
+        (
+            "pacman",
+            &["-S", "--noconfirm", "--quiet", "wireguard-tools"],
+        )
     } else if which("apk") {
         ("apk", &["add", "--quiet", "wireguard-tools"])
     } else if which("zypper") {

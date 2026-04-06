@@ -94,7 +94,8 @@ mod tests {
     #[test]
     fn mock_setup_succeeds() {
         let b = MockBackend;
-        b.setup("key", 51820, &"fd01::1".parse().unwrap(), &[]).unwrap();
+        b.setup("key", 51820, &"fd01::1".parse().unwrap(), &[])
+            .unwrap();
         b.teardown().unwrap();
     }
 }

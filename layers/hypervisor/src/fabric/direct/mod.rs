@@ -29,7 +29,14 @@ impl NetworkBackend for DirectBackend {
     ) -> Result<(), NaukaError> {
         // Assign the mesh IPv6 to the loopback (so we have the address)
         let _ = Command::new("ip")
-            .args(["-6", "addr", "add", &format!("{mesh_ipv6}/128"), "dev", "lo"])
+            .args([
+                "-6",
+                "addr",
+                "add",
+                &format!("{mesh_ipv6}/128"),
+                "dev",
+                "lo",
+            ])
             .output();
 
         // Add routes to peers
@@ -47,7 +54,14 @@ impl NetworkBackend for DirectBackend {
         if let Some(ref endpoint) = peer.endpoint {
             let gw = endpoint.split(':').next().unwrap_or(endpoint);
             let _ = Command::new("ip")
-                .args(["-6", "route", "add", &format!("{}/128", peer.mesh_ipv6), "via", gw])
+                .args([
+                    "-6",
+                    "route",
+                    "add",
+                    &format!("{}/128", peer.mesh_ipv6),
+                    "via",
+                    gw,
+                ])
                 .output();
         }
         Ok(())

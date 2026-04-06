@@ -21,44 +21,98 @@ pub fn resource_def() -> ResourceDef {
         .plural("hypervisors")
         // Lifecycle
         .action("init", "Initialize a new cluster")
-            .op(|op| op
-                .with_arg(OperationArg::optional("region", FieldDef::string("region", "Region label").with_default("default")))
-                .with_arg(OperationArg::optional("zone", FieldDef::string("zone", "Zone label").with_default("default")))
-                .with_arg(OperationArg::optional("port", FieldDef::integer("port", "WireGuard listen port").with_default("51820")))
-                .with_arg(OperationArg::optional("mode", FieldDef::string("mode", "Network mode: wireguard (default), direct, mock").with_default("wireguard")))
-                .with_arg(OperationArg::optional("interface", FieldDef::string("interface", "Fabric network interface (e.g., eth1). Auto-detected if omitted")))
-                .with_arg(OperationArg::optional("endpoint", FieldDef::string("endpoint", "Public endpoint IP for peering (auto-detected if omitted)")))
-                .with_arg(OperationArg::optional("peering", FieldDef::flag("peering", "Start peering listener after init (accepts joins)")))
-                .with_output(OutputKind::Resource)
-                .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --peering")
-            )
+        .op(|op| {
+            op.with_arg(OperationArg::optional(
+                "region",
+                FieldDef::string("region", "Region label").with_default("default"),
+            ))
+            .with_arg(OperationArg::optional(
+                "zone",
+                FieldDef::string("zone", "Zone label").with_default("default"),
+            ))
+            .with_arg(OperationArg::optional(
+                "port",
+                FieldDef::integer("port", "WireGuard listen port").with_default("51820"),
+            ))
+            .with_arg(OperationArg::optional(
+                "mode",
+                FieldDef::string("mode", "Network mode: wireguard (default), direct, mock")
+                    .with_default("wireguard"),
+            ))
+            .with_arg(OperationArg::optional(
+                "interface",
+                FieldDef::string(
+                    "interface",
+                    "Fabric network interface (e.g., eth1). Auto-detected if omitted",
+                ),
+            ))
+            .with_arg(OperationArg::optional(
+                "endpoint",
+                FieldDef::string(
+                    "endpoint",
+                    "Public endpoint IP for peering (auto-detected if omitted)",
+                ),
+            ))
+            .with_arg(OperationArg::optional(
+                "peering",
+                FieldDef::flag(
+                    "peering",
+                    "Start peering listener after init (accepts joins)",
+                ),
+            ))
+            .with_output(OutputKind::Resource)
+            .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --peering")
+        })
         .action("join", "Join an existing cluster")
-            .op(|op| op
-                .with_arg(OperationArg::required("target", FieldDef::string("target", "IP or IP:port of an existing node")))
-                .with_arg(OperationArg::optional("pin", FieldDef::string("pin", "PIN for auto-accept")))
-                .with_arg(OperationArg::optional("region", FieldDef::string("region", "Region label").with_default("default")))
-                .with_arg(OperationArg::optional("zone", FieldDef::string("zone", "Zone label").with_default("default")))
-                .with_arg(OperationArg::optional("port", FieldDef::integer("port", "WireGuard listen port").with_default("51820")))
-                .with_output(OutputKind::Resource)
-                .with_example("nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1")
+        .op(|op| {
+            op.with_arg(OperationArg::required(
+                "target",
+                FieldDef::string("target", "IP or IP:port of an existing node"),
+            ))
+            .with_arg(OperationArg::optional(
+                "pin",
+                FieldDef::string("pin", "PIN for auto-accept"),
+            ))
+            .with_arg(OperationArg::optional(
+                "region",
+                FieldDef::string("region", "Region label").with_default("default"),
+            ))
+            .with_arg(OperationArg::optional(
+                "zone",
+                FieldDef::string("zone", "Zone label").with_default("default"),
+            ))
+            .with_arg(OperationArg::optional(
+                "port",
+                FieldDef::integer("port", "WireGuard listen port").with_default("51820"),
+            ))
+            .with_output(OutputKind::Resource)
+            .with_example(
+                "nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1",
             )
+        })
         .action("status", "Show hypervisor status")
-            .op(|op| op.with_output(OutputKind::Resource))
+        .op(|op| op.with_output(OutputKind::Resource))
         .action("start", "Start the WireGuard service")
         .action("stop", "Stop the WireGuard service")
         .action("leave", "Leave the cluster, uninstall WireGuard service")
-            .op(|op| op.with_confirm())
+        .op(|op| op.with_confirm())
         // CRUD
-        .list().op(|op| op.with_example("nauka hypervisor list"))
-        .get().op(|op| op.with_example("nauka hypervisor get HYPERVISOR-1"))
+        .list()
+        .op(|op| op.with_example("nauka hypervisor list"))
+        .get()
+        .op(|op| op.with_example("nauka hypervisor get HYPERVISOR-1"))
         .action("peering", "Start peering listener to accept new nodes")
-            .op(|op| op
-                .with_arg(OperationArg::optional("timeout", FieldDef::integer("timeout", "Listener timeout in seconds").with_default("3600")))
-                .with_example("nauka hypervisor peering")
-            )
+        .op(|op| {
+            op.with_arg(OperationArg::optional(
+                "timeout",
+                FieldDef::integer("timeout", "Listener timeout in seconds").with_default("3600"),
+            ))
+            .with_example("nauka hypervisor peering")
+        })
         .action("doctor", "Diagnose hypervisor health")
         // Future
-        .action("drain", "Evacuate all VMs before maintenance").op(|op| op.with_confirm())
+        .action("drain", "Evacuate all VMs before maintenance")
+        .op(|op| op.with_confirm())
         .action("enable", "Enable for VM scheduling")
         // Table
         .column("NAME", "name")
@@ -68,14 +122,17 @@ pub fn resource_def() -> ResourceDef {
         .column("MEMORY", "memory")
         .column("VMs", "vms")
         .empty_message("No hypervisors found. Initialize with: nauka hypervisor init --name <mesh>")
-        .detail_section(None, vec![
-            DetailField::new("Name", "name"),
-            DetailField::new("ID", "id"),
-            DetailField::new("Region", "region"),
-            DetailField::new("Zone", "zone"),
-            DetailField::new("Address", "mesh_ipv6"),
-            DetailField::new("State", "state").with_format(DisplayFormat::Status),
-        ])
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Region", "region"),
+                DetailField::new("Zone", "zone"),
+                DetailField::new("Address", "mesh_ipv6"),
+                DetailField::new("State", "state").with_format(DisplayFormat::Status),
+            ],
+        )
         .done()
 }
 
@@ -143,10 +200,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .map(|s| s.as_str())
         .unwrap_or("");
 
-    let endpoint = req
-        .fields
-        .get("endpoint")
-        .cloned();
+    let endpoint = req.fields.get("endpoint").cloned();
 
     let node_name = hostname::get()
         .ok()
@@ -276,7 +330,12 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
         .collect();
     let peer_count = state.peers.len();
-    if let Err(e) = controlplane::ops::join(&node_name, &result.hypervisor.mesh_ipv6, &pd_endpoints, peer_count) {
+    if let Err(e) = controlplane::ops::join(
+        &node_name,
+        &result.hypervisor.mesh_ipv6,
+        &pd_endpoints,
+        peer_count,
+    ) {
         tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
         eprintln!("  Warning: control plane setup incomplete: {e}");
         eprintln!("  Services will continue starting in background via systemd.");
@@ -336,12 +395,19 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
     let s = fabric::ops::status(&db)?;
 
     // Control plane status (best-effort — may not be installed yet)
-    let mesh_ip: std::net::Ipv6Addr = s.mesh_ipv6.parse().map_err(|_| {
-        anyhow::anyhow!("corrupt state: invalid mesh_ipv6 '{}'", s.mesh_ipv6)
-    })?;
+    let mesh_ip: std::net::Ipv6Addr = s
+        .mesh_ipv6
+        .parse()
+        .map_err(|_| anyhow::anyhow!("corrupt state: invalid mesh_ipv6 '{}'", s.mesh_ipv6))?;
     let cp = controlplane::ops::status(&mesh_ip);
     let (pd_active, tikv_active, pd_members, tikv_stores, leader) = match cp {
-        Ok(cs) => (cs.pd_active, cs.tikv_active, cs.pd_members, cs.tikv_stores, cs.leader),
+        Ok(cs) => (
+            cs.pd_active,
+            cs.tikv_active,
+            cs.pd_members,
+            cs.tikv_stores,
+            cs.leader,
+        ),
         Err(_) => (false, false, 0, 0, None),
     };
 

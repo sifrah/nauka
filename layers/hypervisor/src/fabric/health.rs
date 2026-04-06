@@ -81,7 +81,10 @@ pub fn check_once(
     for peer in &mut state.peers.peers {
         let was_active = peer.is_active();
 
-        if let Some(wg_peer) = handshakes.iter().find(|h| h.public_key == peer.wg_public_key) {
+        if let Some(wg_peer) = handshakes
+            .iter()
+            .find(|h| h.public_key == peer.wg_public_key)
+        {
             peer.last_handshake = wg_peer.latest_handshake;
 
             if wg_peer.latest_handshake > 0
@@ -207,7 +210,13 @@ mod tests {
         // Create state with no peers
         let (mesh, secret) = super::super::mesh::create_mesh();
         let hv = super::super::mesh::create_hypervisor(
-            "node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix,
+            "node-1",
+            "eu",
+            "fsn1",
+            51820,
+            None,
+            "",
+            &mesh.prefix,
         )
         .unwrap();
         let state = FabricState {
@@ -232,7 +241,13 @@ mod tests {
 
         let (mesh, secret) = super::super::mesh::create_mesh();
         let hv = super::super::mesh::create_hypervisor(
-            "node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix,
+            "node-1",
+            "eu",
+            "fsn1",
+            51820,
+            None,
+            "",
+            &mesh.prefix,
         )
         .unwrap();
         let mut peers = super::super::peer::PeerList::new();

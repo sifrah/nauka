@@ -96,15 +96,15 @@ async fn main() -> Result<()> {
     let matches = app.get_matches();
 
     match matches.subcommand() {
-        Some(("serve", sub_matches)) => {
-            serve(sub_matches).await
-        }
+        Some(("serve", sub_matches)) => serve(sub_matches).await,
         Some((sub_name, sub_matches)) => {
             if let Some(reg) = registry.find(sub_name) {
                 if let Some((op_name, op_matches)) = sub_matches.subcommand() {
                     dispatch(reg, op_name, op_matches).await
                 } else {
-                    anyhow::bail!("specify a subcommand. Run 'nauka {sub_name} --help' for details.");
+                    anyhow::bail!(
+                        "specify a subcommand. Run 'nauka {sub_name} --help' for details."
+                    );
                 }
             } else {
                 anyhow::bail!("unknown command: {sub_name}");

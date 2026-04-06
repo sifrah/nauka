@@ -7,10 +7,10 @@
 
 use std::net::Ipv6Addr;
 
-use serde::{Deserialize, Serialize};
 use nauka_core::addressing;
 use nauka_core::crypto::{self, MeshSecret};
 use nauka_core::id::MeshId;
+use serde::{Deserialize, Serialize};
 
 /// Complete mesh identity — everything needed to describe a mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +122,8 @@ mod tests {
     #[test]
     fn create_node_has_valid_identity() {
         let (mesh, _) = create_mesh();
-        let node = create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+        let node =
+            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
 
         assert_eq!(node.name, "node-1");
         assert_eq!(node.region, "eu");
@@ -161,7 +162,8 @@ mod tests {
     #[test]
     fn node_identity_serde_roundtrip() {
         let (mesh, _) = create_mesh();
-        let node = create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+        let node =
+            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
         let json = serde_json::to_string(&node).unwrap();
         let back: HypervisorIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "node-1");
@@ -199,7 +201,8 @@ mod tests {
     #[test]
     fn private_key_survives_serde() {
         let (mesh, _) = create_mesh();
-        let node = create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+        let node =
+            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
         let original_private = node.wg_private_key.clone();
         assert!(!original_private.is_empty());
 

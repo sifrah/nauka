@@ -54,8 +54,13 @@ pub fn init(db: &LayerDb, cfg: &InitConfig<'_>) -> Result<InitResult, NaukaError
     // Create identities
     let (mesh_id, secret) = mesh::create_mesh();
     let hv = mesh::create_hypervisor(
-        cfg.node_name, cfg.region, cfg.zone, cfg.port,
-        cfg.endpoint.clone(), cfg.fabric_interface, &mesh_id.prefix,
+        cfg.node_name,
+        cfg.region,
+        cfg.zone,
+        cfg.port,
+        cfg.endpoint.clone(),
+        cfg.fabric_interface,
+        &mesh_id.prefix,
     )?;
 
     // Setup network via backend
@@ -253,19 +258,16 @@ pub async fn join(
     };
 
     // Extract target IP for endpoint discovery
-    let target_ip = target
-        .split(':')
-        .next()
-        .unwrap_or(target)
-        .to_string();
+    let target_ip = target.split(':').next().unwrap_or(target).to_string();
 
     // Build peer list from response (acceptor + existing peers)
     let mut peers = PeerList::new();
     if let Some(acceptor) = &response.acceptor {
         // If acceptor didn't set endpoint, use target IP + acceptor's WG port
-        let endpoint = acceptor.endpoint.clone().or_else(|| {
-            Some(format!("{}:{}", target_ip, acceptor.wg_port))
-        });
+        let endpoint = acceptor
+            .endpoint
+            .clone()
+            .or_else(|| Some(format!("{}:{}", target_ip, acceptor.wg_port)));
         let _ = peers.add(super::peer::Peer::new(
             acceptor.name.clone(),
             acceptor.region.clone(),
@@ -397,7 +399,9 @@ pub fn status(db: &LayerDb) -> Result<StatusResult, NaukaError> {
 pub fn start(db: &LayerDb) -> Result<(), NaukaError> {
     let state = FabricState::load(db)
         .map_err(|e| NaukaError::internal(e.to_string()))?
-        .ok_or_else(|| NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first."))?;
+        .ok_or_else(|| {
+            NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
+        })?;
 
     let backend = super::backend::create_backend(state.network_mode);
     if backend.is_active() {

@@ -45,7 +45,6 @@ impl std::str::FromStr for NetworkMode {
     }
 }
 
-
 /// Peer info passed to the backend.
 pub struct BackendPeer {
     pub public_key: String,
@@ -130,9 +129,15 @@ mod tests {
 
     #[test]
     fn mode_parse() {
-        assert_eq!("wireguard".parse::<NetworkMode>().unwrap(), NetworkMode::WireGuard);
+        assert_eq!(
+            "wireguard".parse::<NetworkMode>().unwrap(),
+            NetworkMode::WireGuard
+        );
         assert_eq!("wg".parse::<NetworkMode>().unwrap(), NetworkMode::WireGuard);
-        assert_eq!("direct".parse::<NetworkMode>().unwrap(), NetworkMode::Direct);
+        assert_eq!(
+            "direct".parse::<NetworkMode>().unwrap(),
+            NetworkMode::Direct
+        );
         assert_eq!("mock".parse::<NetworkMode>().unwrap(), NetworkMode::Mock);
         assert!("invalid".parse::<NetworkMode>().is_err());
     }

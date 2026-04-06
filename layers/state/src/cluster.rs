@@ -49,8 +49,8 @@ impl ClusterDb {
         value: &T,
     ) -> Result<(), StateError> {
         let full_key = format!("{namespace}/{key}");
-        let data = serde_json::to_vec(value)
-            .map_err(|e| StateError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(value).map_err(|e| StateError::Serialization(e.to_string()))?;
         self.client
             .put(full_key.into_bytes(), data)
             .await
@@ -82,11 +82,7 @@ impl ClusterDb {
     }
 
     /// Delete a key.
-    pub async fn delete(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), StateError> {
+    pub async fn delete(&self, namespace: &str, key: &str) -> Result<(), StateError> {
         let full_key = format!("{namespace}/{key}");
         self.client
             .delete(full_key.into_bytes())
@@ -115,7 +111,10 @@ impl ClusterDb {
         for pair in pairs {
             let key_bytes: Vec<u8> = Vec::from(pair.key().clone());
             let key_str = String::from_utf8(key_bytes).unwrap_or_default();
-            let short_key = key_str.strip_prefix(&ns_prefix).unwrap_or(&key_str).to_string();
+            let short_key = key_str
+                .strip_prefix(&ns_prefix)
+                .unwrap_or(&key_str)
+                .to_string();
             let value: T = serde_json::from_slice(pair.value())
                 .map_err(|e| StateError::Serialization(e.to_string()))?;
             results.push((short_key, value));
@@ -125,11 +124,7 @@ impl ClusterDb {
     }
 
     /// Check if a key exists.
-    pub async fn exists(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, StateError> {
+    pub async fn exists(&self, namespace: &str, key: &str) -> Result<bool, StateError> {
         let full_key = format!("{namespace}/{key}");
         let value = self
             .client
@@ -148,8 +143,8 @@ impl ClusterDb {
         let mut kvs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for (key, value) in entries {
             let full_key = format!("{namespace}/{key}");
-            let data = serde_json::to_vec(value)
-                .map_err(|e| StateError::Serialization(e.to_string()))?;
+            let data =
+                serde_json::to_vec(value).map_err(|e| StateError::Serialization(e.to_string()))?;
             kvs.push((full_key.into_bytes(), data));
         }
 

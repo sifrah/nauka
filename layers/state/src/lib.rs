@@ -93,8 +93,7 @@ impl LocalDb {
     pub fn open_at(path: &std::path::Path) -> Result<Self> {
         let data = if path.exists() {
             let contents = std::fs::read_to_string(path)?;
-            serde_json::from_str(&contents)
-                .map_err(|e| StateError::Serialization(e.to_string()))?
+            serde_json::from_str(&contents).map_err(|e| StateError::Serialization(e.to_string()))?
         } else {
             StoreMap::new()
         };

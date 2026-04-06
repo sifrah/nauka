@@ -16,10 +16,7 @@ use super::service::{self, PdConfig, TikvConfig};
 const MAX_PD_MEMBERS: usize = 3;
 
 /// Bootstrap a new single-node TiKV cluster.
-pub fn bootstrap(
-    node_name: &str,
-    mesh_ipv6: &Ipv6Addr,
-) -> Result<(), NaukaError> {
+pub fn bootstrap(node_name: &str, mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
     tracing::info!(node_name, %mesh_ipv6, "controlplane bootstrap starting");
     eprintln!("  Setting up control plane...");
 
@@ -28,19 +25,13 @@ pub fn bootstrap(
     let pd_cfg = PdConfig {
         name: node_name.to_string(),
         mesh_ipv6: *mesh_ipv6,
-        initial_cluster: format!(
-            "{node_name}=http://[{mesh_ipv6}]:{}",
-            super::PD_PEER_PORT
-        ),
+        initial_cluster: format!("{node_name}=http://[{mesh_ipv6}]:{}", super::PD_PEER_PORT),
         initial_cluster_state: "new".to_string(),
     };
 
     let tikv_cfg = TikvConfig {
         mesh_ipv6: *mesh_ipv6,
-        pd_endpoints: vec![format!(
-            "http://[{mesh_ipv6}]:{}",
-            super::PD_CLIENT_PORT
-        )],
+        pd_endpoints: vec![format!("http://[{mesh_ipv6}]:{}", super::PD_CLIENT_PORT)],
     };
 
     service::install(&pd_cfg, &tikv_cfg, None)?;
@@ -91,7 +82,11 @@ pub fn join(
     let run_pd = peer_count < (MAX_PD_MEMBERS - 1); // -1 because init node already has PD
 
     if run_pd {
-        eprintln!("  Starting PD + TiKV (node {} of {})", peer_count + 1, MAX_PD_MEMBERS);
+        eprintln!(
+            "  Starting PD + TiKV (node {} of {})",
+            peer_count + 1,
+            MAX_PD_MEMBERS
+        );
         join_with_pd(node_name, mesh_ipv6, existing_pd_endpoints, primary_pd)?;
     } else {
         eprintln!("  Starting TiKV only (PD cluster full at {MAX_PD_MEMBERS} members)");
@@ -280,8 +275,8 @@ fn extract_ipv6_from_endpoint(endpoint: &str) -> Option<Ipv6Addr> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::service::{PdConfig, TikvConfig};
+    use super::*;
 
     #[test]
     fn bootstrap_config_single_node() {

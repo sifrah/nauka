@@ -46,11 +46,7 @@ pub async fn broadcast_new_peer(
     let mut failures = 0;
 
     for peer in existing_peers {
-        let addr = format!(
-            "[{}]:{}",
-            peer.mesh_ipv6,
-            wg_port + ANNOUNCE_PORT_OFFSET
-        );
+        let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
 
         match send_announce(&addr, &announce).await {
             Ok(()) => {
@@ -158,7 +154,11 @@ async fn handle_announce(
     let peer_name = announce.peer.name.clone();
 
     // Skip if we already know this peer
-    if state.peers.find_by_key(&announce.peer.wg_public_key).is_some() {
+    if state
+        .peers
+        .find_by_key(&announce.peer.wg_public_key)
+        .is_some()
+    {
         tracing::debug!(peer = %peer_name, "already known, skipping");
         return Ok(peer_name);
     }

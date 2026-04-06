@@ -82,11 +82,7 @@ impl ClusterDb {
     }
 
     /// Delete a key.
-    pub async fn delete(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<(), NaukaError> {
+    pub async fn delete(&self, namespace: &str, key: &str) -> Result<(), NaukaError> {
         let full_key = format!("{namespace}/{key}");
         self.client
             .delete(full_key.into_bytes())
@@ -115,7 +111,10 @@ impl ClusterDb {
         for pair in pairs {
             let key_bytes: Vec<u8> = Vec::from(pair.key().clone());
             let key_str = String::from_utf8(key_bytes).unwrap_or_default();
-            let short_key = key_str.strip_prefix(&ns_prefix).unwrap_or(&key_str).to_string();
+            let short_key = key_str
+                .strip_prefix(&ns_prefix)
+                .unwrap_or(&key_str)
+                .to_string();
             let value: T = serde_json::from_slice(pair.value())
                 .map_err(|e| NaukaError::internal(format!("serialization: {e}")))?;
             results.push((short_key, value));
@@ -125,11 +124,7 @@ impl ClusterDb {
     }
 
     /// Check if a key exists.
-    pub async fn exists(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<bool, NaukaError> {
+    pub async fn exists(&self, namespace: &str, key: &str) -> Result<bool, NaukaError> {
         let full_key = format!("{namespace}/{key}");
         let value = self
             .client

@@ -42,15 +42,27 @@ impl DoctorReport {
     }
 
     pub fn ok_count(&self) -> usize {
-        self.checks.iter().flat_map(|(_, c)| c).filter(|c| c.status == CheckStatus::Ok).count()
+        self.checks
+            .iter()
+            .flat_map(|(_, c)| c)
+            .filter(|c| c.status == CheckStatus::Ok)
+            .count()
     }
 
     pub fn warn_count(&self) -> usize {
-        self.checks.iter().flat_map(|(_, c)| c).filter(|c| c.status == CheckStatus::Warn).count()
+        self.checks
+            .iter()
+            .flat_map(|(_, c)| c)
+            .filter(|c| c.status == CheckStatus::Warn)
+            .count()
     }
 
     pub fn fail_count(&self) -> usize {
-        self.checks.iter().flat_map(|(_, c)| c).filter(|c| c.status == CheckStatus::Fail).count()
+        self.checks
+            .iter()
+            .flat_map(|(_, c)| c)
+            .filter(|c| c.status == CheckStatus::Fail)
+            .count()
     }
 
     /// Render the report to stderr.
@@ -79,19 +91,35 @@ impl DoctorReport {
 }
 
 fn ok(name: &str, detail: &str) -> Check {
-    Check { name: name.into(), status: CheckStatus::Ok, detail: detail.into() }
+    Check {
+        name: name.into(),
+        status: CheckStatus::Ok,
+        detail: detail.into(),
+    }
 }
 
 fn warn(name: &str, detail: &str) -> Check {
-    Check { name: name.into(), status: CheckStatus::Warn, detail: detail.into() }
+    Check {
+        name: name.into(),
+        status: CheckStatus::Warn,
+        detail: detail.into(),
+    }
 }
 
 fn fail(name: &str, detail: &str) -> Check {
-    Check { name: name.into(), status: CheckStatus::Fail, detail: detail.into() }
+    Check {
+        name: name.into(),
+        status: CheckStatus::Fail,
+        detail: detail.into(),
+    }
 }
 
 fn skip(name: &str, detail: &str) -> Check {
-    Check { name: name.into(), status: CheckStatus::Skip, detail: detail.into() }
+    Check {
+        name: name.into(),
+        status: CheckStatus::Skip,
+        detail: detail.into(),
+    }
 }
 
 // ═══════════════════════════════════════════════════

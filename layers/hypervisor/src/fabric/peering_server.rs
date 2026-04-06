@@ -117,7 +117,10 @@ pub async fn listen(
 
                 match handle_join(&mut stream, &db, pin, peer_addr).await {
                     Ok(peer_name) => {
-                        rate_limiter.lock().unwrap_or_else(|e| e.into_inner()).record_success(&peer_addr.ip());
+                        rate_limiter
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_success(&peer_addr.ip());
                         tracing::info!(peer = %peer_addr, name = %peer_name, "join accepted");
                         accepted += 1;
                         drop(db);
@@ -126,7 +129,10 @@ pub async fn listen(
                         }
                     }
                     Err(e) => {
-                        rate_limiter.lock().unwrap_or_else(|e| e.into_inner()).record_failure(peer_addr.ip());
+                        rate_limiter
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record_failure(peer_addr.ip());
                         tracing::warn!(peer = %peer_addr, error = %e, "join rejected");
                         drop(db);
                     }
@@ -203,7 +209,13 @@ async fn handle_join(
         })
         .collect();
 
-    let resp = JoinResponse::accepted(&state.secret, state.mesh.prefix, state.mesh.id.as_str(), existing_peers, self_info);
+    let resp = JoinResponse::accepted(
+        &state.secret,
+        state.mesh.prefix,
+        state.mesh.id.as_str(),
+        existing_peers,
+        self_info,
+    );
     write_json(stream, &resp).await?;
 
     // Derive the new peer's mesh IPv6
@@ -241,7 +253,9 @@ async fn handle_join(
         req.endpoint,
         peer_ipv6,
     );
-    state.peers.add(new_peer)
+    state
+        .peers
+        .add(new_peer)
         .map_err(|e| NaukaError::internal(format!("peer add failed: {e}")))?;
 
     // Update WireGuard FIRST — if this fails, state is unchanged
