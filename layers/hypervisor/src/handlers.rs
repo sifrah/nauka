@@ -398,6 +398,16 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         }
     }
 
+    eprintln!();
+    eprintln!("  Joined cluster");
+    eprintln!();
+    eprintln!("  name     {}", result.hypervisor.name);
+    eprintln!("  id       {}", result.hypervisor.id.as_str());
+    eprintln!("  region   {region}/{zone}");
+    eprintln!("  address  {}", result.hypervisor.mesh_ipv6);
+    eprintln!("  peers    {}", result.peer_count);
+    eprintln!();
+
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": result.hypervisor.name,
         "id": result.hypervisor.id.as_str(),
@@ -492,12 +502,12 @@ async fn handle_start() -> anyhow::Result<OperationResponse> {
     let db = open_db()?;
     fabric::ops::start(&db)?;
     if let Err(e) = controlplane::ops::start() {
-        eprintln!("  Warning: control plane start failed: {e}");
+        eprintln!("  Warning: control plane: {e}");
     }
     if let Err(e) = storage::ops::start_all(&db) {
-        eprintln!("  Warning: storage start failed: {e}");
+        eprintln!("  Warning: storage: {e}");
     }
-    Ok(OperationResponse::Message("services started.".into()))
+    Ok(OperationResponse::Message("all services started.".into()))
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
@@ -511,7 +521,7 @@ async fn handle_stop() -> anyhow::Result<OperationResponse> {
     let _ = storage::ops::stop_all(&db);
     let _ = controlplane::ops::stop();
     fabric::ops::stop(&db)?;
-    Ok(OperationResponse::Message("services stopped.".into()))
+    Ok(OperationResponse::Message("all services stopped.".into()))
 }
 
 async fn handle_leave() -> anyhow::Result<OperationResponse> {
@@ -532,8 +542,8 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
         let _ = controlplane::ops::leave();
     }
 
-    // Fabric last (WireGuard mesh)
-    fabric::ops::leave(&db)?;
+    // Fabric last (notifies peers, then tears down mesh)
+    fabric::ops::leave(&db).await?;
     Ok(OperationResponse::Message(
         "left the cluster. All services uninstalled.".into(),
     ))
@@ -564,7 +574,7 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
             "name": peer.name,
             "region": peer.region,
             "zone": peer.zone,
-            "state": format!("{:?}", peer.status).to_lowercase(),
+            "state": peer_state_label(peer),
             "cpu": "0/0",
             "memory": "0/0",
             "vms": 0,
@@ -599,14 +609,24 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
     if let Some(peer) = state.peers.find_by_name(&name) {
         return Ok(OperationResponse::Resource(serde_json::json!({
             "name": peer.name,
+            "id": peer.id.as_str(),
             "region": peer.region,
             "zone": peer.zone,
             "mesh_ipv6": peer.mesh_ipv6.to_string(),
-            "state": format!("{:?}", peer.status).to_lowercase(),
+            "state": peer_state_label(peer),
         })));
     }
 
     anyhow::bail!("hypervisor '{name}' not found")
+}
+
+/// Map peer status to user-facing label.
+fn peer_state_label(peer: &fabric::peer::Peer) -> &'static str {
+    match peer.status {
+        fabric::peer::PeerStatus::Active => "available",
+        fabric::peer::PeerStatus::Unreachable => "unreachable",
+        fabric::peer::PeerStatus::Removed => "removed",
+    }
 }
 
 fn open_db() -> anyhow::Result<LayerDb> {

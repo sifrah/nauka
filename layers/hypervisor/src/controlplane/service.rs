@@ -420,6 +420,57 @@ pub fn deregister_store(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError
     Ok(())
 }
 
+/// Deregister this node's PD member from the cluster before leaving.
+/// Finds our member ID via the PD API, then removes it.
+pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError> {
+    if !pd_is_active() {
+        return Ok(());
+    }
+
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let members_url = format!("{pd_url}/pd/api/v1/members");
+
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &members_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(()),
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    // Find our member by matching peer_urls containing our mesh IPv6
+    let our_ip = mesh_ipv6.to_string();
+    if let Some(members) = body["members"].as_array() {
+        for member in members {
+            let peer_urls = member["peer_urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let member_id = member["member_id"].as_u64().unwrap_or(0);
+
+            if peer_urls.contains(&our_ip) && member_id > 0 {
+                tracing::info!(member_id, "deregistering PD member");
+                let delete_url = format!("{pd_url}/pd/api/v1/members/id/{member_id}");
+                let _ = Command::new("curl")
+                    .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
+                    .output();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Uninstall everything — stop services, remove configs, data.
 pub fn uninstall() -> Result<(), NaukaError> {
     let _ = run_systemctl(&["disable", "--now", TIKV_SERVICE]);

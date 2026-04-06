@@ -194,10 +194,12 @@ async fn handle_join(
         mesh_ipv6: state.hypervisor.mesh_ipv6,
     };
 
+    // Filter out any stale entry for the joining node (leave/rejoin scenario)
     let existing_peers: Vec<PeerInfo> = state
         .peers
         .peers
         .iter()
+        .filter(|p| p.name != req.name)
         .map(|p| PeerInfo {
             name: p.name.clone(),
             region: p.region.clone(),
@@ -235,12 +237,16 @@ async fn handle_join(
         mesh_ipv6: peer_ipv6,
     };
 
-    // Skip if we already have this peer (duplicate join)
-    if state.peers.find_by_key(&req.wg_public_key).is_some()
-        || state.peers.find_by_name(&req.name).is_some()
-    {
-        tracing::info!(peer = %req.name, "duplicate join, already known");
+    // Skip if exact same key already exists (duplicate join)
+    if state.peers.find_by_key(&req.wg_public_key).is_some() {
+        tracing::info!(peer = %req.name, "duplicate join, same key already known");
         return Ok(req.name);
+    }
+
+    // Remove stale entry if same name but different key (leave/rejoin)
+    if state.peers.find_by_name(&req.name).is_some() {
+        tracing::info!(peer = %req.name, "replacing stale peer entry (rejoin)");
+        state.peers.remove(&req.name);
     }
 
     // Add peer + save + update WG

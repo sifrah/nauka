@@ -117,7 +117,7 @@ The CLI binary in `bin/nauka` composes these crates and contains no logic of its
 
 ```bash
 cargo build           # build all crates
-cargo test            # run tests (458+)
+cargo test            # run all tests
 cargo clippy          # lint
 cargo run -- --help   # run the CLI
 ```

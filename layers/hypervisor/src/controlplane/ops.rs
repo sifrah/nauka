@@ -196,10 +196,12 @@ pub fn restart() -> Result<(), NaukaError> {
     service::restart()
 }
 
-/// Uninstall the control plane. Deregisters TiKV store first.
+/// Uninstall the control plane. Deregisters TiKV store and PD member first.
 pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
     // Deregister TiKV store before stopping
     let _ = service::deregister_store(mesh_ipv6);
+    // Deregister PD member before stopping (prevents zombie members on rejoin)
+    let _ = service::deregister_pd_member(mesh_ipv6);
     service::uninstall()
 }
 

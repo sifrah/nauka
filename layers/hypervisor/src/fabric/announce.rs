@@ -14,9 +14,19 @@ use std::time::Duration;
 use nauka_core::error::NaukaError;
 
 use super::peer::Peer;
-use super::peering::{PeerAnnounce, PeerInfo};
+use super::peering::{PeerAnnounce, PeerInfo, PeerRemove};
 use super::peering_server::{read_json, write_json};
 use super::service;
+
+/// Envelope for announce protocol messages.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum AnnounceMessage {
+    #[serde(rename = "announce")]
+    Announce(PeerAnnounce),
+    #[serde(rename = "remove")]
+    Remove(PeerRemove),
+}
 
 /// Default announce port offset from WireGuard port.
 pub const ANNOUNCE_PORT_OFFSET: u16 = 2;
@@ -37,10 +47,10 @@ pub async fn broadcast_new_peer(
     existing_peers: &[Peer],
     wg_port: u16,
 ) -> (usize, usize) {
-    let announce = PeerAnnounce {
+    let msg = AnnounceMessage::Announce(PeerAnnounce {
         peer: new_peer.clone(),
         announced_by: announced_by.to_string(),
-    };
+    });
 
     let mut successes = 0;
     let mut failures = 0;
@@ -48,7 +58,7 @@ pub async fn broadcast_new_peer(
     for peer in existing_peers {
         let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
 
-        match send_announce(&addr, &announce).await {
+        match send_message(&addr, &msg).await {
             Ok(()) => {
                 tracing::info!(
                     peer = %peer.name,
@@ -71,8 +81,8 @@ pub async fn broadcast_new_peer(
     (successes, failures)
 }
 
-/// Send a single PeerAnnounce to one peer (over TLS).
-async fn send_announce(addr: &str, announce: &PeerAnnounce) -> Result<(), NaukaError> {
+/// Send an announce message to one peer (over TLS).
+async fn send_message(addr: &str, msg: &AnnounceMessage) -> Result<(), NaukaError> {
     let timeout = Duration::from_secs(ANNOUNCE_TIMEOUT_SECS);
 
     let tcp_stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr))
@@ -91,9 +101,42 @@ async fn send_announce(addr: &str, announce: &PeerAnnounce) -> Result<(), NaukaE
         .await
         .map_err(|e| NaukaError::network(format!("announce TLS handshake failed: {e}")))?;
 
-    write_json(&mut stream, announce).await?;
+    write_json(&mut stream, msg).await?;
 
     Ok(())
+}
+
+/// Broadcast a peer removal to all existing peers (best-effort).
+/// Called during `leave` before tearing down the network.
+pub async fn broadcast_peer_remove(
+    name: &str,
+    wg_public_key: &str,
+    existing_peers: &[Peer],
+    wg_port: u16,
+) -> (usize, usize) {
+    let msg = AnnounceMessage::Remove(PeerRemove {
+        name: name.to_string(),
+        wg_public_key: wg_public_key.to_string(),
+    });
+
+    let mut successes = 0;
+    let mut failures = 0;
+
+    for peer in existing_peers {
+        let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
+        match send_message(&addr, &msg).await {
+            Ok(()) => {
+                tracing::info!(peer = %peer.name, leaving = %name, "sent peer removal");
+                successes += 1;
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer.name, error = %e, "failed to send peer removal");
+                failures += 1;
+            }
+        }
+    }
+
+    (successes, failures)
 }
 
 /// Listen for peer announcements and apply them (over TLS).
@@ -137,13 +180,9 @@ pub async fn listen(
                     }
                 };
 
-                match handle_announce(&mut stream, &db).await {
-                    Ok(name) => {
-                        tracing::info!(
-                            from = %peer_addr,
-                            new_peer = %name,
-                            "applied peer announcement"
-                        );
+                match handle_message(&mut stream, &db).await {
+                    Ok(msg) => {
+                        tracing::info!(from = %peer_addr, result = %msg, "announce handled");
                     }
                     Err(e) => {
                         tracing::warn!(from = %peer_addr, error = %e, "announce failed");
@@ -157,13 +196,67 @@ pub async fn listen(
     }
 }
 
-/// Handle a single peer announcement.
-async fn handle_announce(
+/// Handle an incoming announce message (add or remove).
+async fn handle_message(
     stream: &mut (impl tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin),
     db: &nauka_state::LayerDb,
 ) -> Result<String, NaukaError> {
-    let announce: PeerAnnounce = read_json(stream).await?;
+    let msg: AnnounceMessage = read_json(stream).await?;
 
+    match msg {
+        AnnounceMessage::Announce(announce) => handle_peer_announce(announce, db).await,
+        AnnounceMessage::Remove(remove) => handle_peer_remove(remove, db),
+    }
+}
+
+/// Handle a PeerRemove — remove a leaving peer.
+fn handle_peer_remove(remove: PeerRemove, db: &nauka_state::LayerDb) -> Result<String, NaukaError> {
+    super::peering_server::validate_peer_field(&remove.name, "name")?;
+
+    let mut state = super::state::FabricState::load(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| NaukaError::precondition("not initialized"))?;
+
+    if let Some(removed) = state.peers.remove(&remove.name) {
+        tracing::info!(peer = %remove.name, "removed leaving peer");
+
+        state
+            .save(db)
+            .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+        // Update WireGuard config
+        let peers_for_wg: Vec<_> = state
+            .peers
+            .peers
+            .iter()
+            .map(|p| {
+                (
+                    p.wg_public_key.clone(),
+                    "25".to_string(),
+                    p.mesh_ipv6,
+                    p.endpoint.clone(),
+                )
+            })
+            .collect();
+
+        let _ = service::update_config(
+            &state.hypervisor.wg_private_key,
+            state.hypervisor.wg_port,
+            &state.hypervisor.mesh_ipv6,
+            &peers_for_wg,
+        );
+
+        Ok(format!("removed {}", removed.name))
+    } else {
+        Ok(format!("{} not found, skipped", remove.name))
+    }
+}
+
+/// Handle a PeerAnnounce — add or replace a peer.
+async fn handle_peer_announce(
+    announce: PeerAnnounce,
+    db: &nauka_state::LayerDb,
+) -> Result<String, NaukaError> {
     // Validate peer data from untrusted source
     super::peering_server::validate_peer_field(&announce.peer.name, "name")?;
     super::peering_server::validate_peer_field(&announce.peer.region, "region")?;
@@ -176,14 +269,20 @@ async fn handle_announce(
 
     let peer_name = announce.peer.name.clone();
 
-    // Skip if we already know this peer
+    // Skip if exact same key already known
     if state
         .peers
         .find_by_key(&announce.peer.wg_public_key)
         .is_some()
     {
-        tracing::debug!(peer = %peer_name, "already known, skipping");
+        tracing::debug!(peer = %peer_name, "already known (same key), skipping");
         return Ok(peer_name);
+    }
+
+    // Remove stale entry if same name but different key (leave/rejoin)
+    if state.peers.find_by_name(&peer_name).is_some() {
+        tracing::info!(peer = %peer_name, "replacing stale peer entry (rejoin announce)");
+        state.peers.remove(&peer_name);
     }
 
     // Add the new peer
@@ -197,7 +296,7 @@ async fn handle_announce(
         announce.peer.mesh_ipv6,
     );
     if let Err(e) = state.peers.add(new_peer) {
-        tracing::debug!(error = %e, "announce: peer already known");
+        tracing::debug!(error = %e, "announce: peer add failed");
         return Ok(peer_name);
     }
 
@@ -268,12 +367,17 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let announce: PeerAnnounce = read_json(&mut stream).await.unwrap();
-            assert_eq!(announce.peer.name, "new-node");
-            assert_eq!(announce.announced_by, "node-1");
+            let msg: AnnounceMessage = read_json(&mut stream).await.unwrap();
+            match msg {
+                AnnounceMessage::Announce(a) => {
+                    assert_eq!(a.peer.name, "new-node");
+                    assert_eq!(a.announced_by, "node-1");
+                }
+                _ => panic!("expected Announce"),
+            }
         });
 
-        let announce = PeerAnnounce {
+        let msg = AnnounceMessage::Announce(PeerAnnounce {
             peer: PeerInfo {
                 name: "new-node".into(),
                 region: "eu".into(),
@@ -284,18 +388,18 @@ mod tests {
                 mesh_ipv6: "fd01::99".parse().unwrap(),
             },
             announced_by: "node-1".into(),
-        };
+        });
 
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        write_json(&mut stream, &announce).await.unwrap();
+        write_json(&mut stream, &msg).await.unwrap();
         drop(stream);
 
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn send_announce_unreachable() {
-        let announce = PeerAnnounce {
+    async fn send_message_unreachable() {
+        let msg = AnnounceMessage::Announce(PeerAnnounce {
             peer: PeerInfo {
                 name: "n".into(),
                 region: "eu".into(),
@@ -306,9 +410,9 @@ mod tests {
                 mesh_ipv6: "fd01::1".parse().unwrap(),
             },
             announced_by: "test".into(),
-        };
+        });
         // Connect to a port nothing is listening on
-        let result = send_announce("127.0.0.1:1", &announce).await;
+        let result = send_message("127.0.0.1:1", &msg).await;
         assert!(result.is_err());
     }
 }

@@ -75,6 +75,15 @@ pub struct PeerAnnounce {
     pub announced_by: String,
 }
 
+/// Peer removal — broadcast to all peers when a node leaves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerRemove {
+    /// Name of the leaving node.
+    pub name: String,
+    /// WireGuard public key of the leaving node.
+    pub wg_public_key: String,
+}
+
 impl JoinResponse {
     /// Create an accepted response.
     pub fn accepted(

@@ -188,7 +188,7 @@ impl NaukaError {
 
     /// Format for CLI output (human-friendly).
     pub fn format_cli(&self) -> String {
-        let mut out = format!("Error: {}", self.message);
+        let mut out = self.message.clone();
         if let Some(suggestion) = &self.suggestion {
             out.push_str(&format!("\n{suggestion}"));
         }
@@ -315,7 +315,7 @@ impl NaukaError {
 
 impl fmt::Display for NaukaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error: {}", self.message)?;
+        write!(f, "{}", self.message)?;
         if let Some(suggestion) = &self.suggestion {
             write!(f, "\n{suggestion}")?;
         }
@@ -519,7 +519,7 @@ mod tests {
     fn display_basic() {
         let err = NaukaError::not_found("vpc", "web");
         let s = format!("{err}");
-        assert!(s.starts_with("Error: "));
+        assert!(!s.starts_with("Error: ")); // no double prefix with anyhow
         assert!(s.contains("web"));
     }
 
@@ -545,7 +545,7 @@ mod tests {
     fn format_cli() {
         let err = NaukaError::not_found("vpc", "web").with_suggestion("Run: nauka vpc list");
         let cli = err.format_cli();
-        assert!(cli.starts_with("Error:"));
+        assert!(cli.contains("not found"));
         assert!(cli.contains("Run: nauka vpc list"));
     }
 

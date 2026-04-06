@@ -112,7 +112,7 @@ pub async fn listen_for_peers(
     peering_port: u16,
     timeout_secs: u64,
 ) -> Result<usize, NaukaError> {
-    let bind_addr = format!("0.0.0.0:{peering_port}")
+    let bind_addr = format!("[::]:{peering_port}")
         .parse()
         .map_err(|_| NaukaError::internal("invalid bind address"))?;
 
@@ -141,7 +141,7 @@ pub async fn listen_for_peers(
 
     // Start announce listener in background (peering_port + 1 = announce port)
     let announce_port = peering_port + 1;
-    let announce_addr: std::net::SocketAddr = format!("0.0.0.0:{announce_port}")
+    let announce_addr: std::net::SocketAddr = format!("[::]:{announce_port}")
         .parse()
         .map_err(|_| NaukaError::internal("invalid announce bind address"))?;
     let announce_db_opener = || {
@@ -428,10 +428,24 @@ pub fn stop(db: &LayerDb) -> Result<(), NaukaError> {
     backend.stop()
 }
 
-/// Leave the cluster — uninstall service, remove state.
-pub fn leave(db: &LayerDb) -> Result<(), NaukaError> {
-    // Get backend from state (if available)
+/// Leave the cluster — notify peers, uninstall service, remove state.
+pub async fn leave(db: &LayerDb) -> Result<(), NaukaError> {
+    // Notify peers before tearing down (best-effort, over mesh)
     if let Some(state) = FabricState::load(db).ok().flatten() {
+        if !state.peers.is_empty() {
+            let peers: Vec<_> = state.peers.peers.clone();
+            let (ok, fail) = super::announce::broadcast_peer_remove(
+                &state.hypervisor.name,
+                &state.hypervisor.wg_public_key,
+                &peers,
+                state.hypervisor.wg_port,
+            )
+            .await;
+            if ok > 0 || fail > 0 {
+                tracing::info!(successes = ok, failures = fail, "peer removal broadcast");
+            }
+        }
+
         let backend = super::backend::create_backend(state.network_mode);
         let _ = backend.teardown();
     } else {
