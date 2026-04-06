@@ -144,8 +144,7 @@ impl Version {
     /// CI sets `NAUKA_VERSION` (e.g. `2.0.0-nightly.5`) at compile time.
     /// Falls back to `CARGO_PKG_VERSION` for local builds.
     pub fn current() -> Self {
-        let version_str =
-            option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        let version_str = option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
         Self::parse(version_str).unwrap_or(Self {
             major: 0,
             minor: 0,

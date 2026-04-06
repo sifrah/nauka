@@ -77,12 +77,8 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
     // Detect platform
     let target = detect_target()?;
     let archive_name = format!("nauka-{tag}-{target}.tar.gz");
-    let archive_url = format!(
-        "https://github.com/{REPO}/releases/download/{tag}/{archive_name}"
-    );
-    let checksums_url = format!(
-        "https://github.com/{REPO}/releases/download/{tag}/SHA256SUMS.txt"
-    );
+    let archive_url = format!("https://github.com/{REPO}/releases/download/{tag}/{archive_name}");
+    let checksums_url = format!("https://github.com/{REPO}/releases/download/{tag}/SHA256SUMS.txt");
 
     let client = reqwest::Client::builder()
         .user_agent("nauka-self-update")
@@ -122,9 +118,7 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
     let actual_hash = format!("{:x}", hasher.finalize());
 
     if actual_hash != expected_hash {
-        bail!(
-            "checksum mismatch:\n  expected: {expected_hash}\n  actual:   {actual_hash}"
-        );
+        bail!("checksum mismatch:\n  expected: {expected_hash}\n  actual:   {actual_hash}");
     }
     eprintln!(" ok");
 
@@ -158,10 +152,8 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
     let current_exe = std::env::current_exe()?;
 
     // On Unix: remove then write (avoids "Text file busy")
-    std::fs::remove_file(&current_exe)
-        .context("failed to remove current binary")?;
-    std::fs::write(&current_exe, &new_binary)
-        .context("failed to write new binary")?;
+    std::fs::remove_file(&current_exe).context("failed to remove current binary")?;
+    std::fs::write(&current_exe, &new_binary).context("failed to write new binary")?;
 
     #[cfg(unix)]
     {
@@ -273,10 +265,7 @@ mod tests {
         let matches = cmd
             .try_get_matches_from(["update", "--channel", "nightly", "--force"])
             .unwrap();
-        assert_eq!(
-            matches.get_one::<String>("channel").unwrap(),
-            "nightly"
-        );
+        assert_eq!(matches.get_one::<String>("channel").unwrap(), "nightly");
         assert!(matches.get_flag("force"));
     }
 }
