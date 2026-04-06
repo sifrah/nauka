@@ -3,6 +3,8 @@ use clap::Command;
 
 use nauka_core::resource::{dispatch, generate_command, ResourceRegistry};
 
+mod update;
+
 /// Build the resource registry with all known resources.
 fn build_registry() -> ResourceRegistry {
     let mut registry = ResourceRegistry::new();
@@ -68,9 +70,10 @@ async fn main() -> Result<()> {
 
     let mut app = Command::new("nauka")
         .about("Nauka — turn dedicated servers into a programmable cloud")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .subcommand(update::command())
         .subcommand(
             Command::new("serve")
                 .about("Start the API server")
@@ -96,6 +99,7 @@ async fn main() -> Result<()> {
     let matches = app.get_matches();
 
     match matches.subcommand() {
+        Some(("update", sub_matches)) => update::run(sub_matches).await,
         Some(("serve", sub_matches)) => serve(sub_matches).await,
         Some((sub_name, sub_matches)) => {
             if let Some(reg) = registry.find(sub_name) {
