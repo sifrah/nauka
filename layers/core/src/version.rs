@@ -1,7 +1,7 @@
 //! Version management and update channels.
 //!
-//! Supports 4 channels: dev, beta, rc, stable.
-//! Versions are semver with channel suffix: `v2.1.0-dev.47`, `v2.1.0`, etc.
+//! Supports 4 channels: nightly, beta, rc, stable.
+//! Versions are semver with channel suffix: `v2.1.0-nightly.47`, `v2.1.0`, etc.
 //!
 //! ```
 //! use nauka_core::version::{Version, Channel};
@@ -24,7 +24,7 @@ use crate::error::NaukaError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
-    Dev,
+    Nightly,
     Beta,
     Rc,
     Stable,
@@ -34,7 +34,7 @@ impl Channel {
     /// Stability rank (higher = more stable).
     pub fn rank(&self) -> u8 {
         match self {
-            Self::Dev => 0,
+            Self::Nightly => 0,
             Self::Beta => 1,
             Self::Rc => 2,
             Self::Stable => 3,
@@ -43,7 +43,7 @@ impl Channel {
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Dev => "dev",
+            Self::Nightly => "nightly",
             Self::Beta => "beta",
             Self::Rc => "rc",
             Self::Stable => "stable",
@@ -61,12 +61,12 @@ impl FromStr for Channel {
     type Err = NaukaError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "dev" => Ok(Self::Dev),
+            "nightly" | "dev" => Ok(Self::Nightly),
             "beta" => Ok(Self::Beta),
             "rc" => Ok(Self::Rc),
             "stable" | "latest" => Ok(Self::Stable),
             _ => Err(NaukaError::validation(format!(
-                "unknown channel '{s}'. Must be: dev, beta, rc, stable"
+                "unknown channel '{s}'. Must be: nightly, beta, rc, stable"
             ))),
         }
     }
@@ -140,12 +140,16 @@ impl Version {
     }
 
     /// Current binary version (injected at build time or from Cargo.toml).
+    ///
+    /// CI sets `NAUKA_VERSION` (e.g. `2.0.0-nightly.5`) at compile time.
+    /// Falls back to `CARGO_PKG_VERSION` for local builds.
     pub fn current() -> Self {
-        Self::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Self {
+        let version_str = option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+        Self::parse(version_str).unwrap_or(Self {
             major: 0,
             minor: 0,
             patch: 0,
-            channel: Channel::Dev,
+            channel: Channel::Nightly,
             build: 0,
         })
     }
@@ -353,7 +357,8 @@ mod tests {
 
     #[test]
     fn channel_parse() {
-        assert_eq!("dev".parse::<Channel>().unwrap(), Channel::Dev);
+        assert_eq!("nightly".parse::<Channel>().unwrap(), Channel::Nightly);
+        assert_eq!("dev".parse::<Channel>().unwrap(), Channel::Nightly);
         assert_eq!("beta".parse::<Channel>().unwrap(), Channel::Beta);
         assert_eq!("rc".parse::<Channel>().unwrap(), Channel::Rc);
         assert_eq!("stable".parse::<Channel>().unwrap(), Channel::Stable);
@@ -367,7 +372,7 @@ mod tests {
 
     #[test]
     fn channel_rank() {
-        assert!(Channel::Dev.rank() < Channel::Beta.rank());
+        assert!(Channel::Nightly.rank() < Channel::Beta.rank());
         assert!(Channel::Beta.rank() < Channel::Rc.rank());
         assert!(Channel::Rc.rank() < Channel::Stable.rank());
     }
@@ -393,9 +398,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_dev() {
+    fn parse_nightly() {
+        let v = Version::parse("2.1.0-nightly.47").unwrap();
+        assert_eq!(v.channel, Channel::Nightly);
+        assert_eq!(v.build, 47);
+    }
+
+    #[test]
+    fn parse_dev_alias() {
         let v = Version::parse("2.1.0-dev.47").unwrap();
-        assert_eq!(v.channel, Channel::Dev);
+        assert_eq!(v.channel, Channel::Nightly);
         assert_eq!(v.build, 47);
     }
 
@@ -458,19 +470,19 @@ mod tests {
 
     #[test]
     fn ordering_channel() {
-        let dev = Version::parse("2.1.0-dev.1").unwrap();
+        let nightly = Version::parse("2.1.0-nightly.1").unwrap();
         let beta = Version::parse("2.1.0-beta.1").unwrap();
         let rc = Version::parse("2.1.0-rc.1").unwrap();
         let stable = Version::parse("2.1.0").unwrap();
-        assert!(dev < beta);
+        assert!(nightly < beta);
         assert!(beta < rc);
         assert!(rc < stable);
     }
 
     #[test]
     fn ordering_build() {
-        let a = Version::parse("2.1.0-dev.1").unwrap();
-        let b = Version::parse("2.1.0-dev.47").unwrap();
+        let a = Version::parse("2.1.0-nightly.1").unwrap();
+        let b = Version::parse("2.1.0-nightly.47").unwrap();
         assert!(b > a);
     }
 
@@ -510,7 +522,7 @@ mod tests {
 
     #[test]
     fn is_prerelease() {
-        assert!(Version::parse("2.0.0-dev.1").unwrap().is_prerelease());
+        assert!(Version::parse("2.0.0-nightly.1").unwrap().is_prerelease());
         assert!(Version::parse("2.0.0-beta.1").unwrap().is_prerelease());
         assert!(!Version::parse("2.0.0").unwrap().is_prerelease());
     }
@@ -602,12 +614,12 @@ mod tests {
 
     #[test]
     fn version_diff_channel_change() {
-        let from = Version::parse("2.1.0-dev.47").unwrap();
+        let from = Version::parse("2.1.0-nightly.47").unwrap();
         let to = Version::parse("2.1.0-beta.1").unwrap();
         let diff = VersionDiff::between(&from, &to);
         assert!(diff.channel_change.is_some());
         let (from_ch, to_ch) = diff.channel_change.unwrap();
-        assert_eq!(from_ch, "dev");
+        assert_eq!(from_ch, "nightly");
         assert_eq!(to_ch, "beta");
     }
 
