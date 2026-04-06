@@ -51,7 +51,9 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
     }
 
     if !is_installed() {
-        return Err(NaukaError::internal("zerofs installed but binary not found"));
+        return Err(NaukaError::internal(
+            "zerofs installed but binary not found",
+        ));
     }
 
     eprintln!("  ZeroFS installed");

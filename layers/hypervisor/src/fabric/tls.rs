@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use nauka_core::error::NaukaError;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// Ensure the rustls crypto provider is installed.
 fn ensure_crypto_provider() {
@@ -15,7 +15,8 @@ fn ensure_crypto_provider() {
 }
 
 /// Generate a self-signed TLS certificate and private key.
-pub fn generate_self_signed() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), NaukaError> {
+pub fn generate_self_signed(
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), NaukaError> {
     ensure_crypto_provider();
     let cert = rcgen::generate_simple_self_signed(vec!["nauka-peering".into()])
         .map_err(|e| NaukaError::internal(format!("TLS cert generation failed: {e}")))?;

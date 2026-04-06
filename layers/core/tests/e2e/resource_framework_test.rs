@@ -7,9 +7,12 @@ fn test_resource() -> ResourceRegistration {
         .alias("w")
         .plural("widgets")
         .action("create", "Create a widget")
-            .op(|op| op
-                .with_arg(OperationArg::required("name", FieldDef::string("name", "Widget name")))
-            )
+        .op(|op| {
+            op.with_arg(OperationArg::required(
+                "name",
+                FieldDef::string("name", "Widget name"),
+            ))
+        })
         .action("list", "List widgets")
         .list()
         .get()
@@ -62,7 +65,9 @@ fn api_route_generation() {
     assert!(ops.contains(&"get"));
 
     // List is GET /v1/widget
-    assert!(routes.iter().any(|r| r.method == "GET" && r.path == "/v1/widget"));
+    assert!(routes
+        .iter()
+        .any(|r| r.method == "GET" && r.path == "/v1/widget"));
 }
 
 #[test]

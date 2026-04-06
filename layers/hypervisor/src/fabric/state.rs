@@ -3,8 +3,8 @@
 //! The fabric state is the complete snapshot of a node's mesh membership:
 //! mesh identity, node identity, secret, and list of peers.
 
-use serde::{Deserialize, Serialize};
 use nauka_state::LayerDb;
+use serde::{Deserialize, Serialize};
 
 use super::backend::NetworkMode;
 use super::mesh::{HypervisorIdentity, MeshIdentity};
@@ -67,7 +67,8 @@ mod tests {
     fn make_state() -> FabricState {
         let (mesh_id, secret) = mesh::create_mesh();
         let node =
-            mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh_id.prefix).unwrap();
+            mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh_id.prefix)
+                .unwrap();
 
         FabricState {
             mesh: mesh_id,
@@ -222,12 +223,12 @@ mod tests {
     #[test]
     fn save_overwrites_previous() {
         let (_d, db) = temp_db();
-        let mut state = make_state();
+        let state = make_state();
         state.save(&db).unwrap();
 
         // Modify and save again
         state.save(&db).unwrap();
 
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        let _loaded = FabricState::load(&db).unwrap().unwrap();
     }
 }

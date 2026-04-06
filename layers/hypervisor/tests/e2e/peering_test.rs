@@ -87,7 +87,9 @@ async fn peering_join_flow() {
                 mesh_ipv6: state.hypervisor.mesh_ipv6,
             },
         );
-        peering_server::write_json(&mut stream, &resp).await.unwrap();
+        peering_server::write_json(&mut stream, &resp)
+            .await
+            .unwrap();
     });
 
     // === Node B: join ===
@@ -101,7 +103,9 @@ async fn peering_join_flow() {
         pin: Some(pin.clone()),
     };
 
-    let resp = peering_client::join(&peering_addr.to_string(), join_req).await.unwrap();
+    let resp = peering_client::join(&peering_addr.to_string(), join_req)
+        .await
+        .unwrap();
 
     // === Verify response ===
     assert!(resp.accepted);
@@ -144,7 +148,9 @@ async fn peering_wrong_pin_rejected() {
 
         // Wrong PIN → reject
         let resp = JoinResponse::rejected("invalid PIN");
-        peering_server::write_json(&mut stream, &resp).await.unwrap();
+        peering_server::write_json(&mut stream, &resp)
+            .await
+            .unwrap();
     });
 
     let req = JoinRequest {
@@ -237,7 +243,8 @@ fn mesh_identity_generation() {
     assert!(mesh.id.as_str().starts_with("mesh-"));
     assert!(secret.to_string().starts_with("syf_sk_"));
 
-    let hv = mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+    let hv =
+        mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
     assert_eq!(hv.name, "node-1");
     assert!(!hv.wg_private_key.is_empty());
     assert!(!hv.wg_public_key.is_empty());

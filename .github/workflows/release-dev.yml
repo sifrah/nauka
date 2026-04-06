@@ -28,6 +28,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools pkg-config libssl-dev
+
       - name: Calculate version
         id: version
         run: |
@@ -77,6 +82,8 @@ jobs:
 
       - name: Build
         if: steps.version.outputs.skip != 'true'
+        env:
+          OPENSSL_STATIC: '1'
         run: |
           cargo build --release --target x86_64-unknown-linux-musl
           strip target/x86_64-unknown-linux-musl/release/nauka

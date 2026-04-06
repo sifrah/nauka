@@ -69,7 +69,9 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NaukaError::internal(format!("tiup install failed: {stderr}")));
+            return Err(NaukaError::internal(format!(
+                "tiup install failed: {stderr}"
+            )));
         }
 
         // Initialize TiUP mirror
@@ -81,7 +83,9 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
 
         if !init.status.success() {
             let stderr = String::from_utf8_lossy(&init.stderr);
-            return Err(NaukaError::internal(format!("tiup mirror init failed: {stderr}")));
+            return Err(NaukaError::internal(format!(
+                "tiup mirror init failed: {stderr}"
+            )));
         }
     }
 
@@ -214,12 +218,10 @@ capacity = "0"
 
 fn generate_pd_unit(join_url: Option<&str>) -> String {
     let exec_start = match join_url {
-        Some(url) => format!(
-            "ExecStart={TIUP_HOME}/bin/tiup pd --config={PD_CONF_PATH} --join={url}"
-        ),
-        None => format!(
-            "ExecStart={TIUP_HOME}/bin/tiup pd --config={PD_CONF_PATH}"
-        ),
+        Some(url) => {
+            format!("ExecStart={TIUP_HOME}/bin/tiup pd --config={PD_CONF_PATH} --join={url}")
+        }
+        None => format!("ExecStart={TIUP_HOME}/bin/tiup pd --config={PD_CONF_PATH}"),
     };
 
     format!(
@@ -273,7 +275,11 @@ WantedBy=multi-user.target
 
 /// Install PD + TiKV configs and systemd units.
 /// `join_url` is Some for joining an existing cluster.
-pub fn install(pd_cfg: &PdConfig, tikv_cfg: &TikvConfig, join_url: Option<&str>) -> Result<(), NaukaError> {
+pub fn install(
+    pd_cfg: &PdConfig,
+    tikv_cfg: &TikvConfig,
+    join_url: Option<&str>,
+) -> Result<(), NaukaError> {
     // Create directories
     std::fs::create_dir_all(PD_DATA_DIR).map_err(NaukaError::from)?;
     std::fs::create_dir_all(TIKV_DATA_DIR).map_err(NaukaError::from)?;
@@ -370,7 +376,13 @@ pub fn deregister_store(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError
     let pd_endpoint = conf
         .lines()
         .find(|l| l.contains("http://"))
-        .and_then(|l| l.trim().trim_matches('"').trim_matches(',').split('"').find(|s| s.starts_with("http://")))
+        .and_then(|l| {
+            l.trim()
+                .trim_matches('"')
+                .trim_matches(',')
+                .split('"')
+                .find(|s| s.starts_with("http://"))
+        })
         .map(|s| s.to_string());
 
     let pd_url = match pd_endpoint {
@@ -433,7 +445,9 @@ pub fn reload(pd_cfg: &PdConfig, tikv_cfg: &TikvConfig) -> Result<(), NaukaError
 
     // PD supports SIGHUP for config reload
     if pd_is_active() {
-        let _ = Command::new("systemctl").args(["reload-or-restart", PD_SERVICE]).output();
+        let _ = Command::new("systemctl")
+            .args(["reload-or-restart", PD_SERVICE])
+            .output();
     }
     // TiKV needs restart for config changes
     if tikv_is_active() {
@@ -452,7 +466,11 @@ pub fn restart() -> Result<(), NaukaError> {
 
 /// Wait for PD to be healthy (responds on client URL).
 pub fn wait_pd_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), NaukaError> {
-    let url = format!("http://[{}]:{}/pd/api/v1/health", mesh_ipv6, super::PD_CLIENT_PORT);
+    let url = format!(
+        "http://[{}]:{}/pd/api/v1/health",
+        mesh_ipv6,
+        super::PD_CLIENT_PORT
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
@@ -501,11 +519,7 @@ pub fn wait_tikv_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), Na
 
 /// Get cluster status from PD API.
 pub fn cluster_status(mesh_ipv6: &Ipv6Addr) -> Result<ClusterStatus, NaukaError> {
-    let pd_url = format!(
-        "http://[{}]:{}",
-        mesh_ipv6,
-        super::PD_CLIENT_PORT
-    );
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
 
     let members = pd_api_get(&pd_url, "/pd/api/v1/members");
     let stores = pd_api_get(&pd_url, "/pd/api/v1/stores");

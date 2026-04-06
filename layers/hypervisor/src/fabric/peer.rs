@@ -3,8 +3,8 @@
 use std::net::Ipv6Addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use nauka_core::id::NodeId;
+use serde::{Deserialize, Serialize};
 
 fn default_wg_port() -> u16 {
     51820

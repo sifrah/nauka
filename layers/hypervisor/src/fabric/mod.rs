@@ -25,7 +25,7 @@ pub mod tls;
 pub mod wg;
 pub mod wireguard;
 
-pub use backend::{NetworkMode, create_backend};
+pub use backend::{create_backend, NetworkMode};
 pub use mesh::*;
 pub use peer::*;
 pub use peering::*;

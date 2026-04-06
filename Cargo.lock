@@ -1403,6 +1403,127 @@ dependencies = [
 ]
 
 [[package]]
+name = "nauka"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.8",
+ "clap",
+ "http 1.4.0",
+ "nauka-core",
+ "nauka-hypervisor",
+ "nauka-state",
+ "rustls 0.23.37",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nauka-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.8",
+ "base64 0.22.1",
+ "bs58",
+ "clap",
+ "console",
+ "dialoguer",
+ "dirs",
+ "hkdf",
+ "http 1.4.0",
+ "hyper 1.9.0",
+ "indicatif",
+ "libc",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminal_size",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ulid",
+ "unicode-width",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "nauka-core-e2e"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "http 1.4.0",
+ "nauka-core",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "nauka-hypervisor"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "dirs",
+ "hostname",
+ "nauka-core",
+ "nauka-state",
+ "rcgen",
+ "rustls 0.23.37",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tikv-client",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+]
+
+[[package]]
+name = "nauka-hypervisor-e2e"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "http 1.4.0",
+ "nauka-core",
+ "nauka-hypervisor",
+ "nauka-state",
+ "rustls 0.23.37",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "nauka-state"
+version = "2.0.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-client",
+ "tokio",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2239,127 +2360,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "nauka"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "axum 0.8.8",
- "clap",
- "http 1.4.0",
- "rustls 0.23.37",
- "serde_json",
- "nauka-core",
- "nauka-hypervisor",
- "nauka-state",
- "tokio",
- "tower 0.5.3",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "nauka-core"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.8",
- "base64 0.22.1",
- "bs58",
- "clap",
- "console",
- "dialoguer",
- "dirs",
- "hkdf",
- "http 1.4.0",
- "hyper 1.9.0",
- "indicatif",
- "libc",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "terminal_size",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tower 0.5.3",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ulid",
- "unicode-width",
- "x25519-dalek",
-]
-
-[[package]]
-name = "nauka-core-e2e"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "http 1.4.0",
- "serde_json",
- "nauka-core",
- "tokio",
- "tower 0.5.3",
-]
-
-[[package]]
-name = "nauka-hypervisor"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "dirs",
- "hostname",
- "rcgen",
- "rustls 0.23.37",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "nauka-core",
- "nauka-state",
- "tempfile",
- "tikv-client",
- "tokio",
- "tokio-rustls 0.26.4",
- "tracing",
-]
-
-[[package]]
-name = "nauka-hypervisor-e2e"
-version = "0.1.0"
-dependencies = [
- "axum 0.8.8",
- "http 1.4.0",
- "rustls 0.23.37",
- "serde_json",
- "nauka-core",
- "nauka-hypervisor",
- "nauka-state",
- "tempfile",
- "tokio",
- "tokio-rustls 0.26.4",
- "tower 0.5.3",
-]
-
-[[package]]
-name = "nauka-state"
-version = "2.0.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-client",
- "tokio",
-]
 
 [[package]]
 name = "syn"

@@ -93,8 +93,7 @@ impl LocalDb {
     pub fn open_at(path: &std::path::Path) -> Result<Self> {
         let data = if path.exists() {
             let contents = std::fs::read_to_string(path)?;
-            serde_json::from_str(&contents)
-                .map_err(|e| StateError::Serialization(e.to_string()))?
+            serde_json::from_str(&contents).map_err(|e| StateError::Serialization(e.to_string()))?
         } else {
             StoreMap::new()
         };
@@ -112,14 +111,9 @@ impl LocalDb {
     }
 
     /// Set a value (serialized to JSON).
-    pub fn set<T: Serialize>(
-        &self,
-        table: &str,
-        key: &str,
-        value: &T,
-    ) -> Result<()> {
-        let json_value = serde_json::to_value(value)
-            .map_err(|e| StateError::Serialization(e.to_string()))?;
+    pub fn set<T: Serialize>(&self, table: &str, key: &str, value: &T) -> Result<()> {
+        let json_value =
+            serde_json::to_value(value).map_err(|e| StateError::Serialization(e.to_string()))?;
 
         let compound_key = format!("{table}/{key}");
 
@@ -129,11 +123,7 @@ impl LocalDb {
     }
 
     /// Get a value (deserialized from JSON).
-    pub fn get<T: DeserializeOwned>(
-        &self,
-        table: &str,
-        key: &str,
-    ) -> Result<Option<T>> {
+    pub fn get<T: DeserializeOwned>(&self, table: &str, key: &str) -> Result<Option<T>> {
         let compound_key = format!("{table}/{key}");
         let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -197,7 +187,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
         let db = LocalDb::open_at(&path).unwrap();
-        db.set("peers", "n1", &TestPeer { name: "n1".into(), zone: "fsn1".into() }).unwrap();
+        db.set(
+            "peers",
+            "n1",
+            &TestPeer {
+                name: "n1".into(),
+                zone: "fsn1".into(),
+            },
+        )
+        .unwrap();
         assert!(path.exists());
     }
 
@@ -206,7 +204,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = LocalDb::open_at(&dir.path().join("test.json")).unwrap();
 
-        let peer = TestPeer { name: "node-1".into(), zone: "fsn1".into() };
+        let peer = TestPeer {
+            name: "node-1".into(),
+            zone: "fsn1".into(),
+        };
         db.set("peers", "n1", &peer).unwrap();
 
         let loaded: Option<TestPeer> = db.get("peers", "n1").unwrap();
@@ -250,7 +251,15 @@ mod tests {
 
         {
             let db = LocalDb::open_at(&path).unwrap();
-            db.set("state", "main", &TestPeer { name: "n1".into(), zone: "fsn1".into() }).unwrap();
+            db.set(
+                "state",
+                "main",
+                &TestPeer {
+                    name: "n1".into(),
+                    zone: "fsn1".into(),
+                },
+            )
+            .unwrap();
         }
 
         {

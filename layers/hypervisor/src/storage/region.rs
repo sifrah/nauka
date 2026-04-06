@@ -3,8 +3,8 @@
 //! Each region maps to one S3 bucket. Credentials are stored
 //! locally in the fabric state (future: encrypted in TiKV).
 
-use serde::{Deserialize, Serialize};
 use nauka_core::error::NaukaError;
+use serde::{Deserialize, Serialize};
 
 /// S3 storage configuration for a region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
