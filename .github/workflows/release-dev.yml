@@ -82,8 +82,6 @@ jobs:
 
       - name: Build
         if: steps.version.outputs.skip != 'true'
-        env:
-          OPENSSL_STATIC: '1'
         run: |
           cargo build --release --target x86_64-unknown-linux-musl
           strip target/x86_64-unknown-linux-musl/release/nauka
