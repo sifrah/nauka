@@ -1,0 +1,85 @@
+---
+import VersionPicker from './VersionPicker.astro';
+---
+
+<div class="theme-and-version">
+<starlight-theme-select>
+  <button type="button" aria-label="Toggle dark mode" class="theme-toggle">
+    <svg class="icon sun" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="5"/>
+      <line x1="12" y1="1" x2="12" y2="3"/>
+      <line x1="12" y1="21" x2="12" y2="23"/>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+      <line x1="1" y1="12" x2="3" y2="12"/>
+      <line x1="21" y1="12" x2="23" y2="12"/>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+    </svg>
+    <svg class="icon moon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  </button>
+</starlight-theme-select>
+<span class="divider"></span>
+<VersionPicker />
+</div>
+
+<script>
+  const storageKey = 'starlight-theme';
+
+  function getCurrentTheme(): 'dark' | 'light' {
+    return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  }
+
+  class StarlightThemeSelect extends HTMLElement {
+    constructor() {
+      super();
+      this.querySelector('button')?.addEventListener('click', () => {
+        const next = getCurrentTheme() === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem(storageKey, next);
+      });
+    }
+  }
+  customElements.define('starlight-theme-select', StarlightThemeSelect);
+</script>
+
+<style>
+  .theme-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+    color: var(--sl-color-text);
+    transition: color 0.2s;
+  }
+  .theme-toggle:hover {
+    color: var(--sl-color-text-accent);
+  }
+
+  /* Light mode: show sun, hide moon */
+  :global([data-theme='light']) .moon { display: none; }
+  :global([data-theme='light']) .sun { display: block; }
+
+  /* Dark mode: show moon, hide sun */
+  :global([data-theme='dark']) .sun { display: none; }
+  :global([data-theme='dark']) .moon { display: block; }
+
+  .theme-and-version {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .divider {
+    display: block;
+    width: 1px;
+    height: 2rem;
+    background: var(--sl-color-gray-5);
+    flex-shrink: 0;
+  }
+</style>

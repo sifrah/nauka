@@ -1,0 +1,61 @@
+---
+import MobileMenuFooter from 'virtual:starlight/components/MobileMenuFooter';
+import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
+import SidebarSublist from '@astrojs/starlight/components/SidebarSublist.astro';
+import logoLight from '../assets/logo-light.svg';
+import logoDark from '../assets/logo-dark.svg';
+
+const { sidebar, siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+---
+
+<div class="sidebar-wrapper">
+  <div class="sidebar-logo">
+    <a href={siteTitleHref}>
+      <img class="logo-light" src={logoLight.src} alt={siteTitle} />
+      <img class="logo-dark" src={logoDark.src} alt={siteTitle} />
+    </a>
+  </div>
+  <div class="sidebar-nav">
+    <SidebarPersister>
+      <SidebarSublist sublist={sidebar} />
+    </SidebarPersister>
+    <div class="md:sl-hidden">
+      <MobileMenuFooter />
+    </div>
+  </div>
+</div>
+
+<style>
+  .sidebar-wrapper {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  .sidebar-logo {
+    display: flex;
+    align-items: center;
+    padding: 0;
+    height: var(--sl-nav-height);
+  }
+  .sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    margin-top: 2.5rem;
+    scrollbar-width: none;
+  }
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+  .sidebar-logo a {
+    display: block;
+    margin-left: -0.25rem;
+  }
+  .sidebar-logo img {
+    height: 5rem;
+    width: auto;
+  }
+  .logo-dark { display: none; }
+  .logo-light { display: block; }
+  :global([data-theme='dark']) .logo-dark { display: block; }
+  :global([data-theme='dark']) .logo-light { display: none; }
+</style>
