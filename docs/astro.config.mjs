@@ -3,11 +3,11 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 const channel = process.env.DOCS_CHANNEL || 'stable';
-const base = `/nauka/${channel}`;
+const base = `/${channel}`;
 
 // https://astro.build/config
 export default defineConfig({
-	site: 'https://sifrah.github.io',
+	site: 'https://www.getnauka.com',
 	base,
 	integrations: [
 		starlight({

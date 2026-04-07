@@ -112,10 +112,9 @@ jobs:
           if [ -n "$PAGES_URL" ]; then
             for ch in stable beta nightly; do
               mkdir -p "_site/${ch}"
-              wget -q -r -np -nH --cut-dirs=1 -P "_site/${ch}" \
+              wget -q -r -np -nH -P "_site/${ch}" \
                 "${PAGES_URL}${ch}/" 2>/dev/null || true
             done
-            curl -fsSL -o "_site/index.html" "${PAGES_URL}index.html" 2>/dev/null || true
           fi
 
       - name: Download built channel
@@ -131,39 +130,13 @@ jobs:
           rm -rf "_site/${CHANNEL}"
           cp -r _channel "_site/${CHANNEL}"
 
-      - name: Generate root index.html
-        run: |
-          cat > _site/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta http-equiv="refresh" content="0; url=stable/">
-            <link rel="canonical" href="stable/">
-            <title>Nauka — Documentation</title>
-            <style>
-              body { font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
-              .container { text-align: center; }
-              h1 { font-size: 2rem; margin-bottom: 0.5rem; }
-              p { color: #94a3b8; }
-              a { color: #60a5fa; text-decoration: none; margin: 0 0.75rem; font-weight: 500; }
-              a:hover { text-decoration: underline; }
-              .channels { margin-top: 1.5rem; }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <h1>Nauka</h1>
-              <p>Redirecting to <a href="stable/">stable</a> documentation&hellip;</p>
-              <div class="channels">
-                <a href="stable/">stable</a>
-                <a href="beta/">beta</a>
-                <a href="nightly/">nightly</a>
-              </div>
-            </div>
-          </body>
-          </html>
-          EOF
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/root-index.html
+          path: _repo
+
+      - name: Copy landing page
+        run: cp _repo/docs/root-index.html _site/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:
