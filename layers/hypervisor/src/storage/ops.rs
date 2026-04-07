@@ -7,6 +7,10 @@ use nauka_state::LocalDb;
 
 use super::region::{RegionRegistry, RegionStorage};
 use super::service;
+use crate::controlplane::ClusterDb;
+
+/// Namespace for region storage configs in TiKV.
+const TIKV_STORAGE_NS: &str = "storage/regions";
 
 /// Setup storage for a region on this node.
 ///
@@ -76,6 +80,28 @@ pub fn leave() -> Result<(), NaukaError> {
     service::uninstall_all()
 }
 
+/// Publish a region's S3 config to the distributed KV (TiKV).
+pub async fn publish_region_config(
+    pd_endpoints: &[&str],
+    config: &RegionStorage,
+) -> Result<(), NaukaError> {
+    let cluster_db = ClusterDb::connect(pd_endpoints).await?;
+    cluster_db
+        .put(TIKV_STORAGE_NS, &config.region, config)
+        .await?;
+    tracing::info!(region = %config.region, "storage config published to cluster");
+    Ok(())
+}
+
+/// Fetch a region's S3 config from the distributed KV (TiKV).
+pub async fn fetch_region_config(
+    pd_endpoints: &[&str],
+    region: &str,
+) -> Result<Option<RegionStorage>, NaukaError> {
+    let cluster_db = ClusterDb::connect(pd_endpoints).await?;
+    cluster_db.get(TIKV_STORAGE_NS, region).await
+}
+
 /// Get storage status for all regions.
 pub fn status(db: &LocalDb) -> Vec<RegionStatus> {
     let registry = RegionRegistry::load(db).unwrap_or_default();
@@ -126,6 +152,7 @@ mod tests {
             s3_access_key: "key".into(),
             s3_secret_key: "secret".into(),
             s3_region: String::new(),
+            encryption_password: "test".into(),
             is_default: false,
         };
         assert!(setup_region(&db, bad).is_err());

@@ -59,10 +59,14 @@ cleanup 2>/dev/null
 # ── Init ──
 echo "Init:"
 check_output "init succeeds" "initialized" \
-    $NAUKA hypervisor init --region eu --zone test --mode mock
+    $NAUKA hypervisor init --region eu --zone test --mode mock \
+    --s3-endpoint https://s3.example.com --s3-bucket test-bucket \
+    --s3-access-key TESTKEY --s3-secret-key TESTSECRET
 
 check_output "init detects already initialized" "already initialized" \
-    $NAUKA hypervisor init --region eu --zone test --mode mock
+    $NAUKA hypervisor init --region eu --zone test --mode mock \
+    --s3-endpoint https://s3.example.com --s3-bucket test-bucket \
+    --s3-access-key TESTKEY --s3-secret-key TESTSECRET
 
 # ── Status ──
 echo "Status:"
@@ -110,7 +114,7 @@ check_output "start succeeds" "started" \
 
 # ── Leave ──
 echo "Leave:"
-check_output "leave succeeds" "uninstalled" \
+check_output "leave succeeds" "Left the cluster" \
     bash -c "echo y | $NAUKA hypervisor leave"
 
 check_output "status after leave fails" "not initialized" \
