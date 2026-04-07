@@ -105,8 +105,8 @@ if [ "$CHANNEL" = "stable" ]; then
 else
   start_spinner "Fetching latest ${CHANNEL} release..."
   VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" \
-    | grep '"tag_name"' | grep "${CHANNEL}" | head -1 \
-    | sed 's/.*"tag_name": *"//;s/".*//')" || true
+    | grep '"tag_name"' | grep "${CHANNEL}" \
+    | sed 's/.*"tag_name": *"//;s/".*//' | sort -V | tail -1)" || true
   if [ -z "$VERSION" ]; then
     stop_spinner "No ${CHANNEL} release found" fail
     exit 1
