@@ -196,7 +196,9 @@ async fn find_latest_release(channel: Channel) -> Result<(String, Version)> {
             Ok((tag, version))
         }
         _ => {
-            // List recent releases and find the latest matching channel
+            // List recent releases and find the highest version matching channel.
+            // GitHub API ordering is not guaranteed to be by version, so we
+            // parse all matching releases and pick the maximum.
             let url = format!("{GITHUB_API}/repos/{REPO}/releases?per_page=30");
             let releases: Vec<serde_json::Value> = client
                 .get(&url)
@@ -209,18 +211,24 @@ async fn find_latest_release(channel: Channel) -> Result<(String, Version)> {
                 .await?;
 
             let channel_str = channel.as_str();
+            let mut best: Option<(String, Version)> = None;
             for release in &releases {
                 if let Some(tag) = release["tag_name"].as_str() {
                     if tag.contains(channel_str) {
-                        let version = Version::parse(tag)?;
-                        if version.channel == channel {
-                            return Ok((tag.to_string(), version));
+                        if let Ok(version) = Version::parse(tag) {
+                            if version.channel == channel {
+                                let is_newer =
+                                    best.as_ref().map(|(_, v)| &version > v).unwrap_or(true);
+                                if is_newer {
+                                    best = Some((tag.to_string(), version));
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            bail!("no {channel} release found");
+            best.ok_or_else(|| anyhow::anyhow!("no {channel} release found"))
         }
     }
 }
