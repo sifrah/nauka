@@ -42,6 +42,8 @@ pub enum FieldType {
     Integer,
     /// Reference to another resource, resolved by name or ID.
     ResourceRef(RefDef),
+    /// Sensitive value (passwords, secret keys) — masked in interactive prompts.
+    Secret,
 }
 
 /// Enum field with allowed values.
@@ -136,6 +138,15 @@ impl FieldDef {
             name,
             description,
             field_type: FieldType::Integer,
+            ..Self::string(name, description)
+        }
+    }
+
+    pub fn secret(name: &'static str, description: &'static str) -> Self {
+        Self {
+            name,
+            description,
+            field_type: FieldType::Secret,
             ..Self::string(name, description)
         }
     }

@@ -63,6 +63,26 @@ pub fn resource_def() -> ResourceDef {
                     "Public endpoint IP for peering (auto-detected if omitted)",
                 ),
             ))
+            .with_arg(OperationArg::required(
+                "s3-endpoint",
+                FieldDef::string("s3-endpoint", "S3 endpoint URL for region storage"),
+            ))
+            .with_arg(OperationArg::required(
+                "s3-bucket",
+                FieldDef::string("s3-bucket", "S3 bucket name for region storage"),
+            ))
+            .with_arg(OperationArg::required(
+                "s3-access-key",
+                FieldDef::secret("s3-access-key", "S3 access key"),
+            ))
+            .with_arg(OperationArg::required(
+                "s3-secret-key",
+                FieldDef::secret("s3-secret-key", "S3 secret key"),
+            ))
+            .with_arg(OperationArg::optional(
+                "s3-region",
+                FieldDef::string("s3-region", "S3 region (e.g., eu-central-1)").with_default(""),
+            ))
             .with_arg(OperationArg::optional(
                 "peering",
                 FieldDef::flag(
@@ -71,7 +91,7 @@ pub fn resource_def() -> ResourceDef {
                 ),
             ))
             .with_output(OutputKind::Resource)
-            .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --peering")
+            .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --s3-endpoint https://s3.eu.example.com --s3-bucket nauka-eu --s3-access-key AKID --s3-secret-key SECRET --peering")
         })
         .action("join", "Join an existing cluster")
         .op(|op| {
@@ -234,6 +254,32 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
     let endpoint = req.fields.get("endpoint").cloned();
 
+    let s3_endpoint = req
+        .fields
+        .get("s3-endpoint")
+        .ok_or_else(|| anyhow::anyhow!("missing required field: s3-endpoint"))?
+        .clone();
+    let s3_bucket = req
+        .fields
+        .get("s3-bucket")
+        .ok_or_else(|| anyhow::anyhow!("missing required field: s3-bucket"))?
+        .clone();
+    let s3_access_key = req
+        .fields
+        .get("s3-access-key")
+        .ok_or_else(|| anyhow::anyhow!("missing required field: s3-access-key"))?
+        .clone();
+    let s3_secret_key = req
+        .fields
+        .get("s3-secret-key")
+        .ok_or_else(|| anyhow::anyhow!("missing required field: s3-secret-key"))?
+        .clone();
+    let s3_region = req
+        .fields
+        .get("s3-region")
+        .cloned()
+        .unwrap_or_default();
+
     let node_name = req
         .fields
         .get("name")
@@ -264,11 +310,33 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         endpoint,
     };
 
-    // Init: 2 steps (fabric) + 4 steps (control plane) = 6
+    // Generate a deterministic encryption password from the S3 secret key + region.
+    // All nodes in the same region will derive the same password.
+    let encryption_password = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(s3_secret_key.as_bytes());
+        hasher.update(b":zerofs:");
+        hasher.update(region.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    let region_storage = storage::region::RegionStorage {
+        region: region.to_string(),
+        s3_endpoint,
+        s3_bucket,
+        s3_access_key,
+        s3_secret_key,
+        s3_region,
+        encryption_password,
+        is_default: true,
+    };
+
+    // Init: 2 steps (fabric) + 4 steps (control plane) + 2 steps (storage) = 8
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        6
+        8
     } else {
-        2
+        3 // 2 fabric + 1 local storage
     };
     let steps = ui::Steps::new(step_count);
 
@@ -276,13 +344,24 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
     // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
-        if let Err(e) =
-            controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)
-        {
-            tracing::warn!(error = %e, "control plane bootstrap issue (services may still be starting)");
-            steps.finish_err(&format!("Control plane setup incomplete: {e}"));
-        }
+        controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)?;
     }
+
+    // Publish region storage config to distributed KV, then setup local storage
+    if network_mode == fabric::NetworkMode::WireGuard {
+        steps.set("Publishing storage config");
+        let pd_endpoint = format!(
+            "http://[{}]:{}",
+            result.hypervisor.mesh_ipv6,
+            controlplane::PD_CLIENT_PORT,
+        );
+        storage::ops::publish_region_config(&[pd_endpoint.as_str()], &region_storage).await?;
+        steps.inc();
+    }
+
+    steps.set("Setting up storage");
+    storage::ops::setup_region(&db, region_storage.clone())?;
+    steps.inc();
 
     // Install persistent announce listener (don't start if --peering will run its own)
     if !peering {
@@ -404,9 +483,9 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         network_mode,
     };
 
-    // Join: 2 steps (fabric) + 3 steps (control plane) + 1 step (announce) = 6
+    // Join: 2 steps (fabric) + 3 steps (control plane) + 1 step (storage) + 1 step (announce) = 7
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        6
+        7
     } else {
         3
     };
@@ -436,6 +515,37 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
             steps.finish_err(&format!("Control plane setup incomplete: {e}"));
         }
+    }
+
+    // Fetch region storage config from distributed KV and setup locally
+    if network_mode == fabric::NetworkMode::WireGuard {
+        steps.set("Setting up storage");
+        let state = fabric::state::FabricState::load(&db)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
+        let pd_endpoints: Vec<String> = state
+            .peers
+            .peers
+            .iter()
+            .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
+            .collect();
+        let pd_refs: Vec<&str> = pd_endpoints.iter().map(|s| s.as_str()).collect();
+
+        let region_config = storage::ops::fetch_region_config(&pd_refs, region)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no storage backend configured for region '{region}'.\n\n\
+                     An S3 backend must be registered before nodes can join this region.\n\
+                     On the init node, re-initialize with storage flags:\n\n\
+                     \x20 nauka hypervisor init --region {region} \\\n\
+                     \x20   --s3-endpoint <URL> --s3-bucket <BUCKET> \\\n\
+                     \x20   --s3-access-key <KEY> --s3-secret-key <SECRET>"
+                )
+            })?;
+
+        storage::ops::setup_region(&db, region_config)?;
+        steps.inc();
     }
 
     // Install persistent announce listener

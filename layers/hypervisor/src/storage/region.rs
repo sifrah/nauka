@@ -22,6 +22,9 @@ pub struct RegionStorage {
     /// S3 region (e.g., "eu-central-1"). Empty for non-AWS.
     #[serde(default)]
     pub s3_region: String,
+    /// Encryption password for ZeroFS at-rest encryption.
+    #[serde(default)]
+    pub encryption_password: String,
     /// Whether this is the default region.
     #[serde(default)]
     pub is_default: bool,
@@ -120,6 +123,7 @@ mod tests {
             s3_access_key: "AKID".into(),
             s3_secret_key: "SECRET".into(),
             s3_region: String::new(),
+            encryption_password: "test-password".into(),
             is_default: false,
         }
     }

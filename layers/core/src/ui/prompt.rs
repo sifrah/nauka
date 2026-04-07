@@ -1,6 +1,6 @@
 //! Interactive prompts for missing CLI arguments.
 
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Password, Select};
 
 use crate::resource::FieldType;
 
@@ -28,6 +28,13 @@ pub fn prompt_flag(label: &str, default: bool) -> PromptResult<bool> {
     Ok(Confirm::new()
         .with_prompt(format!("  {label}"))
         .default(default)
+        .interact()?)
+}
+
+/// Prompt for a secret/password value (masked input).
+pub fn prompt_secret(label: &str) -> PromptResult<String> {
+    Ok(Password::new()
+        .with_prompt(format!("  {label}"))
         .interact()?)
 }
 
@@ -76,6 +83,14 @@ pub fn prompt_field(
                 Ok(Some("true".to_string()))
             } else {
                 Ok(None)
+            }
+        }
+        FieldType::Secret => {
+            let val = prompt_secret(name)?;
+            if val.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(val))
             }
         }
         FieldType::Enum(e) => {
