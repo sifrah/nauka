@@ -92,11 +92,13 @@ The `--name` flag is optional (defaults to hostname). The target must be a runni
 
 ### Concurrent joins
 
-Multiple nodes can join the same mesh simultaneously. The peering server processes joins sequentially (one at a time), and each joiner receives the full peer list known at that moment. To ensure all nodes discover each other even when joins overlap:
+Multiple nodes can join the same mesh simultaneously. The peering server processes joins sequentially (one at a time), and each joiner receives the full peer list known at that moment. Three mechanisms ensure all nodes discover each other even when joins overlap:
 
-1. **Announce retry with reconciliation** — if the initial peer announcement fails (because a target node's announce listener wasn't ready yet), the peering server retries after 30 seconds. On retry, it re-reads the full peer list and announces every peer to every other peer.
+1. **Persistent announce listener** — each node runs `nauka-announce.service` (installed during join), which listens on `wg_port + 2` for incoming peer announcements indefinitely. Without this, nodes that join concurrently would miss each other's broadcasts.
 2. **Self-announce** — after joining, each node announces itself to all known peers. This covers the case where the peering server's broadcast arrived before a peer's announce listener was running.
-3. **Persistent announce listener** — each node runs `nauka-announce.service` (installed during join), which listens on `wg_port + 2` for incoming peer announcements indefinitely.
+3. **Periodic mesh reconciliation** — the peering node (the one running `--peering` or `nauka hv peering`) runs a background reconciliation loop every 30 seconds. It re-reads the complete peer list from the database and announces every peer to every other peer. This is idempotent — peers that already know each other skip the announcement. This guarantees **eventual full mesh convergence** even in the worst case of many concurrent joins.
+
+Convergence time: the mesh is fully connected within ~60 seconds (2 reconciliation cycles) of the last join, regardless of join ordering or timing.
 
 ## listen_for_peers
 

@@ -40,9 +40,9 @@ After a join completes, the server connects to each existing peer's announce por
 - Updates the WireGuard config and applies it via `wg syncconf`
 - Persists state to disk
 
-If any announcement fails (e.g. the target peer's announce listener isn't ready due to a concurrent join), the peering server **retries after 30 seconds**. On retry, it performs a full mesh reconciliation: re-reads the complete peer list from the database and announces every peer to every other peer. This ensures that even with multiple nodes joining simultaneously, all peers eventually discover each other.
+If any announcement fails (e.g. the target peer's announce listener isn't ready due to a concurrent join), the peering server's **periodic reconciliation loop** will fix it. Every 30 seconds, the peering node re-reads the complete peer list and announces every peer to every other peer. This is idempotent and guarantees full mesh convergence within ~60 seconds.
 
-This means a new node is fully connected to the whole mesh within seconds of a successful join (or at most ~30 seconds with concurrent joins) — no manual configuration on other nodes is needed.
+This means a new node is fully connected to the whole mesh within seconds of a successful join (or at most ~60 seconds with concurrent joins) — no manual configuration on other nodes is needed.
 
 ## Firewall requirements
 

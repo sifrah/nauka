@@ -89,9 +89,19 @@ When a node leaves and rejoins with a new keypair:
 - The **announce handler** replaces a stale entry (same name, different key) instead of silently skipping
 - Other peers receive the `PeerRemove` on leave and the `PeerAnnounce` on rejoin — no stale WireGuard entries accumulate
 
+## Periodic mesh reconciliation
+
+The peering node (the one running `--peering` or `nauka hv peering`) runs a background reconciliation loop every 30 seconds. On each cycle it:
+
+1. Re-reads the complete peer list from the database
+2. For each peer, announces it to all other peers
+3. Receivers skip peers they already know (idempotent)
+
+This guarantees **eventual full mesh convergence** — even if initial announcements fail due to concurrent joins, timing issues, or transient network problems, the periodic sweep will fix any gaps within ~60 seconds (2 cycles).
+
 ## Best-effort delivery
 
-Announcements are fire-and-forget per peer. If a peer is unreachable, the failure is logged and the broadcast continues. The peering server's 30-second retry with full reconciliation provides a safety net for transient failures.
+Individual announcements are fire-and-forget per peer. If a peer is unreachable, the failure is logged and the broadcast continues. The periodic reconciliation loop provides a safety net — there is no need for manual intervention after failed announcements.
 
 ## Security
 
