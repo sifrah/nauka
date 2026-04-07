@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
                     fmt::layer()
                         .with_target(true)
                         .with_writer(std::io::stderr)
-                        .with_filter(EnvFilter::new("warn")),
+                        .with_filter(EnvFilter::new("error")),
                 );
             tracing::subscriber::set_global_default(subscriber).ok();
             Some(file_guard)
