@@ -61,7 +61,11 @@ pub async fn broadcast_new_peer(
     // Broadcast in parallel — don't let one dead peer block the rest
     let mut handles = Vec::with_capacity(reachable.len());
     for peer in &reachable {
-        let addr = format!("[{}]:{}", peer.mesh_ipv6, peer.wg_port + ANNOUNCE_PORT_OFFSET);
+        let addr = format!(
+            "[{}]:{}",
+            peer.mesh_ipv6,
+            peer.wg_port + ANNOUNCE_PORT_OFFSET
+        );
         let peer_name = peer.name.clone();
         let new_peer_name = new_peer.name.clone();
         let msg = msg.clone();
@@ -139,7 +143,11 @@ pub async fn broadcast_peer_remove(
 
     let mut handles = Vec::with_capacity(existing_peers.len());
     for peer in existing_peers {
-        let addr = format!("[{}]:{}", peer.mesh_ipv6, peer.wg_port + ANNOUNCE_PORT_OFFSET);
+        let addr = format!(
+            "[{}]:{}",
+            peer.mesh_ipv6,
+            peer.wg_port + ANNOUNCE_PORT_OFFSET
+        );
         let peer_name = peer.name.clone();
         let leaving_name = name.to_string();
         let msg = msg.clone();
