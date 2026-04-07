@@ -272,7 +272,15 @@ async fn handle_join(
         .add(new_peer)
         .map_err(|e| NaukaError::internal(format!("peer add failed: {e}")))?;
 
-    // Update WireGuard FIRST — if this fails, state is unchanged
+    // Save state FIRST — state is the source of truth.
+    // If the process crashes after this point, WireGuard will be reconciled
+    // from state on the next `wg-quick up` / service restart.
+    state
+        .save(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+    // Update WireGuard config. If this fails, state is still correct and
+    // WG will catch up on next restart — log a warning but don't fail the join.
     let peers_for_wg: Vec<_> = state
         .peers
         .peers
@@ -287,17 +295,14 @@ async fn handle_join(
         })
         .collect();
 
-    service::update_config(
+    if let Err(e) = service::update_config(
         &state.hypervisor.wg_private_key,
         state.hypervisor.wg_port,
         &state.hypervisor.mesh_ipv6,
         &peers_for_wg,
-    )?;
-
-    // Save state AFTER WireGuard succeeds — no split-brain
-    state
-        .save(db)
-        .map_err(|e| NaukaError::internal(e.to_string()))?;
+    ) {
+        tracing::warn!(error = %e, "WireGuard config update failed (will reconcile on restart)");
+    }
 
     let announcer_name = state.hypervisor.name.clone();
     let wg_port = state.hypervisor.wg_port;

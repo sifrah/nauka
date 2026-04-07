@@ -185,11 +185,17 @@ pub async fn listen_for_peers(
     super::peering_server::listen(db_opener, pin, bind_addr, timeout, 0).await
 }
 
-/// Periodic full mesh reconciliation.
+/// Reconciliation interval in seconds (matches the sleep in the spawned task).
+const RECONCILE_INTERVAL_SECS: u64 = 30;
+
+/// Periodic mesh reconciliation.
 ///
-/// Reads the complete peer list and announces every peer to every other peer.
-/// Idempotent — peers that already know each other skip the announce.
-/// Runs on the peering node to guarantee eventual full mesh convergence.
+/// Only announces peers whose `added_at` falls within the last two
+/// reconciliation intervals — recently joined nodes that other peers
+/// may not have learned about yet. This keeps the cost proportional
+/// to the join rate (O(new × n)) instead of the total mesh size (O(n²)).
+///
+/// Idempotent — known peers are skipped by the announce handler.
 async fn reconcile_mesh(wg_port: u16) {
     let db = {
         let dir = nauka_core::process::nauka_dir();
@@ -208,8 +214,27 @@ async fn reconcile_mesh(wg_port: u16) {
         return; // nothing to reconcile with 0 or 1 peer
     }
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Only announce peers added in the last 2 intervals (with margin).
+    let recent_cutoff = now.saturating_sub(RECONCILE_INTERVAL_SECS * 2);
+
+    let recent_peers: Vec<_> = state
+        .peers
+        .peers
+        .iter()
+        .filter(|p| p.added_at >= recent_cutoff)
+        .collect();
+
+    if recent_peers.is_empty() {
+        return; // no new peers to announce
+    }
+
     let mut total_sent = 0usize;
-    for peer in &state.peers.peers {
+    for peer in &recent_peers {
         let info = super::peering::PeerInfo {
             name: peer.name.clone(),
             region: peer.region.clone(),
@@ -233,7 +258,11 @@ async fn reconcile_mesh(wg_port: u16) {
     }
 
     if total_sent > 0 {
-        tracing::info!(announcements = total_sent, "mesh reconciliation complete");
+        tracing::info!(
+            announcements = total_sent,
+            recent_peers = recent_peers.len(),
+            "mesh reconciliation complete"
+        );
     }
 }
 
@@ -510,21 +539,42 @@ pub fn stop(db: &LayerDb) -> Result<(), NaukaError> {
     backend.stop()
 }
 
+/// Number of removal broadcast attempts before giving up.
+const LEAVE_BROADCAST_ATTEMPTS: usize = 2;
+/// Delay between removal broadcast retries.
+const LEAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Leave the cluster — notify peers, uninstall service, remove state.
 pub async fn leave(db: &LayerDb) -> Result<(), NaukaError> {
-    // Notify peers before tearing down (best-effort, over mesh)
+    // Notify peers before tearing down (best-effort, over mesh).
+    // Retry once so transient failures don't leave peers thinking we're still around.
     if let Some(state) = FabricState::load(db).ok().flatten() {
         if !state.peers.is_empty() {
             let peers: Vec<_> = state.peers.peers.clone();
-            let (ok, fail) = super::announce::broadcast_peer_remove(
-                &state.hypervisor.name,
-                &state.hypervisor.wg_public_key,
-                &peers,
-                state.hypervisor.wg_port,
-            )
-            .await;
-            if ok > 0 || fail > 0 {
-                tracing::info!(successes = ok, failures = fail, "peer removal broadcast");
+            let remaining = peers.clone();
+
+            for attempt in 1..=LEAVE_BROADCAST_ATTEMPTS {
+                let (ok, fail) = super::announce::broadcast_peer_remove(
+                    &state.hypervisor.name,
+                    &state.hypervisor.wg_public_key,
+                    &remaining,
+                    state.hypervisor.wg_port,
+                )
+                .await;
+                tracing::info!(
+                    attempt,
+                    successes = ok,
+                    failures = fail,
+                    "peer removal broadcast"
+                );
+
+                if fail == 0 || attempt == LEAVE_BROADCAST_ATTEMPTS {
+                    break;
+                }
+
+                // Retry only the peers that failed
+                // broadcast_peer_remove doesn't return which failed, so wait and retry all remaining
+                tokio::time::sleep(LEAVE_RETRY_DELAY).await;
             }
         }
 

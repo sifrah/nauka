@@ -22,6 +22,11 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 /// so 5 minutes without one means the peer is likely down.
 pub const DEFAULT_STALE_THRESHOLD_SECS: u64 = 300;
 
+/// Grace period for newly added peers (5 minutes).
+/// A peer that was just added hasn't had time to establish a WireGuard
+/// handshake yet — don't mark it unreachable until the grace period expires.
+pub const NEW_PEER_GRACE_SECS: u64 = 300;
+
 /// Result of a single health check sweep.
 #[derive(Debug, Clone)]
 pub struct HealthCheckResult {
@@ -81,6 +86,12 @@ pub fn check_once(
     for peer in &mut state.peers.peers {
         let was_active = peer.is_active();
 
+        // Grace period: don't mark a newly added peer as unreachable
+        // if it hasn't had time to establish a WireGuard handshake yet.
+        let is_new_peer = peer.last_handshake == 0
+            && peer.added_at > 0
+            && now.saturating_sub(peer.added_at) < NEW_PEER_GRACE_SECS;
+
         if let Some(wg_peer) = handshakes
             .iter()
             .find(|h| h.public_key == peer.wg_public_key)
@@ -91,9 +102,15 @@ pub fn check_once(
                 && now.saturating_sub(wg_peer.latest_handshake) <= stale_threshold_secs
             {
                 peer.status = super::peer::PeerStatus::Active;
+            } else if is_new_peer {
+                // Keep Active during grace period — handshake not yet expected
+                peer.status = super::peer::PeerStatus::Active;
             } else {
                 peer.status = super::peer::PeerStatus::Unreachable;
             }
+        } else if is_new_peer {
+            // Not in WireGuard yet, but just added — give it time
+            peer.status = super::peer::PeerStatus::Active;
         } else {
             // Peer not in WireGuard at all — unreachable
             peer.status = super::peer::PeerStatus::Unreachable;
