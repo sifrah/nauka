@@ -34,6 +34,8 @@ Checks the mesh connectivity layer. The checks adapt to the configured network m
 
 If the node has no peers yet (freshly initialized), the peer checks report OK rather than a warning.
 
+The `nauka-announce` systemd service is checked as part of the fabric section — it should be active on every initialized node. If it is not running, peer announcements (new joins, leaves) will not be received by this node.
+
 ### Controlplane
 
 Checks the TiKV distributed key-value cluster:

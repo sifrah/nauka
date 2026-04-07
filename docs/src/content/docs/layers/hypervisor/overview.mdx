@@ -16,7 +16,7 @@ When you initialize a server with Nauka, the hypervisor layer:
 3. Persists the node's identity and peer list to the [state layer](/nauka/layers/state/overview)
 4. Listens for incoming join requests so other nodes can peer with it
 
-After initialization, the node is a full member of the mesh. Every other node that joins will establish a direct encrypted tunnel to it.
+After initialization, the node is a full member of the mesh. Every other node that joins will establish a direct encrypted tunnel to it. A persistent announce listener (`nauka-announce` systemd service) runs on each node to receive peer updates when new nodes join or existing nodes leave.
 
 ## Aliases
 
@@ -133,6 +133,7 @@ The hypervisor layer is built on the [fabric](/nauka/layers/hypervisor/fabric/me
 - [peering](/nauka/layers/hypervisor/fabric/peering) — join protocol types
 - [backend](/nauka/layers/hypervisor/fabric/backend) — network backend trait and mode selection
 - [tls](/nauka/layers/hypervisor/fabric/tls) — TLS for the peering protocol
+- [announce](/nauka/layers/hypervisor/fabric/announce) — peer announcement and the `nauka-announce` systemd service
 
 ### Controlplane
 

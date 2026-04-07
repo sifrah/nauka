@@ -51,7 +51,8 @@ The `--endpoint` flag is optional. If omitted, Nauka detects the public IP autom
 4. Installs the backend service via the [service module](/nauka/layers/hypervisor/fabric/service)
 5. Starts the service
 6. Persists `FabricState` (including `network_mode`) to `~/.nauka/fabric.redb`
-7. Derives a short PIN from the mesh secret for use during peer joins
+7. Installs the `nauka-announce` systemd service (persistent announce listener on `wg_port + 2`)
+8. Derives a short PIN from the mesh secret for use during peer joins
 
 **Usage:**
 
@@ -78,6 +79,8 @@ If any step fails, init cleans up (stops and uninstalls the service, removes sta
 5. Creates a `HypervisorIdentity` for this node using the received mesh data
 6. Sets up the network via `backend.setup()` with all received peers pre-configured
 7. Persists `FabricState` (including `network_mode`)
+8. Installs the `nauka-announce` systemd service (persistent announce listener)
+9. Self-announces to all known peers after a short delay, ensuring peers that were still joining when the initial broadcast happened can discover this node
 
 **Usage:**
 
@@ -86,6 +89,14 @@ nauka hv join --target 203.0.113.10 --pin G7CCZX --name web-02 --region us-east 
 ```
 
 The `--name` flag is optional (defaults to hostname). The target must be a running Nauka hypervisor with peering active. You need the PIN displayed when the mesh was initialized.
+
+### Concurrent joins
+
+Multiple nodes can join the same mesh simultaneously. The peering server processes joins sequentially (one at a time), and each joiner receives the full peer list known at that moment. To ensure all nodes discover each other even when joins overlap:
+
+1. **Announce retry with reconciliation** — if the initial peer announcement fails (because a target node's announce listener wasn't ready yet), the peering server retries after 30 seconds. On retry, it re-reads the full peer list and announces every peer to every other peer.
+2. **Self-announce** — after joining, each node announces itself to all known peers. This covers the case where the peering server's broadcast arrived before a peer's announce listener was running.
+3. **Persistent announce listener** — each node runs `nauka-announce.service` (installed during join), which listens on `wg_port + 2` for incoming peer announcements indefinitely.
 
 ## listen_for_peers
 
@@ -142,11 +153,13 @@ nauka hv stop
 **What it does:**
 
 1. Stops and removes all storage services (ZeroFS instances)
-2. Deregisters this node's TiKV store from PD, then uninstalls control plane services
-3. Tears down the fabric network via the backend
-4. Deletes `FabricState` from the database
+2. Deregisters this node's TiKV store and PD member, then uninstalls control plane services
+3. Uninstalls the `nauka-announce` service
+4. Broadcasts a `PeerRemove` message to all known peers over TLS — each peer removes this node from its WireGuard config and peer list
+5. Tears down the fabric network via the backend
+6. Deletes `FabricState` from the database
 
-After `leave`, the node is clean. Other nodes will detect it as `Unreachable` and eventually mark it `Removed`. To rejoin, run `nauka hv join` again.
+After `leave`, the node is clean. Other nodes receive the `PeerRemove` and immediately clean up — no stale entries remain. To rejoin, run `nauka hv join` again.
 
 ```sh
 nauka hv leave
