@@ -404,9 +404,9 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         network_mode,
     };
 
-    // Join: 2 steps (fabric) + 4 steps (control plane) + 1 step (announce) = 7
+    // Join: 2 steps (fabric) + 3 steps (control plane) + 1 step (announce) = 6
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        7
+        6
     } else {
         3
     };
@@ -636,24 +636,34 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
         .flatten()
         .map(|s| s.hypervisor.mesh_ipv6);
 
+    let steps = ui::Steps::new(4);
+
     // Storage first (stop ZeroFS instances)
+    steps.set("Stopping storage");
     let _ = storage::ops::leave();
+    steps.inc();
 
     // Controlplane (deregister TiKV store, then uninstall)
+    steps.set("Leaving control plane");
     if let Some(ipv6) = mesh_ipv6 {
         let _ = controlplane::ops::leave_with_mesh(&ipv6);
     } else {
         let _ = controlplane::ops::leave();
     }
+    steps.inc();
 
-    // Announce listener
+    // Notify peers + tear down mesh
+    steps.set("Notifying peers");
     let _ = fabric::announce::uninstall_service();
-
-    // Fabric last (notifies peers, then tears down mesh)
     fabric::ops::leave(&db).await?;
-    Ok(OperationResponse::Message(
-        "left the cluster. All services uninstalled.".into(),
-    ))
+    steps.inc();
+
+    // Final cleanup
+    steps.set("Removing services");
+    steps.inc();
+
+    steps.finish("Left the cluster");
+    Ok(OperationResponse::None)
 }
 
 async fn handle_list() -> anyhow::Result<OperationResponse> {
