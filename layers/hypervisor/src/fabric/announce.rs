@@ -34,11 +34,11 @@ pub const ANNOUNCE_PORT_OFFSET: u16 = 2;
 /// Default timeout for each announce connection.
 const ANNOUNCE_TIMEOUT_SECS: u64 = 5;
 
-/// Broadcast a new peer to all existing peers.
+/// Broadcast a new peer to all existing peers (in parallel).
 ///
 /// Connects to each peer's announce port (mesh_ipv6:wg_port+2) and sends
 /// a PeerAnnounce message. Best-effort: failures are logged but don't
-/// stop the broadcast.
+/// stop the broadcast. Skips peers marked as unreachable.
 ///
 /// Returns (successes, failures).
 pub async fn broadcast_new_peer(
@@ -52,29 +52,47 @@ pub async fn broadcast_new_peer(
         announced_by: announced_by.to_string(),
     });
 
+    // Skip unreachable peers — no point waiting for a timeout
+    let reachable: Vec<_> = existing_peers
+        .iter()
+        .filter(|p| p.status != super::peer::PeerStatus::Unreachable)
+        .collect();
+
+    // Broadcast in parallel — don't let one dead peer block the rest
+    let mut handles = Vec::with_capacity(reachable.len());
+    for peer in &reachable {
+        let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
+        let peer_name = peer.name.clone();
+        let new_peer_name = new_peer.name.clone();
+        let msg = msg.clone();
+        handles.push(tokio::spawn(async move {
+            match send_message(&addr, &msg).await {
+                Ok(()) => {
+                    tracing::info!(
+                        peer = %peer_name,
+                        new_peer = %new_peer_name,
+                        "announced new peer"
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %peer_name,
+                        error = %e,
+                        "failed to announce new peer"
+                    );
+                    false
+                }
+            }
+        }));
+    }
+
     let mut successes = 0;
     let mut failures = 0;
-
-    for peer in existing_peers {
-        let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
-
-        match send_message(&addr, &msg).await {
-            Ok(()) => {
-                tracing::info!(
-                    peer = %peer.name,
-                    new_peer = %new_peer.name,
-                    "announced new peer"
-                );
-                successes += 1;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    peer = %peer.name,
-                    error = %e,
-                    "failed to announce new peer"
-                );
-                failures += 1;
-            }
+    for handle in handles {
+        match handle.await {
+            Ok(true) => successes += 1,
+            _ => failures += 1,
         }
     }
 
@@ -106,7 +124,7 @@ async fn send_message(addr: &str, msg: &AnnounceMessage) -> Result<(), NaukaErro
     Ok(())
 }
 
-/// Broadcast a peer removal to all existing peers (best-effort).
+/// Broadcast a peer removal to all existing peers in parallel (best-effort).
 /// Called during `leave` before tearing down the network.
 pub async fn broadcast_peer_remove(
     name: &str,
@@ -119,20 +137,32 @@ pub async fn broadcast_peer_remove(
         wg_public_key: wg_public_key.to_string(),
     });
 
-    let mut successes = 0;
-    let mut failures = 0;
-
+    let mut handles = Vec::with_capacity(existing_peers.len());
     for peer in existing_peers {
         let addr = format!("[{}]:{}", peer.mesh_ipv6, wg_port + ANNOUNCE_PORT_OFFSET);
-        match send_message(&addr, &msg).await {
-            Ok(()) => {
-                tracing::info!(peer = %peer.name, leaving = %name, "sent peer removal");
-                successes += 1;
+        let peer_name = peer.name.clone();
+        let leaving_name = name.to_string();
+        let msg = msg.clone();
+        handles.push(tokio::spawn(async move {
+            match send_message(&addr, &msg).await {
+                Ok(()) => {
+                    tracing::info!(peer = %peer_name, leaving = %leaving_name, "sent peer removal");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %peer_name, error = %e, "failed to send peer removal");
+                    false
+                }
             }
-            Err(e) => {
-                tracing::warn!(peer = %peer.name, error = %e, "failed to send peer removal");
-                failures += 1;
-            }
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for handle in handles {
+        match handle.await {
+            Ok(true) => successes += 1,
+            _ => failures += 1,
         }
     }
 

@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 
+use nauka_core::ui;
 use nauka_core::version::{backup_current_binary, Channel, Version};
 
 const REPO: &str = "sifrah/nauka";
@@ -84,8 +85,10 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
         .user_agent("nauka-self-update")
         .build()?;
 
+    let steps = ui::Steps::new(4);
+
     // Download archive
-    eprint!("  Downloading {archive_name}...");
+    steps.set(&format!("Downloading {archive_name}"));
     let archive_bytes = client
         .get(&archive_url)
         .send()
@@ -94,10 +97,10 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
         .context("failed to download release archive")?
         .bytes()
         .await?;
-    eprintln!(" done ({:.1} MB)", archive_bytes.len() as f64 / 1_048_576.0);
+    steps.inc();
 
     // Download and verify checksum
-    eprint!("  Verifying checksum...");
+    steps.set("Verifying checksum");
     let checksums_text = client
         .get(&checksums_url)
         .send()
@@ -118,12 +121,13 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
     let actual_hash = format!("{:x}", hasher.finalize());
 
     if actual_hash != expected_hash {
+        steps.finish_err("Checksum mismatch");
         bail!("checksum mismatch:\n  expected: {expected_hash}\n  actual:   {actual_hash}");
     }
-    eprintln!(" ok");
+    steps.inc();
 
     // Extract binary from tarball
-    eprint!("  Extracting...");
+    steps.set("Extracting");
     let decoder = flate2::read::GzDecoder::new(&archive_bytes[..]);
     let mut archive = tar::Archive::new(decoder);
     let mut new_binary = Vec::new();
@@ -138,17 +142,16 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
     }
 
     if new_binary.is_empty() {
+        steps.finish_err("Binary not found in archive");
         bail!("archive does not contain 'nauka' binary");
     }
-    eprintln!(" done");
 
     // Backup current binary
-    eprint!("  Backing up current binary...");
     backup_current_binary().map_err(|e| anyhow::anyhow!("{e}"))?;
-    eprintln!(" done");
+    steps.inc();
 
     // Replace current binary
-    eprint!("  Installing...");
+    steps.set("Installing");
     let current_exe = std::env::current_exe()?;
 
     // On Unix: remove then write (avoids "Text file busy")
@@ -160,9 +163,9 @@ pub async fn run(matches: &clap::ArgMatches) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
     }
+    steps.inc();
 
-    eprintln!(" done");
-    eprintln!("  Updated to {version}");
+    steps.finish(&format!("Updated to {version}"));
 
     Ok(())
 }
