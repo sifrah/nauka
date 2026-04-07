@@ -93,13 +93,38 @@ pub async fn publish_region_config(
     Ok(())
 }
 
+/// Max retries for TiKV reads (leader election can take a few seconds).
+const FETCH_RETRIES: u32 = 6;
+const FETCH_RETRY_DELAY_MS: u64 = 2000;
+
 /// Fetch a region's S3 config from the distributed KV (TiKV).
+///
+/// Retries on transient errors (e.g. "Leader not found") that occur
+/// right after a node joins the cluster and Raft is still electing.
 pub async fn fetch_region_config(
     pd_endpoints: &[&str],
     region: &str,
 ) -> Result<Option<RegionStorage>, NaukaError> {
-    let cluster_db = ClusterDb::connect(pd_endpoints).await?;
-    cluster_db.get(TIKV_STORAGE_NS, region).await
+    let mut last_err = None;
+    for attempt in 1..=FETCH_RETRIES {
+        match ClusterDb::connect(pd_endpoints).await {
+            Ok(db) => match db.get(TIKV_STORAGE_NS, region).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "TiKV read failed, retrying...");
+                    last_err = Some(e);
+                }
+            },
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "TiKV connect failed, retrying...");
+                last_err = Some(e);
+            }
+        }
+        if attempt < FETCH_RETRIES {
+            tokio::time::sleep(std::time::Duration::from_millis(FETCH_RETRY_DELAY_MS)).await;
+        }
+    }
+    Err(last_err.unwrap_or_else(|| NaukaError::internal("TiKV fetch failed after retries")))
 }
 
 /// Get storage status for all regions.
