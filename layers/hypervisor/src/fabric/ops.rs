@@ -540,9 +540,9 @@ pub fn stop(db: &LayerDb) -> Result<(), NaukaError> {
 }
 
 /// Number of removal broadcast attempts before giving up.
-const LEAVE_BROADCAST_ATTEMPTS: usize = 2;
+const LEAVE_BROADCAST_ATTEMPTS: usize = 4;
 /// Delay between removal broadcast retries.
-const LEAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const LEAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Leave the cluster — notify peers, uninstall service, remove state.
 pub async fn leave(db: &LayerDb) -> Result<(), NaukaError> {
