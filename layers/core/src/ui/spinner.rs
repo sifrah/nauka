@@ -97,21 +97,15 @@ impl Steps {
     /// Finish with a success message — replaces the whole line.
     pub fn finish(&self, msg: &str) {
         self.pb.set_position(self.total);
-        self.pb.set_style(
-            ProgressStyle::default_bar()
-                .template("  ✓  {msg}")
-                .unwrap(),
-        );
+        self.pb
+            .set_style(ProgressStyle::default_bar().template("  ✓  {msg}").unwrap());
         self.pb.finish_with_message(msg.to_string());
     }
 
     /// Finish with a failure message.
     pub fn finish_err(&self, msg: &str) {
-        self.pb.set_style(
-            ProgressStyle::default_bar()
-                .template("  ✖  {msg}")
-                .unwrap(),
-        );
+        self.pb
+            .set_style(ProgressStyle::default_bar().template("  ✖  {msg}").unwrap());
         self.pb.finish_with_message(msg.to_string());
     }
 }
