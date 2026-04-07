@@ -114,7 +114,7 @@ check_output "start succeeds" "started" \
 
 # ── Leave ──
 echo "Leave:"
-check_output "leave succeeds" "uninstalled" \
+check_output "leave succeeds" "Left the cluster" \
     bash -c "echo y | $NAUKA hypervisor leave"
 
 check_output "status after leave fails" "not initialized" \

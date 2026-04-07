@@ -332,7 +332,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
         8
     } else {
-        3 // 2 fabric + 1 local storage
+        2 // fabric only
     };
     let steps = ui::Steps::new(step_count);
 
@@ -355,9 +355,11 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         steps.inc();
     }
 
-    steps.set("Setting up storage");
-    storage::ops::setup_region(&db, region_storage.clone())?;
-    steps.inc();
+    if network_mode == fabric::NetworkMode::WireGuard {
+        steps.set("Setting up storage");
+        storage::ops::setup_region(&db, region_storage.clone())?;
+        steps.inc();
+    }
 
     // Install persistent announce listener (don't start if --peering will run its own)
     if !peering {
