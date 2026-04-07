@@ -18,7 +18,6 @@ pub fn setup_region(db: &LocalDb, config: RegionStorage) -> Result<(), NaukaErro
     config.validate()?;
 
     tracing::info!(region = %config.region, "storage: setting up region");
-    eprintln!("  Setting up storage for region {}...", config.region);
 
     // Install ZeroFS binary
     service::ensure_installed()?;
@@ -35,7 +34,6 @@ pub fn setup_region(db: &LocalDb, config: RegionStorage) -> Result<(), NaukaErro
     registry.save(db)?;
 
     tracing::info!(region = %config.region, "storage: region ready");
-    eprintln!("  Storage for region {} ready", config.region);
 
     Ok(())
 }

@@ -9,6 +9,7 @@
 use std::net::Ipv6Addr;
 
 use nauka_core::error::NaukaError;
+use nauka_core::ui;
 
 use super::service::{self, PdConfig, TikvConfig};
 
@@ -16,12 +17,20 @@ use super::service::{self, PdConfig, TikvConfig};
 const MAX_PD_MEMBERS: usize = 3;
 
 /// Bootstrap a new single-node TiKV cluster.
-pub fn bootstrap(node_name: &str, mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
+///
+/// Uses `steps` to report progress (consumes 4 steps).
+pub fn bootstrap(
+    node_name: &str,
+    mesh_ipv6: &Ipv6Addr,
+    steps: &ui::Steps,
+) -> Result<(), NaukaError> {
     tracing::info!(node_name, %mesh_ipv6, "controlplane bootstrap starting");
-    eprintln!("  Setting up control plane...");
 
+    steps.set("Installing control plane");
     service::ensure_installed()?;
+    steps.inc();
 
+    steps.set("Starting control plane");
     let pd_cfg = PdConfig {
         name: node_name.to_string(),
         mesh_ipv6: *mesh_ipv6,
@@ -36,32 +45,32 @@ pub fn bootstrap(node_name: &str, mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError
 
     service::install(&pd_cfg, &tikv_cfg, None)?;
     service::enable_and_start()?;
+    steps.inc();
 
-    eprintln!("  Waiting for PD...");
+    steps.set("Waiting for PD");
     service::wait_pd_ready(mesh_ipv6, 30)?;
-    eprintln!("  Waiting for TiKV...");
-    service::wait_tikv_ready(mesh_ipv6, 60)?;
+    steps.inc();
 
-    eprintln!("  Control plane ready");
+    steps.set("Waiting for TiKV");
+    service::wait_tikv_ready(mesh_ipv6, 60)?;
+    steps.inc();
+
     Ok(())
 }
 
 /// Join an existing TiKV cluster.
 ///
-/// If there are fewer than MAX_PD_MEMBERS, this node runs PD + TiKV.
-/// Otherwise, this node runs TiKV only (connecting to existing PD).
-/// Join an existing TiKV cluster.
+/// Uses `steps` to report progress (consumes 4 steps).
 ///
 /// `peer_count` is the number of peers already known (from fabric join).
-/// - 0-1 peers → this is the 2nd or 3rd node → run PD + TiKV
-/// - 2+ peers → 3+ nodes already exist → run TiKV only
-///
-/// This avoids the race condition of querying PD API during rapid joins.
+/// - 0-1 peers: this is the 2nd or 3rd node, run PD + TiKV
+/// - 2+ peers: 3+ nodes already exist, run TiKV only
 pub fn join(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
     peer_count: usize,
+    steps: &ui::Steps,
 ) -> Result<(), NaukaError> {
     if existing_pd_endpoints.is_empty() {
         return Err(NaukaError::precondition(
@@ -70,8 +79,10 @@ pub fn join(
     }
 
     tracing::info!(node_name, %mesh_ipv6, peer_count, "controlplane join starting");
-    eprintln!("  Joining control plane...");
+
+    steps.set("Installing control plane");
     service::ensure_installed()?;
+    steps.inc();
 
     let primary_pd = &existing_pd_endpoints[0];
 
@@ -82,18 +93,22 @@ pub fn join(
     let run_pd = peer_count < (MAX_PD_MEMBERS - 1); // -1 because init node already has PD
 
     if run_pd {
-        eprintln!(
-            "  Starting PD + TiKV (node {} of {})",
+        steps.set(&format!(
+            "Starting PD + TiKV (node {} of {MAX_PD_MEMBERS})",
             peer_count + 1,
-            MAX_PD_MEMBERS
-        );
+        ));
         join_with_pd(node_name, mesh_ipv6, existing_pd_endpoints, primary_pd)?;
     } else {
-        eprintln!("  Starting TiKV only (PD cluster full at {MAX_PD_MEMBERS} members)");
+        steps.set("Starting TiKV only");
         join_tikv_only(node_name, mesh_ipv6, existing_pd_endpoints)?;
     }
+    steps.inc();
 
-    eprintln!("  Control plane joined");
+    // Waiting steps are inside join_with_pd / join_tikv_only
+    // but the waits are already done — just mark the final step
+    steps.set("Control plane ready");
+    steps.inc();
+
     Ok(())
 }
 
@@ -104,8 +119,6 @@ fn join_with_pd(
     existing_pd_endpoints: &[String],
     primary_pd: &str,
 ) -> Result<(), NaukaError> {
-    // Wait for mesh connectivity to PD before attempting join
-    eprintln!("  Verifying mesh connectivity to PD...");
     wait_mesh_connectivity(primary_pd, 30)?;
 
     let self_peer_url = format!("http://[{mesh_ipv6}]:{}", super::PD_PEER_PORT);
@@ -130,10 +143,7 @@ fn join_with_pd(
 
     service::install(&pd_cfg, &tikv_cfg, Some(primary_pd))?;
     service::enable_and_start()?;
-
-    eprintln!("  Waiting for PD...");
     service::wait_pd_ready(mesh_ipv6, 120)?;
-    eprintln!("  Waiting for TiKV...");
     service::wait_tikv_ready(mesh_ipv6, 120)?;
 
     Ok(())
@@ -145,8 +155,6 @@ fn join_tikv_only(
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
 ) -> Result<(), NaukaError> {
-    // Wait for mesh connectivity to PD
-    eprintln!("  Verifying mesh connectivity to PD...");
     wait_mesh_connectivity(&existing_pd_endpoints[0], 30)?;
 
     let tikv_cfg = TikvConfig {
@@ -164,7 +172,6 @@ fn join_tikv_only(
     // Use first PD endpoint's IP for health check
     let pd_ip = extract_ipv6_from_endpoint(&existing_pd_endpoints[0]);
     if let Some(ip) = pd_ip {
-        eprintln!("  Waiting for TiKV...");
         service::wait_tikv_ready(&ip, 60)?;
     }
 
@@ -258,7 +265,7 @@ fn cleanup_zombie_members(pd_url: &str) {
 
             // Remove unhealthy members with no name (zombie from failed join)
             if !healthy && name.is_empty() && member_id > 0 {
-                eprintln!("  Removing zombie PD member {member_id}...");
+                tracing::info!(member_id, "removing zombie PD member");
                 let delete_url = format!("{pd_url}/pd/api/v1/members/id/{member_id}");
                 let _ = std::process::Command::new("curl")
                     .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])

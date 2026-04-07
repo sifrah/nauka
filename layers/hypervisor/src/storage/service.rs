@@ -26,8 +26,6 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
         return Ok(());
     }
 
-    eprintln!("  Installing ZeroFS...");
-
     // Try cargo-binstall first (fast, pre-compiled), fallback to cargo install
     let output = Command::new("sh")
         .args(["-c", &format!(
@@ -56,7 +54,6 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
         ));
     }
 
-    eprintln!("  ZeroFS installed");
     Ok(())
 }
 

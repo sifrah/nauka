@@ -56,8 +56,6 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
     std::fs::create_dir_all("/etc/nauka").map_err(NaukaError::from)?;
 
     if !tiup_available() {
-        eprintln!("  Installing TiUP...");
-
         // Map arch: x86_64→amd64, aarch64→arm64
         let output = Command::new("sh")
             .args(["-c", &format!(
@@ -90,8 +88,6 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
     }
 
     if !pd_available() {
-        eprintln!("  Installing PD + TiKV components...");
-
         let output = Command::new(format!("{TIUP_HOME}/bin/tiup"))
             .args(["install", "pd", "tikv"])
             .env("TIUP_HOME", TIUP_HOME)
@@ -104,8 +100,6 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
                 "PD/TiKV install failed: {stderr}"
             )));
         }
-
-        eprintln!("  PD + TiKV installed");
     }
 
     Ok(())

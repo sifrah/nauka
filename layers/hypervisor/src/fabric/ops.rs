@@ -4,6 +4,7 @@
 //! Each function orchestrates the lower-level modules (mesh, service, state, wg).
 
 use nauka_core::error::NaukaError;
+use nauka_core::ui;
 use nauka_state::LayerDb;
 
 use super::mesh::{self, HypervisorIdentity, MeshIdentity};
@@ -31,7 +32,14 @@ pub struct InitConfig<'a> {
     pub endpoint: Option<String>,
 }
 
-pub fn init(db: &LayerDb, cfg: &InitConfig<'_>) -> Result<InitResult, NaukaError> {
+/// Initialize a new mesh.
+///
+/// Uses `steps` to report progress (consumes 2 steps).
+pub fn init(
+    db: &LayerDb,
+    cfg: &InitConfig<'_>,
+    steps: &ui::Steps,
+) -> Result<InitResult, NaukaError> {
     tracing::info!(
         node_name = cfg.node_name, region = cfg.region, zone = cfg.zone,
         port = cfg.port, %cfg.network_mode, fabric_interface = cfg.fabric_interface,
@@ -48,10 +56,13 @@ pub fn init(db: &LayerDb, cfg: &InitConfig<'_>) -> Result<InitResult, NaukaError
     }
 
     // Create backend from mode
+    steps.set("Installing network");
     let backend = super::backend::create_backend(cfg.network_mode);
     backend.ensure_installed()?;
+    steps.inc();
 
     // Create identities
+    steps.set("Creating mesh");
     let (mesh_id, secret) = mesh::create_mesh();
     let hv = mesh::create_hypervisor(
         cfg.node_name,
@@ -78,6 +89,7 @@ pub fn init(db: &LayerDb, cfg: &InitConfig<'_>) -> Result<InitResult, NaukaError
     state
         .save(db)
         .map_err(|e| NaukaError::internal(e.to_string()))?;
+    steps.inc();
 
     let secret_masked = if secret_str.len() >= 14 {
         format!(
@@ -244,12 +256,12 @@ pub struct JoinConfig<'a> {
 
 /// Join an existing cluster.
 ///
-/// 1. TCP connect to target → peering exchange
-/// 2. Receive mesh secret + peer list
-/// 3. Create hypervisor identity from received mesh prefix
-/// 4. Setup network via backend
-/// 5. Persist state
-pub async fn join(db: &LayerDb, cfg: &JoinConfig<'_>) -> Result<JoinResult, NaukaError> {
+/// Uses `steps` to report progress (consumes 2 steps).
+pub async fn join(
+    db: &LayerDb,
+    cfg: &JoinConfig<'_>,
+    steps: &ui::Steps,
+) -> Result<JoinResult, NaukaError> {
     // Check not already initialized
     if FabricState::exists(db).map_err(|e| NaukaError::internal(e.to_string()))? {
         return Err(NaukaError::conflict(
@@ -260,10 +272,13 @@ pub async fn join(db: &LayerDb, cfg: &JoinConfig<'_>) -> Result<JoinResult, Nauk
     }
 
     // Ensure backend is installed
+    steps.set("Installing network");
     let backend = super::backend::create_backend(cfg.network_mode);
     backend.ensure_installed()?;
+    steps.inc();
 
-    // Build join request
+    // Build join request and connect
+    steps.set("Joining mesh");
     // We need a temporary keypair to send in the request
     let (wg_private, wg_public) = nauka_core::crypto::generate_wg_keypair();
 
@@ -392,6 +407,7 @@ pub async fn join(db: &LayerDb, cfg: &JoinConfig<'_>) -> Result<JoinResult, Nauk
     state
         .save(db)
         .map_err(|e| NaukaError::internal(e.to_string()))?;
+    steps.inc();
 
     Ok(JoinResult {
         hypervisor: hv,

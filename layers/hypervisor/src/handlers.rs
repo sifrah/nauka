@@ -9,6 +9,8 @@ use std::pin::Pin;
 use nauka_core::resource::*;
 use nauka_state::LayerDb;
 
+use nauka_core::ui;
+
 use crate::controlplane;
 use crate::fabric;
 use crate::storage;
@@ -261,14 +263,24 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         fabric_interface,
         endpoint,
     };
-    let result = fabric::ops::init(&db, &init_cfg)?;
+
+    // Init: 2 steps (fabric) + 4 steps (control plane) = 6
+    let step_count = if network_mode == fabric::NetworkMode::WireGuard {
+        6
+    } else {
+        2
+    };
+    let steps = ui::Steps::new(step_count);
+
+    let result = fabric::ops::init(&db, &init_cfg, &steps)?;
 
     // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
-        if let Err(e) = controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6) {
+        if let Err(e) =
+            controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)
+        {
             tracing::warn!(error = %e, "control plane bootstrap issue (services may still be starting)");
-            eprintln!("  Warning: control plane setup incomplete: {e}");
-            eprintln!("  Services will continue starting in background via systemd.");
+            steps.finish_err(&format!("Control plane setup incomplete: {e}"));
         }
     }
 
@@ -279,8 +291,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         }
     }
 
-    eprintln!();
-    eprintln!("  Hypervisor initialized");
+    steps.finish("Hypervisor initialized");
     eprintln!();
     eprintln!("  name     {}", result.hypervisor.name);
     eprintln!("  id       {}", result.hypervisor.id.as_str());
@@ -392,7 +403,16 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         pin,
         network_mode,
     };
-    let result = fabric::ops::join(&db, &join_cfg).await?;
+
+    // Join: 2 steps (fabric) + 4 steps (control plane) + 1 step (announce) = 7
+    let step_count = if network_mode == fabric::NetworkMode::WireGuard {
+        7
+    } else {
+        3
+    };
+    let steps = ui::Steps::new(step_count);
+
+    let result = fabric::ops::join(&db, &join_cfg, &steps).await?;
 
     // Join control plane — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
@@ -411,10 +431,10 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             &result.hypervisor.mesh_ipv6,
             &pd_endpoints,
             peer_count,
+            &steps,
         ) {
             tracing::warn!(error = %e, "control plane join issue (services may still be starting)");
-            eprintln!("  Warning: control plane setup incomplete: {e}");
-            eprintln!("  Services will continue starting in background via systemd.");
+            steps.finish_err(&format!("Control plane setup incomplete: {e}"));
         }
     }
 
@@ -426,6 +446,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
     // Self-announce to all peers (ensures they know about us even if the
     // peering server's announce arrived before their listener was ready).
     // Re-read state after a delay to include peers discovered via incoming announces.
+    steps.set("Announcing to peers");
     {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         // Re-open DB to get latest state (may include peers from incoming announces)
@@ -454,9 +475,9 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             tracing::info!(successes = ok, failures = fail, "self-announce to peers");
         }
     }
+    steps.inc();
 
-    eprintln!();
-    eprintln!("  Joined cluster");
+    steps.finish("Joined cluster");
     eprintln!();
     eprintln!("  name     {}", result.hypervisor.name);
     eprintln!("  id       {}", result.hypervisor.id.as_str());

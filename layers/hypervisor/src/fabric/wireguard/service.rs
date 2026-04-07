@@ -27,8 +27,6 @@ pub fn ensure_wireguard() -> Result<(), NaukaError> {
         return Ok(());
     }
 
-    eprintln!("  Installing wireguard-tools...");
-
     let (cmd, args): (&str, &[&str]) = if which("apt-get") {
         ("apt-get", &["install", "-y", "-qq", "wireguard-tools"])
     } else if which("dnf") {
@@ -80,7 +78,6 @@ pub fn ensure_wireguard() -> Result<(), NaukaError> {
         ));
     }
 
-    eprintln!("  wireguard-tools installed");
     Ok(())
 }
 
