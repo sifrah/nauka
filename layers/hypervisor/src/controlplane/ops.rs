@@ -86,11 +86,12 @@ pub fn join(
 
     let primary_pd = &existing_pd_endpoints[0];
 
-    // Use peer count to decide: first 2 joiners run PD, rest run TiKV-only
-    // peer_count=1 means we're the 2nd node (1 peer = the init node)
-    // peer_count=2 means we're the 3rd node (2 peers)
-    // peer_count>=3 means 4th+ node → TiKV only
-    let run_pd = peer_count < (MAX_PD_MEMBERS - 1); // -1 because init node already has PD
+    // Use peer count to decide: first N-1 joiners run PD, rest run TiKV-only.
+    // Init node already has PD, so we need MAX_PD_MEMBERS - 1 more joiners with PD.
+    // peer_count=1 → 2nd node → PD (total PD: 2)
+    // peer_count=2 → 3rd node → PD (total PD: 3 = MAX_PD_MEMBERS)
+    // peer_count≥3 → 4th+ node → TiKV only
+    let run_pd = peer_count < MAX_PD_MEMBERS;
 
     if run_pd {
         steps.set(&format!(
