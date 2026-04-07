@@ -17,31 +17,31 @@ pub fn spinner(msg: &str) -> ProgressBar {
     pb
 }
 
-/// Finish a spinner with a success message.
+/// Finish a spinner with a success message (green ✓).
 pub fn finish_ok(pb: &ProgressBar, msg: &str) {
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("  ✓  {msg}")
+            .template("  \x1b[32m✓\x1b[0m  {msg}")
             .unwrap(),
     );
     pb.finish_with_message(msg.to_string());
 }
 
-/// Finish a spinner with a success message + right-aligned detail.
+/// Finish a spinner with a success message + right-aligned detail (green ✓).
 pub fn finish_ok_detail(pb: &ProgressBar, msg: &str, detail: &str) {
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("  ✓  {msg}")
+            .template("  \x1b[32m✓\x1b[0m  {msg}")
             .unwrap(),
     );
     pb.finish_with_message(format!("{msg:<40} {detail}"));
 }
 
-/// Finish a spinner with a failure message.
+/// Finish a spinner with a failure message (red ✖).
 pub fn finish_fail(pb: &ProgressBar, msg: &str) {
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("  ✖  {msg}")
+            .template("  \x1b[31m✖\x1b[0m  {msg}")
             .unwrap(),
     );
     pb.finish_with_message(msg.to_string());
@@ -105,26 +105,32 @@ impl Steps {
         self.total
     }
 
-    /// Finish with a success message — replaces the whole line.
+    /// Finish with a success message — replaces the whole line (green ✓).
     pub fn finish(&self, msg: &str) {
         if self.is_tty {
             self.pb.set_position(self.total);
-            self.pb
-                .set_style(ProgressStyle::default_bar().template("  ✓  {msg}").unwrap());
+            self.pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  \x1b[32m✓\x1b[0m  {msg}")
+                    .unwrap(),
+            );
             self.pb.finish_with_message(msg.to_string());
         } else {
-            eprintln!("  {msg}");
+            eprintln!("  \x1b[32m✓\x1b[0m  {msg}");
         }
     }
 
-    /// Finish with a failure message.
+    /// Finish with a failure message (red ✖).
     pub fn finish_err(&self, msg: &str) {
         if self.is_tty {
-            self.pb
-                .set_style(ProgressStyle::default_bar().template("  ✖  {msg}").unwrap());
+            self.pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  \x1b[31m✖\x1b[0m  {msg}")
+                    .unwrap(),
+            );
             self.pb.finish_with_message(msg.to_string());
         } else {
-            eprintln!("  {msg}");
+            eprintln!("  \x1b[31m✖\x1b[0m  {msg}");
         }
     }
 }
@@ -146,9 +152,13 @@ pub fn progress(msg: &str, total: u64) -> ProgressBar {
     pb
 }
 
-/// Finish a progress bar with a success message.
+/// Finish a progress bar with a success message (green ✓).
 pub fn progress_finish(pb: &ProgressBar, msg: &str) {
-    pb.set_style(ProgressStyle::default_bar().template("  ✓  {msg}").unwrap());
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  \x1b[32m✓\x1b[0m  {msg}")
+            .unwrap(),
+    );
     pb.finish_with_message(msg.to_string());
 }
 
