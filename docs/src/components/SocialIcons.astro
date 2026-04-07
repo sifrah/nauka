@@ -1,5 +1,49 @@
 ---
 import Default from '@astrojs/starlight/components/SocialIcons.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+// Detect if we're on cloud or platform pages
+const currentPath = Astro.url.pathname;
+const isCloud = currentPath.includes('/cloud');
 ---
 
-<Default />
+<div class="nav-links">
+  {isCloud ? (
+    <a href={`${base}/`} class="nav-doc-link">Platform<br/>Documentation</a>
+  ) : (
+    <a href={`${base}/cloud/`} class="nav-doc-link">Cloud<br/>Documentation</a>
+  )}
+  <span class="nav-divider"></span>
+  <Default />
+</div>
+
+<style>
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .nav-doc-link {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+
+  .nav-doc-link:hover {
+    color: var(--sl-color-text);
+  }
+
+  .nav-divider {
+    display: block;
+    width: 1px;
+    height: 2rem;
+    background: var(--sl-color-gray-5);
+    flex-shrink: 0;
+  }
+</style>

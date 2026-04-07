@@ -1,0 +1,205 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const logoLightSrc = `${base}/logo-light.svg`;
+const logoDarkSrc = `${base}/logo-dark.svg`;
+---
+
+<div class="landing">
+  <div class="landing-content">
+    <div class="landing-logo">
+      <img class="light-only" src={logoLightSrc} alt="Nauka" />
+      <img class="dark-only" src={logoDarkSrc} alt="Nauka" />
+    </div>
+
+
+    <div class="landing-cards">
+      <a href={`${base}/layers/core/overview/`} class="landing-card">
+        <div class="card-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+          </svg>
+        </div>
+        <div class="card-text">
+          <span class="card-title">Platform Documentation</span>
+          <span class="card-desc">Deploy and operate Nauka on your infrastructure.</span>
+        </div>
+        <svg class="card-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M12 5l7 7-7 7"/>
+        </svg>
+      </a>
+
+      <a href={`${base}/cloud/`} class="landing-card">
+        <div class="card-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+          </svg>
+        </div>
+        <div class="card-text">
+          <span class="card-title">Cloud Documentation</span>
+          <span class="card-desc">Build and deploy applications on Nauka Cloud.</span>
+        </div>
+        <svg class="card-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M12 5l7 7-7 7"/>
+        </svg>
+      </a>
+    </div>
+  </div>
+
+  <p class="landing-footer">Open-source infrastructure platform</p>
+</div>
+
+<style>
+  .landing {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+    padding: 2rem;
+    position: relative;
+  }
+
+  .landing-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2.5rem;
+  }
+
+  /* Logo */
+  .landing-logo img {
+    height: 10rem;
+    width: auto;
+  }
+  .dark-only { display: none; }
+  .light-only { display: inline; }
+  :global([data-theme='dark']) .light-only { display: none; }
+  :global([data-theme='dark']) .dark-only { display: inline; }
+
+  /* Tagline */
+  .landing-tagline {
+    font-size: 1.125rem;
+    font-weight: 400;
+    color: var(--sl-color-gray-3);
+    text-align: center;
+    max-width: 32ch;
+    line-height: 1.6;
+    margin: 0;
+  }
+
+  /* Cards */
+  .landing-cards {
+    display: flex;
+    gap: 1rem;
+    width: 100%;
+    max-width: 40rem;
+  }
+
+  .landing-card {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem 1.5rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+    text-decoration: none;
+    color: var(--sl-color-text);
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  .landing-card:hover {
+    border-color: var(--sl-color-gray-3);
+    background: var(--sl-color-gray-6);
+  }
+
+  .card-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 0.5rem;
+    background: var(--sl-color-gray-5);
+    color: var(--sl-color-gray-2);
+    flex-shrink: 0;
+  }
+
+  .card-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--sl-color-text);
+  }
+
+  .card-desc {
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-3);
+    line-height: 1.4;
+  }
+
+  .card-arrow {
+    color: var(--sl-color-gray-4);
+    flex-shrink: 0;
+    transition: transform 0.15s ease, color 0.15s ease;
+  }
+
+  .landing-card:hover .card-arrow {
+    color: var(--sl-color-text);
+    transform: translateX(3px);
+  }
+
+  /* Footer */
+  .landing-footer {
+    position: absolute;
+    bottom: 2rem;
+    font-size: 0.7rem;
+    color: var(--sl-color-gray-4);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 0;
+  }
+
+  /* Mobile */
+  @media (max-width: 40rem) {
+    .landing-cards {
+      flex-direction: column;
+    }
+    .landing-logo img {
+      height: 5rem;
+    }
+  }
+</style>
+
+<style is:global>
+  html:not([data-has-sidebar]) .page {
+    overflow: hidden;
+    height: 100vh;
+  }
+  html:not([data-has-sidebar]) .main-frame {
+    padding-top: 0 !important;
+    overflow: hidden;
+  }
+  html:not([data-has-sidebar]) .content-panel {
+    padding: 0;
+  }
+  html:not([data-has-sidebar]) .sl-container {
+    max-width: none;
+    padding: 0;
+  }
+  html:not([data-has-sidebar]) footer.astro-3yyafb3n,
+  html:not([data-has-sidebar]) .pagination-links {
+    display: none;
+  }
+  html:not([data-has-sidebar]) .sl-markdown-content {
+    display: none;
+  }
+</style>

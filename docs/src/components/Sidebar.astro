@@ -2,19 +2,25 @@
 import MobileMenuFooter from 'virtual:starlight/components/MobileMenuFooter';
 import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
 import SidebarSublist from '@astrojs/starlight/components/SidebarSublist.astro';
-import logoLight from '../assets/logo-light.svg';
-import logoDark from '../assets/logo-dark.svg';
-
 const { sidebar, siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const logoLightSrc = `${base}/logo-light.svg`;
+const logoDarkSrc = `${base}/logo-dark.svg`;
 ---
 
 <div class="sidebar-wrapper">
   <div class="sidebar-logo">
     <a href={siteTitleHref}>
-      <img class="logo-light" src={logoLight.src} alt={siteTitle} />
-      <img class="logo-dark" src={logoDark.src} alt={siteTitle} />
+      <img class="logo-light" src={logoLightSrc} alt={siteTitle} />
+      <img class="logo-dark" src={logoDarkSrc} alt={siteTitle} />
     </a>
   </div>
+
+  <div class="sidebar-section-header">
+    <div class="section-title">Platform Documentation</div>
+    <p class="section-desc">For teams deploying and operating Nauka on their own bare-metal infrastructure.</p>
+  </div>
+
   <div class="sidebar-nav">
     <SidebarPersister>
       <SidebarSublist sublist={sidebar} />
@@ -37,15 +43,6 @@ const { sidebar, siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
     padding: 0;
     height: var(--sl-nav-height);
   }
-  .sidebar-nav {
-    flex: 1;
-    overflow-y: auto;
-    margin-top: 2.5rem;
-    scrollbar-width: none;
-  }
-  .sidebar-nav::-webkit-scrollbar {
-    display: none;
-  }
   .sidebar-logo a {
     display: block;
     margin-left: -0.25rem;
@@ -58,4 +55,42 @@ const { sidebar, siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
   .logo-light { display: block; }
   :global([data-theme='dark']) .logo-dark { display: block; }
   :global([data-theme='dark']) .logo-light { display: none; }
+
+  /* ── Section header ── */
+  .sidebar-section-header {
+    margin: 1.25rem var(--sl-sidebar-pad-x) 0;
+    padding-top: 1.25rem;
+    padding-bottom: 1.25rem;
+    border-top: 1px solid var(--sl-color-gray-5);
+    border-bottom: 1px solid var(--sl-color-gray-5);
+  }
+
+  .section-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--sl-color-text);
+    text-align: center;
+  }
+
+  .section-desc {
+    margin: 0.35rem 0 0;
+    font-size: 0.75rem;
+    color: var(--sl-color-gray-3);
+    line-height: 1.4;
+    text-align: center;
+  }
+
+
+  /* ── Nav panel ── */
+  .sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    margin-top: 1rem;
+    scrollbar-width: none;
+  }
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
 </style>

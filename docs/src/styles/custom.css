@@ -18,7 +18,7 @@
 	--sl-color-text: #fafafa;
 	--sl-color-text-accent: #a1a1aa;
 	--sl-color-text-invert: #fafafa;
-	--sl-color-bg: #18181b;
+	--sl-color-bg: #1c1c20;
 	--sl-color-bg-nav: #18181b;
 	--sl-color-bg-sidebar: #18181b;
 	--sl-color-bg-accent: #3f3f46;
@@ -46,7 +46,7 @@
 	--sl-color-text: #fafafa;
 	--sl-color-text-accent: #d4d4d8;
 	--sl-color-text-invert: #fafafa;
-	--sl-color-bg: #18181b;
+	--sl-color-bg: #1c1c20;
 	--sl-color-bg-nav: #18181b;
 	--sl-color-bg-sidebar: #18181b;
 	--sl-color-bg-accent: #3f3f46;
@@ -253,6 +253,8 @@
 .header {
 	box-shadow: none !important;
 }
+
+
 
 .site-title img {
 	height: calc(var(--sl-nav-height) - 2 * var(--sl-nav-pad-y));
