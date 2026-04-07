@@ -62,26 +62,37 @@ pub fn finish_fail(pb: &ProgressBar, msg: &str) {
 pub struct Steps {
     pb: ProgressBar,
     total: u64,
+    is_tty: bool,
 }
 
 impl Steps {
     /// Create a new multi-step progress with `total` steps.
     pub fn new(total: u64) -> Self {
+        let is_tty = console::Term::stderr().is_term();
         let pb = ProgressBar::new(total);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-                .template("  {spinner}  {msg:<40}  {bar:20.blue/dim}  {pos}/{len}")
-                .unwrap()
-                .progress_chars("━╸─"),
-        );
-        pb.enable_steady_tick(Duration::from_millis(80));
-        Self { pb, total }
+        if is_tty {
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+                    .template("  {spinner}  {msg:<40}  {bar:20.blue/dim}  {pos}/{len}")
+                    .unwrap()
+                    .progress_chars("━╸─"),
+            );
+            pb.enable_steady_tick(Duration::from_millis(80));
+        } else {
+            // Hidden on non-TTY — we print fallback lines manually
+            pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+        }
+        Self { pb, total, is_tty }
     }
 
-    /// Set the current step message (advances the bar by one).
+    /// Set the current step message.
     pub fn set(&self, msg: &str) {
-        self.pb.set_message(msg.to_string());
+        if self.is_tty {
+            self.pb.set_message(msg.to_string());
+        } else {
+            eprintln!("  {msg}...");
+        }
     }
 
     /// Advance the bar by one position (call after each step completes).
@@ -96,17 +107,25 @@ impl Steps {
 
     /// Finish with a success message — replaces the whole line.
     pub fn finish(&self, msg: &str) {
-        self.pb.set_position(self.total);
-        self.pb
-            .set_style(ProgressStyle::default_bar().template("  ✓  {msg}").unwrap());
-        self.pb.finish_with_message(msg.to_string());
+        if self.is_tty {
+            self.pb.set_position(self.total);
+            self.pb
+                .set_style(ProgressStyle::default_bar().template("  ✓  {msg}").unwrap());
+            self.pb.finish_with_message(msg.to_string());
+        } else {
+            eprintln!("  {msg}");
+        }
     }
 
     /// Finish with a failure message.
     pub fn finish_err(&self, msg: &str) {
-        self.pb
-            .set_style(ProgressStyle::default_bar().template("  ✖  {msg}").unwrap());
-        self.pb.finish_with_message(msg.to_string());
+        if self.is_tty {
+            self.pb
+                .set_style(ProgressStyle::default_bar().template("  ✖  {msg}").unwrap());
+            self.pb.finish_with_message(msg.to_string());
+        } else {
+            eprintln!("  {msg}");
+        }
     }
 }
 
