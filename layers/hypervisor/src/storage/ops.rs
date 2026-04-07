@@ -111,12 +111,12 @@ pub async fn fetch_region_config(
             Ok(db) => match db.get(TIKV_STORAGE_NS, region).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    tracing::warn!(attempt, error = %e, "TiKV read failed, retrying...");
+                    tracing::debug!(attempt, error = %e, "TiKV read failed, retrying...");
                     last_err = Some(e);
                 }
             },
             Err(e) => {
-                tracing::warn!(attempt, error = %e, "TiKV connect failed, retrying...");
+                tracing::debug!(attempt, error = %e, "TiKV connect failed, retrying...");
                 last_err = Some(e);
             }
         }
