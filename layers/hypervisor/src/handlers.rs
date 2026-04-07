@@ -274,11 +274,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .get("s3-secret-key")
         .ok_or_else(|| anyhow::anyhow!("missing required field: s3-secret-key"))?
         .clone();
-    let s3_region = req
-        .fields
-        .get("s3-region")
-        .cloned()
-        .unwrap_or_default();
+    let s3_region = req.fields.get("s3-region").cloned().unwrap_or_default();
 
     let node_name = req
         .fields
