@@ -155,8 +155,74 @@ pub async fn listen_for_peers(
         }
     });
 
+    // Start periodic mesh reconciliation in background.
+    // Every 30s, re-read the full peer list and announce every peer to every
+    // other peer. This is idempotent (known peers are skipped) and guarantees
+    // full mesh convergence even after concurrent joins.
+    let reconcile_wg_port = peering_port - 1; // wg_port = peering_port - 1
+    tokio::spawn(async move {
+        // Initial delay — let the first joins settle
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            reconcile_mesh(reconcile_wg_port).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+
     // Main peering listener (blocks)
     super::peering_server::listen(db_opener, pin, bind_addr, timeout, 0).await
+}
+
+/// Periodic full mesh reconciliation.
+///
+/// Reads the complete peer list and announces every peer to every other peer.
+/// Idempotent — peers that already know each other skip the announce.
+/// Runs on the peering node to guarantee eventual full mesh convergence.
+async fn reconcile_mesh(wg_port: u16) {
+    let db = {
+        let dir = nauka_core::process::nauka_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        match nauka_state::LayerDb::open("hypervisor") {
+            Ok(db) => db,
+            Err(_) => return,
+        }
+    };
+    let state = match FabricState::load(&db).ok().flatten() {
+        Some(s) => s,
+        None => return,
+    };
+
+    if state.peers.len() < 2 {
+        return; // nothing to reconcile with 0 or 1 peer
+    }
+
+    let mut total_sent = 0usize;
+    for peer in &state.peers.peers {
+        let info = super::peering::PeerInfo {
+            name: peer.name.clone(),
+            region: peer.region.clone(),
+            zone: peer.zone.clone(),
+            wg_public_key: peer.wg_public_key.clone(),
+            wg_port: peer.wg_port,
+            endpoint: peer.endpoint.clone(),
+            mesh_ipv6: peer.mesh_ipv6,
+        };
+        let targets: Vec<_> = state
+            .peers
+            .peers
+            .iter()
+            .filter(|p| p.wg_public_key != peer.wg_public_key)
+            .cloned()
+            .collect();
+        let (ok, _) =
+            super::announce::broadcast_new_peer(&info, &state.hypervisor.name, &targets, wg_port)
+                .await;
+        total_sent += ok;
+    }
+
+    if total_sent > 0 {
+        tracing::info!(announcements = total_sent, "mesh reconciliation complete");
+    }
 }
 
 /// Result of a successful fabric join.
