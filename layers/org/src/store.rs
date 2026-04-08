@@ -78,8 +78,24 @@ impl OrgStore {
     }
 
     pub async fn list_orgs(&self) -> anyhow::Result<Vec<Org>> {
-        let pairs: Vec<(String, Org)> = self.db.list(NS_ORGS, "").await?;
-        Ok(pairs.into_iter().map(|(_, v)| v).collect())
+        // Scan as raw JSON first to debug namespace collisions
+        let pairs: Vec<(String, serde_json::Value)> = self.db.list(NS_ORGS, "").await?;
+        let mut orgs = Vec::new();
+        for (key, val) in pairs {
+            match serde_json::from_value::<Org>(val.clone()) {
+                Ok(org) => orgs.push(org),
+                Err(e) => {
+                    tracing::warn!(
+                        key,
+                        value = %val,
+                        error = %e,
+                        namespace = NS_ORGS,
+                        "skipping non-Org entry in org scan"
+                    );
+                }
+            }
+        }
+        Ok(orgs)
     }
 
     pub async fn delete_org(&self, name_or_id: &str) -> anyhow::Result<()> {
