@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArgSource","OperationSemantics","OutputKind"],"struct":["FilterDef","OperationArg","OperationDef","OutputDef"]};
