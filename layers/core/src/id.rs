@@ -50,9 +50,9 @@ pub enum IdError {
     },
 }
 
-/// Generate a ULID string (26-char Crockford base32, uppercase).
+/// Generate a ULID string (26-char Crockford base32, lowercase).
 fn generate_ulid() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::new().to_string().to_lowercase()
 }
 
 /// Extract the timestamp (milliseconds since epoch) from a ULID string.
