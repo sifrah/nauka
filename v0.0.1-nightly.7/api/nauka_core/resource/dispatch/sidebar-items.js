@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["capitalize","dispatch","extract_fields","extract_name","extract_scope"]};

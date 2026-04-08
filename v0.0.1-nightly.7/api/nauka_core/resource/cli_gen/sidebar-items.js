@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_scope_args","days_to_date","field_to_arg","format_value","generate_command","generate_command_with_children","generate_operation","is_leap","json_flag","render_detail","render_table","yes_flag"]};
