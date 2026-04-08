@@ -175,30 +175,37 @@ jobs:
             cp -r _tag "_site/${TAG}"
           fi
 
-      - name: Update versions.json
+      - name: Build versions.json from GitHub releases
         env:
-          CHANNEL: ${{ needs.resolve.outputs.channel }}
-          TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          if [ ! -f _site/versions.json ]; then
-            echo '{"versions":[]}' > _site/versions.json
-          fi
-
-          if [ -n "${TAG}" ]; then
-            DATE=$(date -u +%Y-%m-%d)
-            node -e "
-              const fs = require('fs');
-              const data = JSON.parse(fs.readFileSync('_site/versions.json', 'utf8'));
-              if (!data.versions.find(v => v.tag === process.env.TAG)) {
-                data.versions.unshift({
-                  tag: process.env.TAG,
-                  channel: process.env.CHANNEL,
-                  date: '${DATE}'
-                });
-              }
-              fs.writeFileSync('_site/versions.json', JSON.stringify(data, null, 2));
-            "
-          fi
+          # Fetch all releases from GitHub API and build versions.json
+          node -e "
+            const { execSync } = require('child_process');
+            const result = execSync(
+              'gh api repos/${REPO}/releases --paginate --jq \".[] | {tag: .tag_name, date: .published_at, prerelease: .prerelease}\"',
+              { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
+            );
+            const versions = result.trim().split('\n').filter(Boolean).map(line => {
+              const r = JSON.parse(line);
+              let channel = 'stable';
+              if (r.tag.includes('-nightly.')) channel = 'nightly';
+              else if (r.tag.includes('-beta.')) channel = 'beta';
+              return {
+                tag: r.tag,
+                channel,
+                date: r.date ? r.date.split('T')[0] : ''
+              };
+            });
+            // Sort by date descending
+            versions.sort((a, b) => b.date.localeCompare(a.date));
+            require('fs').writeFileSync(
+              '_site/versions.json',
+              JSON.stringify({ versions }, null, 2)
+            );
+            console.log('versions.json: ' + versions.length + ' releases');
+          "
 
       - name: Save site cache
         uses: actions/cache/save@v4
