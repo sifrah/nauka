@@ -216,7 +216,11 @@ mod tests {
             })
         });
 
-        ResourceRegistration { def, handler }
+        ResourceRegistration {
+            def,
+            handler,
+            children: vec![],
+        }
     }
 
     #[test]
