@@ -1,0 +1,101 @@
+//! Environment resource definition + handler.
+
+use std::future::Future;
+use std::pin::Pin;
+
+use nauka_core::resource::*;
+
+use super::store::EnvStore;
+
+pub fn resource_def() -> ResourceDef {
+    ResourceDef::build("env", "Manage environments within a project")
+        .alias("environment")
+        .plural("environments")
+        .parent("org", "--org", "Organization")
+        .parent("project", "--project", "Project")
+        .crud()
+        .column("NAME", "name")
+        .column("PROJECT", "project_name")
+        .column("ORG", "org_name")
+        .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
+        .empty_message(
+            "No environments found. Create one with: nauka org project env create <name> --project <project> --org <org>",
+        )
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Project", "project_name"),
+                DetailField::new("Organization", "org_name"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
+        .done()
+}
+
+pub fn handler() -> HandlerFn {
+    Box::new(
+        |req: OperationRequest| -> Pin<
+            Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
+        > {
+            Box::pin(async move {
+                let store = EnvStore::new(crate::connect_cluster_db().await?);
+                match req.operation.as_str() {
+                    "create" => {
+                        let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;
+                        let org = req.scope.get("org").ok_or_else(|| anyhow::anyhow!("--org is required"))?.to_string();
+                        let project = req.scope.get("project").ok_or_else(|| anyhow::anyhow!("--project is required"))?.to_string();
+                        nauka_core::validate::name(&name)?;
+                        let env = store.create(&name, &project, &org).await?;
+                        Ok(OperationResponse::Resource(serde_json::json!({
+                            "name": env.name, "id": env.id.as_str(),
+                            "project_name": env.project_name, "org_name": env.org_name,
+                            "created_at": env.created_at,
+                        })))
+                    }
+                    "list" => {
+                        let org = req.scope.get("org").map(|s| s.to_string());
+                        let project = req.scope.get("project").map(|s| s.to_string());
+                        let envs = store.list(project.as_deref(), org.as_deref()).await?;
+                        let items: Vec<serde_json::Value> = envs.iter().map(|e| serde_json::json!({
+                            "name": e.name, "id": e.id.as_str(),
+                            "project_name": e.project_name, "org_name": e.org_name,
+                            "created_at": e.created_at,
+                        })).collect();
+                        Ok(OperationResponse::ResourceList(items))
+                    }
+                    "get" => {
+                        let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
+                        let org = req.scope.get("org").map(|s| s.to_string());
+                        let project = req.scope.get("project").map(|s| s.to_string());
+                        let env = store.get(&name, project.as_deref(), org.as_deref()).await?
+                            .ok_or_else(|| anyhow::anyhow!("environment '{name}' not found"))?;
+                        Ok(OperationResponse::Resource(serde_json::json!({
+                            "name": env.name, "id": env.id.as_str(),
+                            "project_name": env.project_name, "org_name": env.org_name,
+                            "created_at": env.created_at,
+                        })))
+                    }
+                    "delete" => {
+                        let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
+                        let org = req.scope.get("org").ok_or_else(|| anyhow::anyhow!("--org is required"))?.to_string();
+                        let project = req.scope.get("project").ok_or_else(|| anyhow::anyhow!("--project is required"))?.to_string();
+                        store.delete(&name, &project, &org).await?;
+                        Ok(OperationResponse::Message(format!("environment '{name}' deleted.")))
+                    }
+                    other => Ok(OperationResponse::Message(format!("unknown: {other}"))),
+                }
+            })
+        },
+    )
+}
+
+pub fn registration() -> ResourceRegistration {
+    ResourceRegistration {
+        def: resource_def(),
+        handler: handler(),
+        children: vec![],
+    }
+}

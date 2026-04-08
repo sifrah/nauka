@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Command;
 
-use nauka_core::resource::{dispatch, generate_command, ResourceRegistry};
+use nauka_core::resource::{dispatch, generate_command_with_children, ResourceRegistry};
 
 mod update;
 
@@ -12,10 +12,8 @@ fn build_registry() -> ResourceRegistry {
     // Hypervisor — the core resource
     registry.register(nauka_hypervisor::handlers::registration());
 
-    // Org hierarchy
-    registry.register(nauka_org::handlers::org_registration());
-    registry.register(nauka_org::handlers::project_registration());
-    registry.register(nauka_org::handlers::env_registration());
+    // Org hierarchy (org → project → env)
+    registry.register(nauka_org::registration());
 
     registry
 }
@@ -94,9 +92,11 @@ async fn main() -> Result<()> {
                 ),
         );
 
-    // Add resource subcommands (hypervisor, future: vm, vpc, etc.)
+    // Add resource subcommands (hypervisor, org, etc.)
     for reg in registry.iter() {
-        app = app.subcommand(generate_command(&reg.def));
+        let child_refs: Vec<&nauka_core::resource::ResourceRegistration> =
+            reg.children.iter().collect();
+        app = app.subcommand(generate_command_with_children(&reg.def, &child_refs));
     }
 
     let matches = app.get_matches();

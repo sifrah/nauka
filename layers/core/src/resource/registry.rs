@@ -80,10 +80,12 @@ pub type HandlerFn = Box<
         + Sync,
 >;
 
-/// A complete resource registration: definition + handler.
+/// A complete resource registration: definition + handler + children.
 pub struct ResourceRegistration {
     pub def: ResourceDef,
     pub handler: HandlerFn,
+    /// Child resources (e.g., org → project → env).
+    pub children: Vec<ResourceRegistration>,
 }
 
 /// The resource registry — holds all registered resources.
