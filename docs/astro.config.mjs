@@ -1,10 +1,44 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const channel = process.env.DOCS_CHANNEL || 'stable';
 const isTag = channel.startsWith('v');
 const base = `/${channel}`;
+
+// Auto-discover layer docs — no manual sidebar entries needed.
+// Scans docs/src/content/docs/layers/ for subdirectories (created by sync-docs.sh).
+// Each layer gets a sidebar section with autogenerate.
+const layersDir = path.resolve('src/content/docs/layers');
+const layerNames = {
+	core: 'Core',
+	state: 'State',
+	hypervisor: 'Hypervisor',
+	org: 'Organization',
+	compute: 'Compute',
+	overlay: 'Overlay',
+	storage: 'Storage',
+};
+const layerSidebar = fs.existsSync(layersDir)
+	? fs.readdirSync(layersDir, { withFileTypes: true })
+		.filter(d => d.isDirectory())
+		.sort((a, b) => {
+			// Fixed order for known layers, alphabetical for new ones
+			const order = ['core', 'state', 'hypervisor', 'org', 'compute', 'overlay', 'storage'];
+			const ai = order.indexOf(a.name);
+			const bi = order.indexOf(b.name);
+			if (ai !== -1 && bi !== -1) return ai - bi;
+			if (ai !== -1) return -1;
+			if (bi !== -1) return 1;
+			return a.name.localeCompare(b.name);
+		})
+		.map(d => ({
+			label: layerNames[d.name] || d.name.charAt(0).toUpperCase() + d.name.slice(1),
+			autogenerate: { directory: `layers/${d.name}` },
+		}))
+	: [];
 
 // https://astro.build/config
 export default defineConfig({
@@ -62,10 +96,7 @@ export default defineConfig({
 						{ label: 'Troubleshooting', slug: 'getting-started/troubleshooting' },
 					],
 				},
-				{ label: 'Core', autogenerate: { directory: 'layers/core' } },
-				{ label: 'State', autogenerate: { directory: 'layers/state' } },
-				{ label: 'Hypervisor', autogenerate: { directory: 'layers/hypervisor' } },
-				{ label: 'Organization', autogenerate: { directory: 'layers/org' } },
+				...layerSidebar,
 				{
 					label: 'API Reference',
 					items: [
