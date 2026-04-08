@@ -15,6 +15,9 @@ fn build_registry() -> ResourceRegistry {
     // Org hierarchy (org → project → env)
     registry.register(nauka_org::registration());
 
+    // Network (vpc → subnet, peering)
+    registry.register(nauka_network::registration());
+
     registry
 }
 
