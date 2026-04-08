@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["blue","bold","dim","green","red","status_color","status_dot","yellow"]};

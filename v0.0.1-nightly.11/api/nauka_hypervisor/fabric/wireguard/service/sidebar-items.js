@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SERVICE_NAME","UNIT_PATH","WG_CONF_DIR","WG_CONF_FILE"],"fn":["enable_and_start","ensure_wireguard","generate_unit","generate_wg_conf","install","is_active","is_enabled","is_installed","run_systemctl","start","stop","uninstall","update_config","wg_quick_available","which"]};
