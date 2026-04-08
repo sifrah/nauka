@@ -1,88 +1,45 @@
 ---
 title: API Server
-description: The axum-based HTTP server — how it starts, composes middleware and routes, and shuts down gracefully on SIGTERM or SIGINT.
+description: The Nauka HTTP API server -- bind addresses, dual admin/public routing, built-in endpoints, and graceful shutdown behavior.
 sidebar:
   order: 2
 ---
 
-The API server wraps the generated axum router with middleware, binds to a socket, and handles graceful shutdown. It is designed to be embedded into any Nauka binary that needs to expose the REST API.
+The Nauka API server exposes resources over HTTP using a REST interface. It supports two separate listener surfaces (admin and public), applies middleware automatically, and shuts down gracefully when the process receives a termination signal.
 
-## Starting the server
+## Dual API surfaces
 
-```rust
-use nauka_core::api::{ApiServer, ApiServerConfig};
+The server can bind two independent listeners:
 
-let config = ApiServerConfig {
-    bind: "0.0.0.0:8080".parse()?,
-    version: env!("CARGO_PKG_VERSION"),
-};
+- **Admin API** -- listens on `127.0.0.1:8443` by default. Intended for local management and operator tooling. All resource routes are prefixed with `/admin/v1`.
+- **Public API** -- disabled by default. When enabled, listens on a separate address and exposes a subset of resources under `/v1`. Useful for exposing read-only or tenant-facing endpoints.
 
-ApiServer::new(config, registry)
-    .start()
-    .await?;
-```
+If no public resources are registered, the public listener is not started.
 
-`start()` binds the socket, composes the middleware stack, registers the routes, and begins serving. It returns when the server shuts down.
+## Configuration
 
-## Middleware stack
+The server is configured with the following parameters:
 
-The server composes middleware in a fixed order. See the [middleware docs](/nauka/layers/core/api/middleware) for details on each layer.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Admin bind address | `127.0.0.1:8443` | Where the admin API listens |
+| Public bind address | disabled | Where the public API listens (e.g., `0.0.0.0:443`) |
+| Admin prefix | `/admin/v1` | URL prefix for admin routes |
+| Public prefix | `/v1` | URL prefix for public routes |
+| Rate limit requests | 1000 | Maximum requests per window |
+| Rate limit window | 60 seconds | Duration of the rate limit window |
 
-```
-Request
-  │
-  ▼
-Rate limiter         — rejects requests that exceed per-IP limits
-  │
-  ▼
-X-Request-Id         — assigns a unique ID to every request
-  │
-  ▼
-X-Nauka-Version     — attaches the server version to every response
-  │
-  ▼
-Pagination defaults  — normalizes limit/offset query params
-  │
-  ▼
-Router               — dispatches to the correct resource handler
-  │
-  ▼
-Error normalization  — converts NaukaError to JSON error responses
-  │
-  ▼
-Response
-```
+## Built-in endpoints
 
-## Graceful shutdown
+Every API server automatically registers two endpoints that are always available, regardless of which resources are configured.
 
-The server listens for `SIGTERM` and `SIGINT` (Ctrl+C) and initiates graceful shutdown when either is received.
-
-On shutdown:
-1. The server stops accepting new connections immediately
-2. In-flight requests are given up to 30 seconds to complete
-3. Once all in-flight requests finish (or the timeout expires), the process exits
-
-This ensures that long-running operations like VM creation or mesh join are not interrupted mid-flight.
+### Health check
 
 ```
-SIGTERM received. Shutting down gracefully...
-Waiting for 3 in-flight requests to complete...
-All requests complete. Exiting.
+GET /health
 ```
 
-The shutdown timeout is configurable:
-
-```rust
-ApiServerConfig {
-    bind: "0.0.0.0:8080".parse()?,
-    version: env!("CARGO_PKG_VERSION"),
-    shutdown_timeout: Duration::from_secs(60),
-}
-```
-
-## Health endpoint
-
-The server automatically registers a `GET /health` endpoint that returns `200 OK` with a JSON body:
+Returns the server status and version:
 
 ```json
 {
@@ -91,13 +48,56 @@ The server automatically registers a `GET /health` endpoint that returns `200 OK
 }
 ```
 
-This endpoint bypasses all middleware (including rate limiting) and is designed for load balancer health checks. It does not touch the resource registry or any layer state.
+This endpoint is designed for load balancer and monitoring health checks. It responds with `200 OK` when the server is running.
 
-## Introspection endpoints
+### OpenAPI specification
 
-Two additional endpoints are registered automatically:
+```
+GET /openapi.json
+```
 
-- `GET /openapi.json` — the full OpenAPI 3.0 spec for all registered resources
-- `GET /resources` — a list of all registered resource names and operation counts
+Returns a minimal OpenAPI 3.0 specification describing the API:
 
-These are useful for debugging and for tooling that needs to discover what a running server supports.
+```json
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Nauka API",
+    "version": "0.3.1"
+  },
+  "paths": {}
+}
+```
+
+This endpoint is useful for tooling and API exploration.
+
+## Middleware stack
+
+Every request passes through the following middleware layers before reaching a resource handler:
+
+1. **HTTP tracing** -- structured request/response logging via `tower-http`
+2. **X-Request-Id** -- a unique identifier is assigned to every request and returned in the response headers
+3. **X-Nauka-Version** -- the server version is attached to every response
+
+See the [middleware documentation](/nauka/layers/core/api/middleware) for details on each layer.
+
+## Graceful shutdown
+
+The server listens for `SIGTERM` and `SIGINT` (Ctrl+C). When either signal is received:
+
+1. The server stops accepting new connections immediately.
+2. In-flight requests are allowed to complete.
+3. Once all in-flight requests finish, the process exits cleanly.
+
+This ensures that operations like mesh join or hypervisor configuration are not interrupted mid-flight during deployments or restarts.
+
+## Response headers
+
+Every API response includes these headers:
+
+```http
+X-Request-Id: req-000000000001
+X-Nauka-Version: 0.3.1
+```
+
+The request ID is a sequential counter formatted as a zero-padded hexadecimal string prefixed with `req-`. It can be used to correlate requests with server-side logs.

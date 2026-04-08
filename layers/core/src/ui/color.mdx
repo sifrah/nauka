@@ -1,75 +1,54 @@
 ---
-title: Terminal Color
-description: ANSI color support, status-based coloring conventions, and NO_COLOR compliance.
+title: Terminal Colors
+description: How the CLI uses color to communicate status, severity, and structure in terminal output.
 sidebar:
   order: 2
 ---
 
-The color module provides ANSI color output for the terminal. It is used by the table renderer, detail view, and status displays throughout the CLI.
+The Nauka CLI uses a consistent color palette across all commands. Colors convey meaning -- green means healthy, red means broken -- so operators can scan output quickly without reading every word.
 
-## Status color mapping
+## Status indicators
 
-The most common use of color is status values. When a column or detail field is marked `.colored()`, the value string is matched against a set of known status words and colored accordingly:
+Status values throughout the CLI are displayed with a colored dot prefix that communicates the resource state at a glance:
 
-| Status words | Color | Meaning |
-|-------------|-------|---------|
-| `active`, `running`, `available`, `healthy`, `ready`, `online` | Green | All good |
-| `stopped`, `inactive`, `disabled`, `offline` | Dim white | Not running, but not broken |
-| `error`, `failed`, `unhealthy`, `unreachable` | Red | Something is wrong |
-| `pending`, `starting`, `stopping`, `draining`, `provisioning` | Yellow | In-progress state |
-| `unknown` | Dim white | Status not available |
+| Status | Indicator | Meaning |
+|--------|-----------|---------|
+| `running`, `available`, `active`, `healthy`, `attached`, `pass` | Green dot | Everything is operating normally |
+| `creating`, `pending`, `scheduling`, `starting` | Blue circle | The resource is transitioning to a ready state |
+| `stopped`, `decommissioned` | Dim square | The resource is intentionally inactive |
+| `notready`, `degraded`, `draining` | Yellow triangle | Something needs attention |
+| `failed`, `error`, `unreachable` | Red cross | The resource is in a broken state |
 
-Values that don't match any known status word are rendered without color.
+In a terminal with color support, the output looks like:
 
-## Explicit colors
-
-For non-status values, you can apply color explicitly:
-
-```rust
-use nauka_core::ui::color::{green, red, yellow, bold, dim};
-
-println!("{}", green("Success"));
-println!("{}", red("Error: something went wrong"));
-println!("{}", bold("Important"));
-println!("{}", dim("(optional)"));
+```
+  NAME          STATUS
+  ─────────────────────────
+  hv-west-01    ● running
+  hv-east-01    ◌ starting
+  hv-south-01   ▲ degraded
+  hv-north-01   ✖ unreachable
 ```
 
-These are simple wrapper functions that prepend and append ANSI escape codes. They return `String`, not a display type, so they compose naturally with string formatting.
+Status values that do not match any known keyword are displayed without a colored indicator.
+
+## Text formatting
+
+Beyond status indicators, the CLI uses a small set of text styles for consistent visual hierarchy:
+
+- **Bold** -- used for table headers, resource names, and important labels
+- **Green** -- success messages and confirmations
+- **Red** -- error messages and failure indicators
+- **Yellow** -- warnings and caution prompts
+- **Blue** -- informational highlights and in-progress states
+- **Dim** -- secondary information, optional fields, and de-emphasized labels
 
 ## NO_COLOR compliance
 
-The color module respects the [`NO_COLOR`](https://no-color.org/) environment variable. When `NO_COLOR` is set to any value, all color functions return the input string unchanged with no escape codes. This applies to both the status mapping and explicit color functions.
+The CLI respects the `NO_COLOR` environment variable (see [no-color.org](https://no-color.org/)). When `NO_COLOR` is set to any value, all ANSI escape codes are suppressed and output is rendered as plain text:
 
 ```bash
-NO_COLOR=1 nauka vm list   # plain text output, no color
+NO_COLOR=1 nauka hypervisor status
 ```
 
-Color is also automatically disabled when stdout is not a TTY (i.e., when output is piped). This prevents escape codes from appearing in files, logs, or downstream tools.
-
-## Checking color support at runtime
-
-```rust
-use nauka_core::ui::color::is_color_enabled;
-
-if is_color_enabled() {
-    // safe to use color
-}
-```
-
-`is_color_enabled()` returns `false` if:
-- `NO_COLOR` is set
-- stdout is not a TTY
-- The `TERM` variable is `dumb`
-
-## Status dot
-
-The `StatusDot` display format renders a filled circle (`●`) before the status text, colored to match:
-
-```
-● running     (green)
-● stopped     (dim)
-● error       (red)
-● pending     (yellow)
-```
-
-This is applied with `DisplayFormat::StatusDot` on a column or detail field, and is the standard way to display resource status in Nauka.
+Color is also automatically disabled when output is piped to a file or another command, preventing escape codes from appearing in logs or downstream tools.

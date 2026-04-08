@@ -1,111 +1,75 @@
 ---
-title: Fluent Builder API
-description: How to construct a ResourceDef using the fluent builder — chaining identity, scope, operations, constraints, and presentation in one expression.
+title: Resource Definition Builder
+description: How resource definitions are constructed -- composing identity, scope, operations, fields, and presentation into a single definition.
 sidebar:
   order: 8
 ---
 
-`ResourceDef` is constructed using a fluent builder. You start with `ResourceDef::build(name, description)` and chain methods to add everything the resource needs, finishing with `.done()` to produce the complete definition.
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## Basic structure
+Resource definitions are the single source of truth for everything Nauka knows about a resource type. Each definition is assembled by composing several parts: identity, scope, fields, operations, and presentation.
 
-```rust
-let resource = ResourceDef::build("vpc", "Virtual Private Cloud")
-    // Identity
-    .alias("v")
-    .plural("vpcs")
+## Anatomy of a resource definition
 
-    // Scope
-    .scope(Scope::org())
+<Mermaid chart={`
+flowchart TD
+    RD[Resource Definition]
+    RD --> ID[Identity: name, aliases, plural]
+    RD --> SC[Scope: parent hierarchy, uniqueness]
+    RD --> SF[Schema Fields: typed input fields]
+    RD --> OP[Operations: create, list, get, delete, custom]
+    RD --> PR[Presentation: table columns, detail sections]
+`} />
 
-    // Operations
-    .op(Operation::list())
-    .op(Operation::create()
-        .with_arg(OperationArg::required(FieldDef::string("name", "VPC name")))
-        .with_arg(OperationArg::optional(FieldDef::string("description", "Description")))
-        .example("nauka vpc create --name production"))
-    .op(Operation::get())
-    .op(Operation::update()
-        .with_arg(OperationArg::optional(FieldDef::string("name", "New name"))))
-    .op(Operation::delete().with_confirm())
+When building a resource definition, you specify each of these parts:
 
-    // Presentation
-    .column(ColumnDef::new("name", "Name"))
-    .column(ColumnDef::new("status", "Status").colored())
-    .column(ColumnDef::new("id", "ID"))
-    .detail(DetailField::new("id", "ID"))
-    .detail(DetailField::new("name", "Name"))
-    .detail(DetailField::new("status", "Status").colored())
-    .detail(DetailField::new("created_at", "Created").format(DisplayFormat::RelativeTime))
+### 1. Identity
 
-    .done();
-```
+The resource's name, CLI command name, aliases, and plural form. See [Identity](/nauka/layers/core/resource/identity) for details.
 
-## Builder method reference
+- **Name**: the internal identifier (e.g., `hypervisor`)
+- **CLI name**: what users type (usually the same as the name)
+- **Plural**: for API paths and messages (auto-generated as name + "s" if not set)
+- **Aliases**: short alternatives (e.g., `hv` for `hypervisor`)
 
-### Identity methods
+### 2. Scope
 
-| Method | Effect |
-|--------|--------|
-| `.alias("hv")` | Add a CLI/API alias |
-| `.plural("vpcs")` | Set the plural form (default: name + "s") |
+Where the resource sits in the hierarchy. See [Scope](/nauka/layers/core/resource/scope).
 
-### Scope methods
+- **Global**: no parent required (e.g., hypervisors)
+- **Within a parent**: requires a parent flag on CLI operations (e.g., subnets within a VPC)
 
-| Method | Effect |
-|--------|--------|
-| `.scope(Scope::global())` | No parent context required |
-| `.scope(Scope::org())` | Requires `--org` |
-| `.scope(Scope::project())` | Requires `--org`, `--project` |
-| `.scope(Scope::vpc())` | Requires `--org`, `--project`, `--vpc` |
+Parent references define the CLI flag name, whether the parent is required on create, and whether it is required on read operations.
 
-### Operation methods
+### 3. Schema fields
 
-| Method | Effect |
-|--------|--------|
-| `.op(Operation::list())` | Add a list operation |
-| `.op(Operation::get())` | Add a get operation |
-| `.op(Operation::create())` | Add a create operation |
-| `.op(Operation::update())` | Add an update operation |
-| `.op(Operation::delete())` | Add a delete operation |
-| `.op(Operation::action("name", "desc"))` | Add a custom action |
+The fields a resource has -- each becomes a CLI flag. See [Schema](/nauka/layers/core/resource/schema).
 
-### Presentation methods
+Fields define their type, description, mutability, optional short flag, default value, environment variable override, and help visibility.
 
-| Method | Effect |
-|--------|--------|
-| `.column(ColumnDef::new("field", "Header"))` | Add a table column |
-| `.detail(DetailField::new("field", "Label"))` | Add a detail view row |
+### 4. Operations
 
-## Operation builder methods
+What you can do with the resource. See [Operations](/nauka/layers/core/resource/operation).
 
-Operations themselves have a fluent builder:
+Standard CRUD operations (create, list, get, delete) are available as presets. Custom actions (init, join, start, stop, leave, etc.) can be added for resource-specific behavior. Each operation can have its own arguments, constraints, confirmation requirements, examples, and output format.
 
-```rust
-Operation::create()
-    .with_arg(OperationArg::required(field))   // add a required argument
-    .with_arg(OperationArg::optional(field))   // add an optional argument
-    .with_constraint(Constraint::requires("a", "b"))  // add a constraint
-    .with_confirm()                            // require confirmation
-    .example("nauka vpc create --name foo")  // add a help example
-```
+The shorthand `crud` adds all four standard operations (create, list, get, delete) at once.
 
-## Reusing field definitions
+### 5. Presentation
 
-Fields can be defined as constants and reused across operations and resources:
+How the resource appears in CLI output. See [Presentation](/nauka/layers/core/resource/presentation).
 
-```rust
-const NAME_FIELD: FieldDef = FieldDef::string("name", "Human-readable name")
-    .validate(|v| validate_name(v));
+- **Table columns**: which fields appear in `list` output, their alignment, width, and display format
+- **Detail sections**: how `get` output is organized into labeled sections with formatted fields
+- **Empty message**: what to show when a list result is empty
+- **Default sort**: which field to sort table results by
 
-let vpc = ResourceDef::build("vpc", "VPC")
-    .op(Operation::create().with_arg(OperationArg::required(NAME_FIELD)))
-    .op(Operation::update().with_arg(OperationArg::optional(NAME_FIELD)))
-    .done();
-```
+## How definitions are used
 
-## Completing the definition
+Once a resource definition is built, it is registered with the [resource registry](/nauka/layers/core/resource/registry) alongside a handler function. From that point:
 
-`.done()` validates the definition and returns a `ResourceDef`. If the definition is invalid (no operations defined, duplicate field names, unknown constraint references), `.done()` panics with a descriptive message. This is intentional — a malformed resource definition is a programming error, not a runtime error.
+1. The [CLI generator](/nauka/layers/core/resource/cli-gen) reads the definition to produce the full command tree with all flags, help text, and examples.
+2. The [dispatch layer](/nauka/layers/core/resource/dispatch) uses the definition to parse arguments, validate constraints, manage prompts and confirmations, call the handler, and render the output.
+3. The API route generator uses the definition to create REST endpoints with the correct paths and parameters.
 
-After calling `.done()`, register the definition with the resource registry along with its handler. See the [registry docs](/nauka/layers/core/resource/registry).
+Adding a new field, operation, or presentation column to a resource definition automatically updates all interfaces -- no separate wiring required.

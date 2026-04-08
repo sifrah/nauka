@@ -1,77 +1,159 @@
 ---
-title: Service
-description: Installing, configuring, and managing the PD and TiKV systemd services via TiUP.
+title: Control Plane Services
+description: How PD and TiKV are installed, configured, and managed as systemd services -- including TiUP installation, config generation, health polling, and store deregistration.
 sidebar:
   order: 2
 ---
 
-The `service` module is the low-level machinery for running PD and TiKV on a node. It handles TiUP installation, configuration file generation, systemd unit management, and health polling. The higher-level [ops module](/nauka/layers/hypervisor/controlplane/ops) calls into service to carry out bootstrap and join workflows.
+import { Aside } from '@astrojs/starlight/components';
 
-## Installation
+The service module handles the low-level mechanics of running PD and TiKV on a node: binary installation via TiUP, configuration file generation, systemd unit management, health polling, and cluster membership operations.
 
-`ensure_installed` downloads and configures TiUP if it is not already present, then installs the PD and TiKV components:
+## TiUP installation
 
-1. Downloads the TiUP binary for the current architecture (`amd64` or `arm64`) from the PingCAP mirror to `/opt/nauka/tiup/bin/tiup`
-2. Sets the TiUP mirror to `https://tiup-mirrors.pingcap.com`
-3. Installs the `pd` and `tikv` components via `tiup install pd tikv`
+TiUP is the package manager for PD and TiKV. Nauka installs it automatically the first time a node initializes or joins a cluster.
 
-This runs automatically during `nauka hv init` and `nauka hv join`. If TiUP and both components are already present, the call is a no-op.
+The installation process:
 
-## Configuration
+1. Download the TiUP binary for the current architecture (`amd64` or `arm64`) from the PingCAP mirror
+2. Extract it to `/opt/nauka/tiup/bin/tiup`
+3. Configure the TiUP mirror URL
+4. Install the `pd` and `tikv` components via `tiup install pd tikv`
 
-### PD config
+If TiUP and both components are already present, the call is a no-op.
 
-`generate_pd_conf` produces `/etc/nauka/pd.toml`. Key settings:
+<Aside type="note">
+The `TIUP_HOME` environment variable is set to `/opt/nauka/tiup` for all TiUP and service operations. This keeps TiUP isolated from any user-level installation.
+</Aside>
 
-- **Client URL**: `http://[mesh_ipv6]:2379` — where TiKV and clients connect
-- **Peer URL**: `http://[mesh_ipv6]:2380` — for PD-to-PD Raft communication
-- **Data dir**: `/var/lib/nauka/pd`
-- **Log**: `/var/log/nauka/pd.log`
+## PD configuration
 
-For the bootstrap node, the config includes `initial-cluster` and `initial-cluster-state = "new"`. For joining nodes, those fields are omitted — the `--join` flag on the `ExecStart` line handles cluster membership instead.
+The PD config file is written to `/etc/nauka/pd.toml`. Key settings:
 
-### TiKV config
+| Setting | Value |
+|---|---|
+| Client URL | `http://[mesh_ipv6]:2379` |
+| Peer URL | `http://[mesh_ipv6]:2380` |
+| Advertise URLs | Same as client and peer URLs |
+| Data directory | `/var/lib/nauka/pd` |
+| Log file | `/var/log/nauka/pd.log` |
+| Log max size | 50 MB (auto-rotation) |
+| Log level | `warn` |
 
-`generate_tikv_conf` produces `/etc/nauka/tikv.toml`. Key settings:
+For the bootstrap node, the config includes:
+- `initial-cluster = "node-name=http://[mesh_ipv6]:2380"`
+- `initial-cluster-state = "new"`
 
-- **Server addr**: `[mesh_ipv6]:20160`
-- **PD endpoints**: list of all known PD client URLs
-- **Data dir**: `/var/lib/nauka/tikv`
-- **Log**: `/var/log/nauka/tikv.log`
+For joining nodes, the `initial-cluster` fields are omitted entirely. Instead, the systemd unit's `ExecStart` line uses the `--join=<primary_pd_url>` flag to register with the existing cluster.
 
-Both services require `nauka-wg.service` — the WireGuard mesh must be up before TiKV or PD start, because they communicate over mesh IPv6 addresses.
+## TiKV configuration
+
+The TiKV config file is written to `/etc/nauka/tikv.toml`. Key settings:
+
+| Setting | Value |
+|---|---|
+| Server address | `[mesh_ipv6]:20160` |
+| Advertise address | Same as server address |
+| PD endpoints | List of all known PD client URLs |
+| Data directory | `/var/lib/nauka/tikv` |
+| Log file | `/var/log/nauka/tikv.log` |
+| Log max size | 50 MB (auto-rotation) |
+| Log level | `warn` |
 
 ## Systemd units
 
-`install` writes `/etc/systemd/system/nauka-pd.service` and `/etc/systemd/system/nauka-tikv.service`, then runs `systemctl daemon-reload`. For joining nodes, the PD unit includes `--join=<primary_pd_url>` on its `ExecStart` line.
+### nauka-pd.service
 
-`install_tikv_only` writes only the TiKV unit — used for nodes that join after the PD cluster is already at capacity.
+```ini
+[Unit]
+Description=Nauka Placement Driver (PD)
+After=network-online.target nauka-wg.service
+Wants=network-online.target
+Requires=nauka-wg.service
 
-## Start, stop, and reload
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=TIUP_HOME=/opt/nauka/tiup
+ExecStart=/opt/nauka/tiup/bin/tiup pd --config=/etc/nauka/pd.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1000000
 
-| Function | Effect |
+[Install]
+WantedBy=multi-user.target
+```
+
+For joining nodes, the `ExecStart` line appends `--join=<primary_pd_url>`.
+
+### nauka-tikv.service
+
+```ini
+[Unit]
+Description=Nauka TiKV Storage Engine
+After=network-online.target nauka-wg.service
+Wants=network-online.target
+Requires=nauka-wg.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+Environment=TIUP_HOME=/opt/nauka/tiup
+ExecStart=/opt/nauka/tiup/bin/tiup tikv --config=/etc/nauka/tikv.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Both units require `nauka-wg.service` because PD and TiKV communicate over mesh IPv6 addresses. The WireGuard mesh must be up before either service can start.
+
+## Startup and shutdown order
+
+Order matters. PD must be running before TiKV starts, because TiKV registers itself with PD on startup.
+
+| Operation | Sequence |
 |---|---|
-| `enable_and_start` | Enable and start PD, wait 3 seconds, then enable and start TiKV |
-| `start_tikv_only` | Enable and start only TiKV (for PD-full nodes) |
-| `stop` | Stop TiKV first, then PD |
-| `restart` | Stop, short pause, start |
+| `enable_and_start` | Start PD, wait 3 seconds, then start TiKV |
+| `start` | Start PD, wait 2 seconds, then start TiKV |
+| `stop` | Stop TiKV first, then stop PD |
+| `restart` | Stop both, wait 1 second, then start in order |
 | `reload` | Rewrite config files; PD gets `reload-or-restart`, TiKV gets a full restart |
 
-Order matters on startup: PD must be running and accepting connections before TiKV starts. The three-second delay in `enable_and_start` provides a simple buffer.
+## Health polling
 
-## Waiting for readiness
+Two readiness checks block until the service is healthy or a timeout is reached:
 
-Two polling functions block until the service is healthy:
+**PD readiness** -- Polls `GET http://[mesh_ipv6]:2379/pd/api/v1/health` every 1 second. Returns success when a 200 response is received.
 
-- `wait_pd_ready(mesh_ipv6, timeout_secs)` — polls `GET /pd/api/v1/health` every second until it returns a 200 response
-- `wait_tikv_ready(mesh_ipv6, timeout_secs)` — polls `GET /pd/api/v1/stores` every second until the response includes at least one registered store
+**TiKV readiness** -- Polls `GET http://[mesh_ipv6]:2379/pd/api/v1/stores` every 1 second. Returns success when the response contains at least one registered store (`"count"` is non-zero).
 
-Both functions return a timeout error if the deadline is exceeded. `bootstrap` gives PD 30 seconds and TiKV 60 seconds. `join` allows up to 120 seconds for each, since a joining node must first reach an existing PD over the mesh.
+| Context | PD timeout | TiKV timeout |
+|---|---|---|
+| Bootstrap (init) | 30 seconds | 60 seconds |
+| Join with PD | 120 seconds | 120 seconds |
+| Join TiKV only | -- | 60 seconds |
+
+Joining nodes get longer timeouts because they must first establish mesh connectivity to an existing PD member.
 
 ## Cluster status
 
-`cluster_status` queries the PD HTTP API and returns a `ClusterStatus` struct with:
+The `cluster_status` function queries the PD HTTP API and returns:
 
-- Whether PD and TiKV services are locally active
-- Number of PD members and TiKV stores in the cluster
-- Name of the current PD leader
+- `pd_active` -- whether the local PD service is running
+- `tikv_active` -- whether the local TiKV service is running
+- `pd_members` -- total number of PD members in the cluster
+- `tikv_stores` -- total number of TiKV stores registered with PD
+- `leader` -- name of the current PD leader (if elected)
+
+## Uninstall
+
+The `uninstall` function:
+
+1. Disables and stops both `nauka-tikv` and `nauka-pd`
+2. Removes systemd unit files from `/etc/systemd/system/`
+3. Removes config files from `/etc/nauka/`
+4. Deletes data directories (`/var/lib/nauka/pd/` and `/var/lib/nauka/tikv/`)
+5. Runs `systemctl daemon-reload`

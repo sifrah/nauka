@@ -1,72 +1,66 @@
 ---
-title: Peer Management
-description: How Nauka tracks the other hypervisors in your mesh — peer records, status transitions, and the local peer list.
+title: Peer Tracking
+description: How each Nauka node maintains its view of the mesh -- peer records, reachability status, and the local peer list.
 sidebar:
   order: 2
 ---
 
-Every node in a Nauka mesh maintains a local list of its peers. This list is the node's view of the mesh: who else is in it, how to reach them over WireGuard, and whether they are currently reachable.
+Every node in a Nauka mesh maintains a local list of all other nodes it knows about. This peer list is the node's view of the mesh: who else is in it, how to reach them over WireGuard, and whether they are currently reachable. The peer list drives WireGuard configuration -- every entry in the list corresponds to a `[Peer]` section in `/etc/wireguard/nauka0.conf`.
 
-## The Peer struct
+## What a peer record contains
 
-Each peer is described by a `Peer` record:
+Each remote node is represented by a peer record with the following properties:
 
-| Field             | Description                                              |
-|-------------------|----------------------------------------------------------|
-| `name`            | Human-readable name (e.g. `web-02`)                      |
-| `region`          | Region the peer is in                                    |
-| `zone`            | Availability zone the peer is in                         |
-| `wg_pubkey`       | Peer's WireGuard public key                              |
-| `endpoint`        | Peer's public IP or hostname                             |
-| `mesh_ipv6`       | Peer's address within the mesh prefix                    |
-| `status`          | Current reachability status                              |
-| `last_handshake`  | Timestamp of the last successful WireGuard handshake     |
+| Property | Description |
+|---|---|
+| Peer ID | Unique identifier for this peer (prefixed `node-`) |
+| Name | Human-readable name (e.g., `node-2`) |
+| Region | Region the peer is located in |
+| Zone | Availability zone within the region |
+| WireGuard public key | The peer's public key, used to establish the encrypted tunnel |
+| WireGuard port | UDP listen port on the peer (default 51820) |
+| Endpoint | Public IP:port used to reach the peer over the internet |
+| Mesh IPv6 | The peer's unique address within the mesh prefix |
+| Status | Current reachability status (see below) |
+| Last handshake | Unix timestamp of the last successful WireGuard handshake |
+| Added at | Unix timestamp of when this peer was added to the list |
 
-## PeerStatus
+## Peer status
 
-A peer is in one of three states:
+A peer is always in one of three states:
 
-| Status        | Meaning                                                            |
-|---------------|--------------------------------------------------------------------|
-| `Active`      | Handshake within the last 300 seconds — the tunnel is healthy      |
-| `Unreachable` | No recent handshake — the peer may be down or the endpoint changed |
-| `Removed`     | Peer has left the mesh and should no longer receive traffic        |
+| Status | Meaning |
+|---|---|
+| **Active** | The WireGuard handshake completed within the last 5 minutes (300 seconds). The tunnel is healthy and traffic can flow. |
+| **Unreachable** | No successful handshake in the last 5 minutes. The peer may be down, its endpoint may have changed, or there may be a network issue between the two nodes. |
+| **Removed** | The peer has explicitly left the mesh (via `nauka hypervisor leave`). It should no longer receive traffic. |
 
-The 300-second threshold matches WireGuard's own keepalive window. A peer that has not completed a handshake in that window is considered unreachable until contact is re-established.
+The 300-second threshold is chosen to accommodate WireGuard's normal behavior. WireGuard initiates a handshake approximately every 2 minutes when there is active traffic between peers. A 5-minute window without any handshake is a strong signal that the peer is genuinely unreachable, not just experiencing a momentary gap in traffic.
 
-## PeerList
+Status transitions are managed by the health check loop, which runs every 30 seconds during peering mode and updates peer statuses based on WireGuard handshake timestamps.
 
-`PeerList` is the collection type that holds all peers for a node. It provides the operations you need for mesh membership:
+## How the peer list is populated
 
-### add
+Peers are added to the list through two mechanisms:
 
-Add a new peer to the list. Called during `join` when the joining node receives the existing peer list, and called on existing nodes when a new peer is announced.
+1. **During join** -- When a node joins the mesh, the accepting peer sends back the complete list of all known peers as part of the join response. The joining node initializes its peer list from this snapshot, including the accepting node itself.
+2. **Via peer announcement** -- After a join completes, the accepting node broadcasts a peer announcement to all existing members, telling them about the new node. Each existing node adds the new peer to its own list.
 
-### remove
+## Uniqueness constraints
 
-Mark a peer as `Removed`. The peer record is retained (so you can see it in history) but it will no longer receive traffic.
+The peer list enforces two uniqueness constraints:
 
-### find_by_name
+- **No duplicate public keys** -- Each WireGuard public key can appear only once. This prevents the same node from being added twice.
+- **No duplicate names** -- Each node name must be unique. This prevents confusion when looking up peers by name.
 
-Look up a peer by its human-readable name:
+If a node leaves and rejoins with the same name but a different key (which is the normal case, since keys are regenerated), the stale entry is replaced with the new one during the announce handling.
 
-```sh
-nauka hv get web-02
-```
+## Peer removal
 
-### active_count
+Peers can be removed from the list by name or by public key. When a node runs `nauka hypervisor leave`, it broadcasts a removal message to all known peers. Each receiving peer removes the entry from its list, updates its WireGuard configuration, and persists the change.
 
-Returns the number of peers currently in `Active` status. Useful for cluster health checks — if `active_count` drops suddenly, something may be wrong with the mesh.
-
-## How the peer list is kept current
-
-Peers are added in two ways:
-
-1. **During join**: when a node joins, the accepting peer sends it the full current `PeerList`. The joining node initializes its list from that snapshot.
-2. **Via peer announce**: after a join completes, the accepting node broadcasts a `PeerAnnounce` to all existing peers so they add the new node to their own lists.
-
-Status is updated by polling WireGuard's handshake timestamps. See [wg](/nauka/layers/hypervisor/fabric/wg) for how those are read from the interface.
+If a peer goes down without running the leave procedure (e.g., hardware failure), it will be marked as **Unreachable** by the health check loop on all other nodes. The entry remains in the peer list but no traffic is routed to it.
 
 ## Persistence
 
-The peer list is part of [`FabricState`](/nauka/layers/hypervisor/fabric/state) and is persisted to `~/.nauka/fabric.redb` on every change. If the node restarts, it reloads the full peer list and re-configures WireGuard from it.
+The peer list is part of the fabric state and is persisted to the embedded database on every change. If the node restarts, it reloads the full peer list and reconfigures WireGuard from it. The persisted state is the source of truth -- any manual changes to the WireGuard configuration will be overwritten on the next service restart.

@@ -1,69 +1,89 @@
 ---
-title: WireGuard Service
-description: systemd service management for the Nauka WireGuard mesh (nauka-wg).
+title: WireGuard Service (Backend)
+description: The canonical WireGuard systemd service implementation -- package installation, config generation, and service lifecycle.
 sidebar:
   order: 1
 ---
 
-The `wireguard/service` module manages WireGuard as a persistent systemd service. It installs `wireguard-tools` if absent, writes the `wg-quick` config, registers a `nauka-wg` systemd unit, and provides lifecycle operations. The service survives reboots and runs independently of the `nauka` process.
+This is the canonical implementation of the WireGuard service management. It is responsible for installing `wireguard-tools`, generating the WireGuard configuration file, managing the `nauka-wg` systemd unit, and providing all service lifecycle operations. The `fabric::service` module re-exports this implementation for convenience.
 
-## Files on disk
+## Files managed
 
-| Path | Purpose |
-|---|---|
-| `/etc/wireguard/nauka0.conf` | `wg-quick` interface config (mode `0600`) |
-| `/etc/systemd/system/nauka-wg.service` | systemd unit (`Type=oneshot`, `RemainAfterExit=yes`) |
+| Path | Purpose | Permissions |
+|---|---|---|
+| `/etc/wireguard/nauka0.conf` | WireGuard interface configuration (`wg-quick` format) | `0600` (root only) |
+| `/etc/systemd/system/nauka-wg.service` | systemd unit wrapping `wg-quick up/down` | Standard |
 
 ## Package installation
 
-`ensure_wireguard()` checks for `wg-quick` and installs `wireguard-tools` if missing. It auto-detects the package manager in this order:
+The `ensure_wireguard()` function checks for `wg-quick` on the system `PATH` and installs `wireguard-tools` automatically if missing. It detects the package manager in the following order:
 
-- `apt-get` (Debian / Ubuntu) — runs `apt-get update` first
-- `dnf` (Fedora / RHEL 8+)
-- `yum` (CentOS / older RHEL)
-- `pacman` (Arch)
-- `apk` (Alpine)
-- `zypper` (openSUSE)
+1. `apt-get` (Debian / Ubuntu) -- runs `apt-get update -qq` first
+2. `dnf` (Fedora / RHEL 8+)
+3. `yum` (CentOS / older RHEL)
+4. `pacman` (Arch Linux)
+5. `apk` (Alpine Linux)
+6. `zypper` (openSUSE)
 
-If none of these are present the function returns a precondition error asking the operator to install `wireguard-tools` manually.
+If no supported package manager is detected, the function returns an error instructing the operator to install `wireguard-tools` manually.
 
-## Config generation
+After installation, the function verifies that `wg-quick` is now available. If it is still not found (e.g., the package installed but the binary is in an unexpected location), the operation fails with a clear error.
 
-`generate_wg_conf(private_key, listen_port, mesh_ipv6, peers)` produces a `wg-quick` config:
+## Configuration generation
+
+The WireGuard configuration is generated from the node's identity and peer list:
 
 ```ini
 [Interface]
-PrivateKey = <private_key>
-ListenPort = <listen_port>
-Address    = <mesh_ipv6>/128
+PrivateKey = <this node's private key>
+ListenPort = 51820
+Address = fd12:3456:789a::1/128
 
 [Peer]
-PublicKey          = <pubkey>
-AllowedIPs         = <peer_ipv6>/128
+PublicKey = <peer's public key>
+AllowedIPs = fd12:3456:789a::2/128
 PersistentKeepalive = 25
-Endpoint           = <host:port>   # omitted when unknown
+Endpoint = 203.0.113.20:51820
 ```
 
-Each peer entry sets `PersistentKeepalive = 25`. `Endpoint` is only written when provided.
+Each peer gets a `[Peer]` section with:
+- `AllowedIPs` set to the peer's single mesh IPv6 (`/128`) -- only mesh traffic goes through the tunnel
+- `PersistentKeepalive = 25` -- ensures regular handshakes for health monitoring
+- `Endpoint` included only when known
 
-## Lifecycle functions
+## The systemd unit
 
-| Function | Effect |
+The unit file uses `Type=oneshot` with `RemainAfterExit=yes`, which means `wg-quick up` runs once to create the interface, and systemd considers the service "active" as long as the interface exists:
+
+- `ExecStart` runs `wg-quick up /etc/wireguard/nauka0.conf`
+- `ExecStop` runs `wg-quick down /etc/wireguard/nauka0.conf`
+- The service starts after `network-online.target` to ensure network availability
+- `WantedBy=multi-user.target` enables automatic start on boot
+
+## Lifecycle operations
+
+| Function | What it does |
 |---|---|
-| `install(key, port, ipv6, peers)` | Write config + unit, `systemctl daemon-reload` |
-| `enable_and_start()` | `systemctl enable --now nauka-wg` |
-| `start()` | `systemctl start nauka-wg` |
-| `stop()` | `systemctl stop nauka-wg` |
-| `uninstall()` | Disable, remove unit + config, reload daemon |
-| `update_config(key, port, ipv6, peers)` | Rewrite config, apply with `wg syncconf` (no teardown); falls back to service restart on error |
+| `install()` | Creates `/etc/wireguard/` directory, writes `nauka0.conf` (with `0600` permissions), writes the systemd unit, runs `systemctl daemon-reload` |
+| `enable_and_start()` | Runs `systemctl enable --now nauka-wg` |
+| `start()` | Runs `systemctl start nauka-wg` |
+| `stop()` | Runs `systemctl stop nauka-wg` |
+| `uninstall()` | Stops and disables the service, removes both files, reloads the systemd daemon |
+| `update_config()` | Rewrites `nauka0.conf` and applies changes via `wg syncconf nauka0 /etc/wireguard/nauka0.conf`. Falls back to a full service restart if `syncconf` fails. |
+
+## Live configuration updates
+
+The `update_config()` function is called whenever the peer list changes (new join, leave, or announcement). It rewrites the configuration file and uses `wg syncconf` to apply changes without bringing the interface down. This is non-disruptive -- existing tunnels continue running.
+
+If `wg syncconf` fails for any reason, the function falls back to restarting the entire service via `systemctl restart nauka-wg`. This ensures the WireGuard interface always reflects the current state, even in edge cases.
 
 ## Status checks
 
-- `is_installed()` — returns `true` if the unit file exists at `/etc/systemd/system/nauka-wg.service`
-- `is_active()` — delegates to `systemctl is-active --quiet nauka-wg`
-- `is_enabled()` — delegates to `systemctl is-enabled --quiet nauka-wg`
-- `wg_quick_available()` — returns `true` if `wg-quick` is on `$PATH`
+| Check | Method |
+|---|---|
+| `is_installed()` | Checks if `/etc/systemd/system/nauka-wg.service` exists on disk |
+| `is_active()` | Runs `systemctl is-active --quiet nauka-wg` |
+| `is_enabled()` | Runs `systemctl is-enabled --quiet nauka-wg` |
+| `wg_quick_available()` | Checks if `wg-quick` is on the system `PATH` |
 
-## Live config reload
-
-`update_config` uses `wg syncconf nauka0 /etc/wireguard/nauka0.conf` to apply peer changes without bringing the interface down. If `syncconf` fails the service is restarted as a fallback, ensuring peers are always in sync.
+All status checks are non-destructive and return booleans without throwing errors.

@@ -1,69 +1,87 @@
 ---
-title: Fabric Health Checks
-description: How the hypervisor monitors peer reachability using WireGuard handshake timestamps.
+title: Health Monitoring
+description: How Nauka monitors peer reachability using WireGuard handshake timestamps -- sweep intervals, thresholds, and status transitions.
 sidebar:
   order: 10
 ---
 
-The health check system keeps the peer list accurate by continuously polling WireGuard for handshake activity. It runs as a background task whenever the hypervisor is in peering mode.
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## How it works
+The health monitoring system keeps the peer list accurate by continuously checking whether each peer is still reachable. It runs as a background task during peering mode and updates peer statuses based on WireGuard handshake activity.
 
-WireGuard performs a handshake every ~2 minutes when there is active traffic between peers. The health check exploits this: if a peer's last handshake is more than **5 minutes** in the past, the tunnel is almost certainly down.
+## How health checks work
 
-Each sweep:
+WireGuard performs a cryptographic handshake with each peer approximately every 2 minutes when there is active traffic. The health check system exploits this behavior: if a peer's last handshake is more than 5 minutes old, the tunnel is almost certainly down.
 
-1. Runs `wg show dump` to get current handshake timestamps for all peers
-2. Compares each timestamp against the staleness threshold (default: 300 seconds)
-3. Updates peer status to `Active` or `Unreachable`
-4. Persists state only if at least one status changed
-5. Logs transitions: `peer now active` and `peer now unreachable`
+Each health check sweep:
 
-If the WireGuard interface is not running when a sweep fires, all peers are considered `Unreachable` for that sweep — but no status-change log entries are written.
+1. Reads WireGuard handshake timestamps for all peers via `wg show nauka0 dump`
+2. Compares each timestamp against the staleness threshold (300 seconds / 5 minutes)
+3. Updates peer status to **Active** or **Unreachable** accordingly
+4. Persists the updated state only if at least one status changed
+5. Logs status transitions
 
-## Timing
+<Mermaid chart={`
+flowchart TD
+    A[Health check sweep starts] --> B[Read WG handshake timestamps]
+    B --> C{WG interface up?}
+    C -- No --> D[All peers = Unreachable]
+    C -- Yes --> E[For each peer]
+    E --> F{Handshake within 300s?}
+    F -- Yes --> G[Status = Active]
+    F -- No --> H{New peer in grace period?}
+    H -- Yes --> I[Status = Active]
+    H -- No --> J[Status = Unreachable]
+    G --> K{Status changed?}
+    J --> K
+    I --> K
+    K -- Yes --> L[Persist state, log transition]
+    K -- No --> M[Skip]
+`} />
 
-| Parameter | Default |
-|---|---|
-| Sweep interval | 30 seconds |
-| Staleness threshold | 300 seconds (5 minutes) |
+## Timing parameters
 
-The threshold is deliberately longer than WireGuard's 2-minute handshake interval to tolerate brief traffic gaps without false positives.
+| Parameter | Value | Rationale |
+|---|---|---|
+| Sweep interval | 30 seconds | Frequent enough to catch failures quickly, infrequent enough to avoid overhead |
+| Staleness threshold | 300 seconds (5 minutes) | Deliberately longer than WireGuard's 2-minute handshake interval to avoid false positives during brief traffic gaps |
+| New peer grace period | 300 seconds (5 minutes) | Newly added peers have not had time to establish a WireGuard handshake yet and should not be marked unreachable immediately |
 
-## DB access pattern
+The staleness threshold is set conservatively. A peer that has not completed a handshake in 5 minutes is very likely genuinely unreachable rather than merely experiencing a momentary gap in traffic. WireGuard's `PersistentKeepalive` (set to 25 seconds in Nauka) ensures regular handshakes even without application-level traffic.
 
-The loop opens a fresh database connection at the start of each sweep and drops it when the sweep completes. This avoids holding a long-lived write lock that would block join requests or other operations between sweeps.
+## Grace period for new peers
 
-## API
+When a peer is first added (e.g., it just joined the mesh), there is an inherent delay before WireGuard establishes the first handshake. Without special handling, the health check would immediately mark the new peer as unreachable, which would be misleading.
 
-Two entry points are exposed:
+To handle this, the health check applies a grace period: any peer that was added within the last 5 minutes and has never completed a handshake is kept in **Active** status. Once the grace period expires, normal handshake-based status determination takes over.
 
-**`check_once(db, stale_threshold_secs)`** — runs a single sweep synchronously. Returns a `HealthCheckResult` with counts of total, active, unreachable, and changed peers. Useful for one-shot checks or testing.
+## Database access pattern
 
-**`run_loop(db_opener, interval_secs, stale_threshold_secs)`** — runs `check_once` in a loop forever, sleeping `interval_secs` between sweeps. Intended to be spawned as a `tokio::task`. Only logs when at least one peer status changed.
+The health check loop opens a fresh database connection at the start of each sweep and drops it when the sweep completes. This avoids holding a long-lived write lock that would block join requests, status queries, or other operations between sweeps.
 
-```rust
-// Spawn health monitoring as a background task
-tokio::spawn(health::run_loop(
-    || LayerDb::open(path),
-    health::DEFAULT_INTERVAL_SECS,
-    health::DEFAULT_STALE_THRESHOLD_SECS,
-));
+Only sweeps that detect at least one status change trigger a database write. In a healthy mesh where all peers are active, the health check produces no writes and no log output -- silence means everything is working.
+
+## Status transitions and logging
+
+When a peer's status changes, the transition is logged:
+
+```
+INFO peer now active        peer=node-2
+WARN peer now unreachable   peer=node-3
 ```
 
-## Status transitions
-
-The health checker only writes to the database when peer status changes. Stable meshes with all peers active produce no writes and no log output — silent is healthy.
-
-When a transition does occur:
+After any sweep that produces changes, a summary is logged:
 
 ```
-INFO peer now active    peer=web-02
-WARN peer now unreachable peer=web-03
+INFO health check complete  total=3 active=2 unreachable=1 changed=1
 ```
 
-A summary is logged after any sweep that produced changes:
+Stable meshes with all peers active produce no log output at all. This makes it easy to spot problems in logs -- any health check output indicates a real status change.
 
-```
-INFO health check complete total=3 active=2 unreachable=1 changed=1
-```
+## Integration with the mesh
+
+The health check loop is one of several background tasks started by the peering command. It runs alongside the peering listener, announce listener, and reconciliation loop. The health check does not take corrective action itself -- it only updates peer status in the state database. Other subsystems use this status information:
+
+- The announce broadcast skips peers marked as **Unreachable**, avoiding unnecessary connection timeouts
+- The `nauka hypervisor status` command displays the current active and unreachable peer counts
+- Future features may use status data for alerting or automatic remediation

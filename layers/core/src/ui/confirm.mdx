@@ -1,82 +1,60 @@
 ---
 title: Confirmation Prompts
-description: How destructive operations ask for confirmation before proceeding, and how to bypass confirmation in scripts with --yes.
+description: How the CLI asks for confirmation before destructive operations, including type-to-confirm for critical actions.
 sidebar:
   order: 4
 ---
 
-Destructive operations — deleting a resource, leaving a mesh, draining a hypervisor — require explicit confirmation before executing. This is a safety guard that prevents accidental data loss from a mistyped command.
+Destructive operations -- deleting a resource, leaving a mesh -- require explicit confirmation before executing. This prevents accidental data loss from a mistyped or misunderstood command.
 
-## How confirmation works
+## Simple confirmation
 
-When an operation is marked with `.with_confirm()` in its definition, the dispatch layer adds a confirmation step before calling the handler:
-
-```
-$ nauka vpc delete vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ
-
-This will permanently delete VPC "production" (vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ).
-This action cannot be undone.
-
-? Are you sure? [y/N]: _
-```
-
-Pressing `y` or `Y` proceeds. Anything else (including just pressing Enter) cancels:
+For standard destructive operations, the CLI displays a warning and asks for a yes/no response. The default is always "No":
 
 ```
-Cancelled.
+  ▲  Delete hypervisor hv-west-01? [y/N]
 ```
 
-The default is always "No" — the user must affirmatively choose to proceed.
+Only typing `y` or `Y` proceeds. Pressing Enter or typing anything else cancels the operation.
 
-## When confirmation is shown
+## Type-to-confirm for critical operations
 
-Confirmation is shown when:
-- The operation has `.with_confirm()` declared
-- stdin is a TTY
-- `--yes` is not provided
+For operations with severe consequences, the CLI requires the operator to type the exact resource name to confirm. This guards against accidental execution of high-impact commands:
 
-If stdin is not a TTY (piped, CI), confirmation is skipped and the operation is **not** executed — the command errors instead:
+```
+  ▲  Delete hypervisor hv-west-01?
+
+  Affected VMs     12
+  Affected subnets  3
+
+  This action is permanent and cannot be undone.
+  Type "hv-west-01" to confirm: _
+```
+
+If the typed input does not exactly match the resource name, the operation is aborted:
+
+```
+  Aborted.
+```
+
+The impact summary (affected resources, counts) is displayed when available, giving the operator full context before confirming.
+
+## Non-interactive behavior
+
+Confirmation prompts only appear when stdin is a terminal. In non-interactive contexts (piped input, CI/CD), the command should be run with the `--yes` flag to skip confirmation:
 
 ```bash
-$ echo "" | nauka vpc delete vpc-01HW...
-Error: this operation requires confirmation
-  Hint: use --yes to confirm in non-interactive contexts
+nauka hypervisor leave --yes
 ```
 
-This prevents accidental execution in scripts where a prompt would hang.
+Without `--yes` in a non-interactive context, the operation will not proceed.
 
-## Bypassing confirmation with --yes
+## When confirmation applies
 
-The `--yes` flag skips the confirmation prompt and proceeds immediately. It is injected automatically on any operation with `.with_confirm()` — you don't need to declare it.
+Confirmation is added to operations that are irreversible or have a significant blast radius. Typical examples include:
 
-```bash
-# In a script, always use --yes for destructive operations
-nauka vpc delete "$VPC_ID" --yes
-nauka hypervisor drain "$HV_ID" --yes --timeout 600
-```
+- Deleting a resource (`nauka hypervisor leave`)
+- Leaving a mesh
+- Any operation that destroys data or disrupts running workloads
 
-In CI/CD pipelines, always use `--yes`. Never rely on interactive confirmation in automation.
-
-## What the confirmation message includes
-
-The confirmation message is generated from the resource name and the resource being operated on. For a delete:
-
-```
-This will permanently delete VPC "production" (vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ).
-This action cannot be undone.
-```
-
-For a drain:
-
-```
-This will drain all workloads from hypervisor "hv-eu-west-1" (hv-01HWKZ3P8B0E7D2N5FVYMR4CXJ).
-Running VMs will be migrated to other hypervisors. This may take several minutes.
-```
-
-The secondary description line can be customized per operation:
-
-```rust
-Operation::action("drain", "Gracefully drain workloads")
-    .with_confirm()
-    .confirm_message("Running VMs will be migrated to other hypervisors. This may take several minutes.")
-```
+Read-only operations like `list`, `get`, and `status` never prompt for confirmation.

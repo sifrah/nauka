@@ -5,77 +5,61 @@ sidebar:
   order: 2
 ---
 
-`ClusterDb` is the distributed state layer for the Nauka mesh. It wraps TiKV's raw client with a namespaced, JSON-serialized API that mirrors the `LocalDb` (redb) interface. While `LocalDb` stores per-node state, `ClusterDb` stores state that must be consistent and visible to all nodes.
+The cluster store is Nauka's distributed persistence backend. It stores all shared state that must be visible and consistent across every node in the mesh: virtual machines, VPCs, networks, volumes, users, and other cluster-wide resources.
 
-## Connecting
+## How it works
 
-```rust
-let db = ClusterDb::connect(&["http://[fd01::1]:2379"]).await?;
+The cluster store wraps TiKV, a distributed key-value database that replicates data across nodes using the Raft consensus protocol. Platform engineers interact with TiKV indirectly through Nauka; there is no need to issue TiKV commands directly.
+
+Data is serialized as JSON and stored in TiKV's raw key-value interface. This means you can inspect stored values with TiKV tooling if needed, and the data will be human-readable.
+
+## Connecting to the cluster
+
+The cluster store connects to TiKV through one or more PD (Placement Driver) endpoints. PD is TiKV's coordination service that tracks which data nodes hold which key ranges. A typical endpoint looks like:
+
+```
+http://[fd01::1]:2379
 ```
 
-Pass one or more PD (Placement Driver) endpoints. TiKV uses these to discover the data nodes. The client is cheaply cloneable — pass it around with `.clone()`.
+These are IPv6 ULA addresses from the mesh's address space, reachable over the WireGuard tunnel. The connection requires the mesh to be up and the WireGuard interface active.
 
-## Key namespace
+## Key structure
 
-All keys are stored as `{namespace}/{key}`. The namespace partitions data by resource type (e.g. `"vms"`, `"networks"`, `"volumes"`). Callers never construct the full key — the namespace and short key are passed separately and composed internally.
+All keys in the cluster store follow the pattern `{namespace}/{key}`. The namespace groups related resources together. For example:
 
-## API
+- `vms/vm-001` — a virtual machine record
+- `networks/net-prod` — a network definition
+- `volumes/vol-data-1` — a storage volume
 
-### put
+Nauka constructs these compound keys internally. Platform engineers working with the CLI or API specify resource types and names; the key format is an implementation detail.
 
-```rust
-db.put("vms", "vm-001", &my_struct).await?;
-```
+## Operations
 
-Serializes the value to JSON and writes it to TiKV. Overwrites any existing value for that key.
+The cluster store supports the standard set of key-value operations:
 
-### get
+**Read and write.** Individual records can be read, written, or deleted by namespace and key. Writing a key that already exists overwrites the previous value. Reading a key that does not exist returns nothing (no error).
 
-```rust
-let vm: Option<MyStruct> = db.get("vms", "vm-001").await?;
-```
+**Listing.** Records can be listed by namespace and prefix. For example, listing all keys under `vms/` returns every virtual machine in the cluster. Listing supports up to 10,000 results per query.
 
-Returns `None` if the key does not exist. Deserializes from JSON on hit.
+**Batch writes.** Multiple records in the same namespace can be written in a single round-trip to TiKV. This reduces latency when creating several related resources at once (for example, provisioning a VM with its network interfaces and volumes).
 
-### delete
+**Existence checks.** You can check whether a key exists without reading its full value.
 
-```rust
-db.delete("vms", "vm-001").await?;
-```
+## Replication and consistency
 
-Removes the key. No-ops silently if the key is absent.
+TiKV replicates data across multiple nodes using Raft. The default replication factor is three, meaning each piece of data is stored on three separate nodes. If a node goes down, reads and writes continue as long as a majority of replicas are available.
 
-### list
+All reads and writes go through the Raft leader for the relevant key range, which provides linearizable consistency. A successful write is guaranteed to be visible to all subsequent reads from any node in the mesh.
 
-```rust
-let vms: Vec<(String, MyStruct)> = db.list("vms", "").await?;
-```
+## When the cluster store is not available
 
-Scans all keys under `{namespace}/{prefix}` using a range query. Returns `(short_key, value)` pairs where `short_key` has the `{namespace}/` prefix stripped. Scans up to 10,000 results per call.
+The cluster store requires TiKV to be running, which in turn requires the mesh to be up. During bootstrap (before the first mesh is created) and during mesh operations (init, join, leave), Nauka uses the local store instead. See the [State Layer overview](/contributing/overview) for details on the two-tier model.
 
-The range end is computed by `prefix_end`: the last byte of the prefix string is incremented by one to form the exclusive upper bound. For example, prefix `"vms/"` produces end key `"vms0"`.
+## Failure handling
 
-### exists
+If TiKV is unreachable or a request fails, the error is surfaced to the caller. There is no automatic retry built into the cluster store layer. Higher-level components decide whether and how to retry based on the operation being performed.
 
-```rust
-let found: bool = db.exists("vms", "vm-001").await?;
-```
+Errors fall into two categories:
 
-Returns `true` if the key has a value. Performs a single `get` internally.
-
-### batch_put
-
-```rust
-db.batch_put("vms", &[("vm-001", &vm1), ("vm-002", &vm2)]).await?;
-```
-
-Writes multiple key-value pairs in a single TiKV `batch_put` call. All entries share the same namespace. Use this when creating multiple related resources to reduce round-trips.
-
-## Error handling
-
-All methods return `StateError`. Two variants are relevant:
-
-- `StateError::Database` — TiKV communication or operation failure
-- `StateError::Serialization` — JSON encode/decode failure
-
-Neither variant is retried automatically; the caller is responsible for retry logic.
+- **Database errors** — TiKV is unreachable, a node is down, or a request timed out.
+- **Serialization errors** — a stored value cannot be decoded, usually indicating data corruption or a schema change.

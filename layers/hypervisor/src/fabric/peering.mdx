@@ -1,62 +1,117 @@
 ---
 title: Peering Protocol
-description: The TCP-based join protocol types — JoinRequest, JoinResponse, and PeerAnnounce — and how PIN validation works.
+description: The TCP/TLS-based protocol used for mesh membership -- join requests, responses, peer announcements, and PIN authentication.
 sidebar:
   order: 7
 ---
 
-When a new node wants to join a Nauka mesh, it does not just connect to WireGuard directly. First it needs to prove it is authorized (via the PIN), then exchange identities and receive the peer list. This handshake is the peering protocol.
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-The `peering` module defines the message types used in this exchange. The actual TCP server and client that send and receive these messages are in [peering-server](/nauka/layers/hypervisor/fabric/peering-server) and [peering-client](/nauka/layers/hypervisor/fabric/peering-client).
+When a new node wants to join a Nauka mesh, it cannot simply connect to WireGuard directly. It first needs to prove authorization (via a PIN), exchange identity information, and receive the complete peer list. This handshake is the peering protocol.
 
-## JoinRequest
+The peering protocol defines the message types and validation rules used in this exchange. The actual network implementation -- the TCP server that listens for join requests and the TCP client that initiates them -- are separate components that serialize and transmit these messages.
 
-Sent by a node that wants to join, to a node that is already a mesh member.
+## Protocol overview
 
-| Field      | Description                                                     |
-|------------|-----------------------------------------------------------------|
-| `name`     | Requested name for the new node (e.g. `web-02`)                 |
-| `region`   | Region the new node is in                                       |
-| `zone`     | Availability zone                                               |
-| `wg_pubkey`| New node's WireGuard public key                                 |
-| `port`     | WireGuard listen port the new node will use                     |
-| `endpoint` | New node's public IP or hostname                                |
-| `pin`      | 4-digit PIN derived from the mesh secret                        |
+<Mermaid chart={`
+sequenceDiagram
+    participant Joiner as Joining Node
+    participant Acceptor as Existing Node
 
-The PIN is the gatekeeper. Without it, the join is rejected before any mesh data is shared.
+    Joiner->>Acceptor: TCP connect to port 51821
+    Joiner->>Acceptor: TLS handshake (self-signed, TOFU)
+    Joiner->>Acceptor: JoinRequest (name, pubkey, port, PIN)
+    Acceptor->>Acceptor: Validate PIN
+    alt PIN valid
+        Acceptor->>Joiner: JoinResponse (accepted, secret, prefix, peers)
+        Acceptor->>Acceptor: Add joiner to local state + WG config
+        Note over Acceptor: Broadcast PeerAnnounce to all peers
+    else PIN invalid
+        Acceptor->>Joiner: JoinResponse (rejected, reason)
+        Note over Acceptor: Record PIN failure for rate limiting
+    end
+`} />
 
-## JoinResponse
+## Join request
 
-Sent by the accepting node back to the joiner. Contains everything the new node needs to configure itself.
+The join request is the first application-level message sent by the joining node after the TLS handshake completes. It contains everything the accepting node needs to evaluate and process the join:
 
-| Field       | Description                                                     |
-|-------------|-----------------------------------------------------------------|
-| `accepted`  | `true` if the join was approved, `false` otherwise              |
-| `secret`    | The mesh shared secret (`syf_sk_...`), only sent if accepted    |
-| `prefix`    | The mesh's `/48` IPv6 prefix                                    |
-| `peers`     | The full `PeerList` — all existing nodes in the mesh            |
-| `acceptor`  | The accepting node's own `Peer` record (so the joiner can add it)|
+| Field | Description |
+|---|---|
+| Name | Requested name for the new node (e.g., `node-2`) |
+| Region | Region the joining node is in |
+| Zone | Availability zone within the region |
+| WireGuard public key | The joining node's public key for tunnel establishment |
+| WireGuard port | UDP port the joining node will listen on |
+| Endpoint | Public IP:port of the joining node (optional -- auto-detected from TCP source if omitted) |
+| PIN | Authentication token derived from the mesh secret |
 
-If `accepted` is `false`, the other fields are empty. The joiner should treat this as a fatal error and abort.
+The PIN is the gatekeeper. Without a valid PIN, the join request is rejected before any mesh data is shared.
 
-## PeerAnnounce
+## Join response
 
-After a successful join, the accepting node broadcasts a `PeerAnnounce` to all existing peers so they add the new member to their WireGuard configs.
+The accepting node sends back a response containing everything the joining node needs to configure itself and connect to the mesh:
 
-| Field  | Description                      |
-|--------|----------------------------------|
-| `peer` | The `Peer` record for the new node |
+| Field | Description |
+|---|---|
+| Accepted | Whether the join was approved |
+| Reason | Explanation if rejected (e.g., "invalid PIN") |
+| Secret | The mesh shared secret (`syf_sk_...`), only included when accepted |
+| Prefix | The mesh's `/48` IPv6 prefix, only included when accepted |
+| Mesh ID | The unique mesh identifier, only included when accepted |
+| Peers | Complete list of all existing peers in the mesh |
+| Acceptor | The accepting node's own peer information |
 
-Each existing peer receives this message, adds the new node to its `PeerList`, calls `wg set` to add the peer to its live interface, and updates `nauka0.conf` on disk.
+If the join is rejected, only the `accepted` and `reason` fields are populated. The joining node receives no mesh credentials and should treat rejection as a terminal error.
 
-## PIN validation
+## Peer announcement
 
-The PIN is a short code derived from the mesh secret. It is displayed when `nauka hv init` runs and must be provided when running `nauka hv join`.
+After a successful join, the accepting node broadcasts a peer announcement to all existing mesh members so they can add the new node to their WireGuard configurations:
 
-The PIN is not the full secret. It is a short human-typeable value that proves the person running `join` was given the PIN by someone who controls the mesh. The full secret is only transmitted after the PIN is accepted.
+| Field | Description |
+|---|---|
+| Peer | Complete peer information for the new node (name, key, endpoint, mesh IPv6) |
+| Announced by | Name of the node sending the announcement |
 
-If the PIN is wrong, the accepting node closes the connection immediately and logs the attempt.
+## Peer removal
+
+When a node leaves the mesh, it broadcasts a removal message:
+
+| Field | Description |
+|---|---|
+| Name | Name of the departing node |
+| WireGuard public key | Public key of the departing node |
+
+Each receiving peer removes the matching entry from its peer list and WireGuard configuration.
+
+## PIN authentication
+
+The PIN is a short code derived from the mesh secret. It is displayed when `nauka hypervisor init` runs and must be provided when running `nauka hypervisor join`.
+
+The PIN is not the full secret. It is a short, human-typeable value that proves the person running the join was given access by someone who controls the mesh. The full mesh secret is only transmitted after the PIN is validated.
+
+If the PIN is wrong, the accepting node:
+1. Sends a rejection response
+2. Records the failure against the source IP for rate limiting
+3. Closes the connection
+
+After 5 failed PIN attempts from the same IP address, that IP is blocked for 10 minutes.
 
 ## Wire format
 
-Messages are encoded as JSON and sent over TCP with a length prefix. The length is a 4-byte big-endian unsigned integer that precedes each message payload. This framing allows the receiver to read exactly the right number of bytes for each message without delimiters.
+All messages are encoded as JSON and transmitted over TLS with a length-prefix framing. Each message is preceded by a 4-byte big-endian unsigned integer indicating the payload size. This framing allows the receiver to read exactly the right number of bytes for each message without relying on delimiters or connection close.
+
+Messages are capped at 1 MB to prevent memory exhaustion from malformed or malicious payloads.
+
+## Endpoint auto-detection
+
+If the joining node does not specify an endpoint in its join request, the accepting node automatically detects it from the TCP connection's source IP address. IPv4-mapped IPv6 addresses (the `::ffff:x.x.x.x` format that appears when an IPv4 client connects to an IPv6-bound socket) are converted back to plain IPv4 for WireGuard compatibility. The detected IP is combined with the joining node's declared WireGuard port to form the endpoint.
+
+## Input validation
+
+All peer-provided fields (name, region, zone, public key, endpoint) are validated against injection attacks before processing:
+
+- Maximum field length: 256 characters
+- No control characters (newlines, tabs, etc.) are allowed
+
+This prevents attackers from injecting malicious content into WireGuard configuration files or log messages.

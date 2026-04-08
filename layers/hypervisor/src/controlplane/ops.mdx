@@ -1,77 +1,104 @@
 ---
-title: Operations
-description: High-level control plane lifecycle — bootstrap a new cluster, join an existing one, and deregister when leaving.
+title: Control Plane Operations
+description: Lifecycle orchestration for the TiKV control plane -- bootstrapping a new cluster, joining an existing one, and gracefully leaving.
 sidebar:
   order: 3
 ---
 
-The `ops` module orchestrates control plane lifecycle events. It sits above the [service module](/nauka/layers/hypervisor/controlplane/service), combining installation, configuration, and health checks into three clear operations: bootstrap, join, and leave.
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## bootstrap
+The operations module orchestrates the control plane lifecycle. It sits above the [service module](/nauka/layers/hypervisor/controlplane/service) and combines binary installation, configuration, systemd management, and health checks into three high-level operations: bootstrap, join, and leave.
 
-`bootstrap` sets up the control plane on the very first node in the cluster. It always runs PD and TiKV together.
+## Bootstrap (first node)
 
-**Steps:**
+When you run `nauka hv init`, the control plane bootstrap creates a single-node TiKV cluster on the init node:
 
-1. `ensure_installed` — download TiUP and install PD + TiKV components
-2. Generate PD config with `initial-cluster-state = "new"` (single-member Raft group)
-3. Generate TiKV config pointing at the local PD
-4. Install systemd units and start both services (PD first, then TiKV)
-5. Poll until PD is healthy (30 s timeout)
-6. Poll until TiKV registers with PD (60 s timeout)
+<Mermaid chart={`
+sequenceDiagram
+  participant Init as nauka hv init
+  participant Svc as Service layer
+  participant PD
+  participant TiKV
 
-After `bootstrap`, the node has a functional single-node TiKV cluster. It is ready to accept joins from other nodes.
+  Init->>Svc: ensure_installed()
+  Note over Svc: Download TiUP, install PD + TiKV
 
-```sh
-# bootstrap is called automatically by nauka hv init
-nauka hv init --name web-01 --region us-east --zone us-east-1a
-```
+  Init->>Svc: install(pd_cfg, tikv_cfg)
+  Note over Svc: Write configs + systemd units
 
-## join
+  Init->>Svc: enable_and_start()
+  Svc->>PD: systemctl start nauka-pd
+  Svc->>TiKV: systemctl start nauka-tikv
 
-`join` adds the current node to an existing cluster. Whether it runs PD depends on how many nodes are already in the cluster.
+  Init->>PD: wait_pd_ready (30s timeout)
+  Init->>TiKV: wait_tikv_ready (60s timeout)
+`} />
 
-Nauka uses `peer_count` — the number of peers already known from the fabric join handshake — to make this decision without querying the live PD API (which avoids a race condition during rapid parallel joins):
+The PD configuration is generated with `initial-cluster-state = "new"`, which tells PD to create a fresh Raft group with itself as the only member. TiKV is configured to point at the local PD endpoint.
 
-| peer_count at join time | PD members so far | This node runs |
+After both services pass their health checks, the control plane is ready to accept joins from other nodes.
+
+## Join (subsequent nodes)
+
+When a node runs `nauka hv join`, the control plane join decides whether to run PD based on how many peers are already in the cluster:
+
+| Peers at join time | Total nodes | This node runs |
 |---|---|---|
-| 1 (we are the 2nd node) | 1 | PD + TiKV |
-| 2 (we are the 3rd node) | 2 | PD + TiKV |
-| 3+ (4th node or beyond) | 3 (full) | TiKV only |
+| 1 peer | 2nd node | PD + TiKV |
+| 2 peers | 3rd node | PD + TiKV |
+| 3+ peers | 4th+ node | TiKV only |
 
-### Joining with PD
+The maximum number of PD members is **3**. Once three PD members exist, additional nodes run TiKV only.
 
-For the 2nd and 3rd nodes:
+### Joining with PD (nodes 2 and 3)
 
-1. Verify mesh connectivity to an existing PD by polling its health endpoint
-2. Clean up any zombie PD members left from failed previous joins
-3. Install PD config in join mode (no `initial-cluster` in the file — the `--join` systemd flag handles it)
-4. Install TiKV config pointing at all known PD endpoints including this node's own
-5. Start PD (using `--join=<primary_pd_url>`), then TiKV
-6. Wait for PD and TiKV to be ready (up to 120 s each)
+1. **Verify mesh connectivity** -- Poll the existing PD's health endpoint (`/pd/api/v1/health`) with a 30-second timeout to confirm the mesh is working
+2. **Clean up zombie members** -- Remove any unhealthy PD members with no name (artifacts from failed previous joins)
+3. **Install PD in join mode** -- The `initial-cluster` field is omitted from `pd.toml`; instead, the systemd unit's `ExecStart` uses `--join=<primary_pd_url>` to register with the existing cluster
+4. **Install TiKV** -- TiKV config includes all known PD endpoints (existing peers plus this node)
+5. **Start and wait** -- PD starts first, then TiKV; health checks allow up to 120 seconds each
 
-### Joining TiKV only
+### Joining TiKV only (nodes 4+)
 
-For the 4th node and beyond:
+1. **Verify mesh connectivity** -- Same health check against an existing PD
+2. **Install TiKV only** -- No PD unit is created; TiKV config points to the existing PD cluster
+3. **Start TiKV** -- `systemctl enable --now nauka-tikv`; waits up to 60 seconds for the store to register with PD
 
-1. Verify mesh connectivity to an existing PD
-2. Install TiKV config pointing at the existing PD cluster
-3. Start TiKV only (no PD unit installed)
-4. Wait for TiKV to register with PD (up to 60 s)
+## Leave
 
-## leave
+When a node runs `nauka hv leave`, the control plane is torn down in a controlled sequence:
 
-`leave` removes the node from the control plane cleanly.
+1. **Deregister TiKV store** -- Query `GET /pd/api/v1/stores` to find this node's store ID (matched by mesh IPv6 address), then `DELETE /pd/api/v1/store/{id}` to remove it. This prevents PD from waiting indefinitely for a store that will never return.
+2. **Deregister PD member** -- If this node runs PD, query `GET /pd/api/v1/members` to find the member ID (matched by peer URL containing the mesh IPv6), then `DELETE /pd/api/v1/members/id/{id}`.
+3. **Uninstall** -- Stop and disable both services, remove systemd units, config files, and data directories, then reload the systemd daemon.
 
-If the node's mesh IPv6 is available, `leave_with_mesh` first calls `deregister_store`: it reads the local TiKV config to find the PD endpoint, queries `GET /pd/api/v1/stores` to find this node's store ID, then sends `DELETE /pd/api/v1/store/<id>` to remove it. This prevents PD from waiting for a store that will never return.
-
-After deregistration (or if deregistration is skipped), `uninstall` stops both services, disables them, removes the systemd units, config files, and data directories.
-
-```sh
-# leave is called automatically by nauka hv leave
-nauka hv leave
-```
+<Aside type="note">
+If the mesh IPv6 address is not available (corrupted state), the leave falls back to a simple uninstall without deregistration. The cluster will eventually detect the missing member, but this is less clean than a proper deregistration.
+</Aside>
 
 ## Status
 
-`status` proxies to `service::cluster_status` and returns the current health of the local PD and TiKV services along with cluster-wide member and store counts. This is what `nauka hv doctor` uses for its controlplane section.
+The `status` function queries the local systemd service state and the PD HTTP API to return:
+
+- Whether `nauka-pd` and `nauka-tikv` are active
+- Number of PD members in the cluster
+- Number of TiKV stores registered
+- Name of the current PD leader
+
+This information is used by both `nauka hv status` and `nauka hv doctor`.
+
+## Operational commands
+
+```sh
+# Start the control plane (requires prior init or join)
+nauka hv start
+
+# Stop the control plane
+nauka hv stop
+
+# Check control plane health
+nauka hv doctor
+```
+
+Control plane start and stop are handled automatically as part of the hypervisor-wide `start` and `stop` commands. There are no separate CLI commands for the control plane alone.

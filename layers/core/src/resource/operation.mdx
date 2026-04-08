@@ -1,137 +1,147 @@
 ---
 title: Operations
-description: The standard CRUD operations and custom actions that a resource can support, and how each is configured.
+description: The standard CRUD operations and custom actions that a resource supports, and how they translate to CLI commands and API routes.
 sidebar:
   order: 5
 ---
 
-An operation is something you can do to a resource. The framework provides standard CRUD operations that cover most cases, plus a mechanism for custom actions when you need something that doesn't fit the CRUD mold.
+An operation is an action you can perform on a resource. Nauka provides standard CRUD operations that cover the most common patterns, plus custom actions for anything that does not fit the CRUD model.
 
 ## Standard operations
 
-These are the five CRUD operations built into the framework. Each generates a predictable CLI subcommand and API route.
+### create
+
+Creates a new resource. The resource name is a required positional argument. All create-only and mutable schema fields appear as CLI flags.
+
+```
+nauka hypervisor init --mesh-name production --endpoint 203.0.113.1:51820
+```
+
+After a successful create, the CLI displays the new resource's details and a confirmation message.
 
 ### list
 
-Fetches all resources of this type (with optional filtering). Renders as a table.
+Lists all resources of this type. Renders output as an aligned table by default, or as JSON with `--json`.
 
-```rust
-Operation::list()
-    .with_arg(OperationArg::optional(FieldDef::string("status", "Filter by status")))
+```
+$ nauka hypervisor list
+NAME     ENDPOINT              STATUS     MESH
+node-1   203.0.113.1:51820     active     production
+node-2   203.0.113.2:51820     active     production
+
+$ nauka hypervisor list --json
+[{"name": "node-1", ...}, {"name": "node-2", ...}]
 ```
 
-CLI: `nauka vpc list [--status active]`  
-API: `GET /vpcs`
+List operations can accept optional filter arguments to narrow results.
 
 ### get
 
-Fetches a single resource by ID or name. Renders as a detail view.
+Retrieves a single resource by name or ID. Renders as a key-value detail view by default, or as JSON with `--json`.
 
-```rust
-Operation::get()
 ```
-
-CLI: `nauka vpc get <id>`  
-API: `GET /vpcs/{id}`
-
-### create
-
-Creates a new resource. Takes field args that define the initial state.
-
-```rust
-Operation::create()
-    .with_arg(OperationArg::required(FieldDef::string("name", "VPC name")))
-    .with_arg(OperationArg::optional(FieldDef::string("cidr", "CIDR block")))
+$ nauka hypervisor get node-1
+Name:        node-1
+Endpoint:    203.0.113.1:51820
+Status:      active
+Mesh:        production
 ```
-
-CLI: `nauka vpc create --name prod [--cidr 10.0.0.0/16]`  
-API: `POST /vpcs`
-
-### update
-
-Modifies an existing resource. All args are typically optional — only the provided fields are changed.
-
-```rust
-Operation::update()
-    .with_arg(OperationArg::optional(FieldDef::string("name", "New name")))
-```
-
-CLI: `nauka vpc update <id> [--name new-name]`  
-API: `PATCH /vpcs/{id}`
 
 ### delete
 
-Removes a resource. Supports confirmation prompts for safety.
+Removes a resource. Requires confirmation before proceeding:
 
-```rust
-Operation::delete()
-    .with_confirm()
+```
+$ nauka hypervisor delete node-1
+Delete hypervisor 'node-1'? This cannot be undone. [y/N] y
+hypervisor 'node-1' deleted.
 ```
 
-CLI: `nauka vpc delete <id>` (prompts "Are you sure?")  
-API: `DELETE /vpcs/{id}`
+To skip the confirmation prompt in scripts or automation, use `--yes` or `-y`:
+
+```
+nauka hypervisor delete node-1 --yes
+```
+
+### update
+
+Modifies an existing resource. Only mutable fields appear as flags, and all are optional -- you only provide the fields you want to change.
 
 ## Custom actions
 
-Not everything fits into CRUD. Custom actions let you define operations with arbitrary names and behaviors.
+Not everything fits into create/list/get/update/delete. Custom actions handle operations specific to a resource type:
 
-```rust
-Operation::action("drain", "Gracefully drain all workloads before removal")
-    .with_arg(OperationArg::optional(FieldDef::integer("timeout", "Drain timeout in seconds").default("300")))
-    .with_confirm()
-
-Operation::action("join", "Join this hypervisor to a mesh")
-    .with_arg(OperationArg::required(FieldDef::string("target", "Target hypervisor IP or hostname")))
-    .with_arg(OperationArg::required(FieldDef::string("pin", "One-time join PIN")))
+```
+nauka hypervisor init --mesh-name production --endpoint 203.0.113.1:51820
+nauka hypervisor join --target 203.0.113.1:51820 --pin abc123
+nauka hypervisor start
+nauka hypervisor stop
+nauka hypervisor leave
+nauka hypervisor peering
 ```
 
-Common custom actions in Nauka:
+Custom actions generate CLI subcommands just like CRUD operations. Each can have its own arguments, constraints, confirmation requirements, and output format.
 
-| Action | Resource | What it does |
-|--------|----------|-------------|
-| `init` | hypervisor | Initialize a new mesh on this node |
-| `join` | hypervisor | Join an existing mesh |
-| `start` | vm | Start a stopped VM |
-| `stop` | vm | Gracefully shut down a VM |
-| `drain` | hypervisor | Drain workloads before maintenance |
+Examples of custom actions in Nauka:
+
+| Action | Resource | Purpose |
+|--------|----------|---------|
+| `init` | hypervisor | Create a new mesh on this node |
+| `join` | hypervisor | Join an existing mesh via peering |
+| `start` | hypervisor | Start the WireGuard service |
+| `stop` | hypervisor | Stop the WireGuard service |
 | `leave` | hypervisor | Leave the mesh |
+| `peering` | hypervisor | Start the peering listener for incoming join requests |
+| `status` | hypervisor | Show detailed mesh and connectivity status |
 
-Custom actions generate CLI subcommands (`nauka hypervisor drain <id>`) and API routes (`POST /hypervisors/{id}/drain`).
+## Output types
 
-## Operation output kinds
+Every operation declares what kind of output it produces. This determines how the result is rendered:
 
-Every operation declares what kind of output it produces. The framework uses this to choose the right renderer.
+| Output type | When used | How it renders |
+|-------------|-----------|----------------|
+| Resource | Single-item results (get, create) | Key-value detail view |
+| ResourceList | Multi-item results (list) | Aligned table |
+| Message | Confirmations, status text | Plain text message |
+| None | Silent operations | Nothing printed |
+| JsonOnly | Machine-oriented output | Always JSON, no table/detail rendering |
 
-| Output kind | When to use | How it renders |
-|------------|-------------|----------------|
-| `OutputKind::Resource` | Single item (get, create, update) | Detail view |
-| `OutputKind::ResourceList` | Multiple items (list) | Table |
-| `OutputKind::Message` | Confirmation text, no data | Plain message |
-| `OutputKind::Empty` | Operation with no output | Nothing printed |
+The `--json` flag overrides any output type to produce JSON, which is useful for scripting and automation.
+
+## Success messages
+
+Operations can define a success message template that is displayed after the handler completes. Templates support `{kind}` and `{name}` placeholders:
+
+```
+hypervisor 'node-1' created.
+hypervisor 'node-1' deleted.
+```
 
 ## Confirmation
 
-Operations that are destructive or irreversible should use `.with_confirm()`. This causes the CLI to print a summary of what will happen and ask "Are you sure? [y/N]" before proceeding.
-
-```rust
-Operation::delete().with_confirm()
-Operation::action("drain", "Drain workloads").with_confirm()
-```
-
-Users can bypass confirmation with `--yes`:
+Operations can be marked as requiring confirmation. This causes the CLI to prompt before executing:
 
 ```
-nauka hypervisor drain hv-01HW... --yes
+Delete hypervisor 'node-1'? This cannot be undone. [y/N]
 ```
 
-The `--yes` flag is injected automatically for any operation that has `.with_confirm()` — you don't need to declare it.
+The `--yes` / `-y` flag is automatically added to any operation that requires confirmation. You do not need to declare it separately.
 
-## Examples in help text
+## Usage examples in help
 
-Operations can include usage examples that appear in `--help` output:
+Operations can include example invocations that appear in the `--help` output:
 
-```rust
-Operation::create()
-    .example("nauka vpc create --name production")
-    .example("nauka vpc create --name staging --cidr 10.1.0.0/16")
+```
+$ nauka hypervisor join --help
+Join an existing mesh
+
+Usage: nauka hypervisor join [OPTIONS]
+
+Options:
+  --target <addr>  Target hypervisor address
+  --pin <pin>      One-time join PIN
+  ...
+
+Examples:
+  nauka hypervisor join --target 203.0.113.1:51820 --pin abc123
 ```

@@ -1,86 +1,110 @@
 ---
 title: Doctor
-description: Run a health diagnostic across all hypervisor sub-systems — fabric, controlplane, storage, and system resources.
+description: Diagnose the health of every hypervisor sub-system -- fabric, control plane, storage, and system resources -- with a single command.
 sidebar:
   order: 3
 ---
 
-The `doctor` command inspects every sub-system on the current node and prints a color-coded report. It is the fastest way to confirm a node is healthy after initial setup or to triage a problem.
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
+
+The `doctor` command inspects all four sub-systems on the current node and prints a color-coded report. It is the single fastest way to verify that a node is healthy or to narrow down which layer has a problem.
 
 ```sh
 nauka hv doctor
 ```
 
-## What gets checked
+## How it works
 
-Doctor runs four sections in sequence. Each section reports individual checks as **pass** (green ✓), **warn** (yellow !), **fail** (red ✗), or **skip** (grey -). Skipped checks indicate the sub-system is not installed or not yet configured — they do not count as failures.
+Doctor loads the node's local state, then runs checks sequentially across four sections: Fabric, Controlplane, Storage, and System. Each individual check reports one of four statuses:
 
-### Fabric
+| Status | Symbol | Meaning |
+|---|---|---|
+| OK | green check | Check passed |
+| WARN | yellow exclamation | Degraded but not broken |
+| FAIL | red cross | Something is wrong and needs attention |
+| SKIP | grey dash | Sub-system not installed or not configured |
 
-Checks the WireGuard mesh connectivity layer:
+Skipped checks do not count as failures. A node that has not installed the control plane will show SKIP for all controlplane checks rather than FAIL.
 
-| Check | Pass condition |
-|---|---|
-| wireguard-tools | `wg` binary is present on PATH |
-| nauka0 interface | The `nauka0` interface is up |
-| wg service | `wg-quick@nauka0` systemd service is active |
-| wg config | `/etc/wireguard/nauka0.conf` exists |
-| peers | All configured peers are reachable |
-| mesh ping | ICMPv6 ping to a sample of up to 3 peers responds |
+<Mermaid chart={`
+graph LR
+  D[nauka hv doctor] --> F[Fabric]
+  D --> C[Controlplane]
+  D --> S[Storage]
+  D --> Y[System]
+  F --> R[Report]
+  C --> R
+  S --> R
+  Y --> R
+`} />
 
-If the node has no peers yet (freshly initialized), the peer checks report OK rather than a warning.
+## Fabric checks
 
-### Controlplane
+These checks verify the WireGuard mesh networking layer.
 
-Checks the TiKV distributed key-value cluster:
+| Check | Pass condition | Fail / Warn condition |
+|---|---|---|
+| wireguard-tools | `wg` command is available on PATH | Not installed (FAIL) |
+| wg config | `/etc/wireguard/nauka0.conf` exists | Missing (FAIL) |
+| fabric network | Network interface is up | Interface down (FAIL) |
+| fabric service | systemd service is active | Service stopped (WARN) |
+| peers | All configured peers are reachable | Some peers unreachable (WARN) |
+| mesh ping | ICMPv6 ping to up to 3 peers responds | Some pings fail (WARN) |
 
-| Check | Pass condition |
-|---|---|
-| tiup | TiUP binary present at `/opt/nauka/tiup/bin/tiup` |
-| pd service | `nauka-pd` systemd service is active (or skipped on TiKV-only nodes) |
-| tikv service | `nauka-tikv` systemd service is active |
-| pd health | All PD members respond as healthy via the PD HTTP API |
-| pd leader | A leader has been elected |
-| tikv stores | At least one TiKV store is registered with PD |
+In `direct` mode, the wireguard-tools and wg config checks are replaced by a simple "direct (no tunnel)" confirmation. If no peers are configured (freshly initialized node), the peer checks report OK.
 
-If TiUP is not installed, all controlplane checks are skipped — the section header still appears but no failures are counted.
+## Controlplane checks
 
-### Storage
+These checks verify the TiKV distributed key-value store and its Placement Driver.
 
-Checks the ZeroFS S3-backed storage layer:
+| Check | Pass condition | Notes |
+|---|---|---|
+| tiup | `/opt/nauka/tiup/bin/tiup` exists | If missing, all controlplane checks are skipped |
+| pd service | `nauka-pd` systemd service is active | Shows "not running (tikv-only node)" as OK if the unit is not installed (4th+ node) |
+| tikv service | `nauka-tikv` systemd service is active | FAIL if the unit exists but is stopped |
+| pd health | All PD members report healthy via the PD API (`/pd/api/v1/health`) | WARN if some members are unhealthy |
+| pd leader | A PD leader has been elected | FAIL if no leader |
+| tikv stores | PD API reports registered TiKV stores (`/pd/api/v1/stores`) | Shows count of registered stores |
 
-| Check | Pass condition |
-|---|---|
-| zerofs | ZeroFS binary present at `/usr/local/bin/zerofs` |
-| region `<name>` | For each configured region, the `nauka-zerofs-<name>` service is active |
+The PD health and leader checks query the PD HTTP API at `http://[mesh_ipv6]:2379`. If the API is unreachable, those checks report WARN rather than FAIL.
 
-If no regions are configured, doctor reports "none configured" as OK. If a region is configured but its service is not running, it reports a warning.
+## Storage checks
 
-### System
+These checks verify the ZeroFS S3-backed storage layer.
 
-Checks host-level resources:
+| Check | Pass condition | Notes |
+|---|---|---|
+| zerofs | `/usr/local/bin/zerofs` binary exists | SKIP if not installed |
+| region `<name>` | `nauka-zerofs-<name>` service is active | WARN if configured but stopped; shows S3 bucket name |
 
-| Check | Pass condition |
-|---|---|
-| disk space | `/var/lib/nauka` has more than 1 GB free |
-| logs | `/var/log/nauka` exists and is writable |
-| state file | `~/.nauka/hypervisor.json` exists and is valid JSON |
+If no regions are configured, doctor reports "none configured" as OK.
 
-Disk space between 256 MB and 1 GB reports a warning; below 256 MB reports a failure.
+## System checks
 
-## Summary line
+These checks verify host-level resources.
 
-After all sections, doctor prints a summary:
+| Check | Pass condition | Warn / Fail threshold |
+|---|---|---|
+| disk space | `/var/lib/nauka` has free space | WARN below 1 GB, FAIL below 256 MB |
+| logs | `/var/log/nauka` exists and is writable | WARN if missing or not writable |
+| state file | `~/.nauka/hypervisor.json` exists and is valid JSON | FAIL if corrupt, SKIP if not initialized |
+
+## Reading the output
+
+After all sections, doctor prints a summary line:
 
 ```
   3 passed, 1 warnings, 0 errors
 ```
 
-The process exits with a non-zero code if any check has status **fail**.
+<Aside type="tip">
+Use `nauka hv doctor` as a post-deploy smoke test in your runbooks. Run it after `nauka hv init`, after `nauka hv join`, and during incident triage to quickly isolate which layer is affected.
+</Aside>
 
-## When to use doctor
+## When to run doctor
 
-- **After `nauka hv init`** — confirm the mesh, controlplane, and storage are all up
-- **After `nauka hv join`** — verify the new node joined every sub-system correctly
-- **During incident triage** — narrow down which layer has a problem before digging into logs
-- **In CI or runbooks** — `nauka hv doctor` as a post-deploy smoke test
+- **After initializing a node** -- confirm all three sub-systems came up correctly
+- **After joining a cluster** -- verify mesh connectivity, control plane membership, and storage setup
+- **During incidents** -- determine which sub-system is degraded before diving into logs
+- **Periodically** -- as a health check in monitoring scripts or cron jobs

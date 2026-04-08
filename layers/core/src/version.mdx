@@ -1,80 +1,51 @@
 ---
 title: Version Management
-description: Semver with release channels, compatibility checking, and rollback support.
+description: Semver with release channels, compatibility checking between mesh nodes, and rollback support for safe upgrades.
 sidebar:
   order: 8
 ---
 
-Nauka uses semantic versioning with release channel suffixes. The version system supports checking compatibility between components, comparing versions across channels, and managing backup/rollback for safe upgrades.
+import Mermaid from '../../../../components/Mermaid.astro';
+
+Nauka uses semantic versioning with release channel suffixes. The version system supports four release channels, compatibility checking between nodes in a mesh, and binary backup/rollback for safe upgrades.
 
 ## Version format
 
 ```
-v{major}.{minor}.{patch}-{channel}.{build}
+{major}.{minor}.{patch}               -- stable release
+{major}.{minor}.{patch}-{channel}.{build}  -- pre-release
 ```
 
 Examples:
 
 ```
-v2.1.0-stable
-v2.1.0-rc.3
-v2.1.0-beta.14
-v2.1.0-dev.47
+2.1.0                    (stable release)
+2.1.0-rc.1               (release candidate)
+2.1.0-beta.14            (beta)
+2.1.0-nightly.47         (nightly build)
 ```
 
-The channel suffix is always present. There is no "bare" version like `v2.1.0` — the channel is explicit so there is never ambiguity about what kind of build you are running.
+Stable releases have no channel suffix. Pre-release versions include the channel and a build number. A `v` prefix is accepted during parsing but omitted in internal representation.
 
 ## Release channels
 
-| Channel | Meaning |
+<Mermaid chart={`
+flowchart LR
+    N["nightly"] --> B["beta"] --> RC["rc"] --> S["stable"]
+    style N fill:#8B4513,color:#fff
+    style B fill:#B8860B,color:#fff
+    style RC fill:#2E8B57,color:#fff
+    style S fill:#2d6a4f,color:#fff
+`} />
+
+| Channel | Purpose |
 |---------|---------|
-| `dev` | Development builds from main branch. Not suitable for production. May have incomplete features or known bugs. |
-| `beta` | Feature-complete builds undergoing testing. Suitable for staging and early-adopter production use. |
-| `rc` | Release candidate. Code is frozen; only bug fixes are applied. Suitable for final pre-production validation. |
-| `stable` | Production release. Fully tested, supported, and eligible for security patches. |
+| `nightly` | Development builds from the main branch. May have incomplete features. Also recognized as `dev`. |
+| `beta` | Feature-complete builds undergoing testing. Suitable for staging environments. |
+| `rc` | Release candidate. Code is frozen; only bug fixes are applied. |
+| `stable` | Production release. Fully tested and supported. Also recognized as `latest`. |
 
-Channel ordering for comparison purposes: `dev < beta < rc < stable`.
-
-## Compatibility checking
-
-Before a component connects to another, it checks version compatibility. The rules:
-
-- **Major version must match.** A `v2.x` client cannot communicate with a `v3.x` server. Breaking API changes only happen on major version bumps.
-- **Minor version of the server must be >= client.** A `v2.1` client can connect to a `v2.2` server (server has new features the client doesn't use). A `v2.3` client cannot connect to a `v2.1` server (client expects features the server doesn't have).
-- **Patch version is always compatible within the same major.minor.** Bug fix releases do not change the API.
-- **Channel does not affect compatibility.** A `beta` build can connect to a `stable` build of the same version, which is intentional for staging-to-production testing.
-
-## Version diffing
-
-The version diff tells you what kind of upgrade you are doing:
-
-```
-diff(from: Version, to: Version) -> VersionDiff
-```
-
-| Diff kind | Example | Notes |
-|-----------|---------|-------|
-| `Major` | v1.x → v2.x | Breaking changes. Manual migration may be required. |
-| `Minor` | v2.1 → v2.3 | New features. Backward compatible. |
-| `Patch` | v2.1.0 → v2.1.4 | Bug fixes only. Safe to apply without downtime planning. |
-| `ChannelPromotion` | v2.1.0-beta.3 → v2.1.0-stable | Same code, different channel label. |
-| `Downgrade` | v2.2 → v2.1 | Rolling back to a previous version. |
-
-## Backup and rollback
-
-Before applying any upgrade, Nauka automatically creates a backup snapshot of the local state database. The backup is tagged with the current version:
-
-```
-~/.nauka/data/backups/v2.1.0-stable-before-v2.2.0-stable.db
-```
-
-If the upgrade fails or the new version does not pass health checks, the operator can roll back:
-
-```sh
-nauka upgrade rollback
-```
-
-This restores the state backup and re-installs the previous binary. The rollback is only available one version back — it is not a full version history system.
+Channels are ordered by stability: `nightly < beta < rc < stable`. Within the same major.minor.patch, a stable release is always considered newer than its pre-release counterparts.
 
 ## Checking the current version
 
@@ -82,25 +53,42 @@ This restores the state backup and re-installs the previous binary. The rollback
 nauka version
 ```
 
-Output:
+The version is determined at build time. CI sets the `NAUKA_VERSION` environment variable during compilation. For local development builds, it falls back to the version in `Cargo.toml`.
+
+## Compatibility between nodes
+
+Before a node joins a mesh or communicates with peers, it checks version compatibility. The rules are straightforward:
+
+- **Major version must match.** A v2.x node cannot join a v3.x mesh. Breaking changes only happen on major version bumps.
+- **Minor version differences are allowed.** Nodes with different minor versions can coexist in the same mesh, enabling rolling upgrades.
+- **Patch version is always compatible** within the same major.minor.
+
+If there is a minor version difference, Nauka logs a warning but allows the connection. If there is a major version mismatch, the connection is refused.
+
+## Version comparison
+
+Versions are compared in this order:
+
+1. Major version (highest weight)
+2. Minor version
+3. Patch version
+4. Channel stability rank (nightly < beta < rc < stable)
+5. Build number within channel
+
+This means `2.1.0` (stable) is always considered newer than `2.1.0-rc.3`, which is newer than `2.1.0-beta.14`, which is newer than `2.1.0-nightly.47`.
+
+## Upgrade safety
+
+Before applying a binary upgrade, Nauka can back up the current binary:
 
 ```
-nauka v2.1.0-stable
-  build:    2026-03-12T14:22:00Z
-  commit:   a4f3e2d
-  platform: linux/amd64
+~/.nauka/nauka.backup
 ```
 
-```sh
-nauka version --check
-```
+If the new version causes problems, the previous binary can be restored from this backup. The rollback is one level deep -- it restores the single most recent backup, not a full version history.
 
-Queries the update channel for newer versions and reports whether an upgrade is available:
+## Feature flags
 
-```
-current:   v2.1.0-stable
-available: v2.2.0-stable
-channel:   stable
+Nauka supports runtime feature flags for gating experimental functionality. Feature flags can be enabled or disabled independently of the version, allowing new features to be shipped in a release but activated only when explicitly opted in.
 
-Run 'nauka upgrade' to install v2.2.0-stable.
-```
+Feature flags default to disabled and must be explicitly enabled. This ensures that experimental behavior never activates on an upgrade unless the operator chooses to turn it on.

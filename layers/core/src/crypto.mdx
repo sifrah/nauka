@@ -1,92 +1,77 @@
 ---
 title: Cryptographic Primitives
-description: WireGuard keypairs, mesh secrets, HKDF key derivation, and secure random utilities.
+description: WireGuard keypairs, mesh secrets, key derivation, and how Nauka bootstraps trust between nodes.
 sidebar:
   order: 4
 ---
 
-The Core crypto module provides the cryptographic building blocks used throughout Nauka. It does not implement any crypto algorithms itself — it composes well-audited libraries into a small, focused API.
+import Mermaid from '../../../../components/Mermaid.astro';
+
+Nauka's cryptographic primitives handle three concerns: generating WireGuard keypairs for tunnel encryption, managing mesh secrets for trust bootstrapping, and deriving purpose-specific keys from shared secrets.
 
 ## WireGuard keypairs
 
-WireGuard uses Curve25519 for key exchange. Every hypervisor node and every mesh peer has a WireGuard keypair.
+Every node in the mesh has a WireGuard keypair based on Curve25519. The keypair is generated during `nauka hypervisor init` (for the first node) or `nauka hypervisor join` (for subsequent nodes).
 
+- The **private key** stays on the node and is never transmitted
+- The **public key** is shared with peers so they can establish encrypted tunnels
+
+Keys are encoded as Base64 strings, which is the standard format that WireGuard uses. You can see a node's public key in the output of:
+
+```sh
+nauka hypervisor status
 ```
-generate_wg_keypair() -> (WgPrivateKey, WgPublicKey)
-```
 
-The private key is a 32-byte scalar. The public key is the corresponding Curve25519 point. Keys are encoded as Base64 for storage and display, which is the format WireGuard itself expects.
-
-You will rarely call this directly. The `nauka init` command generates keypairs during node enrollment and stores them in the local config. The public key is registered with the control plane; the private key never leaves the node.
+You do not need to manage these keys manually. Nauka generates them, stores the private key locally, and distributes the public key to peers automatically through the peering protocol.
 
 ## Mesh secrets
 
-A `MeshSecret` is a 32-byte shared secret used to bootstrap trust between nodes that want to join the same mesh.
+A mesh secret is a 32-byte shared secret that bootstraps trust between nodes. It is the single credential needed to join a mesh.
+
+Mesh secrets are displayed with a `syf_sk_` prefix followed by a Base58-encoded value:
 
 ```
-MeshSecret::generate() -> MeshSecret
-MeshSecret::display() -> "syf_sk_<base58-encoded-bytes>"
-MeshSecret::from_str("syf_sk_...") -> Result<MeshSecret>
+syf_sk_7Kz3x9vPq2mN5wR8tY4uJ6hB1fD0gC3eA8sL2nM4pQ6r
 ```
 
-The `syf_sk_` prefix makes mesh secrets visually distinct from other secrets and allows automated scanning tools to detect accidental exposure (in logs, environment variables, etc.).
+The `syf_sk_` prefix makes mesh secrets visually distinct from other credentials and allows automated scanning tools (such as secret detectors in CI pipelines) to detect accidental exposure in logs, environment variables, or source code.
 
-Mesh secrets are used as the input keying material for HKDF derivation. They are not used directly for encryption.
+A mesh secret is generated once when the first node creates the mesh with `nauka hypervisor init`. The operator then provides this secret to other nodes when they join with `nauka hypervisor join`.
 
-## Key derivation with HKDF
+:::caution
+The mesh secret is the root of trust for the entire mesh. Anyone who has it can join a new node. Store it securely and rotate it if you suspect it has been compromised.
+:::
 
-Once two nodes share a mesh secret, they derive per-purpose keys using HKDF-SHA256. HKDF takes a master secret (the mesh secret), an optional salt, and an "info" string that binds the derived key to its intended use.
+## Key derivation
 
-```
-hkdf_derive(
-    secret: &MeshSecret,
-    info: &str,
-    output: &mut [u8],
-)
-```
+The mesh secret is never used directly for encryption. Instead, Nauka derives purpose-specific keys from it using HKDF-SHA256 (HMAC-based Key Derivation Function). Each derived key is bound to a specific purpose through a domain string:
 
-For example, the peering PIN used during mesh join is derived as:
+<Mermaid chart={`
+flowchart TD
+    SECRET["Mesh Secret<br/>(32 bytes)"] --> HKDF["HKDF-SHA256"]
+    HKDF -->|domain: peering-pin| PIN["Peering PIN"]
+    HKDF -->|domain: wireguard-psk| PSK["WireGuard PSK"]
+    HKDF -->|domain: other-purpose| OTHER["Other keys..."]
+`} />
 
-```
-hkdf_derive(&mesh_secret, "nauka-peering-pin-v1", &mut pin_bytes)
-```
+This design means that even if one derived key is compromised, the others remain secure. Changing the domain string produces a completely different key, even from the same secret.
 
-If the peering info string changes — say, for a v2 peering protocol — a different key is derived automatically, even from the same secret. This prevents key reuse across protocol versions.
+## Peering PIN
 
-## PIN derivation for peering
+When a node wants to join a mesh, it proves knowledge of the mesh secret by presenting a 4-digit PIN derived from the secret. The PIN is computed deterministically:
 
-When a node wants to join a mesh, it needs to prove it knows the mesh secret without transmitting the secret itself. It does this by presenting a short PIN derived from the secret.
+1. The joining node derives the PIN from the mesh secret
+2. The accepting node derives the same PIN from its copy of the secret
+3. If the PINs match, the join is authenticated
 
-```
-derive_peering_pin(secret: &MeshSecret) -> PeeringPin
-```
-
-The PIN is a 6-digit decimal number derived via HKDF. It changes based on a time window (similar to TOTP), so a captured PIN cannot be replayed indefinitely. The joining node and the accepting node both derive the same PIN independently and compare them.
-
-## SHA-256 hashing
-
-```
-sha256(data: &[u8]) -> [u8; 32]
-sha256_hex(data: &[u8]) -> String
-```
-
-Used by the [addressing](/nauka/layers/core/addressing) module to derive IPv6 node addresses from WireGuard public keys, and for content-addressable storage in the snapshot subsystem.
-
-## Secure random bytes
-
-```
-random_bytes(len: usize) -> Vec<u8>
-random_u64() -> u64
-```
-
-These use the operating system's cryptographically secure random source (`getrandom` on Linux). Never use these for secrets that need to be reproducible — use HKDF derivation instead.
+This avoids transmitting the mesh secret itself over the network during the join handshake.
 
 ## What this module does not do
 
-The crypto module does not handle:
+The cryptographic primitives are intentionally scoped to the operations listed above. They do not handle:
 
-- TLS or mTLS — that is handled at the transport layer using rustls
-- Token signing or verification — handled by the auth module with Ed25519
-- Disk encryption — handled by the storage layer with AES-256-GCM
+- **TLS or mutual TLS** -- handled at the transport layer
+- **Disk encryption** -- handled by the storage layer
+- **Token signing** -- handled by the auth module
 
-The boundary is intentional. Mixing responsibilities in a crypto module is a common source of subtle bugs. Each layer owns its own crypto needs and calls into Core only for the shared primitives.
+Each layer owns its own cryptographic needs and calls into the core primitives only for the shared building blocks.

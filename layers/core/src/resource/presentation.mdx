@@ -1,100 +1,115 @@
 ---
 title: Presentation
-description: How list output and detail views are configured — columns, field formatting, status coloring, and byte display.
+description: How Nauka formats list output as tables and get output as detail views -- columns, sections, and display formats.
 sidebar:
   order: 7
 ---
 
-The presentation layer controls how resources look when displayed. `list` operations render a table; `get` operations render a detail view. Both are configured in the `ResourceDef` and driven automatically — your handler just returns data.
+The presentation layer controls how resources appear in terminal output. When you run a `list` command, results are rendered as an aligned table. When you run a `get` command, the result is rendered as a key-value detail view. Both layouts are defined in the resource definition -- handlers just return data, and the framework handles formatting.
 
-## ColumnDef — table output
+## Table output (list commands)
 
-`ColumnDef` configures a column in the table rendered by `list`. Each column maps a field name from the response to a display header.
-
-```rust
-ResourceDef::build("vm", "Virtual machine")
-    .column(ColumnDef::new("id", "ID"))
-    .column(ColumnDef::new("name", "Name"))
-    .column(ColumnDef::new("status", "Status").colored())
-    .column(ColumnDef::new("vcpus", "vCPUs").right_aligned())
-    .column(ColumnDef::new("memory_bytes", "Memory").format(DisplayFormat::Bytes))
-    .column(ColumnDef::new("created_at", "Created").format(DisplayFormat::RelativeTime))
-```
-
-### Column options
-
-| Option | Effect |
-|--------|--------|
-| `.colored()` | Apply status-based color (see [color docs](/nauka/layers/core/ui/color)) |
-| `.right_aligned()` | Right-align numeric values |
-| `.truncate(n)` | Truncate to n characters and append `…` |
-| `.format(DisplayFormat)` | Apply a display formatter |
-
-### DisplayFormat
-
-`DisplayFormat` controls how raw values are transformed before display.
-
-| Format | Input | Output |
-|--------|-------|--------|
-| `DisplayFormat::Bytes` | `1073741824` | `1.0 GiB` |
-| `DisplayFormat::RelativeTime` | ISO 8601 timestamp | `2 hours ago` |
-| `DisplayFormat::AbsoluteTime` | ISO 8601 timestamp | `2026-04-05 14:32:00` |
-| `DisplayFormat::StatusDot` | `"active"` | `● active` (colored) |
-
-## DetailField — get output
-
-`DetailField` configures a row in the key-value detail view rendered by `get`. The layout is a two-column view with the field label on the left and value on the right.
-
-```rust
-ResourceDef::build("vm", "Virtual machine")
-    .detail(DetailField::new("id", "ID"))
-    .detail(DetailField::new("name", "Name"))
-    .detail(DetailField::new("status", "Status").colored())
-    .detail(DetailField::new("hypervisor_id", "Hypervisor"))
-    .detail(DetailField::new("vcpus", "vCPUs"))
-    .detail(DetailField::new("memory_bytes", "Memory").format(DisplayFormat::Bytes))
-    .detail(DetailField::new("created_at", "Created").format(DisplayFormat::RelativeTime))
-    .detail(DetailField::new("updated_at", "Last updated").format(DisplayFormat::RelativeTime))
-```
-
-Example output:
+The table layout is defined as a list of columns. Each column maps a field from the response data to a display header:
 
 ```
-ID          vm-01HWKZ3P8B0E7D2N5FVYMR4CXJ
-Name        web-server-1
-Status      ● running
-Hypervisor  hv-01HWKZ4A9C1F8E3M6GXZNQ5BYK
-vCPUs       4
-Memory      8.0 GiB
-Created     3 hours ago
-Last updated  12 minutes ago
+$ nauka hypervisor list
+NAME     ENDPOINT              STATUS     MESH
+------------------------------------------------------
+node-1   203.0.113.1:51820     active     production
+node-2   203.0.113.2:51820     active     production
 ```
 
-## Status coloring
+### Column configuration
 
-Columns and detail fields marked `.colored()` apply color based on the value string. See the [color module docs](/nauka/layers/core/ui/color) for the full mapping. The defaults are:
+Each column has several configurable properties:
 
-| Value | Color |
-|-------|-------|
-| `active`, `running`, `available`, `healthy` | Green |
-| `stopped`, `inactive`, `disabled` | Dim white |
-| `error`, `failed`, `unhealthy` | Red |
-| `pending`, `starting`, `draining` | Yellow |
-| `unknown` | Dim white |
+**Width**: Columns can auto-size to their content, be fixed to a specific width, or be constrained to a minimum or maximum width.
 
-## Column ordering
+**Alignment**: Columns are left-aligned by default. Numeric columns (like port numbers or sizes) can be right-aligned for easier scanning.
 
-Columns appear in the table in the order they are declared on the `ResourceDef`. Put the most important columns first. IDs are often most useful at the end where truncation is less disruptive to scanning.
+**Display format**: Values can be transformed before display (see Display Formats below).
 
-## Output format flags
+### Empty state
 
-The table and detail renderers respect the `--output` / `-o` flag, which is automatically added to all operations:
+When no resources are found, the table displays a configurable empty message instead of an empty table:
 
-| Flag | Output |
-|------|--------|
-| (none) | Human-readable table or detail view |
-| `-o json` | Raw JSON response |
-| `-o yaml` | YAML response |
-| `-o id` | IDs only (useful for scripting) |
+```
+$ nauka hypervisor list
+No hypervisors found. Run 'nauka hypervisor init' to create a mesh.
+```
 
-These flags are injected automatically — you don't need to declare them.
+### Default sorting
+
+Tables can specify a default sort field so results appear in a consistent, predictable order.
+
+## Detail output (get commands)
+
+The detail view is rendered as a two-column key-value layout, organized into sections:
+
+```
+$ nauka hypervisor get node-1
+
+Mesh Information
+================
+  Name:            production
+  Mesh ID:         mesh-01HW...
+  Role:            founder
+
+Network
+================
+  Endpoint:        203.0.113.1:51820
+  IPv6 Address:    fd00:1234::1/128
+  Listen Port:     51820
+```
+
+Detail views support multiple sections with optional titles. Each section contains a list of labeled fields. Fields without a value display a dash (`-`).
+
+## Display formats
+
+Display formats control how raw values are transformed before being shown to the user. The same formats work in both table columns and detail fields.
+
+| Format | Input example | Output example |
+|--------|--------------|----------------|
+| **Plain** | `"production"` | `production` |
+| **Bytes** | `1073741824` | `1.0 GiB` |
+| **Duration** | `3661` | `1h 1m` |
+| **Timestamp** | `1712345678` | `2024-04-05 18:34 UTC` |
+| **Status** | `"active"` | `active` |
+| **Masked** | `"wg-secret-key-abc123"` | `****...c123` |
+| **YesNo** | `true` | `yes` |
+
+### Bytes format
+
+Automatically selects the appropriate unit (B, KiB, MiB, GiB) based on the value.
+
+### Duration format
+
+Converts seconds into a human-readable format using the largest appropriate units (days/hours, hours/minutes, minutes/seconds, or just seconds).
+
+### Timestamp format
+
+Converts Unix epoch timestamps into `YYYY-MM-DD HH:MM UTC` format.
+
+### Masked format
+
+Shows only the last 4 characters of sensitive values, replacing the rest with asterisks. Useful for keys and tokens.
+
+### YesNo format
+
+Converts boolean values into `yes` or `no` for clearer display.
+
+## JSON output
+
+All formatting is bypassed when `--json` is used. In JSON mode, the raw data from the handler is output directly as formatted JSON:
+
+```
+$ nauka hypervisor get node-1 --json
+{
+  "name": "node-1",
+  "endpoint": "203.0.113.1:51820",
+  "status": "active",
+  ...
+}
+```
+
+This makes it straightforward to use Nauka output in scripts and automation pipelines with tools like `jq`.

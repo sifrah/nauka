@@ -1,92 +1,73 @@
 ---
-title: Store
-description: ClusterDb — the async TiKV client for reading and writing distributed cluster state.
+title: Cluster Database
+description: ClusterDb -- the distributed key-value store client that Nauka sub-systems use to read and write cluster-wide state across the mesh.
 sidebar:
   order: 4
 ---
 
-`ClusterDb` is the async interface that the rest of Nauka uses to read and write state in the distributed TiKV cluster. It wraps the TiKV Raw client and adds namespace-based key isolation and automatic JSON serialization.
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## Connecting
+The ClusterDb is the interface that Nauka uses to store and retrieve cluster-wide state in TiKV. It is used by storage operations to publish and fetch region configurations, and will be used by future sub-systems (VMs, networks, users) to manage their distributed state.
 
-```rust
-let db = ClusterDb::connect(&["http://[fd01::1]:2379"]).await?;
-```
+## How it works
 
-Pass one or more PD endpoint URLs. The TiKV client library handles discovering the actual TiKV nodes from PD and routing requests to the right shards automatically.
+ClusterDb connects to the TiKV cluster through one or more PD endpoints. The TiKV client library handles shard discovery and request routing automatically -- you connect to PD, and PD directs you to the right TiKV node for each key.
 
-## Namespaced keys
+<Mermaid chart={`
+graph LR
+  N[Nauka sub-system] --> CDB[ClusterDb]
+  CDB --> PD[PD<br/>port 2379]
+  PD --> TK1[TiKV node 1]
+  PD --> TK2[TiKV node 2]
+  PD --> TK3[TiKV node 3]
+`} />
 
-All operations take a `namespace` and a `key`. Internally the key is stored as `{namespace}/{key}`. This partitions data by subsystem without any risk of collision between, for example, VM records and network allocations.
+## Key structure
 
-```rust
-// Stored at "vms/vm-001"
-db.put("vms", "vm-001", &vm_record).await?;
+All keys are partitioned by namespace using the format `{namespace}/{key}`. This prevents collisions between different sub-systems that share the same TiKV cluster.
 
-// Stored at "networks/net-abc"
-db.put("networks", "net-abc", &net_record).await?;
-```
+For example, storage region configs are stored under the namespace `storage/regions`:
+- `storage/regions/eu` -- configuration for the "eu" region
+- `storage/regions/us-east` -- configuration for the "us-east" region
 
 ## Operations
 
-### put
+ClusterDb provides six operations for working with distributed state:
 
-Write a serializable value. The value is JSON-serialized before storage.
+| Operation | Description |
+|---|---|
+| **put** | Write a value (JSON-serialized) |
+| **get** | Read a value (JSON-deserialized); returns nothing if the key does not exist |
+| **delete** | Remove a key |
+| **list** | Scan all keys matching a prefix within a namespace (up to 10,000 results) |
+| **exists** | Check if a key exists without reading its value |
+| **batch_put** | Write multiple key-value pairs in a single call (not transactional, but more efficient than individual puts) |
 
-```rust
-db.put("vms", "vm-001", &serde_json::json!({"name": "web-1", "vcpus": 2})).await?;
-```
+All values are stored as JSON. Serialization and deserialization happen automatically.
 
-### get
+## Current usage
 
-Read a deserializable value. Returns `None` if the key does not exist.
+Today, ClusterDb is used for one purpose: distributing storage region configurations across the cluster.
 
-```rust
-let vm: Option<VmRecord> = db.get("vms", "vm-001").await?;
-```
+When the first node runs `nauka hv init` with S3 credentials, the region configuration (endpoint, bucket, access key, secret key, encryption password) is published to TiKV under `storage/regions/{region}`.
 
-### delete
+When subsequent nodes run `nauka hv join`, they fetch the region configuration from TiKV and set up their local ZeroFS instance with the same S3 backend. This means S3 credentials only need to be provided once during init -- all joining nodes receive them automatically through the control plane.
 
-Remove a key.
+<Aside type="note">
+The fetch operation retries up to 6 times with a 2-second delay between attempts. This handles transient "Leader not found" errors that can occur immediately after a node joins the cluster, while Raft is still electing a leader.
+</Aside>
 
-```rust
-db.delete("vms", "vm-001").await?;
-```
+## Relationship to local state
 
-### list
+Each Nauka node also has a local key-value store (LocalDb) backed by an embedded database for node-specific state like the mesh identity and peer list. The two stores serve different purposes:
 
-Scan all keys with a given prefix within a namespace. Returns a vector of `(key, value)` pairs. The namespace prefix is stripped from the returned keys.
+| | LocalDb | ClusterDb |
+|---|---|---|
+| **Scope** | Single node | Entire cluster |
+| **Backend** | Embedded (redb) | Distributed (TiKV) |
+| **Survives node loss** | No | Yes (replicated) |
+| **Requires mesh** | No | Yes (PD + TiKV on mesh IPv6) |
+| **Use case** | Node identity, peer list, region registry | Shared config, VM records, network allocations |
 
-```rust
-// Returns all keys starting with "vms/vm-" as ("vm-001", ...), ("vm-002", ...) etc.
-let vms: Vec<(String, VmRecord)> = db.list("vms", "vm-").await?;
-```
-
-The scan limit is 10,000 entries per call. For larger datasets, use a more specific prefix.
-
-### exists
-
-Check whether a key is present without deserializing the value.
-
-```rust
-if db.exists("vms", "vm-001").await? {
-    // ...
-}
-```
-
-### batch_put
-
-Write multiple key-value pairs in a single batch. This is not a transaction — it does not provide atomicity across keys — but it is more efficient than issuing individual puts for a large number of entries.
-
-```rust
-db.batch_put("vms", &[
-    ("vm-001", &record_a),
-    ("vm-002", &record_b),
-]).await?;
-```
-
-## Relationship to LocalDb
-
-`ClusterDb` is the distributed counterpart to `LocalDb` (the embedded redb store used for node-local state like `FabricState`). They share the same key naming convention — `namespace/key` — so patterns developed with `LocalDb` transfer directly.
-
-`LocalDb` is for per-node state that does not need to be replicated. `ClusterDb` is for cluster-wide state that must survive a node failure and be visible from any node in the mesh.
+Both stores use the same `namespace/key` convention, so patterns developed with one transfer directly to the other.

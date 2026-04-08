@@ -1,40 +1,95 @@
 ---
-title: Overview
-description: ZeroFS — S3-backed block storage for Nauka VMs, with per-region buckets, encryption, compression, and NBD export.
+title: Storage Overview
+description: S3-backed block storage for Nauka, powered by ZeroFS -- with per-region buckets, transparent encryption, compression, and local caching.
 sidebar:
   order: 1
 ---
 
-Nauka's storage layer gives VMs persistent block devices backed by object storage. The engine is [ZeroFS](https://github.com/barre/zerofs), a filesystem that treats an S3 bucket as its backing store and exposes block devices to the host via NBD (Network Block Device).
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## How it works
+Nauka's storage layer provides persistent block storage backed by S3-compatible object storage. The engine is [ZeroFS](https://github.com/barre/zerofs), which treats an S3 bucket as its backing store and exposes block devices locally via NBD (Network Block Device).
 
-ZeroFS runs as a daemon on each hypervisor node. It mounts an S3 bucket and presents block devices at the OS level. VMs attach to those block devices through the NBD interface. From the VM's perspective it is a regular block device; ZeroFS handles caching, encryption, and synchronization with S3 transparently.
+## Architecture
+
+Each node runs one ZeroFS instance per storage region. ZeroFS handles caching, encryption, compression, and synchronization with S3 transparently.
+
+<Mermaid chart={`
+graph LR
+  VM[VM / Workload] -->|NBD| ZFS[ZeroFS daemon]
+  ZFS -->|encrypted + compressed| S3[(S3 Bucket)]
+  ZFS -->|hot data| Cache[(Local cache<br/>/var/lib/nauka/zerofs/region/)]
+`} />
 
 ## Regions and buckets
 
-Storage is organized into regions. Each region maps to exactly one S3 bucket. A node can serve multiple regions simultaneously — each gets its own ZeroFS instance and systemd service (`nauka-zerofs-<region>`).
+Storage is organized into regions. Each region maps to exactly one S3 bucket on one endpoint. A node can serve multiple regions simultaneously -- each gets its own ZeroFS instance and systemd service.
 
-The region identifier (e.g., `eu`, `us-east`) is chosen by the operator when the region is registered. It does not need to match an S3 region name.
+The region identifier (e.g., `eu`, `us-east`) is chosen by the operator during cluster initialization. It does not need to match any S3 or cloud provider region name.
 
-## Encryption and compression
+When the init node creates a cluster, the region's S3 configuration is published to the distributed control plane (TiKV). When subsequent nodes join, they automatically fetch the region configuration from TiKV and set up their local ZeroFS instance -- no need to re-enter S3 credentials on each node.
 
-ZeroFS is configured with:
+## Encryption
 
-- **Encryption**: always enabled — data is encrypted before being written to S3
-- **Compression**: LZ4 — fast, low-overhead compression applied before encryption
+All data is encrypted before being written to S3. The encryption password is derived deterministically:
 
-Both are on by default for every region. There is no option to disable them through the Nauka CLI.
+```
+SHA256(s3_secret_key + ":zerofs:" + region)
+```
+
+This means all nodes in the same region derive the same encryption password automatically from the S3 credentials. There is no separate key to manage or distribute.
+
+<Aside type="note">
+Encryption is always enabled. There is no option to disable it through the Nauka CLI.
+</Aside>
+
+## Compression
+
+ZeroFS applies LZ4 compression to all data before encryption. LZ4 provides fast compression with low CPU overhead, suitable for block storage workloads.
 
 ## Local cache
 
-Each region has a local disk cache at `/var/lib/nauka/zerofs/<region>` capped at 10 GB. Hot data stays local, reducing S3 request latency and costs.
+Each region has a local disk cache at `/var/lib/nauka/zerofs/{region}/` with the following defaults:
 
-## NBD export
+| Setting | Value |
+|---|---|
+| Disk cache | 10 GB |
+| Memory cache | 1 GB |
 
-ZeroFS is configured with NBD enabled and NFS disabled. Block devices are served locally at `127.0.0.1` and attached by the VM manager. No NBD traffic leaves the host.
+Hot data stays local, reducing S3 request latency and bandwidth costs.
+
+## NBD and RPC servers
+
+ZeroFS is configured with two local servers per region:
+
+| Server | Address | Unix socket |
+|---|---|---|
+| NBD (block device) | `127.0.0.1:10809` | `/tmp/zerofs-{region}.nbd.sock` |
+| RPC (control) | `127.0.0.1:7000` | `/tmp/zerofs-{region}.rpc.sock` |
+
+No ZeroFS traffic leaves the host -- block devices are served locally and attached by the VM manager.
+
+## File paths
+
+| Path | Purpose |
+|---|---|
+| `/usr/local/bin/zerofs` | ZeroFS binary |
+| `/etc/nauka/zerofs/{region}.toml` | Per-region configuration (mode 0600) |
+| `/var/lib/nauka/zerofs/{region}/` | Local disk cache |
+| `/mnt/nauka/{region}/` | Mount point |
+
+## Systemd services
+
+Each region runs as an independent systemd service:
+
+| Service name | Description |
+|---|---|
+| `nauka-zerofs-{region}` | ZeroFS instance for a specific region |
+
+For example, a node serving the `eu` and `us-east` regions would have `nauka-zerofs-eu` and `nauka-zerofs-us-east` running simultaneously.
 
 ## Sub-modules
 
-- [Regions](/nauka/layers/hypervisor/storage/region) — `RegionStorage` config and the `RegionRegistry` that persists all configured regions
-- [Service](/nauka/layers/hypervisor/storage/service) — ZeroFS installation, per-region TOML config, and systemd lifecycle
+- [Regions](/nauka/layers/hypervisor/storage/region) -- Region configuration model and the local registry
+- [Service](/nauka/layers/hypervisor/storage/service) -- ZeroFS installation, TOML config generation, and systemd lifecycle
+- [Operations](/nauka/layers/hypervisor/storage/ops) -- High-level orchestration for setup, teardown, and status

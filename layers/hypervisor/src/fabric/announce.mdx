@@ -1,68 +1,101 @@
 ---
-title: Fabric Peer Announcement
-description: How the hypervisor broadcasts new nodes to existing mesh members after a join.
+title: Peer Announcement
+description: How Nauka broadcasts mesh membership changes -- new peer joins and departures -- to keep all nodes in sync.
 sidebar:
   order: 11
 ---
 
-When a new node joins the mesh, the accepting hypervisor needs to tell every other existing peer about it. That is what the announce system does. Without it, peers that were already in the mesh when the new node joined would not have a WireGuard entry for it and could not route traffic to it.
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## Flow
+When a node joins or leaves the mesh, every other node needs to know about it. The announce system handles this propagation. Without it, existing nodes would not have WireGuard entries for newly joined peers and could not route traffic to them. Similarly, when a node leaves, the announce system ensures its peers remove the stale WireGuard configuration.
 
-After a join request is accepted:
+## How announcements work
 
-1. The accepting node calls `broadcast_new_peer()` with the new node's `PeerInfo` and the list of all existing peers
-2. For each existing peer, it opens a TCP connection to that peer's announce port and sends a `PeerAnnounce` message
-3. Each receiving peer runs `handle_announce()`, which adds the new node to its `PeerList`, persists state, and updates its WireGuard config
+The announce system uses two message types, both sent over TLS connections to each peer's announce port (`wg_port + 2`, default 51822).
 
-The new node itself receives the full peer list directly in the `JoinResponse`, so it does not need an announcement.
+### When a new node joins
+
+<Mermaid chart={`
+sequenceDiagram
+    participant New as New Node
+    participant Acceptor as Accepting Node
+    participant P1 as Peer 1
+    participant P2 as Peer 2
+
+    New->>Acceptor: Join request (peering port)
+    Acceptor->>Acceptor: Accept join, update state
+    Acceptor->>P1: PeerAnnounce over TLS (announce port)
+    Acceptor->>P2: PeerAnnounce over TLS (announce port)
+    P1->>P1: Add peer, update WG config
+    P2->>P2: Add peer, update WG config
+`} />
+
+After accepting a join request, the accepting node broadcasts a peer announcement to every existing peer in parallel. Each announcement is a TLS connection to the target peer's announce port carrying a JSON message that identifies the new node (name, WireGuard public key, endpoint, mesh IPv6 address) and who sent the announcement.
+
+Each receiving peer:
+1. Validates the incoming data against injection attacks
+2. Checks whether the peer is already known (skips if same key exists)
+3. Replaces stale entries if the name matches but the key differs (rejoin scenario)
+4. Adds the new peer to its local peer list
+5. Persists the updated state
+6. Rewrites `/etc/wireguard/nauka0.conf` and applies changes via `wg syncconf`
+
+### When a node leaves
+
+Before tearing down its network, a departing node broadcasts a removal message to all known peers. Each receiving peer removes the departing node from its peer list and WireGuard configuration.
+
+The leaving node retries the removal broadcast up to 4 times with 3-second delays between attempts. This handles cases where a peer's announce listener is temporarily unavailable.
+
+## The announce listener
+
+Every node that runs peering mode (`nauka hypervisor peering`) starts an announce listener on `wg_port + 2` (default 51822). This listener:
+
+- Binds to `[::]` (all interfaces, dual-stack IPv4/IPv6)
+- Accepts TLS connections using the same TOFU model as the peering server
+- Opens a fresh database connection for each incoming message (avoids lock contention)
+- Processes both peer announcements and peer removals
+- Runs indefinitely until the peering process is stopped
+
+The announce listener also has a dedicated systemd service (`nauka-announce`) that can run persistently:
+
+| Item | Value |
+|---|---|
+| Service name | `nauka-announce` |
+| Unit file | `/etc/systemd/system/nauka-announce.service` |
+| Depends on | `nauka-wg.service` |
+| Restart policy | On failure, 5-second delay |
+
+This service is managed through the `nauka hypervisor` commands and does not need manual intervention.
 
 ## Port allocation
 
-Three ports are used by the fabric subsystem, all relative to the WireGuard port:
+| Purpose | Default Port | Protocol |
+|---|---|---|
+| WireGuard data plane | 51820 | UDP |
+| Peering listener (join requests) | 51821 | TCP/TLS |
+| Announce listener | 51822 | TCP/TLS |
 
-| Purpose | Port |
-|---|---|
-| WireGuard data plane | `wg_port` (default 51820) |
-| Peering listener (join requests) | `wg_port + 1` (51821) |
-| Announce listener | `wg_port + 2` (51822) |
+The announce port is always `wg_port + 2`. When broadcasting, the sending node connects to `[mesh_ipv6]:51822` on each peer -- announcements travel over the mesh network, not over the public internet.
 
-The announce listener is always at `wg_port + 2`. When broadcasting, the accepting node connects to `[mesh_ipv6]:51822` on each peer.
+## Best-effort delivery and convergence
 
-## Protocol
+Individual announcements are fire-and-forget. If a peer is unreachable or its announce listener is not yet running (common during concurrent joins), the failure is logged and the broadcast continues to remaining peers. A failed announcement does not fail the join.
 
-Announcements use the same length-prefixed JSON framing as the peering protocol. The message type is `PeerAnnounce`:
+The system achieves reliable convergence through periodic reconciliation rather than guaranteed delivery. Every 30 seconds, the peering node re-reads its peer list and re-announces any peers added within the last 60 seconds. This sweep is idempotent -- peers that already know about the announced node skip the update silently.
 
-```json
-{
-  "peer": {
-    "name": "web-03",
-    "region": "eu",
-    "zone": "fsn1",
-    "wg_public_key": "...",
-    "wg_port": 51820,
-    "endpoint": "203.0.113.30",
-    "mesh_ipv6": "fd01::3"
-  },
-  "announced_by": "web-01"
-}
-```
-
-## Best-effort delivery
-
-Announcements are fire-and-forget per peer. If a peer is down or unreachable, the failure is logged and the broadcast continues to the remaining peers. A failed announcement does not fail the join.
-
-```
-WARN failed to announce new peer  peer=web-04  error=connection refused
-INFO announced new peer           peer=web-02  new_peer=web-03
-```
-
-`broadcast_new_peer()` returns `(successes, failures)` so the caller can log a summary.
+This means the mesh converges to full connectivity within approximately 60 seconds of the last join, even in worst-case scenarios with many concurrent joins, timing issues, or transient network problems.
 
 ## Idempotency
 
-The announce listener checks whether the incoming peer is already known before adding it. If a duplicate announcement arrives (e.g. from two acceptors racing), the second one is silently skipped.
+The announce handler checks whether an incoming peer is already known before adding it:
 
-## DB access
+- **Same public key already known** -- The announcement is silently skipped. This handles duplicate announcements from multiple sources or reconciliation sweeps.
+- **Same name, different key** -- The old entry is replaced with the new one. This handles the leave-and-rejoin scenario where a node generates a new keypair.
 
-Like the health checker, the announce listener opens a fresh database connection per incoming request and drops it immediately after. This keeps the write lock window short and avoids blocking concurrent operations.
+This design means it is always safe to send redundant announcements. The reconciliation loop exploits this property to guarantee convergence without tracking which peers have received which announcements.
+
+## Security
+
+All announce connections use TLS with the same TOFU (Trust on First Use) model as the peering protocol. The TLS layer prevents eavesdropping and injection by attackers on the local network. The WireGuard mesh itself provides an additional layer of encryption at the transport level, since announce traffic travels over mesh IPv6 addresses.
+
+All incoming peer data is validated against injection attacks (control characters, excessive length) before being used in WireGuard configuration files.

@@ -1,75 +1,90 @@
 ---
 title: Resource Framework
-description: A single ResourceDef declaration generates CLI commands, REST API routes, validation, and interactive prompts — all from one definition.
+description: How Nauka generates CLI commands and REST API routes from a single resource definition, eliminating duplication between interfaces.
 sidebar:
   order: 1
 ---
 
-The resource framework is the heart of Nauka's CLI and API. Instead of writing separate clap argument parsers, axum route handlers, validation logic, and display code for every resource, you write one `ResourceDef` and get all of that for free.
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-## The problem it solves
+The resource framework is the foundation of Nauka's command-line interface and REST API. Every manageable object in the platform -- a hypervisor, a VPC, a virtual machine -- is declared once as a **resource definition**. From that single declaration, Nauka automatically generates CLI subcommands, API endpoints, input validation, interactive prompts, and formatted output.
 
-Building a CLI tool and a REST API for the same resources is tedious. The same concepts — "list hypervisors", "create a VPC", "delete a volume" — have to be expressed three times: once in the CLI argument parser, once in the HTTP router, and once in the display layer. When things change, they have to change in all three places.
+## Why a unified framework
 
-The resource framework eliminates that duplication. A `ResourceDef` is the single source of truth for what a resource is, what operations it supports, what its fields look like, and how it should be displayed.
+Without a resource framework, adding a new manageable object to the platform means writing separate code for:
 
-## What a ResourceDef contains
+- CLI argument parsing and help text
+- REST API route handlers and request validation
+- Output formatting (tables, detail views, JSON)
+- Interactive prompts for missing input
+- Confirmation dialogs for destructive actions
 
-| Section | Purpose |
-|---------|---------|
-| [Identity](/nauka/layers/core/resource/identity) | Name, aliases, plural form — used for CLI commands and API paths |
-| [Scope](/nauka/layers/core/resource/scope) | Where the resource lives in the hierarchy (org, project, VPC) |
-| [Schema](/nauka/layers/core/resource/schema) | Field definitions with types, defaults, and validation |
-| [Operations](/nauka/layers/core/resource/operation) | Which CRUD and custom actions are supported |
-| [Constraints](/nauka/layers/core/resource/constraint) | Cross-field rules like "A requires B" or "A conflicts with C" |
-| [Presentation](/nauka/layers/core/resource/presentation) | Which columns appear in table output and detail view |
+That quickly leads to inconsistency and duplication. The resource framework eliminates this by deriving all interfaces from one source of truth.
 
-## One definition, many outputs
+## What a resource definition contains
 
-From a single `ResourceDef`, the framework generates:
+Each resource definition is composed of several parts:
 
-- **CLI subcommands** — `nauka vpc list`, `nauka vpc create --name prod`, etc. via [CLI generation](/nauka/layers/core/resource/cli-gen)
-- **REST API routes** — `GET /vpcs`, `POST /vpcs`, `GET /vpcs/{id}`, etc. via [route generation](/nauka/layers/core/api/route-gen)
-- **Interactive prompts** — when a required field is missing and stdin is a TTY, the user is prompted rather than getting an error
-- **Confirmation dialogs** — destructive operations ask "Are you sure?" before proceeding
-- **Table and detail output** — `list` results render as aligned tables; `get` results render as key-value detail views
+| Part | Purpose | Learn more |
+|------|---------|------------|
+| [Identity](/nauka/layers/core/resource/identity) | Name, aliases, and plural form -- determines CLI command names and API paths |  |
+| [Scope](/nauka/layers/core/resource/scope) | Where the resource sits in the hierarchy and which parent flags are required |  |
+| [Schema](/nauka/layers/core/resource/schema) | Field definitions with types, defaults, environment variable overrides, and visibility |  |
+| [Operations](/nauka/layers/core/resource/operation) | Which actions are supported: create, list, get, delete, or custom actions |  |
+| [Constraints](/nauka/layers/core/resource/constraint) | Cross-field validation rules checked before any action executes |  |
+| [Presentation](/nauka/layers/core/resource/presentation) | Table columns for list output and sections for detail views |  |
 
-## A minimal example
+## How it works end to end
 
-```rust
-let vpc = ResourceDef::build("vpc", "Virtual Private Cloud")
-    .plural("vpcs")
-    .op(Operation::list())
-    .op(Operation::create().with_arg(
-        OperationArg::required(FieldDef::string("name", "VPC name"))
-    ))
-    .op(Operation::get())
-    .op(Operation::delete().with_confirm())
-    .column(ColumnDef::new("name", "Name"))
-    .column(ColumnDef::new("status", "Status").colored())
-    .done();
-```
+<Mermaid chart={`
+flowchart LR
+    A[Resource Definition] --> B[CLI Generation]
+    A --> C[API Route Generation]
+    B --> D[Argument Parsing]
+    C --> D
+    D --> E[Constraint Validation]
+    E --> F[Handler Execution]
+    F --> G[Output Rendering]
+`} />
 
-That definition generates:
+1. At startup, each layer **registers** its resource definitions with a central [registry](/nauka/layers/core/resource/registry).
+2. The [CLI generator](/nauka/layers/core/resource/cli-gen) reads the registry and builds the full command tree -- subcommands, flags, help text, and examples.
+3. When you run a command, the [dispatch](/nauka/layers/core/resource/dispatch) layer extracts arguments, prompts for missing required values (in interactive mode), validates constraints, handles confirmation prompts, calls the handler, and renders the output.
 
-```
-nauka vpc list
-nauka vpc create --name <name>
-nauka vpc get <id>
-nauka vpc delete <id>
-```
+## What this looks like in practice
 
-And the API equivalents:
+Given a resource definition for a hypervisor with `list`, `get`, `init`, `join`, `start`, `stop`, and `leave` operations, the framework automatically generates:
+
+**CLI commands:**
 
 ```
-GET    /vpcs
-POST   /vpcs
-GET    /vpcs/{id}
-DELETE /vpcs/{id}
+nauka hypervisor list
+nauka hypervisor get <name>
+nauka hypervisor init --mesh-name <name> --endpoint <ip:port>
+nauka hypervisor join --target <ip:port> --pin <pin>
+nauka hypervisor start
+nauka hypervisor stop
+nauka hypervisor leave
 ```
 
-## Registration
+**And equivalent API routes:**
 
-Resources are registered at startup. Each layer calls `registry.register(resource_def, handler)` to add its resources. The CLI and API server both draw from this registry — there's no separate wiring needed.
+```
+GET    /hypervisors
+GET    /hypervisors/{name}
+POST   /hypervisors/init
+POST   /hypervisors/join
+POST   /hypervisors/start
+POST   /hypervisors/stop
+POST   /hypervisors/leave
+```
 
-See the [registry docs](/nauka/layers/core/resource/registry) for how registration works, and the [builder docs](/nauka/layers/core/resource/builder) for the full fluent API.
+Adding a new operation or field to the resource definition automatically updates both the CLI and the API -- no separate wiring needed.
+
+## Key behaviors for platform engineers
+
+- **Interactive prompts**: When running commands in a terminal and a required argument is missing, Nauka prompts you for it rather than failing. In non-interactive contexts (scripts, CI), missing arguments always produce an error.
+- **Confirmation dialogs**: Destructive operations (like `delete` or `leave`) ask for confirmation before proceeding. Use `--yes` or `-y` to skip this in automation.
+- **JSON output**: Every command supports `--json` to get machine-readable output instead of formatted tables.
+- **Aliases**: Resources can have short aliases (e.g., `hv` for `hypervisor`) for faster typing.
+- **Self-registering layers**: The binary itself has no knowledge of specific resources. Each layer registers its own resources at startup. Adding a new resource type requires no changes to the binary.

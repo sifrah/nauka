@@ -1,55 +1,73 @@
 ---
-title: Regions
-description: RegionStorage config and the RegionRegistry that persists all S3-backed storage regions on a node.
+title: Region Configuration
+description: How storage regions are configured, validated, and persisted -- each region maps to one S3 bucket with credentials, encryption, and a default region selection.
 sidebar:
   order: 2
 ---
 
-A region is the unit of storage configuration in Nauka. Every region corresponds to one S3 bucket on one endpoint. The `region` module defines the configuration types and the local registry that persists them.
+import { Aside } from '@astrojs/starlight/components';
 
-## RegionStorage
+A region is the unit of storage configuration in Nauka. Each region maps to exactly one S3 bucket on one endpoint. The region module defines the configuration model and the local registry that persists configured regions on each node.
 
-`RegionStorage` holds everything ZeroFS needs to connect to and use an S3 bucket:
+## Region configuration
 
-| Field | Description |
-|---|---|
-| `region` | Short identifier used in service names and CLI output (e.g., `eu`, `us-east`) |
-| `s3_endpoint` | Full URL of the S3 endpoint (`https://...`) |
-| `s3_bucket` | Bucket name |
-| `s3_access_key` | S3 access key |
-| `s3_secret_key` | S3 secret key |
-| `s3_region` | AWS region string (e.g., `eu-central-1`); leave empty for non-AWS providers |
-| `is_default` | Whether this is the default region when none is specified |
+Each region requires the following settings:
 
-The `s3_endpoint` field must start with `http://` or `https://`. All other non-optional fields must be non-empty. Nauka validates this before saving.
+| Field | Required | Description |
+|---|---|---|
+| `region` | Yes | Short identifier (e.g., `eu`, `us-east`). Used in service names, file paths, and CLI output. |
+| `s3_endpoint` | Yes | S3-compatible endpoint URL (must start with `http://` or `https://`) |
+| `s3_bucket` | Yes | Bucket name |
+| `s3_access_key` | Yes | S3 access key |
+| `s3_secret_key` | Yes | S3 secret key |
+| `s3_region` | No | AWS region string (e.g., `eu-central-1`). Leave empty for non-AWS providers. |
+| `encryption_password` | Auto | Derived deterministically from `SHA256(s3_secret_key + ":zerofs:" + region)` |
+| `is_default` | No | Whether this is the default region when none is specified |
 
-Credentials are stored as plain text in the local state file. They are passed to ZeroFS at runtime through environment variables in the systemd unit — they are never written into the ZeroFS TOML config file.
+### Validation
 
-## RegionRegistry
+Before a region is saved or used, all required fields are validated:
 
-`RegionRegistry` is the local collection of all configured regions on a node. It is persisted to `~/.nauka/` via the state layer under the key `"regions"/"config"`.
+- `region` must be non-empty
+- `s3_endpoint` must be non-empty and start with `http://` or `https://`
+- `s3_bucket` must be non-empty
+- `s3_access_key` must be non-empty
+- `s3_secret_key` must be non-empty
 
-### Operations
+If any validation fails, the setup is rejected with a descriptive error before any files are written or services started.
 
-**upsert** — add a new region or replace an existing one (matched by region identifier):
+## Region registry
 
-```sh
-nauka storage region add --region eu --endpoint https://s3.eu.example.com \
-  --bucket nauka-eu --access-key AKID --secret-key SECRET
-```
+The region registry is the local collection of all configured storage regions on a node. It is persisted to the node's local state store under the path `regions/config`.
 
-**remove** — delete a region from the registry:
+### How it works
 
-```sh
-nauka storage region remove --region eu
-```
-
-**find** — look up a specific region by name. Used internally by the service layer when installing or starting a region's ZeroFS instance.
-
-**default_region** — returns the region marked `is_default`, or the first region if none is explicitly marked. Used when a command needs a region but none was specified.
+- **Add or update** -- When a region is set up, its configuration is added to the registry. If a region with the same identifier already exists, it is replaced.
+- **Remove** -- When a region is removed, its entry is deleted from the registry.
+- **Find** -- Look up a specific region by its identifier.
+- **Default region** -- Returns the region marked as `is_default`, or the first region in the list if none is explicitly marked as default.
 
 ### Persistence
 
-The registry is loaded at the start of any storage command and saved after any mutation. It uses the same atomic-write guarantees as all state layer operations: a save either fully commits or leaves the previous value intact.
+The registry is loaded at the start of any storage operation and saved after any mutation. Saves are atomic -- a write either fully commits or leaves the previous value intact.
 
-The registry is local to each node. A node only knows about the regions it has been explicitly configured to serve. There is no automatic replication of region configuration across the mesh — each node must be configured independently.
+<Aside type="note">
+The registry is local to each node. There is no automatic replication of the registry across nodes. However, the underlying region configuration (S3 endpoint, bucket, credentials) is distributed through TiKV during cluster join, so all nodes in the same region end up with the same S3 backend configuration.
+</Aside>
+
+## Configuration flow
+
+During cluster lifecycle, region configuration flows as follows:
+
+1. **Init node** -- The operator provides S3 credentials via `--s3-*` flags. The encryption password is derived. The configuration is saved locally and published to TiKV.
+2. **Joining node** -- The node fetches the region configuration from TiKV (no S3 credentials needed on the command line). The configuration is saved to the local registry and used to install ZeroFS.
+3. **All nodes** -- The local registry is the authoritative source for which regions this specific node serves. ZeroFS configs and systemd units are generated from the registry entries.
+
+## Where credentials are stored
+
+Region credentials (S3 access key and secret key) are stored in two places:
+
+- **Local registry** -- Part of the node's local state file
+- **ZeroFS TOML config** -- Written directly into `/etc/nauka/zerofs/{region}.toml` (file permissions `0600`)
+
+The encryption password is also written to the ZeroFS config, since ZeroFS needs it to encrypt and decrypt data at rest.

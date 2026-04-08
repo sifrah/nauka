@@ -1,108 +1,95 @@
 ---
 title: Interactive Prompts
-description: How Nauka prompts for missing required arguments when stdin is a TTY, and falls back to errors in non-interactive contexts.
+description: How the CLI prompts for missing arguments interactively, with support for text input, selections, secrets, and flags.
 sidebar:
   order: 3
 ---
 
-When a required argument is missing and the CLI is running interactively (stdin is a TTY), Nauka prompts the user to supply it rather than immediately printing an error. This makes the CLI comfortable to use without memorizing every flag, while still being fully scriptable.
+When a required argument is missing and the CLI is running in an interactive terminal, Nauka prompts the operator to supply the value rather than immediately returning an error. This makes the CLI comfortable to use without memorizing every flag, while remaining fully scriptable.
 
 ## How prompting works
 
-The dispatch layer checks each required argument after parsing. If a required argument is missing:
+After parsing command-line arguments, the CLI checks for missing required fields. If stdin is a TTY, it presents an interactive prompt for each missing value. If stdin is not a TTY (piped input, CI), the command exits with an error listing the missing arguments.
 
-1. If stdin is a TTY: show an interactive prompt
-2. If stdin is not a TTY: exit with an error
-
-```bash
-# Interactive — prompts for --name
-$ nauka vpc create
-
-? VPC name: production
-? Description (leave blank to skip): staging network
-
-Created VPC "production" (vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ)
 ```
+$ nauka hypervisor init
 
-```bash
-# Non-interactive — error immediately
-$ nauka vpc create < /dev/null
-Error: missing required argument --name
-  Hint: run with --name <value> to specify the VPC name
+  Mesh name: production
+  Region: eu-west
+  Zone: fsn1
+
+  ✓  Mesh initialized.
 ```
 
 ## Prompt types
 
-The prompts module uses [dialoguer](https://github.com/console-rs/dialoguer) under the hood and exposes three prompt types:
+The CLI chooses the prompt style based on the field's type.
 
 ### Text input
 
-For string fields without a restricted set of values:
+For string fields like names, CIDRs, IP addresses, paths, and durations:
 
-```rust
-Prompt::text("VPC name", /* optional default */ None)
+```
+  Mesh name: _
 ```
 
-Renders as:
+When a default value is available, it is shown and accepted by pressing Enter:
+
 ```
-? VPC name: _
+  Region [eu-west]: _
+```
+
+### Numeric input
+
+For integer fields like port numbers, sizes, and counts. A default of `0` is shown when no other default is specified:
+
+```
+  Listen port [51820]: _
 ```
 
 ### Selection
 
-For fields with a defined set of valid values:
+For fields with a defined set of valid values (enums), the CLI presents an interactive selection list:
 
-```rust
-Prompt::select("Region", &["eu-west", "us-east", "ap-south"])
 ```
-
-Renders as:
-```
-? Region:
+  Region:
   > eu-west
     us-east
     ap-south
 ```
 
-The user navigates with arrow keys and selects with Enter.
+The operator navigates with arrow keys and selects with Enter.
 
-### Password
+### Yes/No flag
 
-For secret values that should not echo:
+For boolean fields:
 
-```rust
-Prompt::password("API token")
+```
+  Enable monitoring? [y/N]: _
 ```
 
-Renders as:
+### Secret input
+
+For sensitive values like API tokens or passwords, input is masked:
+
 ```
-? API token: ••••••••
+  API token: ********
 ```
 
-Input is hidden. The value is not logged or stored in shell history.
+The value is not echoed to the terminal and is not stored in shell history.
+
+## Non-interactive contexts
+
+In scripts, CI/CD pipelines, and any context where stdin is not a terminal, prompts are never shown. The CLI detects non-interactive mode automatically -- there is no `--no-prompt` flag.
+
+In these contexts, always provide all required arguments explicitly:
+
+```bash
+nauka hypervisor init --name production --region eu-west --zone fsn1
+```
+
+If a required argument is missing in a non-interactive context, the CLI exits with an error indicating which argument is needed.
 
 ## Optional fields
 
-Optional fields are never prompted. If an optional field is absent, it remains absent and the handler sees `None` for that field. Prompting only happens for required fields.
-
-## Scope prompts
-
-When scope flags (`--org`, `--project`, `--vpc`) are missing and stdin is a TTY, the prompt module fetches the available options and presents a selection list:
-
-```
-? Organization:
-  > my-org (org-01HW...)
-    other-org (org-01HW...)
-```
-
-This makes it possible to use scoped resources without remembering or copy-pasting IDs.
-
-## Disabling prompts
-
-Prompts can be disabled by redirecting stdin or by running in a non-TTY environment. There is no `--no-prompt` flag — non-interactive behavior is automatic when stdin is not a terminal.
-
-In scripts, always provide all required arguments explicitly to avoid any ambiguity:
-
-```bash
-nauka vpc create --org "$ORG_ID" --name production
-```
+Optional fields are never prompted. If an optional flag is not provided on the command line, it is left unset and the handler receives no value for that field. Prompting only occurs for required fields.

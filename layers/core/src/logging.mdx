@@ -1,115 +1,113 @@
 ---
 title: Structured Logging
-description: Tracing-based structured logging with text and JSON output, file rotation, panic hooks, and global context fields.
+description: How Nauka logs events with text or JSON output, file rotation, noise suppression, and global context fields.
 sidebar:
   order: 11
 ---
 
-Nauka uses the [tracing](https://docs.rs/tracing) ecosystem for structured logging. Every log line carries context — not just a timestamp and a message, but the node ID, region, zone, and any span context from the current operation.
+Nauka uses structured logging. Every log line carries context -- not just a timestamp and a message, but the node name, region, zone, and any relevant operational data.
 
 ## Output formats
 
-Two formats are available, set via the `logging.format` config key or `NAUKA_LOGGING_FORMAT`:
+Two formats are available, set via the `logging.format` config key or `NAUKA_LOG_FORMAT` environment variable.
 
-**Text format** (default) — readable by humans:
+**Text format** (default) -- readable by humans:
 
 ```
-2026-03-15T14:22:01Z  INFO nauka::networking  peer connected  node=node-01HWK...  mesh=mesh-01HWK...  latency_ms=12
-2026-03-15T14:22:03Z  WARN nauka::storage     cache miss rate high  rate=0.87  threshold=0.80
+2026-03-15T14:22:01Z  INFO nauka::fabric  peer connected  node="node-1" region="eu" zone="fsn1"
+2026-03-15T14:22:03Z  WARN nauka::fabric  peer unreachable  peer="node-2"
 ```
 
-**JSON format** — structured, suitable for log aggregators (Loki, Datadog, etc.):
+**JSON format** -- structured, suitable for log aggregators (Loki, Datadog, etc.):
 
 ```json
-{"timestamp":"2026-03-15T14:22:01Z","level":"INFO","target":"nauka::networking","message":"peer connected","node":"node-01HWK...","mesh":"mesh-01HWK...","latency_ms":12}
+{"timestamp":"2026-03-15T14:22:01Z","level":"INFO","target":"nauka::fabric","message":"peer connected","node":"node-1","region":"eu","zone":"fsn1"}
 ```
 
-Use JSON format when running in production with a log aggregation pipeline. Use text format when developing or reading logs interactively.
+Use JSON format when running in production with a log aggregation pipeline. Use text format when reading logs interactively or during development.
 
 ## Log levels
 
-| Level | When to use |
-|-------|-------------|
-| `error` | Operation failures that require attention |
+| Level | When it appears |
+|-------|-----------------|
+| `error` | Operation failures that require immediate attention |
 | `warn` | Degraded state, approaching limits, recoverable issues |
-| `info` | Normal operational events (connections, state changes) |
-| `debug` | Detailed per-operation tracing, useful for troubleshooting |
-| `trace` | Very high volume per-packet or per-frame data |
+| `info` | Normal operational events: connections, state changes, commands |
+| `debug` | Detailed per-operation data, useful for troubleshooting |
+| `trace` | Very high volume internal data, rarely needed |
 
-Set the level via config, env var, or CLI flag:
+Set the level via config, environment variable, or CLI:
 
 ```sh
-NAUKA_DAEMON_LOG_LEVEL=debug nauka run
-nauka run --log-level debug
+# Environment variable
+NAUKA_LOG_LEVEL=debug nauka hypervisor status
+
+# Config file
+# [logging]
+# level = "debug"
 ```
+
+You can also use the standard `RUST_LOG` environment variable for fine-grained control, which overrides the config-based level entirely.
+
+## Per-module filtering
+
+The log level can include module-specific directives for targeted debugging:
+
+```sh
+# Global info, but debug for the fabric module
+NAUKA_LOG_LEVEL="info,nauka_hypervisor=debug" nauka hypervisor peering
+```
+
+This is useful when you need detailed logs from one subsystem without flooding the output with trace data from everything else.
 
 ## Global context fields
 
-When Nauka initializes, it registers global fields that appear on every log line:
+When Nauka initializes, it registers context fields that appear on every log line:
 
 | Field | Example | Description |
 |-------|---------|-------------|
-| `node` | `node-01HWK...` | This node's ID |
-| `region` | `htz-fsn1` | Node's region |
-| `zone` | `htz-fsn1-a` | Node's zone |
+| `node` | `node-1` | This node's name |
+| `region` | `eu` | Node's region |
+| `zone` | `fsn1` | Node's zone |
 
-These fields are set once at startup and cannot be changed. They make it easy to filter logs from a specific node in a multi-node log stream.
+These fields are set once at startup. They make it straightforward to filter logs from a specific node when viewing a combined log stream from multiple nodes.
 
 ## File logging and rotation
 
-To write logs to a file in addition to stderr:
+By default, logs go to stderr only. To also write logs to a file, set the `logging.file` config key:
 
 ```toml
 [logging]
-file = "~/.nauka/logs/nauka.log"
-rotation = "daily"
+file = "/var/log/nauka/nauka.log"
+max_file_size_mb = 50
+max_files = 3
 ```
 
-Rotation options:
-
-- `hourly` — new file every hour, named `nauka.log.2026-03-15-14`
-- `daily` — new file every day, named `nauka.log.2026-03-15`
-- `never` — single file, no rotation (suitable for external log rotation via logrotate)
-
-Old log files are not automatically deleted. If disk space is a concern, configure logrotate or a similar tool to clean up old files.
-
-## Panic hook
-
-Panics in Nauka are routed through the tracing system rather than printing directly to stderr:
-
-```
-2026-03-15T14:22:01Z  ERROR nauka  PANIC  message="called unwrap() on None"  file="src/storage/db.rs"  line=142  backtrace=...
-```
-
-This means panics appear in the log file and JSON output just like other errors, making them visible to log aggregators and alerting systems. Without this hook, a panic would write to stderr and be invisible to anything monitoring structured log output.
+Log files are rotated daily. Old log files are kept according to the `max_files` setting.
 
 ## Dependency noise suppression
 
-Third-party dependencies — particularly `hyper`, `tokio`, `redb`, and `rustls` — produce high-volume debug and trace logs that are rarely useful to Nauka operators. These are suppressed to `warn` level by default, regardless of the configured log level.
+Third-party dependencies -- particularly networking and database libraries -- produce high-volume debug and trace logs that are rarely useful during normal operation. Nauka suppresses these to `warn` level by default. The suppressed dependencies include:
 
-If you need to debug an issue at the dependency level, you can re-enable full logging for specific crates:
+- `hyper`, `h2`, `tower` (HTTP stack)
+- `tokio`, `mio` (async runtime)
+- `redb` (database)
+- `rustls`, `reqwest` (TLS and HTTP client)
+
+If you need to debug an issue at the dependency level, use `RUST_LOG` to override:
 
 ```sh
-RUST_LOG=nauka=debug,hyper=trace nauka run
+RUST_LOG="nauka=debug,hyper=trace" nauka hypervisor peering
 ```
+
+## Panic handling
+
+If Nauka encounters an unexpected panic, it is routed through the logging system rather than printing raw output to stderr. This means panics appear in log files and JSON output just like other errors, making them visible to log aggregators and alerting systems.
 
 ## Warn and error counters
 
-The logging system maintains in-process counters for warn and error events:
+The logging system maintains internal counters for `warn` and `error` level events. These counters can be used to detect unusual error rates without parsing log files.
 
-```sh
-nauka metrics show | grep log_events
-```
+## CLI logging
 
-```
-log_events_warn_total    47
-log_events_error_total   3
-```
-
-These counters are exposed as metrics and can be used to alert on unusual error rates without parsing log files.
-
-## Guard pattern
-
-The logging system returns a `LoggingGuard` on initialization. This guard must be held for the lifetime of the process — dropping it flushes buffered log lines and closes the log file cleanly.
-
-This prevents log loss on shutdown. A common bug in async applications is dropping the logger before background tasks have finished writing their final log lines. The guard pattern makes this explicit: hold the guard, get clean logs.
+CLI commands (such as `nauka hypervisor status`) use a minimal logging configuration at `warn` level with text format. This keeps the CLI output clean -- you only see warnings and errors, not operational info messages.

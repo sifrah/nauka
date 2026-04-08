@@ -1,62 +1,69 @@
 ---
 title: Mesh Identity
-description: How a Nauka mesh is defined — shared secrets, ULA IPv6 prefixes, and per-node identities with WireGuard keys.
+description: How a Nauka mesh is defined -- shared secrets, IPv6 addressing, and per-node identity within the mesh network.
 sidebar:
   order: 1
 ---
 
-A Nauka mesh is a private network shared by a group of hypervisors. Two things define a mesh: a shared secret and an IPv6 address space. Every node in the mesh shares these two values. Everything else — the node's name, its WireGuard keys, its endpoint — is per-node.
+A Nauka mesh is a private network connecting a group of hypervisors. Every mesh is defined by two fundamental properties: a unique identifier and an IPv6 address space. These two values are shared by all members and cannot be changed after creation. Everything else -- the node's name, its WireGuard keys, its public endpoint -- is specific to each individual node.
 
-## MeshIdentity
+## What defines a mesh
 
-`MeshIdentity` captures the two mesh-wide values:
+When you run `nauka hypervisor init`, two mesh-wide values are generated:
 
-| Field    | Description                                         |
-|----------|-----------------------------------------------------|
-| `id`     | A UUID that uniquely identifies this mesh           |
-| `prefix` | A `/48` ULA IPv6 prefix (e.g. `fd12:3456:789a::/48`) |
+- **Mesh ID** -- A unique identifier (prefixed `mesh-`) that distinguishes this mesh from any other. Every node in the mesh shares the same mesh ID.
+- **IPv6 prefix** -- A randomly generated `/48` ULA (Unique Local Address) prefix from the `fd00::/8` range. A `/48` prefix provides 2^80 possible addresses, far more than any practical cluster will ever require.
 
-The `/48` prefix gives the mesh `2^80` addresses, which is more than enough for any cluster. Addresses within that prefix are assigned to nodes by the [IPAM](/nauka/layers/control-plane/ipam) system.
+These values are transmitted to every node that joins the mesh through the peering protocol. They form the immutable foundation of the mesh's identity.
 
-## HypervisorIdentity
+## How nodes get their addresses
 
-Each node in the mesh has a `HypervisorIdentity` that describes it fully:
+Each node receives a `/128` IPv6 address derived deterministically from two inputs: the mesh's `/48` prefix and the node's WireGuard public key. Because WireGuard keys are cryptographically unique, every node is guaranteed a unique mesh address without any central coordination or DHCP.
 
-| Field        | Description                                              |
-|--------------|----------------------------------------------------------|
-| `id`         | UUID for this hypervisor                                 |
-| `name`       | Human-readable name (e.g. `web-01`)                      |
-| `region`     | Region this node is in (e.g. `us-east`)                  |
-| `zone`       | Availability zone (e.g. `us-east-1a`)                    |
-| `wg_pubkey`  | WireGuard public key                                     |
-| `wg_privkey` | WireGuard private key (stored locally, never transmitted)|
-| `port`       | WireGuard listen port                                    |
-| `endpoint`   | Public IP or hostname other nodes use to reach this one  |
-| `mesh_ipv6`  | This node's address within the mesh prefix               |
+This addressing scheme has several practical implications:
 
-The private key never leaves the node. Only the public key is shared with peers during the join process.
+- Addresses are **stable and predictable** -- the same key always produces the same address.
+- If a node leaves and rejoins with the same WireGuard key, it gets the same address. If it rejoins with a new key (which happens by default, since keys are regenerated on each init or join), it gets a new address.
+- There is **no address allocation service** to manage or that could fail. Addresses are computed locally by each node.
 
-## Creating a mesh
+## Node identity
 
-`create_mesh()` generates a new `MeshIdentity` with a fresh UUID and a randomly chosen ULA prefix. This is called once, when the first node runs `nauka hv init`.
+Each hypervisor in the mesh carries a complete identity record:
 
-```sh
-nauka hv init --name web-01 --region us-east --zone us-east-1a
-# Outputs the mesh secret: syf_sk_...
-```
+| Property | Description |
+|---|---|
+| Hypervisor ID | Unique identifier for this node (prefixed `hv-`) |
+| Name | Human-readable name, typically the hostname (e.g., `node-1`). Max 63 characters, lowercase alphanumeric and hyphens only |
+| Region | Logical region label (e.g., `eu`, `us-east`) for topology awareness |
+| Zone | Availability zone within the region (e.g., `fsn1`, `nbg1`) |
+| WireGuard public key | Shared with all peers for tunnel establishment |
+| WireGuard private key | Stored locally only, never transmitted over the network |
+| WireGuard port | UDP listen port (default 51820) |
+| Endpoint | Public IP:port that other nodes connect to over the internet |
+| Mesh IPv6 | This node's unique `/128` address within the mesh prefix |
 
-The mesh secret encodes the shared secret and the prefix. Keep it safe — anyone with the secret can join the mesh.
+The private key is the most security-sensitive piece of the identity. It is persisted in the local state database but is never included in any network communication -- only the corresponding public key is shared with peers.
 
-## Creating a hypervisor identity
+## Mesh secret and PIN
 
-`create_hypervisor()` builds a `HypervisorIdentity` from the supplied name, region, zone, and a freshly generated WireGuard keypair. It validates that:
+When a mesh is created, a mesh secret is generated (prefixed `syf_sk_`). This secret serves two purposes:
 
-- The name is non-empty and does not conflict with existing peers
-- The endpoint (if provided) is a valid address
-- The port is in an acceptable range
+1. **PIN derivation** -- A short PIN is derived from the secret and used to authenticate join requests during peering. Without the correct PIN, a node cannot join the mesh.
+2. **Membership credential** -- The secret is shared with every node that successfully joins, establishing shared trust across all members.
 
-If validation fails, the init or join flow aborts with a clear error before any state is written.
+The mesh secret should be treated as a sensitive credential. Store it securely and share it only with operators who need to add nodes to the mesh. The PIN is displayed when `nauka hypervisor init` runs and is required by anyone running `nauka hypervisor join`.
 
-## How identities relate to state
+## Validation rules
 
-Both `MeshIdentity` and `HypervisorIdentity` are part of [`FabricState`](/nauka/layers/hypervisor/fabric/state), which is the full snapshot of this node's mesh membership. You rarely interact with these types directly — the init and join flows handle everything.
+When creating a node identity (during both init and join), the following validation rules are enforced:
+
+- **Name**: non-empty, max 63 characters, lowercase alphanumeric characters and hyphens only
+- **Region**: same naming rules as name
+- **Zone**: same naming rules as name
+- **Port**: must be a valid non-zero port number
+
+If validation fails, the operation aborts immediately -- no state is written and no network changes are made.
+
+## Relationship to fabric state
+
+Both the mesh identity and the node identity are stored as part of the fabric state, the complete snapshot of this node's mesh membership. You do not interact with these identities directly during normal operations. The `init` and `join` workflows handle all identity creation, and the `status` command displays the relevant information.

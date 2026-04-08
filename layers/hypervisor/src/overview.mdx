@@ -1,152 +1,159 @@
 ---
 title: Hypervisor Layer
-description: Every server running Nauka is a hypervisor. This layer manages the WireGuard mesh, peer lifecycle, and the commands that control it all.
+description: The hypervisor layer turns bare-metal servers into Nauka cluster nodes, managing mesh networking, the distributed control plane, and S3-backed storage.
 sidebar:
   order: 1
 ---
 
-In Nauka, every server is a hypervisor. There is no separate "controller" host — each node in your cluster is both a participant and a peer. The hypervisor layer is what turns a plain Linux server into a Nauka node: it joins the WireGuard mesh, tracks peers, manages the tunnel service, and exposes a CLI for day-to-day operations.
+import { Aside } from '@astrojs/starlight/components';
+import Mermaid from '../../../../components/Mermaid.astro';
 
-## What the hypervisor does
+Every server running Nauka is a hypervisor. There is no separate controller -- each node participates equally in the mesh. The hypervisor layer is what transforms a Linux server into a Nauka node by joining the encrypted WireGuard mesh, bootstrapping or joining the distributed control plane, and configuring S3-backed storage.
 
-When you initialize a server with Nauka, the hypervisor layer:
+## Architecture
 
-1. Generates a WireGuard keypair and a mesh identity for the node
-2. Creates the WireGuard interface (`nauka0`) and a systemd service to manage it
-3. Persists the node's identity and peer list to the [state layer](/nauka/layers/state/overview)
-4. Listens for incoming join requests so other nodes can peer with it
+A hypervisor node runs three sub-systems, each managed as systemd services:
 
-After initialization, the node is a full member of the mesh. Every other node that joins will establish a direct encrypted tunnel to it.
+<Mermaid chart={`
+graph TD
+  subgraph Hypervisor Node
+    F[Fabric<br/>WireGuard mesh]
+    C[Control Plane<br/>PD + TiKV]
+    S[Storage<br/>ZeroFS per region]
+  end
+  F -->|mesh IPv6| C
+  F -->|mesh IPv6| S
+  C -->|region config| S
+  S -->|S3| B[(Object Storage)]
+`} />
 
-## Aliases
+- **Fabric** -- WireGuard mesh networking between all nodes. All inter-node traffic flows over encrypted IPv6 tunnels.
+- **Control Plane** -- A TiKV distributed key-value store (with PD for consensus) that holds cluster-wide state. Runs on the mesh.
+- **Storage** -- ZeroFS instances that mount S3 buckets as local block storage, one per region.
 
-The hypervisor is exposed as both `hv` and `node` in the CLI. They are identical — use whichever feels natural.
+All three sub-systems start automatically during `init` or `join` and are managed together through the hypervisor CLI.
 
-```sh
-nauka hv status
-nauka node status
-```
+## Lifecycle commands
 
-## Commands
+The hypervisor is accessible as `nauka hypervisor`, `nauka hv`, or `nauka node` -- all three are identical aliases.
 
-### init
-
-Create a new mesh and initialize this server as the first hypervisor.
-
-```sh
-nauka hv init --name web-01 --region us-east --zone us-east-1a
-```
-
-This generates the mesh secret (a `syf_sk_...` token), creates the WireGuard service, and starts it. Save the mesh secret — other nodes need it to join.
-
-### join
-
-Add this server to an existing mesh by connecting to a peer that is already a member.
+### Initialize a new cluster
 
 ```sh
-nauka hv join --target 203.0.113.10 --name web-02 --region us-east --zone us-east-1a
+nauka hv init \
+  --name web-01 \
+  --region eu --zone fsn1 \
+  --s3-endpoint https://s3.eu-central.example.com \
+  --s3-bucket nauka-eu \
+  --s3-access-key AKID \
+  --s3-secret-key SECRET \
+  --peering
 ```
 
-The join command connects to the target's peering port, authenticates with the mesh PIN, receives the mesh secret and existing peer list, then brings up the WireGuard service with all known peers configured.
+This command:
+1. Generates a mesh identity (WireGuard keypair, ULA /48 network, node /128 address)
+2. Creates the WireGuard interface and systemd service
+3. Installs TiUP and bootstraps PD + TiKV as a single-node cluster
+4. Publishes the region storage configuration to TiKV
+5. Installs ZeroFS and starts the storage service for the given region
+6. Optionally starts the peering listener to accept joins immediately (`--peering`)
 
-### status
+After initialization, the command prints a PIN that other nodes need to join.
 
-Show the current state of this node: mesh identity, WireGuard service health, and connected peer count.
+### Join an existing cluster
 
 ```sh
-nauka hv status
+nauka hv join \
+  --target 46.224.166.60 \
+  --pin G7CCZX \
+  --region eu --zone nbg1
 ```
 
-### start / stop
+The join flow:
+1. Connects to the target node's peering port (WireGuard listen port + 1)
+2. Authenticates with the PIN, receives the mesh secret and peer list
+3. Configures WireGuard with all known peers
+4. Joins or connects to the TiKV control plane (PD on the first 3 nodes, TiKV-only after that)
+5. Fetches the region's S3 storage configuration from TiKV and sets up ZeroFS locally
+6. Announces itself to all peers in the mesh
 
-Start or stop the WireGuard service on this node. Both commands are idempotent — running start on an already-running node is safe.
+### Day-to-day operations
 
 ```sh
-nauka hv start
-nauka hv stop
+nauka hv status          # Show node state, mesh, controlplane, peers
+nauka hv start           # Start all services (fabric, controlplane, storage)
+nauka hv stop            # Stop all services (storage first, then controlplane, then fabric)
+nauka hv list            # List all known hypervisors
+nauka hv get web-01      # Show details of a specific node
+nauka hv doctor          # Run health diagnostics across all sub-systems
+nauka hv peering         # Start the peering listener to accept new nodes
+nauka hv leave           # Leave the cluster and uninstall everything
 ```
 
-### leave
+<Aside type="caution">
+`nauka hv leave` is destructive. It deregisters the node's TiKV store and PD member from the cluster, stops all services, removes systemd units, configuration files, and data directories. This action requires confirmation.
+</Aside>
 
-Gracefully remove this node from the mesh. Stops and uninstalls the WireGuard service, removes the interface, and deletes local state.
+### Start and stop order
 
-```sh
-nauka hv leave
-```
+When starting services, Nauka brings them up in dependency order: fabric first (WireGuard must be up for mesh communication), then the control plane (PD before TiKV), then storage.
 
-### peering
+When stopping, the order is reversed: storage services stop first, then the control plane, then the fabric.
 
-Manage inbound join requests. By default, a running hypervisor listens for peers automatically. Use this command to inspect or control that listener.
+## Network modes
 
-```sh
-nauka hv peering
-```
+The fabric layer supports three network backends, selected with `--mode` at init or join time:
 
-### list / get
+| Mode | Description | Use case |
+|---|---|---|
+| `wireguard` (default) | Encrypted WireGuard mesh over IPv6 | Production deployments over the internet |
+| `direct` | Plain IP routing, no tunnel | Trusted private networks |
+| `mock` | No-op backend for testing | Development and CI |
 
-List all known peers or inspect a specific one.
+In `direct` and `mock` modes, the control plane and storage sub-systems are not deployed -- only the fabric peer tracking runs.
 
-```sh
-nauka hv list
-nauka hv get web-01
-```
+## Ports
 
-### doctor
+| Port | Protocol | Service | Binding |
+|---|---|---|---|
+| 51820 | UDP | WireGuard tunnel | Public IP |
+| 51821 | TCP | Peering listener (join requests) | Public IP |
+| 51822 | TCP | Announce listener (peer updates) | All interfaces |
+| 2379 | TCP | PD client API | Mesh IPv6 |
+| 2380 | TCP | PD peer (Raft) | Mesh IPv6 |
+| 20160 | TCP | TiKV | Mesh IPv6 |
 
-Run a full health diagnostic across all sub-systems:
+The WireGuard port is configurable with `--port`. The peering and announce ports are derived as `port + 1` and `port + 2`. Control plane ports are fixed and bind only to the mesh IPv6 address.
 
-```sh
-nauka hv doctor
-```
+## File paths
 
-Checks fabric, controlplane, storage, and system resources. Prints colored pass/warn/fail output and exits non-zero if any check fails. See [Doctor](/nauka/layers/hypervisor/doctor) for details.
-
-## Network backend modes
-
-The fabric layer supports three network backends selected with `--mode` at init or join time:
-
-| Mode | Description |
+| Path | Purpose |
 |---|---|
-| `wireguard` (default) | Encrypted WireGuard mesh — use this for any public internet deployment |
-| `direct` | Plain IP routing, no tunnel — for trusted private networks |
-| `mock` | No-op backend for testing |
+| `/etc/wireguard/nauka0.conf` | WireGuard configuration |
+| `/etc/nauka/pd.toml` | PD configuration |
+| `/etc/nauka/tikv.toml` | TiKV configuration |
+| `/etc/nauka/zerofs/{region}.toml` | ZeroFS configuration per region |
+| `/var/lib/nauka/pd/` | PD data directory |
+| `/var/lib/nauka/tikv/` | TiKV data directory |
+| `/var/lib/nauka/zerofs/{region}/` | ZeroFS local cache per region |
+| `/var/log/nauka/` | Log files (pd.log, tikv.log) |
+| `/opt/nauka/tiup/` | TiUP installation |
+| `/mnt/nauka/{region}/` | ZeroFS mount point |
+| `~/.nauka/` | Local node state (hypervisor identity, region registry) |
 
-```sh
-nauka hv init --name web-01 --mode wireguard
-nauka hv join --target 203.0.113.10 --name web-02 --mode direct
-```
+## Systemd services
 
-Two additional flags control the WireGuard interface:
+| Service | Description |
+|---|---|
+| `nauka-wg` or `wg-quick@nauka0` | WireGuard mesh interface |
+| `nauka-pd` | Placement Driver (Raft consensus) |
+| `nauka-tikv` | TiKV storage engine |
+| `nauka-zerofs-{region}` | ZeroFS instance per region |
+| `nauka-announce` | Persistent peer announce listener |
 
-- `--interface` — override the interface name (default: `nauka0`)
-- `--endpoint` — explicitly set this node's public endpoint (`host:port`) advertised to peers
+## Sub-systems
 
-## Sub-modules
-
-The hypervisor layer is built on the [fabric](/nauka/layers/hypervisor/fabric/mesh) sub-module, which handles the lower-level details:
-
-- [mesh](/nauka/layers/hypervisor/fabric/mesh) — mesh and node identity
-- [peer](/nauka/layers/hypervisor/fabric/peer) — peer tracking and status
-- [ops](/nauka/layers/hypervisor/fabric/ops) — high-level orchestration (init, join, leave, etc.)
-- [wg](/nauka/layers/hypervisor/fabric/wg) — WireGuard interface management
-- [service](/nauka/layers/hypervisor/fabric/service) — systemd service lifecycle
-- [peering](/nauka/layers/hypervisor/fabric/peering) — join protocol types
-- [backend](/nauka/layers/hypervisor/fabric/backend) — network backend trait and mode selection
-- [tls](/nauka/layers/hypervisor/fabric/tls) — TLS for the peering protocol
-
-### Controlplane
-
-The [controlplane](/nauka/layers/hypervisor/controlplane/overview) sub-module manages the distributed TiKV key-value cluster:
-
-- [overview](/nauka/layers/hypervisor/controlplane/overview) — TiKV + PD architecture, cluster topology
-- [service](/nauka/layers/hypervisor/controlplane/service) — install, configure, and manage PD + TiKV services
-- [ops](/nauka/layers/hypervisor/controlplane/ops) — bootstrap, join, and leave the control plane
-- [store](/nauka/layers/hypervisor/controlplane/store) — `ClusterDb` async client for distributed state
-
-### Storage
-
-The [storage](/nauka/layers/hypervisor/storage/overview) sub-module manages ZeroFS S3-backed block storage:
-
-- [overview](/nauka/layers/hypervisor/storage/overview) — ZeroFS, S3 regions, encryption, NBD
-- [region](/nauka/layers/hypervisor/storage/region) — `RegionStorage` config and `RegionRegistry`
-- [service](/nauka/layers/hypervisor/storage/service) — ZeroFS installation and per-region systemd units
+- [Handlers](/nauka/layers/hypervisor/handlers) -- CLI command routing and argument mapping
+- [Doctor](/nauka/layers/hypervisor/doctor) -- Health diagnostics across all sub-systems
+- [Control Plane](/nauka/layers/hypervisor/controlplane/overview) -- TiKV distributed key-value store
+- [Storage](/nauka/layers/hypervisor/storage/overview) -- ZeroFS S3-backed block storage

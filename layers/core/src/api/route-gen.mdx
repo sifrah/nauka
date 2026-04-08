@@ -1,94 +1,102 @@
 ---
 title: Route Generation
-description: How axum routes are automatically generated from ResourceDef — standard CRUD paths, scoped URL hierarchies, and OpenAPI 3.0 spec output.
+description: How REST API routes are automatically generated from resource definitions -- URL patterns, scoped hierarchies, and OpenAPI spec output.
 sidebar:
   order: 1
 ---
 
-Just as `generate_command()` builds a clap command tree from a `ResourceDef`, `build_router()` builds an axum router. Every registered resource gets the correct HTTP routes, request parsing, and handler wiring — with no manual axum code.
+Nauka automatically generates REST API routes from the same resource definitions that power the CLI. When a resource is registered with its operations, the corresponding HTTP endpoints are created without any manual route wiring.
 
-## Generated routes
+## Standard route patterns
 
-For a resource with `Scope::global()` and name `hypervisor`, plural `hypervisors`:
-
-```
-GET    /hypervisors              → list
-POST   /hypervisors              → create
-GET    /hypervisors/{id}         → get
-PATCH  /hypervisors/{id}         → update
-DELETE /hypervisors/{id}         → delete
-```
-
-For a resource with `Scope::vpc()` and name `vm`, plural `vms`:
+For a resource named `hypervisor` with standard CRUD operations, the following routes are generated:
 
 ```
-GET    /orgs/{org_id}/projects/{project_id}/vpcs/{vpc_id}/vms
-POST   /orgs/{org_id}/projects/{project_id}/vpcs/{vpc_id}/vms
-GET    /orgs/{org_id}/projects/{project_id}/vpcs/{vpc_id}/vms/{id}
-PATCH  /orgs/{org_id}/projects/{project_id}/vpcs/{vpc_id}/vms/{id}
-DELETE /orgs/{org_id}/projects/{project_id}/vpcs/{vpc_id}/vms/{id}
+GET     /admin/v1/hypervisor          List all hypervisors
+POST    /admin/v1/hypervisor          Create a hypervisor
+GET     /admin/v1/hypervisor/{id}     Get a specific hypervisor
+PATCH   /admin/v1/hypervisor/{id}     Update a hypervisor
+DELETE  /admin/v1/hypervisor/{id}     Delete a hypervisor
 ```
 
-Custom actions generate additional POST routes:
+The route prefix (`/admin/v1`) comes from the server configuration. The resource's CLI name is used as the URL segment.
+
+## Custom actions
+
+Resources can define custom actions beyond CRUD. Each action generates a POST route at the collection level:
 
 ```
-POST   /hypervisors/{id}/drain
-POST   /hypervisors/{id}/join
-POST   /hypervisors/init          (no id, creates the initial state)
+POST    /admin/v1/hypervisor/init     Initialize a new mesh
+POST    /admin/v1/hypervisor/join     Join an existing mesh
+POST    /admin/v1/hypervisor/ping     Ping a hypervisor
 ```
 
-## Building the router
+Action routes accept a JSON body and return an action response envelope.
 
-```rust
-use nauka_core::api::build_router;
+## Scoped (nested) routes
 
-let router = build_router(&registry);
+Resources that belong to a parent resource generate nested URL paths. The parent's identifier becomes a path parameter:
+
+```
+GET     /admin/v1/vpc/{vpc_id}/subnet          List subnets in a VPC
+POST    /admin/v1/vpc/{vpc_id}/subnet          Create a subnet in a VPC
 ```
 
-The router is an `axum::Router` that can be composed with additional middleware and served directly.
+Multiple levels of nesting are supported. A resource scoped under both an organization and a project produces deeply nested paths:
 
-## Request parsing
-
-For each route, the generated handler:
-
-1. Extracts path parameters (`{org_id}`, `{id}`, etc.) into the scope context
-2. Deserializes the JSON request body into a `FieldMap` (for create/update/action)
-3. Parses query parameters (`?limit=20&offset=40`) for list operations
-4. Validates all fields and constraints
-5. Calls the registered handler via the registry
-
-The same dispatch pipeline used by the CLI is used here. Fields, constraints, and handlers are shared.
-
-## OpenAPI 3.0 spec
-
-The route generator also produces a complete OpenAPI 3.0 spec from the resource registry:
-
-```rust
-use nauka_core::api::openapi_spec;
-
-let spec = openapi_spec(&registry);
-// Returns serde_json::Value — the full OpenAPI 3.0 document
+```
+GET     /v1/org/{org_id}/project/{project_id}/vpc          List VPCs
+GET     /v1/org/{org_id}/project/{project_id}/vpc/{id}     Get a VPC
 ```
 
-The spec includes:
-- All paths and HTTP methods
-- Request body schemas derived from `FieldDef` types and constraints
-- Response schemas for each operation's `OutputKind`
+This URL hierarchy mirrors the logical ownership structure of the resources.
+
+## Request handling
+
+When a request arrives at a generated route, the server:
+
+1. Extracts path parameters (`{id}`, `{vpc_id}`, etc.) from the URL
+2. Parses query parameters for list operations (pagination, sorting)
+3. Deserializes the JSON request body for create, update, and action operations
+4. Validates all field constraints defined on the operation
+5. Dispatches to the registered handler
+
+If constraint validation fails, the server returns a `400 Bad Request` with a `VALIDATION_ERROR` code before the handler is called.
+
+## GET and DELETE on the same path
+
+GET and DELETE operations on a single resource share the same URL path (`/{prefix}/{resource}/{id}`) and are differentiated by HTTP method. The route generator merges these into a single path entry with distinct method handlers, avoiding route conflicts.
+
+## OpenAPI specification
+
+The route generator can produce an OpenAPI 3.0 specification from the registered resources. The spec includes:
+
+- All paths and their HTTP methods
+- Operation IDs in the format `{resource}_{operation}` (e.g., `hypervisor_list`)
+- Summary text from the operation description
 - Tag groups by resource name
-- Summary and description from operation and resource descriptions
 
-The spec is served at `GET /openapi.json` by default when the API server starts.
+The specification is served at `GET /openapi.json` when the API server is running. It can also be generated offline for documentation or client code generation.
 
-## Pagination
+Example entry from the spec:
 
-List routes automatically support pagination via query parameters:
-
+```json
+{
+  "/admin/v1/hypervisor": {
+    "get": {
+      "summary": "List hypervisors",
+      "operationId": "hypervisor_list",
+      "tags": ["hypervisor"]
+    },
+    "post": {
+      "summary": "Create a hypervisor",
+      "operationId": "hypervisor_create",
+      "tags": ["hypervisor"]
+    }
+  }
+}
 ```
-GET /vms?limit=25&offset=50
-```
 
-The `limit` and `offset` values are passed to the handler via `req.pagination`. See [middleware](/nauka/layers/core/api/middleware) for defaults and limits.
+## Route introspection
 
-## Content negotiation
-
-All routes accept and return `application/json`. Requests with a different `Content-Type` get a `415 Unsupported Media Type` response. The response `Content-Type` is always `application/json`.
+A route listing function is available to enumerate all registered routes with their HTTP method, URL path, operation name, resource name, and description. This is useful for debugging, documentation generation, or building admin dashboards that need to discover available endpoints.

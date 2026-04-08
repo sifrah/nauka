@@ -1,107 +1,91 @@
 ---
 title: Error Model
-description: Every Nauka error has a code, a message, a suggestion, and optional context. No silent failures, no opaque codes.
+description: How Nauka reports errors with codes, messages, suggestions, and context -- consistently across CLI and API.
 sidebar:
   order: 3
 ---
 
-Nauka uses a unified error model across every layer. Whether an error originates in the CLI, the daemon, the networking stack, or the storage engine, it always has the same shape.
+Nauka uses a unified error model across every layer. Whether an error originates from the CLI, the hypervisor, the networking stack, or the storage engine, it always has the same shape and always tells you what to do next.
 
-## Anatomy of a NaukaError
+## Anatomy of an error
 
-```
-NaukaError {
-    code:       ErrorCode,     // machine-readable classification
-    message:    String,        // what went wrong
-    suggestion: String,        // what to do about it
-    context:    Option<Value>, // structured diagnostic data (optional)
-}
-```
+Every error includes:
 
-Every error has:
+- A **code** -- a stable, machine-readable classification (e.g., `RESOURCE_NOT_FOUND`)
+- A **message** -- a human-readable description of what went wrong
+- A **suggestion** -- a concrete hint about what action to take
+- Optional **context** -- structured key-value pairs with diagnostic detail (resource kind, resource name, etc.)
 
-- A **code** — a stable, machine-parseable identifier for the error class
-- A **message** — a human-readable description of what went wrong
-- A **suggestion** — a concrete hint about what to do next
-- Optional **context** — structured JSON with diagnostic detail (resource IDs, field names, actual vs. expected values)
-
-The suggestion is not optional. Every error must tell the operator what to try. Silent failures and opaque error codes are not acceptable in a system managing production infrastructure.
+The suggestion is not optional in practice. Every error that reaches the operator includes guidance on how to resolve it. Silent failures and opaque error codes are not acceptable when managing production infrastructure.
 
 ## Error codes
 
-| Code | HTTP | Meaning |
-|------|------|---------|
-| `NotFound` | 404 | The requested resource does not exist |
-| `AlreadyExists` | 409 | A resource with that name or ID already exists |
-| `InvalidInput` | 400 | A field or parameter failed validation |
-| `Unauthorized` | 401 | Authentication is required or failed |
-| `Forbidden` | 403 | Authenticated but not permitted |
-| `Conflict` | 409 | The operation conflicts with current state |
-| `ResourceExhausted` | 429 | A limit (quota, rate, capacity) was exceeded |
-| `Unavailable` | 503 | The service or dependency is temporarily unavailable |
-| `Timeout` | 504 | The operation did not complete in time |
-| `Internal` | 500 | An unexpected internal error |
-| `NotReady` | 503 | The resource exists but is not yet in a usable state |
-| `InvalidState` | 409 | The operation is not valid for the resource's current state |
-| `DependencyFailed` | 502 | A required upstream call failed |
-| `Unimplemented` | 501 | This operation is not yet implemented |
-| `Cancelled` | 499 | The operation was cancelled by the caller |
+| Code | HTTP Status | Meaning |
+|------|-------------|---------|
+| `RESOURCE_NOT_FOUND` | 404 | The requested resource does not exist |
+| `RESOURCE_ALREADY_EXISTS` | 409 | A resource with that name or ID already exists |
+| `VALIDATION_ERROR` | 400 | A field or parameter failed validation |
+| `INVALID_NAME` | 400 | A resource name does not follow naming rules |
+| `PERMISSION_DENIED` | 403 | The operation is not permitted |
+| `CONFLICT` | 409 | The operation conflicts with the current state |
+| `PRECONDITION_FAILED` | 412 | A prerequisite was not met |
+| `AMBIGUOUS_NAME` | 400 | Multiple resources match the given name |
+| `RATE_LIMITED` | 429 | Too many requests -- try again later |
+| `INTERNAL_ERROR` | 500 | An unexpected internal error |
+| `NOT_IMPLEMENTED` | 501 | The operation is not yet implemented |
+| `DAEMON_UNREACHABLE` | 503 | Cannot reach the Nauka process |
+| `TIMEOUT` | 504 | The operation did not complete in time |
+| `NETWORK_ERROR` | 502 | A network communication failure |
+| `STORAGE_ERROR` | 500 | A storage system failure |
 
 ## Retryable vs. terminal errors
 
 Errors are classified as retryable or terminal:
 
-- **Retryable**: `Unavailable`, `Timeout`, `ResourceExhausted` — the same request may succeed if retried after a delay
-- **Terminal**: `NotFound`, `InvalidInput`, `Forbidden`, `AlreadyExists` — retrying will not change the outcome
+- **Retryable**: `TIMEOUT`, `RATE_LIMITED`, `NETWORK_ERROR`, `DAEMON_UNREACHABLE` -- the same request may succeed if retried after a delay
+- **Terminal**: `RESOURCE_NOT_FOUND`, `VALIDATION_ERROR`, `PERMISSION_DENIED`, `RESOURCE_ALREADY_EXISTS` -- retrying the same request will not change the outcome
 
-This classification drives automatic retry logic in clients and the Forge reconciliation loop.
+This classification helps automation scripts decide whether to retry or fail immediately.
 
-## Client vs. server errors
+## What errors look like
 
-Errors are also classified by fault:
+In CLI output, errors are printed as human-readable text:
 
-- **Client errors** (4xx): `NotFound`, `AlreadyExists`, `InvalidInput`, `Unauthorized`, `Forbidden`, `InvalidState` — the caller needs to change the request
-- **Server errors** (5xx): `Internal`, `Unavailable`, `Timeout`, `DependencyFailed` — the system failed, the caller may retry
+```
+Error: hypervisor 'web-node' not found
+Suggestion: Start it with: nauka hypervisor init --name <mesh> --region <region> --zone <zone>
+```
 
-## What a real error looks like
-
-When a VPC creation fails because the name is already taken:
+In JSON mode (for scripting and API responses), the same error is structured:
 
 ```json
 {
-  "code": "AlreadyExists",
-  "message": "a VPC named 'production' already exists in org org-01HWKZ3P8B0E7D2N5FVYMR4CXJ",
-  "suggestion": "choose a different name, or delete the existing VPC first with 'nauka vpc delete production'",
-  "context": {
-    "existing_id": "vpc-01HWKZ4A9C1F8E3M6GXZNQ5BYK",
-    "org_id": "org-01HWKZ3P8B0E7D2N5FVYMR4CXJ",
-    "name": "production"
-  }
+  "code": "RESOURCE_NOT_FOUND",
+  "message": "hypervisor 'web-node' not found",
+  "suggestion": "Start it with: nauka hypervisor init --name <mesh> --region <region> --zone <zone>",
+  "context": [
+    ["resource_kind", "hypervisor"],
+    ["resource_name", "web-node"]
+  ]
 }
 ```
 
-When a port number is out of range:
+## Ambiguous name resolution
 
-```json
-{
-  "code": "InvalidInput",
-  "message": "port 99999 is out of range",
-  "suggestion": "port must be between 1 and 65535",
-  "context": {
-    "field": "port",
-    "value": 99999,
-    "min": 1,
-    "max": 65535
-  }
-}
+When a name matches multiple resources, the error lists all matches so you can disambiguate:
+
+```
+Error: multiple hypervisors named 'web':
+  hv-01AAA... (region: eu)
+  hv-01BBB... (region: us)
+Use the ID directly or add scope flags to disambiguate.
 ```
 
-## Automatic conversions
+## Common errors and their solutions
 
-Standard library errors convert automatically to `NaukaError`:
-
-- `std::io::Error` → `Internal` or `NotFound` depending on the IO error kind
-- `serde_json::Error` → `InvalidInput` with the field path from serde
-- `std::num::ParseIntError` → `InvalidInput`
-
-This means layers that work with files, sockets, or JSON serialization get consistent Nauka errors without manual wrapping at every call site.
+| Error | Likely cause | What to do |
+|-------|-------------|------------|
+| `DAEMON_UNREACHABLE` | No Nauka process is running | Run `nauka hypervisor init` or check if the peering server is started |
+| `VALIDATION_ERROR` on a duration | Invalid format like `banana` instead of `60s` | Use format: number + unit (`s`, `m`, `h`, `d`) |
+| `RESOURCE_NOT_FOUND` for a hypervisor | Node not initialized or wrong name | Run `nauka hypervisor list` to see available nodes |
+| `PRECONDITION_FAILED` | A required step was skipped | Read the suggestion -- it will tell you what prerequisite is missing |

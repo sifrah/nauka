@@ -1,63 +1,102 @@
 ---
-title: WireGuard Interface
-description: Direct WireGuard interface management via wg and ip commands (no C bindings).
+title: WireGuard Interface (Backend)
+description: Direct WireGuard interface management via the wg and ip CLI tools -- interface lifecycle, peer operations, and status monitoring.
 sidebar:
   order: 2
 ---
 
-The `wireguard/wg` module manages the `nauka0` WireGuard interface directly through the `wg` and `ip` CLI tools. It does not use netlink or any C bindings — all operations shell out to standard `wireguard-tools` commands, keeping the code portable and auditable.
+This is the canonical WireGuard interface management implementation. It manages the `nauka0` interface directly through the standard `wg` and `ip` command-line tools, without netlink or C bindings. All operations shell out to system commands, keeping the code portable and easy to audit. The `fabric::wg` module re-exports this implementation.
 
 ## Interface name
 
-The interface is always named `nauka0` (`INTERFACE_NAME` constant). A single node has exactly one WireGuard interface per mesh.
+The WireGuard interface is always named `nauka0`. Each node has exactly one WireGuard interface per mesh. This name is a compile-time constant and appears in:
+
+- `ip link show nauka0`
+- `wg show nauka0`
+- Systemd journal entries
+- `/etc/wireguard/nauka0.conf`
 
 ## Interface lifecycle
 
-### Create
+### Creation
 
-`create_interface(private_key, listen_port, mesh_ipv6)` performs three steps:
+The `create_interface()` function sets up a new WireGuard interface from scratch:
 
-1. `ip link add dev nauka0 type wireguard` — create the kernel interface
-2. `wg set nauka0 private-key /dev/stdin listen-port <port>` — configure key and port (key is written to stdin, never appears in the process argument list)
-3. `ip -6 addr add <mesh_ipv6>/128 dev nauka0` + `ip link set up dev nauka0` — assign address and bring up
+1. `ip link add dev nauka0 type wireguard` -- Creates the WireGuard kernel interface
+2. `wg set nauka0 private-key /dev/stdin listen-port <port>` -- Configures the private key (piped through stdin so it never appears in the process argument list) and the listen port
+3. `ip -6 addr add <mesh_ipv6>/128 dev nauka0` -- Assigns the node's mesh IPv6 address
+4. `ip link set up dev nauka0` -- Brings the interface online
 
-### Destroy
+This sequence is used primarily for testing and manual operations. In production, the service module uses `wg-quick` for initial setup, which handles these steps internally along with additional route setup.
 
-`destroy_interface()` runs `ip link del dev nauka0`. Any routes added for peers are automatically cleaned up by the kernel.
+### Destruction
+
+The `destroy_interface()` function runs `ip link del dev nauka0`. When a WireGuard interface is deleted, the kernel automatically cleans up any associated routes.
 
 ## Peer management
 
-### Add peer
+### Adding a peer
 
-`add_peer(peer, keepalive_secs)` calls `wg set nauka0 peer <pubkey> allowed-ips <ipv6>/128 persistent-keepalive <n>`. If `peer.endpoint` is set it appends `endpoint <host:port>`. After configuring WireGuard it adds a host route: `ip -6 route add <peer_ipv6>/128 dev nauka0`.
+When a new node is announced to this node, it is added to the running WireGuard interface:
 
-### Remove peer
+```sh
+wg set nauka0 peer <pubkey> allowed-ips <mesh_ipv6>/128 \
+    persistent-keepalive 25 endpoint <host:port>
+```
 
-`remove_peer(wg_public_key, mesh_ipv6)` calls `wg set nauka0 peer <pubkey> remove` and deletes the corresponding route. Route deletion errors are ignored — the route may already be gone.
+After configuring the WireGuard peer, a host route is added:
 
-## Status
+```sh
+ip -6 route add <mesh_ipv6>/128 dev nauka0
+```
 
-`get_status()` parses `wg show nauka0 dump` and returns a `WgStatus`:
+This route tells the kernel to send traffic destined for the peer's mesh address through the WireGuard tunnel. The `endpoint` parameter is optional -- if the peer is behind NAT and its endpoint is unknown, WireGuard will learn it when the peer initiates a handshake.
 
-| Field | Source |
-|---|---|
-| `interface` | constant `"nauka0"` |
-| `listen_port` | column 3 of the interface line |
-| `peer_count` | number of peer lines |
-| `rx_bytes` | sum of column 6 across all peers |
-| `tx_bytes` | sum of column 7 across all peers |
+### Removing a peer
 
-`interface_exists()` probes `ip link show dev nauka0` and returns a boolean without throwing on failure.
+When a node leaves the mesh, it is removed from WireGuard:
 
-## Per-peer handshakes
+```sh
+wg set nauka0 peer <pubkey> remove
+ip -6 route del <mesh_ipv6>/128 dev nauka0
+```
 
-`get_peer_handshakes()` also parses `wg show nauka0 dump` (skipping the interface line) and returns a `Vec<PeerHandshake>`:
+Route deletion errors are silently ignored because the route may have already been removed by another operation or by the kernel.
+
+## Interface status
+
+The `get_status()` function parses `wg show nauka0 dump` and returns:
 
 | Field | Description |
 |---|---|
-| `public_key` | peer's WireGuard public key |
-| `latest_handshake` | Unix timestamp of last handshake (0 = never) |
-| `rx_bytes` / `tx_bytes` | traffic counters for this peer |
-| `endpoint` | current endpoint, `None` if WireGuard reports `(none)` |
+| Interface name | Always `nauka0` |
+| Listen port | The UDP port WireGuard is listening on |
+| Peer count | Number of configured WireGuard peers |
+| Total RX bytes | Sum of received bytes across all peers |
+| Total TX bytes | Sum of transmitted bytes across all peers |
 
-This is used by the peering layer to detect stale peers and trigger reconnection.
+The `interface_exists()` function probes `ip link show dev nauka0` and returns a boolean. It does not throw an error if the interface is absent.
+
+## Per-peer handshake monitoring
+
+The `get_peer_handshakes()` function parses `wg show nauka0 dump` to extract per-peer handshake data, which is the foundation of the health monitoring system:
+
+| Field | Description |
+|---|---|
+| Public key | The peer's WireGuard public key |
+| Latest handshake | Unix timestamp of the last successful handshake (0 = never) |
+| RX bytes | Bytes received from this peer |
+| TX bytes | Bytes sent to this peer |
+| Endpoint | Current endpoint as seen by WireGuard, or empty if reported as `(none)` |
+
+The health check loop calls this function every 30 seconds. Peers whose `latest_handshake` is more than 300 seconds old are marked as **Unreachable**. Peers that have never completed a handshake (timestamp 0) are given a 5-minute grace period after being added.
+
+## System requirements
+
+| Dependency | Purpose |
+|---|---|
+| `wireguard-tools` | Provides the `wg` binary for WireGuard configuration |
+| `iproute2` | Provides the `ip` binary for interface and route management |
+| WireGuard kernel module | Built into Linux 5.6+; on older kernels, install via DKMS |
+
+All operations require root privileges. If either binary is missing, the init operation fails with a clear error before any changes are made to the system.

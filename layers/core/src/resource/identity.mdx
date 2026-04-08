@@ -1,72 +1,80 @@
 ---
 title: Resource Identity
-description: How resources are named, aliased, and pluralized — and how those names become CLI commands and API paths.
+description: How resources are named, aliased, and pluralized -- and how those names become CLI commands and API paths.
 sidebar:
   order: 2
 ---
 
-Every resource has an identity: a canonical name, optional aliases, and a plural form. These three things determine how the resource appears in the CLI and in the REST API.
+Every resource in Nauka has an **identity** that determines how it appears in the CLI and the API. The identity consists of three things: a canonical name, optional aliases, and a plural form.
 
-## Name
+## Resource name
 
-The canonical name is how the resource is referred to everywhere. It becomes the top-level CLI subcommand and the singular form used in log messages and error text.
+The canonical name is the primary way you interact with a resource on the command line. It becomes the top-level subcommand under `nauka`:
 
-```rust
-ResourceDef::build("hypervisor", "A bare-metal server in the mesh")
+```
+nauka hypervisor list
+nauka hypervisor get node-1
+nauka hypervisor init --mesh-name production
 ```
 
-This produces the `nauka hypervisor` command family.
+In this example, `hypervisor` is the resource name. Names are always lowercase and may contain hyphens. Each registered resource must have a unique name.
 
-Names must be lowercase, use only letters and hyphens, and be unique across all registered resources. A resource named `load-balancer` becomes `nauka load-balancer ...` in the CLI.
+A resource can also specify a separate **CLI name** if the command-line form should differ from the internal identifier. In most cases, the CLI name and the internal name are the same.
 
 ## Aliases
 
-Aliases let users type shorter versions of a command. A resource can have multiple aliases.
+Aliases provide shorter alternatives for frequently used commands. A resource can have multiple aliases.
 
-```rust
-ResourceDef::build("hypervisor", "A bare-metal server in the mesh")
-    .alias("hv")
+For example, if `hypervisor` has the alias `hv`, both of these commands are equivalent:
+
+```
+nauka hypervisor list
+nauka hv list
 ```
 
-With this alias, both `nauka hypervisor list` and `nauka hv list` work identically. Aliases also apply to API route matching, so `/hv` and `/hypervisors` both resolve to the same handler.
+Aliases are particularly useful for resources with long names that operators type often:
 
-Aliases are useful for resources with long names that operators will type frequently. Common patterns:
-
-| Resource | Alias |
-|----------|-------|
+| Resource | Typical alias |
+|----------|---------------|
 | `hypervisor` | `hv` |
 | `virtual-machine` | `vm` |
 | `load-balancer` | `lb` |
 | `firewall` | `fw` |
 
+Aliases are shown in the CLI help output so operators can discover them.
+
 ## Plural form
 
-The plural form is used for API route paths and in table headers. By default, Nauka appends `s` to the name. For resources where that produces the wrong result, set it explicitly.
+The plural form is used in API route paths and in output messages like "No hypervisors found" or table headers.
 
-```rust
-ResourceDef::build("gateway", "Network gateway")
-    .plural("gateways")  // default: "gateways" — fine here
+By default, Nauka appends an `s` to the resource name. For resources where that produces an incorrect result, the plural is set explicitly:
 
-ResourceDef::build("policy", "IAM policy")
-    .plural("policies")  // default would be "policys" — wrong
+| Resource | Default plural | Correct plural |
+|----------|----------------|----------------|
+| `hypervisor` | `hypervisors` | `hypervisors` (default works) |
+| `policy` | `policys` | `policies` (must be set explicitly) |
+
+The plural form controls the API path. Given a resource named `hypervisor` with plural `hypervisors`:
+
+| CLI command | API equivalent |
+|-------------|---------------|
+| `nauka hypervisor list` | `GET /hypervisors` |
+| `nauka hypervisor get node-1` | `GET /hypervisors/node-1` |
+| `nauka hypervisor create` | `POST /hypervisors` |
+| `nauka hypervisor delete node-1` | `DELETE /hypervisors/node-1` |
+
+Changing the plural form affects the API paths but does not change the CLI command name. They are independent.
+
+## Description
+
+Each resource has a human-readable description that appears in CLI help output:
+
+```
+$ nauka --help
+...
+Commands:
+  hypervisor  A bare-metal server in the mesh
+  ...
 ```
 
-The plural is used in:
-
-- REST API base path: `/gateways`, `/policies`
-- Table header context lines: "Showing 4 gateways"
-- Empty state messages: "No policies found"
-
-## How identity maps to routes
-
-Given a resource with name `vpc`, alias `v`, plural `vpcs`:
-
-| CLI | API |
-|-----|-----|
-| `nauka vpc list` | `GET /vpcs` |
-| `nauka v list` | `GET /vpcs` (alias resolves to same handler) |
-| `nauka vpc get <id>` | `GET /vpcs/{id}` |
-| `nauka vpc create` | `POST /vpcs` |
-| `nauka vpc delete <id>` | `DELETE /vpcs/{id}` |
-
-The plural form controls the API path. The name and aliases control the CLI. They are independent — changing the plural doesn't change the CLI command name.
+This description is set once in the resource definition and used consistently across all generated help text.

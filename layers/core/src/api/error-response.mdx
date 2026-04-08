@@ -1,108 +1,113 @@
 ---
 title: Error Responses
-description: The structured JSON error format returned by the API — error codes, messages, suggestions, and how NaukaError maps to HTTP status codes.
+description: The JSON error format returned by the Nauka API, including error codes, HTTP status mapping, and response envelope structures.
 sidebar:
   order: 4
 ---
 
-When an API request fails, the server returns a structured JSON error body. Every error has a machine-readable code, a human-readable message, and a suggestion for what to do next.
+Every Nauka API response follows a consistent envelope format. Errors return structured JSON with a machine-readable code, a human-readable message, and an optional suggestion. Success responses use typed envelopes depending on the operation.
 
-## Error response format
+## Error format
 
-```json
-{
-  "code": "resource_not_found",
-  "message": "VPC 'vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ' does not exist.",
-  "suggestion": "Check the ID and try again. Use 'nauka vpc list' to see available VPCs.",
-  "request_id": "req-01HWKZ4A9C1F8E3M6GXZNQ5BYK"
-}
-```
-
-- `code` — a stable, lowercase snake_case identifier for the error type. Safe to match programmatically.
-- `message` — a human-readable description of what went wrong.
-- `suggestion` — what to do about it. Always present.
-- `request_id` — the `X-Request-Id` for this request. Include this when reporting bugs.
-
-## HTTP status code mapping
-
-`NaukaError` variants map to HTTP status codes:
-
-| NaukaError | HTTP status | code |
-|-------------|------------|------|
-| `NotFound` | 404 | `resource_not_found` |
-| `AlreadyExists` | 409 | `already_exists` |
-| `ValidationError` | 400 | `validation_error` |
-| `MissingArgument` | 400 | `missing_argument` |
-| `ConstraintViolation` | 400 | `constraint_violation` |
-| `Unauthorized` | 401 | `unauthorized` |
-| `Forbidden` | 403 | `forbidden` |
-| `RateLimited` | 429 | `rate_limited` |
-| `Internal` | 500 | `internal_error` |
-| `Unavailable` | 503 | `service_unavailable` |
-
-Internal errors (`500`) never expose implementation details in the message or suggestion. The message is always `"An internal error occurred."` and the suggestion is `"If this persists, contact support with the request ID."`.
-
-## Validation errors
-
-When multiple validation errors occur (e.g., several required fields are missing), they are returned as an array:
+When a request fails, the API returns a JSON body with three fields:
 
 ```json
 {
-  "code": "validation_error",
-  "message": "The request contains 2 validation errors.",
-  "suggestion": "Fix the listed errors and retry.",
-  "errors": [
-    {
-      "field": "name",
-      "message": "name is required",
-      "suggestion": "Provide a value for the 'name' field."
-    },
-    {
-      "field": "cidr",
-      "message": "cidr must be a valid IPv4 CIDR block",
-      "suggestion": "Example: 10.0.0.0/16"
-    }
-  ],
-  "request_id": "req-01HWKZ4A9C1F8E3M6GXZNQ5BYK"
+  "code": "RESOURCE_NOT_FOUND",
+  "message": "hypervisor 'hv-west-01' not found",
+  "suggestion": "Check the name and try again. Use 'nauka hypervisor list' to see available hypervisors."
 }
 ```
 
-The `errors` array is present only for `validation_error` responses.
+- **code** -- a stable, SCREAMING_SNAKE_CASE identifier. Safe to match programmatically. Codes never change between versions.
+- **message** -- describes what went wrong in plain language.
+- **suggestion** -- when present, tells the operator what to do next.
 
-## Constraint violation errors
+Every error response also includes an `X-Request-Id` header. Include this value when reporting issues so the server operator can trace the exact request.
 
-Constraint violations (e.g., `Requires(A, B)` where B is missing) return:
+## Error codes and HTTP status mapping
+
+Each error code maps to exactly one HTTP status code:
+
+| Code | HTTP | When it happens |
+|------|------|----------------|
+| `RESOURCE_NOT_FOUND` | 404 | The requested resource does not exist |
+| `RESOURCE_ALREADY_EXISTS` | 409 | A resource with that name already exists |
+| `VALIDATION_ERROR` | 400 | The request body or parameters are invalid |
+| `INVALID_NAME` | 400 | The resource name does not meet naming rules |
+| `PERMISSION_DENIED` | 403 | The caller is not authorized for this operation |
+| `CONFLICT` | 409 | The operation conflicts with the current resource state |
+| `PRECONDITION_FAILED` | 412 | A required precondition is not met |
+| `AMBIGUOUS_NAME` | 400 | Multiple resources match the given name |
+| `RATE_LIMITED` | 429 | Too many requests in the current window |
+| `INTERNAL_ERROR` | 500 | An unexpected server-side error |
+| `NOT_IMPLEMENTED` | 501 | The operation is not yet available |
+| `DAEMON_UNREACHABLE` | 503 | The Nauka daemon is not responding |
+| `TIMEOUT` | 504 | The operation did not complete in time |
+| `NETWORK_ERROR` | 502 | A network-level failure occurred |
+| `STORAGE_ERROR` | 500 | The embedded storage layer reported an error |
+
+## Retryable errors
+
+Some errors are safe to retry automatically. The following codes are retryable:
+
+- `RATE_LIMITED` -- wait and retry after a brief delay
+- `TIMEOUT` -- the operation may succeed on a subsequent attempt
+- `NETWORK_ERROR` -- a transient network issue
+- `DAEMON_UNREACHABLE` -- the daemon may be restarting
+
+All other error codes indicate a permanent failure that requires operator action.
+
+## Success response envelopes
+
+The API uses different response envelopes depending on the operation type.
+
+**Single resource** (GET, POST create):
+
+The resource object is returned directly as the JSON body, with all fields flattened at the top level.
+
+**List** (GET collection):
 
 ```json
 {
-  "code": "constraint_violation",
-  "message": "The --private flag requires --cidr to be set.",
-  "suggestion": "Add --cidr <value> to your request.",
-  "request_id": "req-01HWKZ4A9C1F8E3M6GXZNQ5BYK"
+  "items": [ ... ],
+  "count": 3
 }
 ```
 
-## Handling errors in client code
+The `count` field reflects the number of items in the current response.
 
-Match on `code`, not on `message` or HTTP status. Messages can change between versions; codes are stable.
+**Delete**:
 
-```rust
-match error.code.as_str() {
-    "resource_not_found" => // 404 - show not found UI
-    "already_exists" => // 409 - prompt to use a different name
-    "validation_error" => // 400 - highlight the invalid fields
-    "unauthorized" => // 401 - redirect to login
-    _ => // unexpected error - show generic error with request_id
+```json
+{
+  "deleted": true,
+  "message": "hypervisor 'hv-west-01' deleted."
 }
 ```
+
+**Action** (POST to a named action like `/hypervisor/init`):
+
+```json
+{
+  "ok": true,
+  "message": "Mesh initialized successfully."
+}
+```
+
+Action responses may include an optional `data` field with additional structured information when relevant. The `data` field is omitted when there is nothing extra to report.
 
 ## CLI error display
 
-The CLI translates API error responses into terminal-formatted errors using the same `NaukaError` display logic used for local errors:
+When an API error reaches the CLI, it is displayed as a formatted terminal message:
 
 ```
-Error: VPC 'vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ' does not exist.
-  Hint: Check the ID and try again. Use 'nauka vpc list' to see available VPCs.
+  ✖  hypervisor 'hv-west-01' not found
+     Check the name and try again. Use 'nauka hypervisor list' to see available hypervisors.
 ```
 
-The `code` and `request_id` are not shown to the terminal user by default, but are available with `--verbose`.
+The error code and request ID are not shown by default but can be surfaced for debugging purposes.
+
+## Handling errors programmatically
+
+When integrating with the Nauka API, always match on the `code` field rather than parsing the `message` string. Messages may be refined across releases, but error codes are stable and guaranteed not to change.

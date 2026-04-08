@@ -1,124 +1,113 @@
 ---
 title: Control Socket Transport
-description: Unix domain socket transport with length-prefixed JSON framing, request/response types, and a resource-based router.
+description: How the CLI communicates with Nauka over a Unix domain socket using length-prefixed JSON messages.
 sidebar:
   order: 10
 ---
 
-The transport module defines how the Nauka CLI and any other local client communicate with the running Nauka process. All communication happens over a Unix domain socket using a simple, inspectable wire format.
+import Mermaid from '../../../../components/Mermaid.astro';
 
-## Why Unix sockets?
+The transport module defines how the Nauka CLI and other local clients communicate with a running Nauka process. All communication happens over a Unix domain socket using a simple, inspectable wire format.
 
-Unix domain sockets are ideal for local process-to-process communication:
+## Why Unix domain sockets?
 
-- **No network stack overhead** — faster than loopback TCP for local calls
-- **Filesystem permissions** — socket access is controlled by file permissions, not port numbers
-- **No port conflicts** — no risk of colliding with other services
-- **Atomic cleanup** — the socket file can be removed when the process exits
+Unix domain sockets are the right choice for local process-to-process communication:
 
-The socket is located at `~/.nauka/nauka.sock` by default (see [process](/nauka/layers/core/process)).
+- **No network overhead** -- faster than loopback TCP for local calls
+- **File permissions** -- socket access is controlled by filesystem permissions, not port numbers or firewalls
+- **No port conflicts** -- no risk of colliding with other services on the host
+- **Clean lifecycle** -- the socket file is created when the process starts and removed when it exits
 
-## Wire format
+The socket is located at `~/.nauka/control.sock` by default (see [Process and Directory Layout](/nauka/layers/core/process)).
+
+## Wire protocol
 
 Messages are length-prefixed JSON:
 
-```
-[4 bytes: big-endian uint32 length][N bytes: UTF-8 JSON payload]
-```
+<Mermaid chart={`
+sequenceDiagram
+    participant CLI
+    participant Daemon as Nauka Process
+    CLI->>Daemon: [4 bytes: length] [JSON request]
+    Daemon->>CLI: [4 bytes: length] [JSON response]
+    CLI->>CLI: Close connection
+`} />
 
-The 4-byte header encodes the byte length of the JSON body that follows. The receiver reads the 4-byte header first, allocates a buffer of that size, then reads the body.
+The 4-byte header is a big-endian unsigned 32-bit integer encoding the byte length of the JSON body that follows. The receiver reads the header first, allocates a buffer of that size, then reads the body.
 
-This framing is simple, easy to implement in any language, and easy to inspect with standard tools. The maximum message size is **1 MB**. Responses larger than 1 MB indicate a design problem and are rejected.
+The maximum message size is **1 MB**. Messages larger than this are rejected.
 
-## Request and Response types
+## Request format
 
-All messages are either a `Request` or a `Response`.
-
-**Request:**
+Every request specifies a resource kind, an operation, and optional parameters:
 
 ```json
 {
-  "id": "01HWKZ3P8B0E7D2N5FVYMR4CXJ",
-  "resource": "vpc",
-  "action": "list",
-  "payload": {
-    "org_id": "org-01HWKZ3P8B0E7D2N5FVYMR4CXJ"
-  }
+  "kind": "hypervisor",
+  "operation": "status",
+  "name": "my-node",
+  "fields": {}
 }
 ```
 
 | Field | Description |
 |-------|-------------|
-| `id` | Request correlation ID (ULID). Matched in the response. |
-| `resource` | The resource kind being operated on |
-| `action` | The operation: `create`, `get`, `list`, `delete`, `update` |
-| `payload` | Action-specific parameters |
+| `kind` | The resource type being operated on (`hypervisor`, `vpc`, `fabric`, etc.) |
+| `operation` | The action to perform (`create`, `list`, `get`, `delete`, or a custom action) |
+| `name` | Resource name or ID (for operations that target a specific resource) |
+| `scope` | Scope values for hierarchical resources (e.g., which org or VPC) |
+| `fields` | Additional parameters from CLI flags |
 
-**Response:**
+## Response format
+
+Responses indicate success or failure with structured data:
+
+**Success:**
 
 ```json
 {
-  "id": "01HWKZ3P8B0E7D2N5FVYMR4CXJ",
   "ok": true,
-  "payload": { ... }
-}
-```
-
-Or on error:
-
-```json
-{
-  "id": "01HWKZ3P8B0E7D2N5FVYMR4CXJ",
-  "ok": false,
-  "error": {
-    "code": "NotFound",
-    "message": "VPC 'staging' not found",
-    "suggestion": "run 'nauka vpc list' to see available VPCs"
+  "data": {
+    "name": "my-mesh",
+    "status": "active",
+    "peers": 3
   }
 }
 ```
 
-The `id` field in the response matches the request, allowing the client to correlate responses when pipelining multiple requests.
+**Error:**
 
-## Resource kinds
-
-The `resource` field in a request is one of the defined resource kind strings:
-
-| Kind | Description |
-|------|-------------|
-| `org` | Organization |
-| `vpc` | Virtual Private Cloud |
-| `hypervisor` | Hypervisor node |
-| `mesh` | WireGuard mesh |
-| `node` | Mesh node |
-| `vm` | Virtual machine |
-| `volume` | Storage volume |
-| `snapshot` | Volume snapshot |
-| `image` | Boot image |
-| `network` | Network attachment |
-| `firewall` | Firewall ruleset |
-| `key` | SSH or API key |
-
-## Router
-
-The router dispatches incoming requests to the appropriate handler based on the `resource` field:
-
-```
-Router {
-  handlers: HashMap<ResourceKind, Box<dyn Handler>>,
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "hypervisor 'staging' not found",
+    "suggestion": "Run 'nauka hypervisor list' to see available nodes"
+  }
 }
 ```
 
-Each layer registers its handlers during startup. When a request arrives, the router looks up the handler by resource kind and passes the request to it. Unknown resource kinds return a `NotFound` error immediately.
+The error in the response follows the standard [error model](/nauka/layers/core/error), so error handling is consistent whether the error originates locally in the CLI or remotely from the daemon.
 
-The router runs synchronously within the async task that accepted the socket connection. Each connection gets its own task, so concurrent requests from different clients are handled in parallel. A single client's requests are handled sequentially in order of arrival.
+## Request routing
+
+The Nauka process uses a router to dispatch incoming requests to the appropriate handler based on the `kind` field. Each layer registers its handlers during startup. When a request arrives:
+
+1. The router looks up the handler for the request's `kind`
+2. If found, the request is passed to the handler
+3. If no handler is registered for that kind, a `RESOURCE_NOT_FOUND` error is returned with a list of available resource kinds
+
+## Socket permissions
+
+The control socket is created with restrictive permissions (mode `0600`) so that only the socket owner can connect. This prevents other users on the same host from sending commands to the Nauka process.
 
 ## Inspecting traffic
 
-Because the wire format is JSON, you can inspect socket traffic during development using `socat`:
+Because the wire format is JSON (after the 4-byte length header), you can inspect socket traffic during debugging using standard tools:
 
 ```sh
-socat -v UNIX-CONNECT:~/.nauka/nauka.sock -
+socat -v UNIX-CONNECT:~/.nauka/control.sock -
 ```
 
-This connects to the socket and lets you type raw requests. The `-v` flag prints a hex dump of all bytes, which makes the 4-byte length header visible.
+This is useful for verifying that requests are being formatted correctly or for building custom integrations that communicate directly with the Nauka process.

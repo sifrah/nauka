@@ -5,139 +5,165 @@ sidebar:
   order: 7
 ---
 
-Nauka's configuration system has a clear priority chain: CLI flags beat environment variables, which beat the config file, which beats built-in defaults. You never need to worry about which source "wins" — higher-priority sources always override lower ones.
+import Mermaid from '../../../../components/Mermaid.astro';
 
-## Config file location
-
-The config file lives at `~/.nauka/config.toml`. This is created automatically by `nauka init` with sensible defaults.
-
-```toml
-[daemon]
-socket_path = "~/.nauka/nauka.sock"
-log_level = "info"
-
-[wireguard]
-listen_port = 51820
-dns = ["1.1.1.1", "8.8.8.8"]
-
-[peering]
-timeout = "30s"
-retry_interval = "5s"
-
-[storage]
-data_dir = "~/.nauka/data"
-cache_size_mb = 512
-
-[logging]
-format = "text"
-file = "~/.nauka/logs/nauka.log"
-rotation = "daily"
-```
-
-## Environment variables
-
-Every config key has a corresponding environment variable with the `NAUKA_` prefix. Nested keys use `_` as the separator.
-
-| Config key | Environment variable |
-|------------|---------------------|
-| `daemon.log_level` | `NAUKA_DAEMON_LOG_LEVEL` |
-| `wireguard.listen_port` | `NAUKA_WIREGUARD_LISTEN_PORT` |
-| `peering.timeout` | `NAUKA_PEERING_TIMEOUT` |
-| `storage.data_dir` | `NAUKA_STORAGE_DATA_DIR` |
-| `logging.format` | `NAUKA_LOGGING_FORMAT` |
-
-This makes Nauka easy to configure in containerized or CI environments without writing config files.
+Nauka's configuration follows a clear priority chain. You can set values in a config file, override them with environment variables, and override those with CLI flags. The highest-priority source always wins.
 
 ## Priority chain
 
-```
-CLI flags
-    ↓ (overrides)
-Environment variables (NAUKA_*)
-    ↓ (overrides)
-~/.nauka/config.toml
-    ↓ (overrides)
-Built-in defaults
+<Mermaid chart={`
+flowchart TD
+    CLI["CLI flags<br/>(highest priority)"] --> MERGED["Resolved<br/>configuration"]
+    ENV["Environment variables<br/>(NAUKA_*)"] --> MERGED
+    FILE["~/.nauka/config.toml"] --> MERGED
+    DEFAULTS["Built-in defaults<br/>(lowest priority)"] --> MERGED
+`} />
+
+A value is only taken from a lower-priority source if no higher-priority source sets it. An absent CLI flag does not override a config file value.
+
+## Config file
+
+The config file lives at `~/.nauka/config.toml`. If the file does not exist, Nauka uses built-in defaults for all values. A complete default configuration looks like this:
+
+```toml
+# Nauka configuration
+# All settings are optional -- defaults shown below.
+# Durations: use s (seconds), m (minutes), h (hours), d (days).
+# Env vars override config file (e.g., NAUKA_LOG_LEVEL=debug).
+
+[daemon]
+health_check_interval = "60s"
+reconcile_interval = "30s"
+persist_interval = "30s"
+unreachable_timeout = "5m"
+max_concurrent_requests = 100
+
+[wireguard]
+interface_name = "nauka0"
+keepalive_interval = "25s"
+listen_port = 51820
+
+[peering]
+join_timeout = "5m"
+exchange_timeout = "30s"
+max_concurrent_connections = 100
+max_pending_joins = 100
+
+[storage]
+cache_memory_mb = 4096
+cache_disk_gb = 100
+
+[logging]
+level = "info"        # trace, debug, info, warn, error
+format = "text"       # text, json
+file = ""             # empty = stderr only
+max_file_size_mb = 50
+max_files = 3
 ```
 
-A value is only taken from a source if it was explicitly set. An absent CLI flag does not override a config file value with an empty string.
+The config file is saved with mode `0600` (owner read/write only) to protect any sensitive values.
+
+## Environment variables
+
+Every configurable setting can be overridden with an environment variable using the `NAUKA_` prefix:
+
+| Environment variable | Config path |
+|---------------------|-------------|
+| `NAUKA_LOG_LEVEL` | `logging.level` |
+| `NAUKA_LOG_FORMAT` | `logging.format` |
+| `NAUKA_LOG_FILE` | `logging.file` |
+| `NAUKA_WG_INTERFACE` | `wireguard.interface_name` |
+| `NAUKA_WG_PORT` | `wireguard.listen_port` |
+| `NAUKA_HEALTH_INTERVAL` | `daemon.health_check_interval` |
+| `NAUKA_RECONCILE_INTERVAL` | `daemon.reconcile_interval` |
+| `NAUKA_UNREACHABLE_TIMEOUT` | `daemon.unreachable_timeout` |
+| `NAUKA_CACHE_MEMORY_MB` | `storage.cache_memory_mb` |
+| `NAUKA_CACHE_DISK_GB` | `storage.cache_disk_gb` |
+
+This makes Nauka easy to configure in containerized or automated environments without writing config files.
 
 ## Configuration sections
 
 ### daemon
 
-Controls the Nauka process itself.
+Controls health checking and reconciliation behavior.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `socket_path` | `~/.nauka/nauka.sock` | Unix socket path for CLI-daemon communication |
-| `log_level` | `info` | Logging verbosity: `trace`, `debug`, `info`, `warn`, `error` |
+| `health_check_interval` | `60s` | How often to check peer health |
+| `reconcile_interval` | `30s` | How often to reconcile desired vs. actual state |
+| `persist_interval` | `30s` | How often to persist state to disk |
+| `unreachable_timeout` | `5m` | Time before a peer is marked unreachable |
+| `max_concurrent_requests` | `100` | Maximum concurrent API requests |
 
 ### wireguard
 
-Controls WireGuard interface setup.
+Controls the WireGuard interface.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `listen_port` | `51820` | UDP port WireGuard listens on |
-| `dns` | `["1.1.1.1"]` | DNS resolvers for mesh peers |
+| `interface_name` | `nauka0` | Name of the WireGuard network interface |
+| `keepalive_interval` | `25s` | WireGuard persistent keepalive interval |
+| `listen_port` | `51820` | UDP port for WireGuard traffic |
 
 ### peering
 
-Controls mesh peer discovery and join.
+Controls the mesh join process.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `timeout` | `30s` | Time to wait for a peer to respond during join |
-| `retry_interval` | `5s` | Interval between retry attempts |
+| `join_timeout` | `5m` | Maximum time to wait for a join operation to complete |
+| `exchange_timeout` | `30s` | Timeout for the key exchange phase |
+| `max_concurrent_connections` | `100` | Maximum simultaneous incoming peering connections |
+| `max_pending_joins` | `100` | Maximum join requests waiting for approval |
 
 ### storage
 
-Controls local state storage.
+Controls cache sizing.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `data_dir` | `~/.nauka/data` | Directory for the embedded database and working files |
-| `cache_size_mb` | `512` | In-memory cache for the embedded database |
+| `cache_memory_mb` | `4096` | In-memory cache limit in megabytes |
+| `cache_disk_gb` | `100` | On-disk cache limit in gigabytes |
+
+Setting both to `0` disables caching entirely, which Nauka will warn about.
 
 ### logging
 
-Controls log output.
+Controls log output. See also [Structured Logging](/nauka/layers/core/logging) for details on formats, rotation, and filtering.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `format` | `text` | `text` for human-readable, `json` for structured |
-| `file` | none | Path to write logs to (in addition to stderr) |
-| `rotation` | `daily` | Log rotation frequency: `hourly`, `daily`, `never` |
+| `level` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
+| `format` | `text` | Output format: `text` (human-readable) or `json` (structured) |
+| `file` | _(empty)_ | Log file path. Empty means stderr only. |
+| `max_file_size_mb` | `50` | Maximum log file size before rotation |
+| `max_files` | `3` | Number of rotated log files to keep |
 
 ## Validation on load
 
-All config values are validated when the config is loaded. Invalid values cause the process to exit with a clear error message before doing any work.
+All config values are validated when the configuration is loaded. Invalid values cause the process to exit with a clear error message before any work is done:
 
 ```
-Error: invalid configuration
-  wireguard.listen_port: 99999 is out of range (must be 1–65535)
-
-Suggestion: set NAUKA_WIREGUARD_LISTEN_PORT to a valid port number,
-or update ~/.nauka/config.toml
+Error: daemon.health_check_interval 'banana' is invalid (use e.g., 60s, 1m, 5m)
 ```
 
-Duration values use the same [human-readable format](/nauka/layers/core/validate) as the CLI — `30s`, `5m`, `2h`. The config file does not use raw seconds or milliseconds.
+Duration values use [human-readable format](/nauka/layers/core/validate) -- `30s`, `5m`, `2h`. Raw seconds or milliseconds are not accepted in the config file.
 
-## Inspecting resolved config
+## Common tasks
 
-To see the effective configuration after merging all sources:
+**Override a setting for a single command:**
 
 ```sh
-nauka config show
+NAUKA_LOG_LEVEL=debug nauka hypervisor status
 ```
 
-This prints the resolved config as TOML, with each value annotated by its source:
+**Check WireGuard port configuration:**
 
-```toml
-[daemon]
-log_level = "debug"  # from NAUKA_DAEMON_LOG_LEVEL
-
-[wireguard]
-listen_port = 51820  # from default
+```sh
+grep listen_port ~/.nauka/config.toml
 ```
+
+**Use a non-default config file path:**
+
+The config file path is always `~/.nauka/config.toml`. To use a different home directory, set the `HOME` environment variable before running Nauka.

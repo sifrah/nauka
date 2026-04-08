@@ -1,83 +1,128 @@
 ---
 title: CLI Generation
-description: How generate_command() converts a ResourceDef into a clap command tree — subcommands, flags, and help text, all automatic.
+description: How Nauka automatically generates a full CLI command tree from resource definitions -- subcommands, flags, help text, and output rendering.
 sidebar:
   order: 9
 ---
 
-Once you have a `ResourceDef`, turning it into a fully functional CLI command tree requires one call:
+import Mermaid from '../../../../../components/Mermaid.astro';
 
-```rust
-let command = generate_command(&resource_def);
-```
-
-This returns a `clap::Command` that you can mount into the top-level CLI. No manual clap code, no hand-written argument lists, no duplicated help strings.
+Nauka's CLI is not hand-written. Every subcommand, flag, help string, and example you see in `nauka --help` is generated automatically from the resource definitions registered at startup. This page explains what gets generated and how.
 
 ## What gets generated
 
-For each operation on the resource, `generate_command` creates a `clap::Command` subcommand. The subcommand name is the operation name: `list`, `get`, `create`, `update`, `delete`, or the custom action name.
+For each registered resource, the CLI generator produces:
 
-For each `OperationArg` on the operation, a `clap::Arg` is generated:
-- Required args generate `--flag <value>` syntax and are marked as required in clap
-- Optional args generate `--flag [value]` syntax
-- Positional args generate bare `<value>` syntax
-- Flag (boolean) args generate `--flag` with no value
+<Mermaid chart={`
+flowchart TD
+    RD[Resource Definition] --> RC[Resource Command: nauka hypervisor]
+    RC --> OP1[nauka hypervisor list]
+    RC --> OP2[nauka hypervisor get]
+    RC --> OP3[nauka hypervisor init]
+    RC --> OP4[nauka hypervisor join]
+    RC --> OP5[...]
+    OP1 --> F1["--json flag"]
+    OP2 --> F2["name argument + --json flag"]
+    OP3 --> F3["--mesh-name, --endpoint, ..."]
+    OP4 --> F4["--target, --pin, ..."]
+`} />
 
-Scope flags (`--org`, `--project`, `--vpc`) are injected automatically based on the resource's declared scope. You don't need to add them to each operation.
+1. **A top-level subcommand** named after the resource (e.g., `nauka hypervisor`).
+2. **A subcommand for each operation** (e.g., `nauka hypervisor list`, `nauka hypervisor get`, `nauka hypervisor init`).
+3. **Flags for each field** on the operation, with types, defaults, and help text.
+4. **Automatically injected flags** like `--json`, `--yes`, and scope flags.
 
-The `--yes` flag is injected automatically on any operation with `.with_confirm()`.
+## Automatic flags
 
-The `--output` / `-o` flag is injected on all operations.
+Several flags are added automatically based on the operation type:
 
-## Help text
+| Flag | Added when | Purpose |
+|------|-----------|---------|
+| `--json` | On `get` and `list` operations | Output raw JSON instead of formatted tables |
+| `--yes` / `-y` | On operations marked as requiring confirmation | Skip the interactive confirmation prompt |
+| Scope flags (e.g., `--vpc`) | On all operations for scoped resources | Identify the parent resource |
 
-Help text is derived from the `FieldDef` descriptions, operation descriptions, and any `.example()` calls on operations:
+These flags do not need to be declared in the resource definition -- they appear automatically.
 
-```
-nauka vpc create --help
+## How operation types affect the CLI
 
-Create a new Virtual Private Cloud.
+Each operation type generates a different argument structure:
 
-Usage: nauka vpc create [OPTIONS] --name <name>
+### create
 
-Options:
-  --name <name>          VPC name
-  --description <desc>   Optional description
-  --org <id>             Organization ID
-  --output <format>      Output format [json|yaml|id]
-  -h, --help             Print help
+- A required positional `name` argument (the resource name, 3-63 characters, lowercase alphanumeric and hyphens)
+- All create-only and mutable schema fields as `--flag` options
+- Scope flags if the resource has a parent
 
-Examples:
-  nauka vpc create --name production
-```
+### get
 
-The "Examples:" section is generated from `.example()` calls on the operation.
+- A required positional `name` argument (resource name or ID)
+- The `--json` flag
+- Scope flags if the resource has a parent
+
+### list
+
+- The `--json` flag
+- Scope flags if the resource has a parent
+- Any filter arguments defined on the operation
+
+### delete
+
+- A required positional `name` argument
+- The `--yes` / `-y` flag
+- Scope flags if the resource has a parent
+
+### update
+
+- A required positional `name` argument
+- All mutable schema fields as optional `--flag` options
+- Scope flags if the resource has a parent
+
+### Custom actions
+
+- Whatever arguments are defined on the operation (required or optional)
 
 ## Aliases
 
-Resource aliases are registered as `clap` command aliases. Users typing `nauka v list` and `nauka vpc list` get the same command:
+Resource aliases are registered as command aliases. If `hypervisor` has the alias `hv`, both of these work:
 
-```rust
-// Generated automatically from .alias("v")
-command.alias("v")
+```
+nauka hypervisor list
+nauka hv list
 ```
 
-## Integrating into the top-level CLI
+## Help text and examples
 
-Generated commands are typically collected at startup from the resource registry and added to the root command:
+Help text is derived from field descriptions and operation descriptions:
 
-```rust
-let mut root = clap::Command::new("nauka");
+```
+$ nauka hypervisor init --help
+Create a new mesh on this node
 
-for resource in registry.resources() {
-    root = root.subcommand(generate_command(resource));
-}
+Usage: nauka hypervisor init [OPTIONS]
+
+Options:
+  --mesh-name <name>    Name for the new mesh
+  --endpoint <addr>     Public endpoint for this node
+  --listen-port <port>  WireGuard listen port [default: 51820]
+  -h, --help            Print help
+
+Examples:
+  nauka hypervisor init --mesh-name production --endpoint 203.0.113.1:51820
 ```
 
-The binary has no knowledge of specific resources — it just collects whatever is registered. Adding a new resource to the registry automatically makes it available in the CLI.
+The "Examples:" section comes from examples defined on the operation.
 
-## What generate_command does NOT do
+## Output rendering
 
-- It does not execute any logic. The command tree is purely structural.
-- It does not connect to the handler. Dispatch happens separately (see [dispatch](/nauka/layers/core/resource/dispatch)).
-- It does not validate business logic. clap validates argument presence and types; constraint checking and handler invocation happen in the dispatch layer.
+The CLI generator also handles rendering responses from handlers:
+
+- **Table rendering** for list operations: columns are sized automatically based on content, headers are printed with a separator line, and empty results show a configurable message.
+- **Detail rendering** for get operations: fields are displayed in labeled sections with consistent alignment.
+- **Value formatting**: bytes are shown as KiB/MiB/GiB, timestamps as UTC dates, durations as human-readable strings, booleans as yes/no, and sensitive values are masked.
+
+All rendering is bypassed when `--json` is used -- the raw JSON from the handler is printed directly.
+
+## Self-assembling CLI
+
+The binary itself has no knowledge of which resources exist. At startup, it collects all registered resource definitions from the registry and generates the command tree. Adding a new resource to a layer automatically makes it available as a CLI command with no changes to the binary.

@@ -1,94 +1,106 @@
 ---
 title: Typed Resource IDs
-description: ULID-backed identifiers that encode resource type, creation time, and uniqueness in a single string.
+description: How Nauka identifies resources with typed, sortable, ULID-backed identifiers.
 sidebar:
   order: 2
 ---
 
-Every resource in Nauka has a unique identifier. These aren't plain UUIDs — they are typed, sortable, and human-readable at a glance.
+Every resource in Nauka has a unique identifier. These are not plain UUIDs -- they are typed, sortable by creation time, and human-readable at a glance.
 
 ## Format
 
 ```
-{prefix}-{26-char-crockford-base32}
+{prefix}-{26-character ULID}
 ```
 
 For example:
 
 ```
-org-01HWKZ3P8B0E7D2N5FVYMR4CXJ
-vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ
-hv-01HWKZ4A9C1F8E3M6GXZNQ5BYK
+hv-01HWKZ4A9C1F8E3M6GXZNQ5BYK     (hypervisor)
+mesh-01HWKZ3P8B0E7D2N5FVYMR4CXJ   (mesh network)
+vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ    (VPC)
+node-01HWKZ4A9C1F8E3M6GXZNQ5BYK   (mesh node)
 ```
 
-The prefix tells you what kind of resource it is. The 26-character suffix is a [ULID](https://github.com/ulid/spec) encoded in Crockford Base32 — 48 bits of millisecond timestamp followed by 80 bits of randomness.
+The prefix tells you what kind of resource it is. The 26-character suffix is a [ULID](https://github.com/ulid/spec) encoded in Crockford Base32 -- 48 bits of millisecond timestamp followed by 80 bits of randomness.
 
 ## Why ULIDs instead of UUIDs?
 
-UUIDs are random. Two UUIDs give you no information about which was created first. ULIDs embed a timestamp, so they sort chronologically. A list of resource IDs sorted lexicographically is also sorted by creation time.
+UUIDs are random. Two UUIDs give you no information about which was created first. ULIDs embed a timestamp, so they sort chronologically. A list of resource IDs sorted alphabetically is also sorted by creation time.
 
-ULIDs are also more compact and readable than UUIDs. Compare:
-
-```
-UUID:  550e8400-e29b-41d4-a716-446655440000
-ULID:  01HWKZ3P8B0E7D2N5FVYMR4CXJ
-```
-
-The typed prefix adds resource-type information without sacrificing any of these properties.
-
-## ID types
-
-Nauka defines 17 typed ID types:
-
-| Type | Prefix | Resource |
-|------|--------|---------|
-| `OrgId` | `org-` | Organization |
-| `VpcId` | `vpc-` | Virtual Private Cloud |
-| `HypervisorId` | `hv-` | Hypervisor node |
-| `MeshId` | `mesh-` | WireGuard mesh network |
-| `NodeId` | `node-` | Mesh node (member of a mesh) |
-| `VmId` | `vm-` | Virtual machine |
-| `VolumeId` | `vol-` | Storage volume |
-| `SnapshotId` | `snap-` | Volume snapshot |
-| `ImageId` | `img-` | VM boot image |
-| `NetworkId` | `net-` | Network attachment |
-| `SubnetId` | `sub-` | Subnet |
-| `GatewayId` | `gw-` | Gateway |
-| `RouteId` | `rt-` | Route entry |
-| `FirewallId` | `fw-` | Firewall ruleset |
-| `KeyId` | `key-` | SSH or API key |
-| `TokenId` | `tok-` | Auth token |
-| `EventId` | `evt-` | Audit event |
-
-## Parsing and validation
-
-IDs are validated on parse. An ID string that doesn't match `{prefix}-{26-chars}` or contains invalid Crockford Base32 characters is rejected immediately with a descriptive error.
+ULIDs are also more compact and readable than UUIDs:
 
 ```
-// Correct
-"vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ" -> VpcId (valid)
+UUID:  550e8400-e29b-41d4-a716-446655440000   (36 chars with dashes)
+ULID:  01HWKZ3P8B0E7D2N5FVYMR4CXJ            (26 chars)
+```
 
-// Wrong prefix for the expected type
-"org-01HWKZ3P8B0E7D2N5FVYMR4CXJ" -> error: expected vpc- prefix, got org-
+The typed prefix adds resource-kind information without sacrificing any of these properties.
 
-// Malformed suffix
-"vpc-notavalidulid" -> error: invalid Crockford Base32 characters
+## Resource ID types
+
+| Prefix | Resource |
+|--------|---------|
+| `org-` | Organization |
+| `proj-` | Project |
+| `env-` | Environment |
+| `vpc-` | Virtual Private Cloud |
+| `sub-` | Subnet |
+| `sg-` | Security Group |
+| `hv-` | Hypervisor node |
+| `vm-` | Virtual machine |
+| `vol-` | Storage volume |
+| `snap-` | Volume snapshot |
+| `nic-` | Network interface |
+| `nat-` | NAT gateway |
+| `rt-` | Route table |
+| `rule-` | Security group rule |
+| `peer-` | VPC peering |
+| `node-` | Mesh node |
+| `mesh-` | Mesh network |
+
+## Validation
+
+IDs are validated when parsed. An ID string that does not match the expected prefix or contains invalid characters is rejected immediately with a descriptive error:
+
+```
+# Correct
+hv-01HWKZ4A9C1F8E3M6GXZNQ5BYK    -> valid hypervisor ID
+
+# Wrong prefix for expected type
+vpc-01HWKZ4A9C1F8E3M6GXZNQ5BYK   -> error: expected prefix 'hv-', got 'vpc-'
+
+# Missing ULID suffix
+hv-                                -> error: missing ULID after prefix
+
+# Invalid characters in suffix
+hv-not_a_valid_ulid!!!!!!!         -> error: bad ULID encoding
 ```
 
 ## Names vs. IDs
 
-Resources can have both a name and an ID. Names are for humans — they're mutable, descriptive, and subject to naming rules (see [validate](/nauka/layers/core/validate)). IDs are for machines — they're immutable, globally unique, and used in all API calls and state references.
+Resources can have both a human-readable name and a machine-generated ID. Names are mutable and descriptive. IDs are immutable and globally unique.
 
-When you reference a resource in the CLI, you can often use the name. Internally, everything uses the ID. The distinction matters when scripting: if you rename a VPC, scripts referencing it by name break. Scripts referencing it by ID do not.
+When you reference a resource in the CLI, you often use the name:
+
+```sh
+nauka hypervisor status
+```
+
+Internally, everything uses the ID. This distinction matters for automation: if you rename a resource, scripts referencing it by name break. Scripts referencing it by ID do not.
 
 ## Sorting by creation time
 
-Because the ULID timestamp is in the most-significant bits, lexicographic sort equals chronological sort:
+Because the ULID timestamp occupies the most-significant bits, alphabetical sort equals chronological sort:
 
 ```
-org-01HWKZ2AAAAAAAAAAAAAAAAAAA  (created first)
-org-01HWKZ3P8B0E7D2N5FVYMR4CXJ (created second)
-org-01HWKZ9ZZZZZZZZZZZZZZZZZZZ  (created third)
+hv-01HWKZ2AAAAAAAAAAAAAAAAAAA   (created first)
+hv-01HWKZ3P8B0E7D2N5FVYMR4CXJ  (created second)
+hv-01HWKZ9ZZZZZZZZZZZZZZZZZZZ   (created third)
 ```
 
-This is useful when paginating resource lists — a lexicographic cursor gives you stable, time-ordered pagination without a separate `created_at` index.
+This is useful when listing resources -- you get time-ordered results naturally without needing a separate `created_at` field for sorting.
+
+## Extracting creation time
+
+Each ID encodes the millisecond timestamp of when it was generated. This means you can determine when a resource was created from the ID alone, without querying any database.

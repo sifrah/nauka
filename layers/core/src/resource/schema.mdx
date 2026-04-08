@@ -1,111 +1,99 @@
 ---
 title: Resource Schema
-description: How fields are defined for operations — types, defaults, validation, and how OperationArg wraps fields as required or optional.
+description: How fields are defined for resources -- types, defaults, environment variable overrides, and visibility in help output.
 sidebar:
   order: 4
 ---
 
-Every operation that takes user input relies on field definitions. A `FieldDef` describes a single piece of input: its name, type, description, and default value. An `OperationArg` wraps a `FieldDef` and marks it as required or optional for a specific operation.
+The schema defines what fields a resource has. Each field becomes a CLI flag (like `--endpoint` or `--cidr`) and a corresponding API parameter. The framework handles parsing, default values, environment variable overrides, and help text generation automatically.
 
-## FieldDef
+## Field types
 
-A `FieldDef` defines a reusable input field:
+Every field has a type that determines how user input is parsed and validated:
 
-```rust
-FieldDef::string("name", "Human-readable name for this resource")
-FieldDef::integer("port", "Port number to listen on")
-FieldDef::boolean("private", "Whether the resource is private")
-FieldDef::flag("force", "Skip safety checks")
-```
+| Type | CLI appearance | Description |
+|------|---------------|-------------|
+| String | `--name <value>` | Free-form text |
+| Integer | `--port <number>` | Whole number |
+| CIDR | `--cidr <block>` | Network CIDR notation (e.g., `10.0.0.0/16`) |
+| Port | `--port <number>` | Network port number |
+| SizeGb | `--size <gb>` | Disk or storage size in gigabytes |
+| SizeMb | `--memory <mb>` | Memory size in megabytes |
+| Duration | `--timeout <duration>` | Time duration |
+| IpAddr | `--endpoint <ip>` | IP address |
+| Path | `--config <path>` | File system path |
+| Flag | `--force` | Boolean toggle (present = true, absent = false) |
+| Enum | `--type <value>` | One of a fixed set of allowed values |
+| KeyValue | `--label key=value` | Key-value pair, can be specified multiple times |
+| Secret | `--password <value>` | Sensitive value, masked in interactive prompts |
+| ResourceRef | `--vpc <name>` | Reference to another resource, resolved by name or ID |
 
-### Field types
+## Defaults
 
-| Type | Rust equivalent | CLI appearance | Notes |
-|------|----------------|----------------|-------|
-| `string` | `String` | `--name <value>` | Free-form text |
-| `integer` | `i64` | `--port <number>` | Parsed as base-10 integer |
-| `boolean` | `bool` | `--private <true\|false>` | Explicit true/false value |
-| `flag` | `bool` (presence) | `--force` | Present = true, absent = false |
-
-### Defaults
-
-Fields can have default values. Defaults are displayed in help text and used when the field is omitted:
-
-```rust
-FieldDef::integer("port", "Port to bind")
-    .default("8080")
-
-FieldDef::string("region", "Deployment region")
-    .default("eu-west")
-```
-
-If a field has a default, it is implicitly optional — the default is used when the field is not provided.
-
-### Validation
-
-Fields can have inline validation beyond their type:
-
-```rust
-FieldDef::string("name", "Resource name")
-    .validate(|v| validate_name(v))
-
-FieldDef::integer("port", "Port number")
-    .min(1)
-    .max(65535)
-```
-
-Validation runs before the operation handler is called. If validation fails, the user sees a clear error with the field name and what was wrong.
-
-## OperationArg
-
-An `OperationArg` wraps a `FieldDef` and attaches it to a specific operation. It controls whether the field is required or optional for that operation.
-
-```rust
-// Required: user must provide --name or be prompted for it
-OperationArg::required(FieldDef::string("name", "Name for the new VPC"))
-
-// Optional: --description is accepted but not mandatory
-OperationArg::optional(FieldDef::string("description", "Optional description"))
-```
-
-### Required fields and interactive prompts
-
-When a required field is missing and stdin is a TTY, the framework prompts the user interactively rather than failing immediately. This makes the CLI usable both in scripts (where all args must be provided) and interactively (where the user can fill things in as they go).
-
-In non-TTY contexts (pipes, CI, scripts), a missing required field is always an error.
-
-### Positional arguments
-
-Some operations take a positional argument rather than a named flag — typically the resource identifier:
-
-```rust
-OperationArg::positional(FieldDef::string("id", "Resource ID or name"))
-```
-
-Positional args appear in the CLI as bare values:
+Fields can have default values. When a field has a default, it is effectively optional -- the default is used if the user does not provide a value. Defaults are displayed in the `--help` output:
 
 ```
-nauka vpc get vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ
+$ nauka hypervisor init --help
+...
+Options:
+  --listen-port <port>  WireGuard listen port [default: 51820]
+  --mesh-name <name>    Name for the new mesh
 ```
 
-rather than:
+## Environment variable overrides
+
+Fields can be configured to accept their value from an environment variable. This is useful for values that should not appear in command history or that differ between deployment environments:
 
 ```
-nauka vpc get --id vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ
+$ export NAUKA_ENDPOINT=203.0.113.1:51820
+$ nauka hypervisor init --mesh-name production
+# The --endpoint flag is populated from NAUKA_ENDPOINT
 ```
 
-## Sharing field definitions
+When both a CLI flag and an environment variable are provided, the CLI flag takes precedence.
 
-Field definitions are plain structs — you can define them once and reference them in multiple operations:
+## Short flags
 
-```rust
-let name_field = FieldDef::string("name", "Resource name").validate(|v| validate_name(v));
+Frequently used fields can have single-character short flags for convenience:
 
-ResourceDef::build("vpc", "Virtual Private Cloud")
-    .op(Operation::create()
-        .with_arg(OperationArg::required(name_field.clone())))
-    .op(Operation::update()
-        .with_arg(OperationArg::optional(name_field.clone())))
+```
+nauka hypervisor init -n production    # same as --mesh-name production
 ```
 
-This ensures consistent validation and help text across operations.
+## Field mutability
+
+Each field has a mutability setting that controls when it can be set:
+
+| Mutability | Meaning |
+|------------|---------|
+| **Create-only** | Can be set at creation time but not changed afterward (e.g., CIDR block) |
+| **Mutable** | Can be updated after creation (e.g., description, labels) |
+| **Read-only** | Computed by the system, never set by the user (e.g., ID, creation timestamp) |
+| **Internal** | Used internally, never exposed in the CLI or API |
+
+Create-only and mutable fields appear as CLI flags on the `create` command. Only mutable fields appear on the `update` command. Read-only and internal fields are never shown as input flags.
+
+## Help visibility
+
+Fields can be configured with different visibility levels in CLI help output:
+
+| Visibility | Behavior |
+|------------|----------|
+| **Normal** | Shown in both `-h` (short help) and `--help` (full help) |
+| **Advanced** | Only shown in `--help` (full help), hidden from `-h` |
+| **Hidden** | Never shown in help output, but still accepted as a flag |
+
+This keeps the short help clean for common usage while making advanced options discoverable with `--help`.
+
+## Enum fields
+
+Enum fields restrict input to a predefined set of allowed values. The CLI shows these as possible values in help output and rejects any value that is not in the set:
+
+```
+$ nauka vm create web-1 --type standard
+$ nauka vm create web-1 --type invalid-type
+error: invalid value 'invalid-type' for '--type <type>'
+  [possible values: standard, performance, memory-optimized]
+```
+
+Enum fields can also have a default value that is used when the flag is not provided.

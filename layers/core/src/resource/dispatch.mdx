@@ -1,99 +1,113 @@
 ---
 title: Request Dispatch
-description: How the dispatch layer extracts args, prompts for missing input, validates constraints, confirms destructive ops, calls the handler, and renders output.
+description: How Nauka processes a CLI command or API request through argument extraction, validation, prompts, confirmation, handler execution, and output rendering.
 sidebar:
   order: 10
 ---
 
-Dispatch is the bridge between the parsed CLI arguments (or incoming HTTP request) and the registered handler. It's the layer that makes the CLI feel polished: prompting for missing input, confirming destructive operations, and rendering the result correctly.
+import Mermaid from '../../../../../components/Mermaid.astro';
+
+Dispatch is the execution pipeline that sits between user input and the resource handler. When you run a command like `nauka hypervisor init --mesh-name production`, dispatch takes the parsed arguments, validates them, handles any interactive prompts, calls the handler, and renders the result.
 
 ## The dispatch pipeline
 
-When a command like `nauka vpc create --name production` is executed, dispatch follows this sequence:
+<Mermaid chart={`
+flowchart TD
+    A[Parsed CLI arguments] --> B[Extract raw values]
+    B --> C{Missing required args?}
+    C -->|Yes, interactive terminal| D[Prompt user for values]
+    C -->|Yes, non-interactive| E[Return error]
+    C -->|No| F[Validate constraints]
+    D --> F
+    F -->|Fail| G[Return constraint error]
+    F -->|Pass| H{Requires confirmation?}
+    H -->|Yes, no --yes flag| I["Prompt: Are you sure? [y/N]"]
+    H -->|No or --yes| J[Call handler]
+    I -->|y| J
+    I -->|N| K[Abort]
+    J --> L[Render output]
+`} />
+
+Each step is described below.
+
+### 1. Extract raw values
+
+The dispatch layer extracts all values from the parsed CLI arguments:
+
+- **Resource name**: the positional argument (for create, get, delete)
+- **Scope values**: parent flags like `--vpc`
+- **Field values**: all `--flag` options, including schema fields and operation-specific arguments
+- **Control flags**: `--json` and `--yes`
+
+### 2. Prompt for missing required values
+
+When running in an interactive terminal (TTY) and a required argument was not provided, Nauka prompts the user instead of immediately failing:
 
 ```
-1. Extract args from clap matches
-2. Identify the resource and operation
-3. Prompt for any missing required args (if TTY)
-4. Validate all field types and individual constraints
-5. Evaluate cross-field constraints (Requires, Conflicts, etc.)
-6. Show confirmation prompt if operation requires it (unless --yes)
-7. Build OperationRequest
-8. Call handler
-9. Render OperationResponse
+$ nauka hypervisor init
+? Mesh name: production
+? Endpoint: 203.0.113.1:51820
 ```
 
-If any step fails, dispatch stops and reports the error. Steps that fail before the handler is called never execute any state changes.
-
-## Prompting for missing args
-
-When a required arg is absent and stdin is a TTY, dispatch prompts interactively:
+This behavior only applies in interactive terminals. In non-interactive contexts (piped input, scripts, CI), missing required arguments always produce an error:
 
 ```
-$ nauka vpc create
-
-? VPC name: production
-? Description (optional, press Enter to skip):
-
-Created VPC "production" (vpc-01HWKZ3P8B0E7D2N5FVYMR4CXJ)
+$ echo "" | nauka hypervisor init
+Error: missing required argument --mesh-name
 ```
 
-When stdin is not a TTY (pipes, CI), missing required args are always errors:
+The prompts are type-aware: secret fields mask input, enum fields show the allowed values, and all fields show their description.
+
+### 3. Validate constraints
+
+After all field values are collected (from CLI arguments and interactive prompts), [constraints](/nauka/layers/core/resource/constraint) are evaluated. If any constraint fails, the operation is rejected with an error message.
+
+Constraints are evaluated before the handler runs, so a failed constraint never causes side effects.
+
+### 4. Confirmation prompt
+
+For operations marked as requiring confirmation (typically `delete` and other destructive actions), the user is prompted:
 
 ```
-$ echo "" | nauka vpc create
-Error: missing required argument --name
-  Hint: provide --name <value> to specify the VPC name
+Delete hypervisor 'node-1'? This cannot be undone. [y/N]
 ```
 
-The interactive prompts are rendered by the [prompt module](/nauka/layers/core/ui/prompt).
+The user must type `y` to proceed. Any other input aborts the operation. The `--yes` / `-y` flag skips this prompt for use in scripts and automation.
 
-## The OperationRequest
+### 5. Call handler
 
-The handler receives an `OperationRequest` containing everything it needs:
+The validated request is passed to the handler registered for this resource. The handler receives:
 
-```rust
-pub struct OperationRequest {
-    /// Which operation is being performed
-    pub operation: OperationKind,
-    /// The resource name (from the ResourceDef)
-    pub resource: String,
-    /// Parsed field values
-    pub fields: FieldMap,
-    /// Scope context (org_id, project_id, vpc_id as applicable)
-    pub scope: ScopeContext,
-    /// The resource ID, for get/update/delete and custom actions
-    pub id: Option<ResourceId>,
-}
+- **Operation name**: which action is being performed (create, list, get, delete, or a custom action name)
+- **Resource name**: the target resource name, if applicable
+- **Scope values**: parent identifiers
+- **Field values**: all parsed and validated field values
+
+The handler performs the actual work (state changes, service management, etc.) and returns a response.
+
+### 6. Render output
+
+The response from the handler is rendered based on the operation's declared output type:
+
+| Response type | Default rendering | With `--json` |
+|---------------|-------------------|---------------|
+| Single resource | Key-value detail view | JSON object |
+| Resource list | Aligned table | JSON array |
+| Message | Plain text | `{"message": "..."}` |
+| None | Nothing | Nothing |
+
+If the operation defines a success message template, it is rendered with the resource kind and name substituted in:
+
+```
+hypervisor 'node-1' created.
 ```
 
-Handlers don't need to re-parse arguments or re-validate types — by the time the handler is called, the request is clean.
+## CLI and API use the same pipeline
 
-## The OperationResponse
+The dispatch pipeline works the same way for both CLI and API requests. The only differences are:
 
-Handlers return an `OperationResponse`:
+- API requests skip the interactive prompting step (there is no terminal)
+- Arguments are extracted from the HTTP request body and URL parameters instead of CLI flags
+- Errors are returned as structured JSON instead of terminal-formatted messages
 
-```rust
-pub enum OperationResponse {
-    Resource(serde_json::Value),
-    ResourceList(Vec<serde_json::Value>),
-    Message(String),
-    Empty,
-}
-```
-
-Dispatch selects the correct renderer based on the response variant and the operation's declared `OutputKind`. A `ResourceList` response renders as a table using the `ColumnDef` configuration on the `ResourceDef`. A `Resource` response renders as a detail view using the `DetailField` configuration.
-
-## HTTP dispatch
-
-For API requests, dispatch works the same way but skips the prompting step. Args are extracted from the request body and URL parameters instead of clap matches. Constraints are evaluated identically. The same handler is called. Error responses follow the [error response format](/nauka/layers/core/api/error-response).
-
-This means the same handler code runs whether the operation was triggered by the CLI or the API — no duplication, no divergence.
-
-## Error propagation
-
-Handlers return `Result<OperationResponse, NaukaError>`. Dispatch translates `NaukaError` to:
-- A formatted terminal error (with suggestion text) for CLI
-- A structured JSON error response for API
-
-The handler never needs to know which transport it's running on.
+The same handler code runs regardless of whether the request came from the CLI or the API, ensuring consistent behavior across both interfaces.
