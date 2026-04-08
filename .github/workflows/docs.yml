@@ -66,9 +66,10 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     steps:
+      # ── Channel build (always from HEAD of main) ──
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag || github.sha }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -91,7 +92,6 @@ jobs:
         working-directory: docs
         run: npm ci
 
-      # Build for channel path (e.g., /stable/)
       - name: Build docs (channel)
         working-directory: docs
         env:
@@ -106,7 +106,19 @@ jobs:
           name: docs-channel
           path: docs/dist
 
-      # Build for tag path (e.g., /v1.2.0/) — only on release
+      # ── Tag build (from the tag commit) ──
+      - name: Checkout tag commit
+        if: needs.resolve.outputs.tag != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          clean: false
+
+      - name: Reinstall docs deps for tag
+        if: needs.resolve.outputs.tag != ''
+        working-directory: docs
+        run: npm ci
+
       - name: Build docs (tag)
         if: needs.resolve.outputs.tag != ''
         working-directory: docs
