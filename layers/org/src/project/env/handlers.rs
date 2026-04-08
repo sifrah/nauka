@@ -49,31 +49,14 @@ pub fn handler() -> HandlerFn {
                         let project = req.scope.get("project").ok_or_else(|| anyhow::anyhow!("--project is required"))?.to_string();
                         nauka_core::validate::name(&name)?;
                         let env = store.create(&name, &project, &org).await?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": env.name, "id": env.id.as_str(),
-                            "org_id": env.org_id.as_str(),
-                            "project_id": env.project_id.as_str(),
-                            "project_name": env.project_name, "org_name": env.org_name,
-                            "created_at": crate::to_iso8601(env.created_at),
-                            "updated_at": crate::to_iso8601(env.updated_at),
-                            "status": env.status,
-                            "labels": env.labels,
-                        })))
+                        Ok(OperationResponse::Resource(env.to_api_json()))
                     }
                     "list" => {
                         let org = req.scope.get("org").map(|s| s.to_string());
                         let project = req.scope.get("project").map(|s| s.to_string());
                         let envs = store.list(project.as_deref(), org.as_deref()).await?;
-                        let items: Vec<serde_json::Value> = envs.iter().map(|e| serde_json::json!({
-                            "name": e.name, "id": e.id.as_str(),
-                            "org_id": e.org_id.as_str(),
-                            "project_id": e.project_id.as_str(),
-                            "project_name": e.project_name, "org_name": e.org_name,
-                            "created_at": crate::to_iso8601(e.created_at),
-                            "updated_at": crate::to_iso8601(e.updated_at),
-                            "status": e.status,
-                            "labels": e.labels,
-                        })).collect();
+                        let items: Vec<serde_json::Value> =
+                            envs.iter().map(|e| e.to_api_json()).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
                     "get" => {
@@ -82,16 +65,7 @@ pub fn handler() -> HandlerFn {
                         let project = req.scope.get("project").map(|s| s.to_string());
                         let env = store.get(&name, project.as_deref(), org.as_deref()).await?
                             .ok_or_else(|| anyhow::anyhow!("environment '{name}' not found"))?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": env.name, "id": env.id.as_str(),
-                            "org_id": env.org_id.as_str(),
-                            "project_id": env.project_id.as_str(),
-                            "project_name": env.project_name, "org_name": env.org_name,
-                            "created_at": crate::to_iso8601(env.created_at),
-                            "updated_at": crate::to_iso8601(env.updated_at),
-                            "status": env.status,
-                            "labels": env.labels,
-                        })))
+                        Ok(OperationResponse::Resource(env.to_api_json()))
                     }
                     "delete" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;

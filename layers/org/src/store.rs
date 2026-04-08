@@ -1,6 +1,7 @@
 //! Org persistence in ClusterDb (TiKV).
 
 use nauka_core::id::OrgId;
+use nauka_core::resource::ResourceMeta;
 use nauka_hypervisor::controlplane::ClusterDb;
 
 use crate::types::Org;
@@ -24,19 +25,14 @@ impl OrgStore {
         }
 
         let org = Org {
-            id: OrgId::generate(),
-            name: name.to_string(),
-            created_at: crate::now(),
-            updated_at: crate::now(),
-            status: "active".to_string(),
-            labels: std::collections::HashMap::new(),
+            meta: ResourceMeta::new(OrgId::generate().to_string(), name),
         };
 
-        self.db.put(NS_ORG, org.id.as_str(), &org).await?;
+        self.db.put(NS_ORG, &org.meta.id, &org).await?;
         self.db
-            .put(NS_ORG_IDX, &org.name, &org.id.as_str().to_string())
+            .put(NS_ORG_IDX, &org.meta.name, &org.meta.id)
             .await?;
-        add_id(&self.db, org.id.as_str()).await?;
+        add_id(&self.db, &org.meta.id).await?;
 
         Ok(org)
     }
@@ -74,20 +70,19 @@ impl OrgStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("org '{name_or_id}' not found"))?;
 
-        // Check for child projects
         let proj_store = crate::project::store::ProjectStore::new(self.db.clone());
-        let projects = proj_store.list(Some(&org.name)).await?;
+        let projects = proj_store.list(Some(&org.meta.name)).await?;
         if !projects.is_empty() {
             anyhow::bail!(
                 "org '{}' has {} project(s). Delete them first.",
-                org.name,
+                org.meta.name,
                 projects.len()
             );
         }
 
-        self.db.delete(NS_ORG, org.id.as_str()).await?;
-        self.db.delete(NS_ORG_IDX, &org.name).await?;
-        remove_id(&self.db, org.id.as_str()).await?;
+        self.db.delete(NS_ORG, &org.meta.id).await?;
+        self.db.delete(NS_ORG_IDX, &org.meta.name).await?;
+        remove_id(&self.db, &org.meta.id).await?;
         Ok(())
     }
 }

@@ -40,39 +40,28 @@ pub fn handler() -> HandlerFn {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         nauka_core::validate::name(&name)?;
                         let org = store.create(&name).await?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": org.name, "id": org.id.as_str(),
-                            "created_at": crate::to_iso8601(org.created_at),
-                            "updated_at": crate::to_iso8601(org.updated_at),
-                            "status": org.status,
-                            "labels": org.labels,
-                        })))
+                        Ok(OperationResponse::Resource(org.to_api_json()))
                     }
                     "list" => {
                         let orgs = store.list().await?;
-                        let items: Vec<serde_json::Value> = orgs.iter().map(|o| serde_json::json!({
-                            "name": o.name, "id": o.id.as_str(),
-                            "created_at": crate::to_iso8601(o.created_at),
-                            "updated_at": crate::to_iso8601(o.updated_at),
-                            "status": o.status,
-                            "labels": o.labels,
-                        })).collect();
+                        let items: Vec<serde_json::Value> =
+                            orgs.iter().map(|o| o.to_api_json()).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
                     "get" => {
-                        let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
-                        let org = store.get(&name).await?
+                        let name = req
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
+                        let org = store
+                            .get(&name)
+                            .await?
                             .ok_or_else(|| anyhow::anyhow!("org '{name}' not found"))?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": org.name, "id": org.id.as_str(),
-                            "created_at": crate::to_iso8601(org.created_at),
-                            "updated_at": crate::to_iso8601(org.updated_at),
-                            "status": org.status,
-                            "labels": org.labels,
-                        })))
+                        Ok(OperationResponse::Resource(org.to_api_json()))
                     }
                     "delete" => {
-                        let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
+                        let name = req
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;
                         store.delete(&name).await?;
                         Ok(OperationResponse::Message(format!("org '{name}' deleted.")))
                     }

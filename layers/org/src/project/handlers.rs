@@ -44,28 +44,13 @@ pub fn handler() -> HandlerFn {
                         let org = req.scope.get("org").ok_or_else(|| anyhow::anyhow!("--org is required"))?.to_string();
                         nauka_core::validate::name(&name)?;
                         let project = store.create(&name, &org).await?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": project.name, "id": project.id.as_str(),
-                            "org_id": project.org_id.as_str(),
-                            "org_name": project.org_name,
-                            "created_at": crate::to_iso8601(project.created_at),
-                            "updated_at": crate::to_iso8601(project.updated_at),
-                            "status": project.status,
-                            "labels": project.labels,
-                        })))
+                        Ok(OperationResponse::Resource(project.to_api_json()))
                     }
                     "list" => {
                         let org = req.scope.get("org").map(|s| s.to_string());
                         let projects = store.list(org.as_deref()).await?;
-                        let items: Vec<serde_json::Value> = projects.iter().map(|p| serde_json::json!({
-                            "name": p.name, "id": p.id.as_str(),
-                            "org_id": p.org_id.as_str(),
-                            "org_name": p.org_name,
-                            "created_at": crate::to_iso8601(p.created_at),
-                            "updated_at": crate::to_iso8601(p.updated_at),
-                            "status": p.status,
-                            "labels": p.labels,
-                        })).collect();
+                        let items: Vec<serde_json::Value> =
+                            projects.iter().map(|p| p.to_api_json()).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
                     "get" => {
@@ -73,15 +58,7 @@ pub fn handler() -> HandlerFn {
                         let org = req.scope.get("org").map(|s| s.to_string());
                         let project = store.get(&name, org.as_deref()).await?
                             .ok_or_else(|| anyhow::anyhow!("project '{name}' not found"))?;
-                        Ok(OperationResponse::Resource(serde_json::json!({
-                            "name": project.name, "id": project.id.as_str(),
-                            "org_id": project.org_id.as_str(),
-                            "org_name": project.org_name,
-                            "created_at": crate::to_iso8601(project.created_at),
-                            "updated_at": crate::to_iso8601(project.updated_at),
-                            "status": project.status,
-                            "labels": project.labels,
-                        })))
+                        Ok(OperationResponse::Resource(project.to_api_json()))
                     }
                     "delete" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name or ID"))?;

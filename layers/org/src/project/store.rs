@@ -1,6 +1,7 @@
 //! Project persistence in ClusterDb (TiKV).
 
 use nauka_core::id::ProjectId;
+use nauka_core::resource::ResourceMeta;
 use nauka_hypervisor::controlplane::ClusterDb;
 
 use super::types::Project;
@@ -25,28 +26,21 @@ impl ProjectStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("org '{org_name}' not found"))?;
 
-        let idx_key = format!("{}/{}", org.id.as_str(), name);
+        let idx_key = format!("{}/{}", org.meta.id, name);
         let existing: Option<String> = self.db.get(NS_PROJ_IDX, &idx_key).await?;
         if existing.is_some() {
             anyhow::bail!("project '{name}' already exists in org '{org_name}'");
         }
 
         let project = Project {
-            id: ProjectId::generate(),
-            name: name.to_string(),
-            org_id: org.id.clone(),
-            org_name: org.name.clone(),
-            created_at: crate::now(),
-            updated_at: crate::now(),
-            status: "active".to_string(),
-            labels: std::collections::HashMap::new(),
+            meta: ResourceMeta::new(ProjectId::generate().to_string(), name),
+            org_id: org.meta.id.clone().into(),
+            org_name: org.meta.name.clone(),
         };
 
-        self.db.put(NS_PROJ, project.id.as_str(), &project).await?;
-        self.db
-            .put(NS_PROJ_IDX, &idx_key, &project.id.as_str().to_string())
-            .await?;
-        add_id(&self.db, project.id.as_str()).await?;
+        self.db.put(NS_PROJ, &project.meta.id, &project).await?;
+        self.db.put(NS_PROJ_IDX, &idx_key, &project.meta.id).await?;
+        add_id(&self.db, &project.meta.id).await?;
 
         Ok(project)
     }
@@ -68,7 +62,7 @@ impl ProjectStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("org '{org_name}' not found"))?;
 
-        let idx_key = format!("{}/{}", org.id.as_str(), name_or_id);
+        let idx_key = format!("{}/{}", org.meta.id, name_or_id);
         let id: Option<String> = self.db.get(NS_PROJ_IDX, &idx_key).await?;
         match id {
             Some(id) => self.db.get(NS_PROJ, &id).await.map_err(Into::into),
@@ -99,21 +93,22 @@ impl ProjectStore {
             anyhow::anyhow!("project '{name_or_id}' not found in org '{org_name}'")
         })?;
 
-        // Check for child environments
         let env_store = super::env::store::EnvStore::new(self.db.clone());
-        let envs = env_store.list(Some(&project.name), Some(org_name)).await?;
+        let envs = env_store
+            .list(Some(&project.meta.name), Some(org_name))
+            .await?;
         if !envs.is_empty() {
             anyhow::bail!(
                 "project '{}' has {} environment(s). Delete them first.",
-                project.name,
+                project.meta.name,
                 envs.len()
             );
         }
 
-        let idx_key = format!("{}/{}", project.org_id.as_str(), project.name);
-        self.db.delete(NS_PROJ, project.id.as_str()).await?;
+        let idx_key = format!("{}/{}", project.org_id.as_str(), project.meta.name);
+        self.db.delete(NS_PROJ, &project.meta.id).await?;
         self.db.delete(NS_PROJ_IDX, &idx_key).await?;
-        remove_id(&self.db, project.id.as_str()).await?;
+        remove_id(&self.db, &project.meta.id).await?;
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 //! Environment persistence in ClusterDb (TiKV).
 
 use nauka_core::id::EnvId;
+use nauka_core::resource::ResourceMeta;
 use nauka_hypervisor::controlplane::ClusterDb;
 
 use super::types::Environment;
@@ -33,30 +34,23 @@ impl EnvStore {
                 anyhow::anyhow!("project '{project_name}' not found in org '{org_name}'")
             })?;
 
-        let idx_key = format!("{}/{}", project.id.as_str(), name);
+        let idx_key = format!("{}/{}", project.meta.id, name);
         let existing: Option<String> = self.db.get(NS_ENV_IDX, &idx_key).await?;
         if existing.is_some() {
             anyhow::bail!("environment '{name}' already exists in project '{project_name}'");
         }
 
         let env = Environment {
-            id: EnvId::generate(),
-            name: name.to_string(),
-            project_id: project.id.clone(),
-            project_name: project.name.clone(),
+            meta: ResourceMeta::new(EnvId::generate().to_string(), name),
+            project_id: project.meta.id.clone().into(),
+            project_name: project.meta.name.clone(),
             org_id: project.org_id.clone(),
             org_name: project.org_name.clone(),
-            created_at: crate::now(),
-            updated_at: crate::now(),
-            status: "active".to_string(),
-            labels: std::collections::HashMap::new(),
         };
 
-        self.db.put(NS_ENV, env.id.as_str(), &env).await?;
-        self.db
-            .put(NS_ENV_IDX, &idx_key, &env.id.as_str().to_string())
-            .await?;
-        add_id(&self.db, env.id.as_str()).await?;
+        self.db.put(NS_ENV, &env.meta.id, &env).await?;
+        self.db.put(NS_ENV_IDX, &idx_key, &env.meta.id).await?;
+        add_id(&self.db, &env.meta.id).await?;
 
         Ok(env)
     }
@@ -79,7 +73,7 @@ impl EnvStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("project '{project_name}' not found"))?;
 
-        let idx_key = format!("{}/{}", project.id.as_str(), name_or_id);
+        let idx_key = format!("{}/{}", project.meta.id, name_or_id);
         let id: Option<String> = self.db.get(NS_ENV_IDX, &idx_key).await?;
         match id {
             Some(id) => self.db.get(NS_ENV, &id).await.map_err(Into::into),
@@ -100,7 +94,6 @@ impl EnvStore {
             }
         }
 
-        // Filter accepts both names and IDs (API passes IDs, CLI passes names)
         match (project_name, org_name) {
             (Some(proj), Some(org)) => Ok(envs
                 .into_iter()
@@ -134,10 +127,10 @@ impl EnvStore {
                 anyhow::anyhow!("environment '{name_or_id}' not found in project '{project_name}'")
             })?;
 
-        let idx_key = format!("{}/{}", env.project_id.as_str(), env.name);
-        self.db.delete(NS_ENV, env.id.as_str()).await?;
+        let idx_key = format!("{}/{}", env.project_id.as_str(), env.meta.name);
+        self.db.delete(NS_ENV, &env.meta.id).await?;
         self.db.delete(NS_ENV_IDX, &idx_key).await?;
-        remove_id(&self.db, env.id.as_str()).await?;
+        remove_id(&self.db, &env.meta.id).await?;
         Ok(())
     }
 }
