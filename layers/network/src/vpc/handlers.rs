@@ -57,7 +57,7 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = VpcStore::new(crate::connect_cluster_db().await?);
+                let store = VpcStore::new(nauka_hypervisor::controlplane::connect().await?);
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;

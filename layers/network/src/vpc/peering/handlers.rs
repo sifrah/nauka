@@ -46,7 +46,7 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = PeeringStore::new(crate::connect_cluster_db().await?);
+                let store = PeeringStore::new(nauka_hypervisor::controlplane::connect().await?);
                 match req.operation.as_str() {
                     "create" => {
                         let vpc = req
