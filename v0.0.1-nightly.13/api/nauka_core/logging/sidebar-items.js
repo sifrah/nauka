@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NOISE_FILTERS"],"fn":["build_filter","error_count","global_context","init","init_cli","init_stderr","init_with_file","install_panic_hook","reset_counters","warn_count"],"static":["ERROR_COUNT","WARN_COUNT"],"struct":["LogGuard","MetricsLayer"]};
