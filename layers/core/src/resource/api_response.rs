@@ -117,7 +117,7 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
     let mut y = 1970u64;
     let mut remaining = days;
     loop {
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
         let diy = if leap { 366 } else { 365 };
         if remaining < diy {
             break;
@@ -125,7 +125,7 @@ fn days_to_date(days: u64) -> (u64, u64, u64) {
         remaining -= diy;
         y += 1;
     }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
     let months: [u64; 12] = if leap {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
