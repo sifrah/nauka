@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ActionResponse","ApiError","ApiSuccess","DeleteResponse","ListResponse","ResourceResponse"],"type":["ApiResult"]};

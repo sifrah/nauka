@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_router","list_routes","openapi_spec"],"mod":["error_response","middleware","route_gen","server"],"struct":["ActionResponse","ApiConfig","ApiError","ApiServer","ApiSuccess","DeleteResponse","ListResponse","ResourceResponse","RouteInfo"],"type":["ApiResult"]};
