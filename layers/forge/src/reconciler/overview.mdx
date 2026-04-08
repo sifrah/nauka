@@ -1,0 +1,60 @@
+---
+title: Reconcilers
+description: How the Forge converges desired state to actual state for each resource type.
+sidebar:
+  order: 2
+---
+
+The Forge runs **reconcilers** — one per resource type — in dependency order. Each reconciler reads desired state from TiKV, compares with actual system state, and applies the delta.
+
+## Reconciliation order
+
+1. **VPC reconciler** — creates VXLAN bridges for VPCs that have VMs on this node
+2. **VM reconciler** — starts/stops VM processes to match desired state
+
+Order matters: the VPC bridge must exist before a VM can attach its network interface.
+
+## The reconciliation loop
+
+```
+Every 30 seconds:
+  1. Connect to TiKV
+  2. For each reconciler (VPC, VM):
+     a. Read desired state from TiKV
+     b. Read actual state from the kernel
+     c. Diff: what's missing? what's orphaned?
+     d. Apply: create missing, delete orphaned
+     e. Log results
+```
+
+## Reconciler trait
+
+Each resource type implements a simple contract:
+
+```
+trait Reconciler {
+    fn name(&self) → "vpc" | "vm" | ...
+    fn reconcile(ctx) → ReconcileResult
+}
+```
+
+The `ReconcileResult` reports what happened:
+
+```
+vpc: 2 desired, 1 actual — created:1 deleted:0 updated:0 failed:0
+vm: 3 desired, 3 actual — in sync
+```
+
+## Resource ownership
+
+- **VMs** belong to this node if `vm.hypervisor_id == this_node_id`
+- **VPCs** belong to this node if any local VM uses that VPC
+
+A VPC with no local VMs has its bridge removed (cleanup reconciliation).
+
+## Manual trigger
+
+```bash
+# Run one cycle manually (for debugging)
+nauka forge reconcile
+```
