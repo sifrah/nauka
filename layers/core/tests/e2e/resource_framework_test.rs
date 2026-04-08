@@ -37,7 +37,11 @@ fn test_resource() -> ResourceRegistration {
         })
     });
 
-    ResourceRegistration { def, handler }
+    ResourceRegistration {
+        def,
+        handler,
+        children: vec![],
+    }
 }
 
 #[test]

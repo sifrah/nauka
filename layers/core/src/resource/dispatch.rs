@@ -23,6 +23,16 @@ pub async fn dispatch(
     op_name: &str,
     matches: &ArgMatches,
 ) -> anyhow::Result<()> {
+    // Check if op_name is a child resource (e.g., "project" under "org")
+    if let Some(child) = reg
+        .children
+        .iter()
+        .find(|c| c.def.identity.cli_name == op_name || c.def.identity.aliases.contains(&op_name))
+    {
+        let (child_op, child_matches) = matches.subcommand().expect("subcommand enforced by clap");
+        return Box::pin(dispatch(child, child_op, child_matches)).await;
+    }
+
     let def = &reg.def;
     let op = def
         .operations

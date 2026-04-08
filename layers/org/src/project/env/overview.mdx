@@ -1,0 +1,82 @@
+---
+title: Environments
+description: Environments represent deployment targets within a project -- production, staging, dev -- and scope all future cloud resources.
+sidebar:
+  order: 3
+---
+
+An environment is a deployment target within a project. Most teams use environments to separate lifecycle stages: production runs live traffic, staging validates releases, dev is for daily work. All future resources (VPCs, VMs, volumes) will be created within an environment.
+
+## Creating an environment
+
+```bash
+nauka org project env create production --org acme --project backend
+```
+
+```
+  Name:            production
+  ID:              env-01KNPWMAGT4XA9N6QBWGARDT09
+  Project:         backend
+  Organization:    acme
+  Created:         2026-04-08 15:50 UTC
+```
+
+Both `--org` and `--project` are required on create.
+
+## Listing environments
+
+```bash
+# All environments in a project
+nauka org project env list --org acme --project backend
+
+# All environments across all projects and orgs
+nauka org project env list
+```
+
+```
+NAME        PROJECT  ORG   ID                              CREATED
+-------------------------------------------------------------------------------
+production  backend  acme  env-01KNPWMAGT4XA9N6QBWGARDT09  2026-04-08 15:50 UTC
+staging     backend  acme  env-01KNPWMAHFHGSMFX22WFKDGRM9  2026-04-08 15:50 UTC
+```
+
+## Inspecting an environment
+
+```bash
+nauka org project env get production --org acme --project backend
+```
+
+Or by ID:
+
+```bash
+nauka org project env get env-01KNPWMAGT4XA9N6QBWGARDT09
+```
+
+## Deleting an environment
+
+```bash
+nauka org project env delete staging --org acme --project backend
+```
+
+In the future, an environment containing active resources (VPCs, VMs) cannot be deleted until those resources are cleaned up first.
+
+## Typical setup
+
+A common pattern for a small team:
+
+```bash
+# Create the org
+nauka org create mycompany
+
+# Create a project per service
+nauka org project create api --org mycompany
+nauka org project create web --org mycompany
+
+# Create environments for each
+nauka org project env create production --org mycompany --project api
+nauka org project env create staging    --org mycompany --project api
+nauka org project env create production --org mycompany --project web
+nauka org project env create staging    --org mycompany --project web
+```
+
+This gives you isolated environments for each service, ready for VPC and VM creation.
