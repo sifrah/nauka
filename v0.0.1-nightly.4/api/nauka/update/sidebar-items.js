@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GITHUB_API","REPO"],"fn":["command","detect_target","find_latest_release","run"]};
