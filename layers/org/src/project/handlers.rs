@@ -46,7 +46,12 @@ pub fn handler() -> HandlerFn {
                         let project = store.create(&name, &org).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": project.name, "id": project.id.as_str(),
-                            "org_name": project.org_name, "created_at": project.created_at,
+                            "org_id": project.org_id.as_str(),
+                            "org_name": project.org_name,
+                            "created_at": crate::to_iso8601(project.created_at),
+                            "updated_at": crate::to_iso8601(project.updated_at),
+                            "status": project.status,
+                            "labels": project.labels,
                         })))
                     }
                     "list" => {
@@ -54,7 +59,12 @@ pub fn handler() -> HandlerFn {
                         let projects = store.list(org.as_deref()).await?;
                         let items: Vec<serde_json::Value> = projects.iter().map(|p| serde_json::json!({
                             "name": p.name, "id": p.id.as_str(),
-                            "org_name": p.org_name, "created_at": p.created_at,
+                            "org_id": p.org_id.as_str(),
+                            "org_name": p.org_name,
+                            "created_at": crate::to_iso8601(p.created_at),
+                            "updated_at": crate::to_iso8601(p.updated_at),
+                            "status": p.status,
+                            "labels": p.labels,
                         })).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
@@ -65,7 +75,12 @@ pub fn handler() -> HandlerFn {
                             .ok_or_else(|| anyhow::anyhow!("project '{name}' not found"))?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": project.name, "id": project.id.as_str(),
-                            "org_name": project.org_name, "created_at": project.created_at,
+                            "org_id": project.org_id.as_str(),
+                            "org_name": project.org_name,
+                            "created_at": crate::to_iso8601(project.created_at),
+                            "updated_at": crate::to_iso8601(project.updated_at),
+                            "status": project.status,
+                            "labels": project.labels,
                         })))
                     }
                     "delete" => {

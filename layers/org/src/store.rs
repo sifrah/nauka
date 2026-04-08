@@ -27,6 +27,9 @@ impl OrgStore {
             id: OrgId::generate(),
             name: name.to_string(),
             created_at: crate::now(),
+            updated_at: crate::now(),
+            status: "active".to_string(),
+            labels: std::collections::HashMap::new(),
         };
 
         self.db.put(NS_ORG, org.id.as_str(), &org).await?;

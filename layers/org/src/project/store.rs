@@ -37,6 +37,9 @@ impl ProjectStore {
             org_id: org.id.clone(),
             org_name: org.name.clone(),
             created_at: crate::now(),
+            updated_at: crate::now(),
+            status: "active".to_string(),
+            labels: std::collections::HashMap::new(),
         };
 
         self.db.put(NS_PROJ, project.id.as_str(), &project).await?;

@@ -42,14 +42,20 @@ pub fn handler() -> HandlerFn {
                         let org = store.create(&name).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": org.name, "id": org.id.as_str(),
-                            "created_at": org.created_at,
+                            "created_at": crate::to_iso8601(org.created_at),
+                            "updated_at": crate::to_iso8601(org.updated_at),
+                            "status": org.status,
+                            "labels": org.labels,
                         })))
                     }
                     "list" => {
                         let orgs = store.list().await?;
                         let items: Vec<serde_json::Value> = orgs.iter().map(|o| serde_json::json!({
                             "name": o.name, "id": o.id.as_str(),
-                            "created_at": o.created_at,
+                            "created_at": crate::to_iso8601(o.created_at),
+                            "updated_at": crate::to_iso8601(o.updated_at),
+                            "status": o.status,
+                            "labels": o.labels,
                         })).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
@@ -59,7 +65,10 @@ pub fn handler() -> HandlerFn {
                             .ok_or_else(|| anyhow::anyhow!("org '{name}' not found"))?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": org.name, "id": org.id.as_str(),
-                            "created_at": org.created_at,
+                            "created_at": crate::to_iso8601(org.created_at),
+                            "updated_at": crate::to_iso8601(org.updated_at),
+                            "status": org.status,
+                            "labels": org.labels,
                         })))
                     }
                     "delete" => {

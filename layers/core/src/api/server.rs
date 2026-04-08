@@ -250,7 +250,7 @@ mod tests {
     async fn list_endpoint() {
         let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
         let req = Request::builder()
-            .uri("/admin/v1/thing")
+            .uri("/admin/v1/things")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
@@ -264,7 +264,7 @@ mod tests {
 
         // GET
         let req = Request::builder()
-            .uri("/admin/v1/thing/t1")
+            .uri("/admin/v1/things/t1")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
@@ -273,11 +273,11 @@ mod tests {
         // DELETE
         let req = Request::builder()
             .method("DELETE")
-            .uri("/admin/v1/thing/t1")
+            .uri("/admin/v1/things/t1")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.status(), 204);
     }
 
     #[tokio::test]
@@ -285,7 +285,7 @@ mod tests {
         let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
         let req = Request::builder()
             .method("POST")
-            .uri("/admin/v1/thing/ping")
+            .uri("/admin/v1/things/ping")
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();

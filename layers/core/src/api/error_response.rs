@@ -13,9 +13,10 @@ impl IntoResponse for ApiError {
         let status =
             StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::Json(serde_json::json!({
-            "code": self.0.code.as_str(),
-            "message": self.0.message,
-            "suggestion": self.0.suggestion,
+            "error": {
+                "code": self.0.code.as_str(),
+                "message": self.0.message,
+            }
         }));
         (status, body).into_response()
     }

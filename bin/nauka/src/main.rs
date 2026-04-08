@@ -195,7 +195,7 @@ mod tests {
         let reg = handlers::registration();
         let spec = openapi_spec(&[reg], "/admin/v1");
         assert_eq!(spec["openapi"], "3.0.0");
-        assert!(spec["paths"]["/admin/v1/hypervisor"].is_object());
+        assert!(spec["paths"]["/admin/v1/hypervisors"].is_object());
     }
 
     #[tokio::test]
@@ -209,7 +209,7 @@ mod tests {
         let server = ApiServer::new(ApiConfig::default(), vec![handlers::registration()], vec![]);
 
         let req = Request::builder()
-            .uri("/admin/v1/hypervisor")
+            .uri("/admin/v1/hypervisors")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router().clone().oneshot(req).await.unwrap();
