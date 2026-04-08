@@ -182,8 +182,9 @@ jobs:
           # Landing page
           cp _repo/docs/root-index.html _site/index.html
 
-          # .nojekyll
+          # GitHub Pages config
           touch _site/.nojekyll
+          echo "www.getnauka.com" > _site/CNAME
 
           # Deploy channel (always)
           rm -rf "_site/${CHANNEL}"
