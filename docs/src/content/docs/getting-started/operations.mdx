@@ -1,0 +1,213 @@
+---
+title: Operations
+description: Day-to-day management of a Nauka mesh — status, start, stop, health checks, and leaving the cluster.
+sidebar:
+  order: 6
+---
+
+Once your mesh is running, you need to monitor it, manage services, and occasionally add or remove nodes. Nauka provides a small set of commands that cover these day-to-day operations. Every command reads the local state database, performs its action, and exits — there is no long-running management process.
+
+## Status
+
+The `status` command gives you a snapshot of the current node — its identity, connectivity, and the health of every sub-system:
+
+```bash
+nauka hypervisor status
+```
+
+| Field | Description |
+|---|---|
+| **name** | Node name as set during init or join |
+| **id** | Hypervisor ULID |
+| **region/zone** | Location labels |
+| **mesh_ipv6** | Node's address on the mesh |
+| **state** | Overall health: `available` (everything running), `degraded` (WireGuard up but TiKV down), or `down` (WireGuard not running) |
+| **wg** | WireGuard service status — `running` or `stopped` |
+| **peers** | Number of connected peers |
+| **wg_port** | WireGuard listen port |
+| **rx/tx_bytes** | Total data transferred through the WireGuard tunnel since last restart |
+| **pd/tikv** | Control plane service status — `running` or `stopped` |
+| **pd_members** | Number of PD members in the cluster |
+| **tikv_stores** | Number of TiKV stores in the cluster |
+| **leader** | Current PD leader (if elected) |
+
+The **state** field deserves attention. `available` means everything is healthy — WireGuard is up, TiKV is running, and the node is a full member of the mesh. `degraded` means the WireGuard tunnel is working (peers can reach this node) but the control plane has an issue — this usually means TiKV or PD needs attention. `down` means WireGuard is not running and the node is unreachable from the mesh.
+
+## List and get
+
+`list` shows all nodes in the mesh — the current node and all its peers:
+
+```bash
+nauka hypervisor list
+```
+
+```
+NAME     REGION   ZONE   STATE
+node-1   eu       fsn1   available
+node-2   eu       nbg1   available
+node-3   eu       hel1   available
+```
+
+The state column reflects what this node knows about each peer. For the current node, the state comes from the local service status. For peers, the state comes from WireGuard handshake timestamps — if the last handshake was recent, the peer is `available`; if it's too old, the peer shows as `unreachable`.
+
+To get detailed information about a specific node:
+
+```bash
+nauka hypervisor get node-2
+```
+
+This shows the node's ID, region, zone, mesh IPv6 address, and state.
+
+## Start and stop
+
+These commands manage all services on the current node — WireGuard, TiKV, PD, ZeroFS, and the announce listener. They are the operational equivalent of rebooting the node's Nauka services without actually rebooting.
+
+**Stop** gracefully shuts down all services in reverse dependency order — storage first (ZeroFS), then control plane (TiKV, PD), then networking (announce listener, WireGuard):
+
+```bash
+nauka hypervisor stop
+```
+
+State is fully preserved. The state database, WireGuard config, and systemd units remain on disk. The node is simply offline from the mesh's perspective — peers will see it as `unreachable` after the WireGuard handshake times out.
+
+**Start** brings everything back up in the correct order — networking first (WireGuard, announce listener), then control plane (PD, TiKV), then storage (ZeroFS):
+
+```bash
+nauka hypervisor start
+```
+
+If a service fails to start (e.g. TiKV can't bind its port), Nauka prints a warning but continues starting the remaining services. This lets you get partial functionality back while debugging the issue.
+
+The ordering matters: TiKV needs WireGuard to be up (it communicates over the mesh IPv6), and ZeroFS might need TiKV to fetch configuration. Stop reverses this order to avoid errors during shutdown.
+
+## Doctor
+
+`doctor` is Nauka's built-in diagnostic tool. It systematically checks every sub-system on the current node and reports the results with color-coded status indicators:
+
+```bash
+nauka hypervisor doctor
+```
+
+Each check reports one of four statuses:
+- **Pass** (green) — the check passed
+- **Warn** (yellow) — something isn't ideal but isn't broken
+- **Fail** (red) — something is broken and needs attention
+- **Skip** (grey) — the sub-system isn't installed or configured, so the check doesn't apply
+
+### Fabric checks
+
+The fabric section checks the mesh networking layer:
+
+- **wireguard-tools** — Is the `wg` binary on PATH?
+- **wg config** — Does `/etc/wireguard/nauka0.conf` exist?
+- **fabric network** — Is the `nauka0` interface up?
+- **fabric service** — Is the WireGuard systemd service active?
+- **peers** — Are all configured peers reachable (based on WireGuard handshake timestamps)?
+- **mesh ping** — Can we ICMPv6 ping a sample of up to 3 peers over the mesh?
+- **nauka-announce** — Is the announce service running?
+
+In `direct` or `mock` mode, the WireGuard-specific checks are replaced by a single check confirming the active backend.
+
+### Control plane checks
+
+- **tiup** — Is TiUP installed at `/opt/nauka/tiup/bin/tiup`?
+- **pd service** — Is `nauka-pd` systemd service active?
+- **tikv service** — Is `nauka-tikv` systemd service active?
+- **pd health** — Do all PD members respond as healthy?
+- **pd leader** — Has a leader been elected?
+- **tikv stores** — Is at least one TiKV store registered?
+
+If TiUP isn't installed, all control plane checks are skipped.
+
+### Storage checks
+
+- **zerofs** — Is the ZeroFS binary at `/usr/local/bin/zerofs`?
+- **region `<name>`** — For each configured region, is the `nauka-zerofs-<name>` service active?
+
+### System checks
+
+- **disk space** — Is there more than 1 GB free on `/var/lib/nauka`? (Warns below 1 GB, fails below 256 MB.)
+- **logs** — Does `/var/log/nauka` exist and is it writable?
+- **state file** — Does `~/.nauka/hypervisor.json` exist and is it valid?
+
+After all sections, doctor prints a summary and exits with a non-zero code if any check failed. This makes it usable in scripts and CI:
+
+```bash
+nauka hypervisor doctor || echo "Node unhealthy!"
+```
+
+### When to use doctor
+
+- **After `nauka hv init` or `join`** — confirm everything was set up correctly
+- **After a reboot** — verify all services came back up
+- **During incident triage** — quickly narrow down which sub-system has a problem
+- **As a smoke test** — in CI, after deployments, or in operational runbooks
+
+## Peering (accepting new nodes)
+
+Peering isn't just an init-time operation. You can accept new nodes at any time by starting the peering listener on any initialized node:
+
+```bash
+nauka hypervisor peering
+```
+
+The listener runs for 1 hour by default. The timeout is configurable:
+
+```bash
+nauka hypervisor peering --timeout 7200  # 2 hours in seconds
+```
+
+Any initialized node can serve as the peering host — it doesn't have to be the node that ran init. The PIN is derived from the mesh secret, which every node in the mesh has, so the PIN is the same regardless of which node runs peering.
+
+While peering is active, the node also runs a background reconciliation loop every 30 seconds to ensure mesh convergence when multiple nodes join concurrently.
+
+## Leave
+
+`leave` permanently removes the current node from the mesh. This is a destructive operation — the node's identity, keys, and state are deleted.
+
+```bash
+nauka hypervisor leave
+```
+
+Nauka asks for confirmation before proceeding, then executes these steps:
+
+1. **Stop storage** — Stops and removes all ZeroFS instances for every configured region.
+2. **Leave control plane** — Deregisters this node's TiKV store from PD, removes its PD member (if applicable), and uninstalls the control plane services.
+3. **Notify peers** — Uninstalls the announce service, then broadcasts a `PeerRemove` message to all known peers over TLS. Each peer removes this node from its WireGuard config and peer list. The broadcast makes up to 4 attempts per peer to handle transient failures.
+4. **Tear down networking** — Stops and removes the WireGuard service and interface.
+5. **Delete state** — Removes the local state database.
+
+After leaving, the server is clean — no Nauka services, no state, no WireGuard interface. Peers receive the `PeerRemove` and clean up immediately. To rejoin the mesh later, run `nauka hypervisor join` again (you'll need a node with peering active and the PIN).
+
+:::caution
+`leave` is destructive and irreversible. The node's identity (hypervisor ID, WireGuard keypair, mesh IPv6 address) is deleted permanently. If you rejoin, the node gets a new identity.
+
+If you just want to temporarily take a node offline, use `stop` instead — it preserves the identity and state, and `start` brings everything back.
+:::
+
+## API server
+
+Nauka exposes the same operations available through the CLI as a REST API:
+
+```bash
+nauka serve
+```
+
+By default, the API binds to the node's mesh IPv6 address on port 8443. This means it's only reachable from within the mesh — not from the public internet.
+
+To override the bind address or port:
+
+```bash
+nauka serve --bind 0.0.0.0 --port 9443
+```
+
+:::caution
+Binding to `0.0.0.0` makes the API reachable from the public internet. Only do this if you have authentication and firewall rules in place.
+:::
+
+The API is auto-generated from the same `ResourceDef` that generates the CLI commands. Every CLI operation has a corresponding REST endpoint. See the [API Reference](/stable/rest/) for the full specification.
+
+## Next steps
+
+- [Troubleshooting](/stable/getting-started/troubleshooting/) — diagnose and fix common issues
+- [Hypervisor Layer](/stable/layers/hypervisor/overview/) — deep dive into the architecture and internals

@@ -1,0 +1,208 @@
+---
+title: Core Concepts
+description: Understand the building blocks of Nauka — mesh, hypervisors, peering, addressing, control plane, and storage.
+sidebar:
+  order: 3
+---
+
+import Mermaid from '../../../components/Mermaid.astro';
+
+This page explains the ideas behind Nauka — not just what each component does, but why it exists and how the pieces fit together. If you've already completed the [Quick Start](/stable/getting-started/quick-start/), this will help you understand what happened under the hood.
+
+## The mesh
+
+At the heart of Nauka is the **mesh**: a fully connected WireGuard network that links all your servers into a single, encrypted fabric.
+
+When you think about connecting servers across datacenters, the traditional approach is to configure point-to-point VPN tunnels or rely on the provider's private network. Both approaches have drawbacks — point-to-point tunnels don't scale (N nodes need N*(N-1)/2 tunnels to configure manually), and provider networks lock you into a single vendor.
+
+Nauka takes a different approach. When you run `nauka hypervisor init`, it creates a mesh identity:
+
+- A **mesh ID** — a unique identifier for the cluster
+- A **ULA /48 IPv6 prefix** — a private address space large enough for millions of nodes (e.g. `fd12:3456:789a::/48`)
+- A **mesh secret** — a cryptographic key used to derive PINs and authenticate peers, stored locally and never transmitted in the clear
+
+Every node that joins the mesh gets a direct WireGuard tunnel to every other node. There is no relay, no gateway, no single point of failure. If node A wants to talk to node C, the packet goes directly from A to C — it doesn't route through B.
+
+<Mermaid chart={`graph TD
+    A[node-1<br/>fd12::1] <-->|WireGuard| B[node-2<br/>fd12::2]
+    A <-->|WireGuard| C[node-3<br/>fd12::3]
+    B <-->|WireGuard| C
+`} />
+
+This full-mesh topology is simple and robust. It means that losing any single node only affects traffic to and from that node — the rest of the mesh continues operating normally. It also means that latency between any two nodes is always the direct network path, never an extra hop through a relay.
+
+The tradeoff is that the number of tunnels grows quadratically with nodes. For the cluster sizes Nauka targets (tens to low hundreds of servers), this is well within WireGuard's capabilities — WireGuard is implemented in the Linux kernel and handles thousands of peers with negligible overhead.
+
+## Hypervisors
+
+In Nauka, **every server is a hypervisor**. The term is deliberate — it signals that each node is a first-class compute host, not a "worker" managed by a "controller." There is no hierarchy. The mesh is symmetric.
+
+This is a conscious departure from the controller/worker model used by Kubernetes, Nomad, and most orchestration platforms. In those systems, control plane nodes are special — they run the scheduler, the API server, the state store. If the control plane goes down, the cluster is blind.
+
+In Nauka, every node participates in the control plane. Every node runs a TiKV store. Every node can accept join requests. Every node has the full peer list. There is no single node whose failure takes down the cluster.
+
+When you initialize a server, the hypervisor layer:
+
+1. Generates a WireGuard keypair and a mesh identity for the node
+2. Creates the `nauka0` network interface and a systemd service to manage it
+3. Persists the node's identity and peer list to the embedded state database
+4. Starts a persistent announce listener to receive peer updates
+
+After initialization, the server is a full member of the mesh with a stable IPv6 address, encrypted connectivity to all peers, and a local state store.
+
+## Peering
+
+Peering is Nauka's admission protocol — the process by which a new server joins an existing mesh. It is **manual by design**: an operator must explicitly start the peering listener and provide the PIN to the joining node.
+
+This is a deliberate choice. Automatic discovery protocols (mDNS, gossip, broadcast) are convenient but introduce security risks — a misconfigured or compromised machine could silently join the cluster. In Nauka, every admission is an intentional operator action.
+
+The protocol works as follows:
+
+1. An operator starts the peering listener on an existing node (`nauka hypervisor peering` or the `--peering` flag during init). The listener opens a TCP port (default 51821) and displays a short PIN.
+
+2. On the new server, the operator runs `nauka hypervisor join --target <ip>:51821 --pin <PIN>`. The new node connects to the listener over TLS (Trust On First Use) and sends a join request containing its name, region, zone, WireGuard public key, and the PIN.
+
+3. The listener validates the PIN. If correct, it responds with the mesh secret, the /48 prefix, the mesh ID, and the complete list of all existing peers.
+
+4. The new node uses the mesh secret and prefix to derive its own IPv6 address. It configures its WireGuard interface with all existing peers and starts its own announce listener.
+
+5. The listener broadcasts the new peer to all existing nodes, so they add it to their WireGuard configs immediately.
+
+The PIN is derived deterministically from the mesh secret. It is short (6 characters) and easy to communicate verbally or paste into a terminal. To prevent brute-force attacks, the peering server rate-limits failed attempts — 5 failures trigger a 10-minute lockout.
+
+:::note[Why not certificates?]
+A PKI-based approach (mutual TLS with a CA) would be more standard, but it adds significant operational complexity — you need to generate, distribute, rotate, and revoke certificates. For the join protocol, which happens once per node and is operator-initiated, a PIN is simpler and equally secure. The mesh secret never leaves the cluster boundary.
+:::
+
+## Addressing
+
+Nauka is IPv6-native. Every mesh gets a ULA (Unique Local Address) /48 prefix, and every node gets a /128 address within that prefix.
+
+ULA addresses (the `fd00::/8` range) are the IPv6 equivalent of RFC 1918 private addresses (10.x.x.x, 172.16.x.x, 192.168.x.x). They are routable within your mesh but not on the public internet, which is exactly what you want for inter-node communication.
+
+A /48 prefix provides 2^80 possible addresses — far more than any cluster will ever need. Within that space, each node's address is derived from the mesh prefix and the node's WireGuard public key using HKDF (HMAC-based Key Derivation Function). This means:
+
+- **Deterministic** — The same key always produces the same address in a given mesh. Restarting a node doesn't change its address.
+- **Unique** — Different keys produce different addresses with overwhelming probability.
+- **No coordination** — Nodes derive their own addresses locally, without consulting a central allocator.
+
+| Scope | Format | Example |
+|---|---|---|
+| Mesh prefix | ULA /48 | `fd12:3456:789a::/48` |
+| Node address | /128 | `fd12:3456:789a::1/128` |
+
+The entire control plane (TiKV), announce protocol, and storage services communicate over these mesh IPv6 addresses. This means they are only reachable from within the mesh — you cannot access TiKV or the storage layer from the public internet, even if the server's firewall is misconfigured.
+
+## The no-daemon model
+
+Most infrastructure tools run as long-lived daemons. Nauka does not.
+
+When you run `nauka hypervisor init` or `join`, Nauka performs its work — generating keys, configuring WireGuard, starting systemd services, bootstrapping TiKV — and then exits. The `nauka` process is not running afterward. There is nothing to monitor, nothing to restart, no PID file, no log stream.
+
+The actual work is done by:
+
+- **The Linux kernel** — WireGuard is a kernel module. Once the interface is configured, the kernel handles all encryption, decryption, and routing at line speed. There is no userspace process in the data path.
+- **systemd** — Service units manage the WireGuard interface (`nauka-wg.service`), the announce listener (`nauka-announce.service`), and the control plane (`nauka-pd.service`, `nauka-tikv.service`). systemd handles restarts, ordering, and logging.
+
+This model has several advantages:
+
+- **No Nauka-specific failures.** If a Nauka daemon crashed, the mesh would degrade. Since there is no daemon, the mesh is only affected by kernel or systemd failures — which are far more battle-tested.
+- **Zero resource overhead.** No background process consuming CPU or memory.
+- **Simple upgrades.** Updating Nauka means replacing a single binary. No graceful restart, no rolling deploy, no state migration. The next time you run a command, it uses the new binary.
+- **Idempotent commands.** Since all state lives in the database and systemd, running `nauka hypervisor status` always reads the current truth. There is no stale in-memory state.
+
+The exception is `nauka hypervisor peering`, which blocks while listening for join requests. But even this is temporary — once you stop it (Ctrl+C or timeout), the process exits and the announce service handles ongoing peer updates.
+
+## Control plane
+
+The mesh provides connectivity. The control plane provides **shared state**.
+
+Nauka uses [TiKV](https://tikv.org/), a distributed transactional key-value store built on the Raft consensus protocol. TiKV runs on the mesh IPv6 addresses, so it is only reachable from within the cluster.
+
+Each node runs two components:
+
+- **TiKV store** — The data engine. Stores actual key-value pairs with ACID transactions.
+- **PD (Placement Driver)** — The metadata server. Manages TiKV store membership, handles leader election, and routes requests. PD requires a majority of members to be healthy (quorum), so with 3 PD members, at most 1 can be down.
+
+The control plane stores:
+
+- **Region storage configuration** — S3 endpoint, bucket, region, and credentials for each region's storage backend. Published during `init`, fetched during `join`.
+- **Cluster membership** — Which nodes are part of the cluster, their regions and zones.
+- **Operational metadata** — Configuration that needs to be consistent across all nodes.
+
+Why TiKV and not etcd, Consul, or a simpler approach? TiKV provides strong consistency (linearizable reads and writes via Raft), horizontal scalability (data is automatically sharded across stores), and a simple key-value API that maps well to Nauka's needs. It is also the storage engine behind TiDB, so it is well-tested at scale.
+
+## Storage
+
+Each region in a Nauka mesh has an S3-compatible storage backend. The idea is that compute and storage are co-located by region — nodes in the `eu` region use an S3 bucket in Europe, nodes in `us` use a bucket in the US.
+
+The storage configuration is published to the control plane during `init` and automatically fetched by any node that joins the same region. This means the operator configures S3 credentials once, and every subsequent node in that region picks them up without manual configuration.
+
+Data is encrypted at rest using a key derived deterministically from the S3 secret key and the region name:
+
+```
+encryption_key = SHA-256(s3_secret_key + ":zerofs:" + region)
+```
+
+This means all nodes in the same region derive the same encryption key without ever transmitting it. The key is never stored explicitly — it is recomputed from values that each node already has.
+
+The local storage service (ZeroFS) runs as a systemd unit on each node, mounting the S3 bucket as an encrypted filesystem.
+
+## Regions and zones
+
+Regions and zones are **labels** — plain strings that you assign to nodes to describe your infrastructure topology. Nauka does not enforce any particular naming scheme, hierarchy, or mapping to physical locations.
+
+They serve two purposes today:
+
+- **Storage isolation** — Each region has its own S3 backend. Nodes in region `eu` use one bucket, nodes in region `us` use another. This keeps data geographically close to the compute that uses it.
+- **Topology awareness** — Regions and zones are included in the peer list and displayed in `nauka hypervisor list`. They help operators understand the physical layout of the mesh.
+
+In the future, regions and zones will also inform scheduling decisions — VM placement, replication policies, failure domain awareness. But today, they are informational labels with one operational consequence (storage backend selection).
+
+A common convention:
+
+```bash
+# Region = geographic area, Zone = datacenter
+--region eu --zone fsn1    # Hetzner Falkenstein
+--region eu --zone nbg1    # Hetzner Nuremberg
+--region us --zone ash1    # Hetzner Ashburn
+```
+
+But you can use whatever makes sense for your infrastructure. `--region prod --zone rack-3` is equally valid.
+
+## How everything fits together
+
+To summarize how the pieces interact:
+
+<Mermaid chart={`graph TD
+    subgraph "Each Node"
+        CLI[nauka CLI] -->|reads/writes| DB[(State DB<br/>redb)]
+        CLI -->|configures| WG[WireGuard<br/>nauka0]
+        CLI -->|manages| SD[systemd services]
+        SD --> WG
+        SD --> AN[Announce listener]
+        SD --> TK[TiKV store]
+        SD --> PD[PD member]
+        SD --> ZF[ZeroFS]
+    end
+
+    subgraph "Mesh Network"
+        WG <-->|encrypted tunnels| OTHER[Other nodes]
+        TK <-->|Raft consensus| OTHER
+        AN <-->|peer updates| OTHER
+    end
+
+    ZF -->|encrypted I/O| S3[(S3 Bucket)]
+`} />
+
+1. The **CLI** is the operator's interface. It reads state from the local database, performs actions (configure WireGuard, start services, join the mesh), writes state back, and exits.
+
+2. **WireGuard** provides encrypted, peer-to-peer connectivity between all nodes. It runs in the kernel and is managed by systemd.
+
+3. The **announce listener** receives peer updates (new joins, leaves) and updates the local WireGuard config and peer list accordingly. It runs as a persistent systemd service.
+
+4. **TiKV** provides distributed, strongly-consistent key-value storage across the mesh. It stores configuration that needs to be shared between nodes.
+
+5. **ZeroFS** mounts the S3 bucket as an encrypted filesystem, providing persistent storage for the region.
+
+All inter-node communication (WireGuard data, TiKV Raft, announce messages, storage) flows over the mesh IPv6 addresses. Nothing is exposed on the public internet except the WireGuard UDP port and, temporarily, the peering TCP port during join operations.

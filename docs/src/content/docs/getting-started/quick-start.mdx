@@ -1,0 +1,147 @@
+---
+title: Quick Start
+description: Create a two-node mesh in under five minutes — from init to verified connectivity.
+sidebar:
+  order: 2
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This guide walks through creating a working mesh with two servers. By the end, you'll have two machines connected by an encrypted WireGuard tunnel, running a distributed control plane and sharing an S3 storage backend — all configured with two commands.
+
+## What you'll need
+
+- **Two Linux servers** with Nauka [installed](/stable/getting-started/installation/). They can be bare-metal, VPS, or a mix — as long as they can reach each other over the network.
+- **An S3-compatible storage backend** — the endpoint URL, bucket name, access key, and secret key. Any S3-compatible provider works (AWS, Hetzner Object Storage, MinIO, Wasabi, etc.).
+- **Ports 51820-51822 open** on both servers. Port 51820 (UDP) is for WireGuard, 51821 (TCP) for the peering protocol, and 51822 (TCP) for the announce listener.
+
+## Create the mesh
+
+<Steps>
+
+1. **Initialize the first node**
+
+   On Server 1, create a new mesh and start the peering listener. The `--peering` flag tells Nauka to stay open and listen for join requests after initialization.
+
+   ```bash
+   nauka hypervisor init \
+     --name node-1 \
+     --region eu \
+     --zone fsn1 \
+     --s3-endpoint https://s3.eu-central-1.amazonaws.com \
+     --s3-bucket my-nauka-storage \
+     --s3-access-key AKIAIOSFODNN7EXAMPLE \
+     --s3-secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+     --peering
+   ```
+
+   Nauka generates the mesh identity, sets up WireGuard, bootstraps the control plane, configures storage, and starts listening:
+
+   ```
+   ✓ Hypervisor initialized
+
+     name     node-1
+     id       hv-01JAXZ7KG8MN2P4Q6R9S0T1V2
+     mesh     mesh-01JAXZ7KG8MN2P4Q6R9S0T1V3
+     region   eu/fsn1
+     address  fd12:3456:789a::1
+     pin      G7CCZX
+
+     Peering active on port 51821
+     Nodes can join with:
+       nauka hypervisor join --target <this-ip>:51821 --pin G7CCZX
+
+     Waiting for joins... (Ctrl+C to stop)
+   ```
+
+   Note the **PIN** (`G7CCZX` in this example) — you'll need it in the next step. The PIN is derived from the mesh secret and authenticates join requests.
+
+2. **Join the second node**
+
+   On Server 2, join the mesh using Server 1's IP and the PIN. Replace `203.0.113.10` with Server 1's actual public IP address.
+
+   ```bash
+   nauka hypervisor join \
+     --target 203.0.113.10:51821 \
+     --pin G7CCZX \
+     --name node-2 \
+     --region eu \
+     --zone nbg1
+   ```
+
+   Nauka connects to Server 1, authenticates, receives the mesh configuration, sets up WireGuard, joins the control plane, and configures storage:
+
+   ```
+   ✓ Joined cluster
+
+     name     node-2
+     id       hv-01JAXZ8LH9NO3Q5R7S1T2U3W4
+     region   eu/nbg1
+     address  fd12:3456:789a::2
+     peers    1
+   ```
+
+   Back on Server 1, you'll see a message confirming the join. You can now press Ctrl+C to stop the peering listener — the announce service will handle any future peer updates.
+
+3. **Verify connectivity**
+
+   On either server, check the mesh status:
+
+   ```bash
+   nauka hypervisor status
+   ```
+
+   This shows the node's state, WireGuard tunnel status, peer count, and control plane health. Both nodes should show `available`.
+
+   List all nodes in the mesh:
+
+   ```bash
+   nauka hypervisor list
+   ```
+
+   ```
+   NAME     REGION   ZONE   STATE
+   node-1   eu       fsn1   available
+   node-2   eu       nbg1   available
+   ```
+
+   For a deeper health check, run the built-in diagnostic:
+
+   ```bash
+   nauka hypervisor doctor
+   ```
+
+   Doctor checks WireGuard, the control plane (TiKV), storage, and system resources. Every check should show a green checkmark.
+
+</Steps>
+
+## What just happened?
+
+It's worth understanding what those two commands actually did, because Nauka sets up quite a few things behind the scenes.
+
+**During init**, Nauka:
+
+- Generated a ULA /48 IPv6 prefix for the mesh (e.g. `fd12:3456:789a::/48`) and a mesh secret
+- Created a WireGuard keypair for node-1 and derived its mesh IPv6 address from the prefix and public key
+- Installed the `nauka0` WireGuard interface and a systemd service to manage it
+- Bootstrapped a TiKV cluster (PD + TiKV store) on the mesh IPv6 address — this provides a distributed key-value store for cluster configuration
+- Published the S3 storage configuration to TiKV and started a local ZeroFS instance to mount the bucket
+- Derived a PIN from the mesh secret and started the peering listener on port 51821
+
+**During join**, Nauka:
+
+- Connected to Server 1's peering port over TLS and sent a join request with node-2's WireGuard public key and the PIN
+- Server 1 validated the PIN and responded with the mesh secret, the /48 prefix, and the full peer list
+- node-2 derived its own mesh IPv6 address, configured `nauka0` with node-1 as a WireGuard peer, and started the tunnel
+- Joined the TiKV cluster by starting a local TiKV store connected to the existing PD
+- Fetched the S3 storage configuration from TiKV and started a local ZeroFS instance
+- Installed the `nauka-announce` systemd service to receive future peer updates
+- Announced itself to all peers (just node-1 in this case) to ensure full connectivity
+
+**The result**: both servers have an encrypted WireGuard tunnel between them, a distributed key-value store running on the mesh, and a shared S3 storage backend — all accessible only from within the mesh.
+
+## Next steps
+
+- [Core Concepts](/stable/getting-started/concepts/) — understand the design decisions behind the mesh, peering, and addressing
+- [Adding Nodes](/stable/getting-started/adding-nodes/) — scale the mesh to 3, 10, or 50 servers
+- [Operations](/stable/getting-started/operations/) — monitor and manage the mesh day-to-day

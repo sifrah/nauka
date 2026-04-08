@@ -1,0 +1,361 @@
+---
+title: Troubleshooting
+description: Diagnose and fix common issues with Nauka — WireGuard, peering, connectivity, and control plane problems.
+sidebar:
+  order: 7
+---
+
+Things break. Networks are unreliable, firewalls are misconfigured, disks fill up. This page covers the most common issues you'll encounter with Nauka and how to fix them.
+
+## First step: always run doctor
+
+Before diving into specific symptoms, run the built-in diagnostic:
+
+```bash
+nauka hypervisor doctor
+```
+
+Doctor systematically checks every sub-system (WireGuard, control plane, storage, system resources) and reports pass/warn/fail for each. The output usually points directly at the problem, saving you from guessing.
+
+If doctor can't run (e.g. the state file is corrupted), fall back to checking systemd services manually:
+
+```bash
+systemctl list-units 'nauka-*' --no-pager
+```
+
+## WireGuard issues
+
+### wireguard-tools not installed
+
+**Symptom:** Doctor reports `wireguard-tools` as failed.
+
+Nauka normally installs WireGuard automatically during init and join. If the automatic install failed (e.g. the package manager returned an error, or the server doesn't have internet access), install it manually:
+
+```bash
+# Debian / Ubuntu
+sudo apt install wireguard-tools
+
+# Fedora / RHEL
+sudo dnf install wireguard-tools
+
+# Arch
+sudo pacman -S wireguard-tools
+
+# Alpine
+sudo apk add wireguard-tools
+
+# openSUSE
+sudo zypper install wireguard-tools
+```
+
+After installing, restart the WireGuard service:
+
+```bash
+nauka hypervisor start
+```
+
+### WireGuard interface not up
+
+**Symptom:** Doctor reports `fabric network` as failed. The `nauka0` interface doesn't appear in `ip link`.
+
+Check the WireGuard config and service:
+
+```bash
+# Is the config file present?
+ls -la /etc/wireguard/nauka0.conf
+
+# What does systemd say?
+sudo systemctl status nauka-wg.service
+
+# Any useful errors in the journal?
+sudo journalctl -u nauka-wg.service --no-pager -n 50
+```
+
+Common causes:
+- **The config file is missing or malformed** — this usually means init or join was interrupted. Re-run `nauka hypervisor leave` (which will clean up partial state) and then `init` or `join` again.
+- **The WireGuard kernel module isn't loaded** — check with `lsmod | grep wireguard`. On some older kernels, you may need to `sudo modprobe wireguard`.
+- **Port conflict** — another process is using UDP port 51820. Check with `sudo ss -ulnp | grep 51820`.
+
+If the config exists and looks correct, try restarting:
+
+```bash
+nauka hypervisor start
+```
+
+### Peers show as unreachable
+
+**Symptom:** `nauka hypervisor list` shows peers as `unreachable`. Doctor reports `peers` as warn or fail, or `mesh ping` fails.
+
+This means WireGuard handshakes are not completing. The most common causes:
+
+**1. Firewall blocking WireGuard traffic**
+
+Both nodes need UDP port 51820 open (or whatever port you configured). Check:
+
+```bash
+# Is the port actually listening?
+sudo ss -ulnp | grep 51820
+
+# Can you reach the peer's port from this node?
+# (WireGuard is UDP, so nc -zu is a basic check)
+nc -zu 203.0.113.10 51820
+```
+
+**2. Wrong endpoint**
+
+If a node is behind NAT or has multiple IPs, the auto-detected endpoint might be wrong. The other nodes will try to connect to the wrong IP. Check what endpoint is configured:
+
+```bash
+sudo wg show nauka0
+```
+
+Look at the `endpoint` field for each peer. If it's wrong, the fix is to leave and re-init/re-join with `--endpoint`:
+
+```bash
+nauka hypervisor leave
+nauka hypervisor init --endpoint <correct-public-ip>:51820 ...
+```
+
+**3. Peer's node is actually down**
+
+SSH into the peer and check:
+
+```bash
+nauka hypervisor status
+```
+
+If WireGuard is stopped, restart it:
+
+```bash
+nauka hypervisor start
+```
+
+**4. Asymmetric connectivity**
+
+WireGuard requires both sides to be able to reach each other. If node A can reach node B but not vice versa (common with one-sided NAT), the handshake will fail. Both nodes need to have their WireGuard port reachable.
+
+## Peering issues
+
+### Connection refused on join
+
+```
+Error: connection refused (target 203.0.113.10:51821)
+```
+
+**What it means:** Nothing is listening on TCP port 51821 on the target server. Either the peering listener isn't running, or the firewall is blocking the port.
+
+**Fix:** On the target server, start peering:
+
+```bash
+nauka hypervisor peering
+```
+
+If peering is already running, check the firewall:
+
+```bash
+# On the target server
+sudo ss -tlnp | grep 51821
+```
+
+### Invalid PIN
+
+```
+Error: invalid PIN
+```
+
+**What it means:** The PIN you provided doesn't match the mesh secret on the target node.
+
+**Fix:** Get the correct PIN by running peering on the target node — it displays the PIN in the output:
+
+```bash
+nauka hypervisor peering
+# Output includes: PIN: G7CCZX
+```
+
+The PIN is the same on every node in the mesh (it's derived from the mesh secret), so you can run `nauka hypervisor peering` on any initialized node to see it.
+
+### PIN rate-limited
+
+```
+Error: too many failed attempts, try again later
+```
+
+**What it means:** 5 failed PIN attempts triggered the 10-minute lockout. This is a brute-force protection mechanism.
+
+**Fix:** Wait 10 minutes and try again with the correct PIN. If you're not sure of the PIN, check it on the target node with `nauka hypervisor peering`.
+
+### Join timeout
+
+```
+Error: connection timed out
+```
+
+**What it means:** The TCP connection to the target's peering port couldn't be established within the timeout period.
+
+**Diagnose step by step:**
+
+```bash
+# 1. Is the target IP reachable at all?
+ping 203.0.113.10
+
+# 2. Is the peering port open and reachable?
+nc -zv 203.0.113.10 51821
+
+# 3. Is the peering listener actually running on the target?
+# (SSH into the target and check)
+sudo ss -tlnp | grep 51821
+```
+
+### No storage config for region
+
+```
+Error: no storage backend configured for region 'us'
+```
+
+**What it means:** The node is trying to join with `--region us`, but no S3 storage backend has been published to the control plane for that region. The storage config for a region is set during `init` — if the mesh was initialized with `--region eu`, only `eu` has a storage backend.
+
+**Fix:** Either join with the region that was configured during init, or configure the additional region's storage backend.
+
+## Control plane issues
+
+### TiKV not starting
+
+**Symptom:** Doctor reports `tikv service` as failed.
+
+```bash
+# Check the service
+sudo systemctl status nauka-tikv.service
+
+# Look at recent logs
+sudo journalctl -u nauka-tikv.service --no-pager -n 50
+```
+
+Common causes:
+
+- **Disk full** — TiKV stores data in `/var/lib/nauka`. Check available space:
+  ```bash
+  df -h /var/lib/nauka
+  ```
+
+- **Port conflict** — TiKV uses port 20160 on the mesh IPv6 address. Check:
+  ```bash
+  sudo ss -tlnp | grep 20160
+  ```
+
+- **WireGuard not running** — TiKV binds to the mesh IPv6 address. If WireGuard is down, TiKV can't start because the address doesn't exist. Fix WireGuard first, then start TiKV.
+
+### PD no leader
+
+**Symptom:** Doctor reports `pd leader` as failed. `nauka hypervisor status` shows `pd_members` but no `leader`.
+
+**What it means:** The PD cluster can't elect a leader. PD uses Raft consensus, which requires a **majority** (quorum) of members to be healthy:
+
+| PD members | Quorum | Can tolerate |
+|---|---|---|
+| 1 | 1 | 0 failures |
+| 3 | 2 | 1 failure |
+| 5 | 3 | 2 failures |
+
+If you have 3 PD members and 2 are down, the remaining one can't form a quorum and won't elect a leader.
+
+**Fix:** Bring the failed PD members back online. Check their status:
+
+```bash
+# SSH into the failed node
+sudo systemctl status nauka-pd.service
+sudo journalctl -u nauka-pd.service --no-pager -n 50
+```
+
+### State shows "degraded"
+
+**Symptom:** `nauka hypervisor status` shows `state: degraded`.
+
+**What it means:** WireGuard is running (the node is reachable on the mesh), but TiKV is not. The networking layer is fine, but the control plane needs attention.
+
+**Fix:** Check TiKV and PD:
+
+```bash
+sudo systemctl status nauka-tikv.service nauka-pd.service
+```
+
+If they're stopped, start them:
+
+```bash
+nauka hypervisor start
+```
+
+## General debugging
+
+### Check all Nauka services at once
+
+```bash
+systemctl list-units 'nauka-*' --no-pager
+```
+
+This shows every Nauka-related systemd unit and its current state.
+
+### View logs
+
+Each service writes to the systemd journal:
+
+```bash
+# WireGuard
+sudo journalctl -u nauka-wg.service --no-pager -n 100
+
+# Announce listener
+sudo journalctl -u nauka-announce.service --no-pager -n 100
+
+# TiKV
+sudo journalctl -u nauka-tikv.service --no-pager -n 100
+
+# PD
+sudo journalctl -u nauka-pd.service --no-pager -n 100
+
+# ZeroFS (replace <region> with your region name)
+sudo journalctl -u nauka-zerofs-<region>.service --no-pager -n 100
+```
+
+To follow logs in real time, add `-f`:
+
+```bash
+sudo journalctl -u nauka-tikv.service -f
+```
+
+### WireGuard diagnostic
+
+For detailed WireGuard tunnel information:
+
+```bash
+sudo wg show nauka0
+```
+
+This shows the private key (masked), listen port, and for each peer: their public key, endpoint, allowed IPs, latest handshake, and transfer bytes. A recent handshake (within the last 2-3 minutes) means the tunnel is healthy.
+
+### Re-initialize from scratch
+
+If the node's state is too corrupted to fix, the nuclear option is to leave and start over:
+
+```bash
+nauka hypervisor leave
+nauka hypervisor init ...   # or join
+```
+
+If `leave` itself fails (e.g. the state file is corrupted and can't be loaded), you'll need to clean up manually:
+
+```bash
+# Stop all services
+sudo systemctl stop nauka-wg nauka-announce nauka-tikv nauka-pd
+sudo systemctl disable nauka-wg nauka-announce nauka-tikv nauka-pd
+
+# Remove service files
+sudo rm -f /etc/systemd/system/nauka-*.service
+sudo systemctl daemon-reload
+
+# Remove state and config
+sudo rm -rf ~/.nauka/
+sudo rm -f /etc/wireguard/nauka0.conf
+```
+
+:::danger
+Manual cleanup deletes all state on this node. Other nodes in the mesh will still have it as a peer — they'll see it as `unreachable` until they receive a `PeerRemove` (which won't happen, since you're cleaning up manually) or until they're told to remove it through some other means. In small meshes, the simplest fix is to have the other nodes run `leave` and re-create the mesh.
+:::

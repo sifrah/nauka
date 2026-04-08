@@ -1,0 +1,210 @@
+---
+title: Creating a Mesh
+description: Detailed guide to initializing the first node in a new Nauka mesh — all options explained.
+sidebar:
+  order: 4
+---
+
+import Mermaid from '../../../components/Mermaid.astro';
+
+The `nauka hypervisor init` command is the starting point of every Nauka deployment. It creates a new mesh — generating the cryptographic identity, configuring the WireGuard tunnel, bootstrapping the distributed control plane, and setting up storage. Everything that follows (join, status, start, stop, leave) depends on the foundation laid by init.
+
+This page explains every option in detail and walks through what happens at each step.
+
+## Basic usage
+
+A minimal init requires the S3 storage flags. Everything else has sensible defaults:
+
+```bash
+nauka hypervisor init \
+  --s3-endpoint https://s3.eu-central-1.amazonaws.com \
+  --s3-bucket nauka-eu \
+  --s3-access-key AKIAIOSFODNN7EXAMPLE \
+  --s3-secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+```
+
+In practice, you'll usually also set `--name`, `--region`, `--zone`, and `--peering`:
+
+```bash
+nauka hypervisor init \
+  --name web-01 \
+  --region eu \
+  --zone fsn1 \
+  --s3-endpoint https://s3.eu-central-1.amazonaws.com \
+  --s3-bucket nauka-eu \
+  --s3-access-key AKIAIOSFODNN7EXAMPLE \
+  --s3-secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+  --peering
+```
+
+## Arguments reference
+
+### Required
+
+The S3 flags are required because Nauka needs a storage backend for the region. The storage configuration is published to the control plane so that other nodes joining the same region can fetch it automatically.
+
+| Flag | Description |
+|---|---|
+| `--s3-endpoint` | S3-compatible endpoint URL (e.g. `https://s3.eu-central-1.amazonaws.com`, `https://fsn1.your-objectstorage.com`) |
+| `--s3-bucket` | Bucket name. Must already exist — Nauka does not create it. |
+| `--s3-access-key` | S3 access key (treated as a secret, not logged) |
+| `--s3-secret-key` | S3 secret key (treated as a secret, not logged). Also used to derive the at-rest encryption key. |
+
+### Optional
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name` | hostname | Node name displayed in `nauka hv list`. Use something meaningful — you'll see this name in every operational command. |
+| `--region` | `default` | Region label. Determines which S3 backend is used — all nodes in the same region share the same storage. |
+| `--zone` | `default` | Zone label within the region. Informational today, used for scheduling in the future. |
+| `--port` | `51820` | WireGuard listen port. Peering uses port+1, announce uses port+2. Change this if 51820 is already in use. |
+| `--mode` | `wireguard` | Network backend — see [Network modes](#network-modes) below. |
+| `--interface` | auto-detect | Physical network interface for fabric traffic (e.g. `eth1`). Nauka inspects interfaces and picks the one with a default route. Set this explicitly if auto-detection picks the wrong one. |
+| `--endpoint` | auto-detect | Public IP advertised to peers. See [Endpoint detection](#endpoint-detection) below. |
+| `--s3-region` | _(empty)_ | S3 region hint passed to the S3 client (e.g. `eu-central-1`). Some providers require this. |
+| `--peering` | off | Start the peering listener immediately after init. See [The peering flag](#the-peering-flag) below. |
+
+## What happens during init
+
+Init is a multi-step process. Understanding each step helps diagnose issues and makes the overall system less opaque.
+
+<Mermaid chart={`graph TD
+    A[Generate mesh identity] --> B[Generate hypervisor identity]
+    B --> C[Setup WireGuard]
+    C --> D[Bootstrap TiKV]
+    D --> E[Publish storage config]
+    E --> F[Setup local storage]
+    F --> G[Install announce service]
+    G --> H[Derive PIN]
+    H --> I{--peering?}
+    I -->|yes| J[Start peering listener]
+    I -->|no| K[Exit]
+`} />
+
+### 1. Mesh identity
+
+Nauka generates three things:
+
+- A **mesh ID** (ULID format, e.g. `mesh-01JAXZ7KG8MN2...`) — uniquely identifies this cluster.
+- A **ULA /48 IPv6 prefix** (e.g. `fd12:3456:789a::/48`) — the address space for all nodes. The prefix is randomly generated within the `fd00::/8` range, making collisions with other meshes astronomically unlikely.
+- A **mesh secret** (`syf_sk_...`) — a cryptographic key stored locally. It is used to derive PINs for the peering protocol and to authenticate join requests. The mesh secret is shared with joining nodes via the peering protocol, but never transmitted in the clear.
+
+### 2. Hypervisor identity
+
+For this node specifically, Nauka:
+
+- Generates a WireGuard keypair (Curve25519).
+- Derives the node's mesh IPv6 address from the /48 prefix and the public key using HKDF.
+- Assigns a hypervisor ID (ULID format, e.g. `hv-01JAXZ7KG8MN2...`).
+
+The resulting address (e.g. `fd12:3456:789a::1/128`) is stable — it will not change across restarts, because it is derived from the key, which is persisted.
+
+### 3. WireGuard setup
+
+Nauka installs `wireguard-tools` if missing (auto-detecting the package manager), then creates:
+
+- `/etc/wireguard/nauka0.conf` — the WireGuard interface configuration with the node's private key, listen port, and (for now) no peers.
+- `/etc/systemd/system/nauka-wg.service` — a systemd unit that brings the interface up and assigns the mesh IPv6 address.
+
+The service is started immediately. At this point, the `nauka0` interface is up but has no peers — it's a WireGuard tunnel with no one to talk to yet.
+
+### 4. Control plane bootstrap
+
+Nauka installs TiKV (via the [TiUP](https://tiup.io/) package manager) and starts:
+
+- A **PD (Placement Driver) member** on the mesh IPv6 address, port 2379. PD manages cluster metadata, handles leader election, and routes client requests.
+- A **TiKV store** on the mesh IPv6 address, port 20160. This is the actual data store.
+
+Since this is the first (and only) node, both PD and TiKV start as a single-node cluster. As more nodes join, they add their own TiKV stores and (depending on cluster size) PD members.
+
+### 5. Storage setup
+
+Two things happen:
+
+1. The S3 backend configuration (endpoint, bucket, access key, secret key, region) is **published to TiKV** under a key derived from the region name. This is how joining nodes discover the storage configuration.
+2. The local storage service (**ZeroFS**) is started as a systemd unit. ZeroFS mounts the S3 bucket with transparent at-rest encryption using a key derived from `SHA-256(s3_secret_key + ":zerofs:" + region)`.
+
+### 6. Announce service
+
+Nauka installs `nauka-announce.service`, a persistent systemd service that listens on port+2 (default 51822) for peer updates. When a new node joins or an existing node leaves, the announce service receives the update and adjusts the local WireGuard configuration accordingly.
+
+### 7. PIN derivation
+
+A short PIN (e.g. `G7CCZX`) is derived deterministically from the mesh secret. This PIN is used to authenticate join requests in the peering protocol.
+
+## The peering flag
+
+The `--peering` flag changes the behavior after init completes:
+
+**Without `--peering`** — init finishes, prints the PIN, and exits. You can start accepting joins later with `nauka hypervisor peering`.
+
+```
+  pin      G7CCZX
+
+  To accept joins on this node:
+    nauka hypervisor peering
+
+  Or from another node:
+    nauka hypervisor join --target <this-ip> --pin G7CCZX
+```
+
+**With `--peering`** — init finishes and then blocks, listening for incoming join requests on port 51821. The listener runs until Ctrl+C or the 1-hour timeout. This is the most convenient way to bootstrap a mesh, because you can run init on Server 1, then immediately join from Server 2 without running a separate command.
+
+```
+  Peering active on port 51821
+  Nodes can join with:
+    nauka hypervisor join --target <this-ip>:51821 --pin G7CCZX
+
+  Waiting for joins... (Ctrl+C to stop)
+```
+
+## Endpoint detection
+
+Nauka needs to know the public IP address that other nodes should connect to for WireGuard. By default, it auto-detects this by inspecting network interfaces — it picks the IP associated with the default route.
+
+Auto-detection works well for servers with a single public IP. Set `--endpoint` explicitly when:
+
+- **The server is behind NAT** — the public IP differs from the interface IP. Without `--endpoint`, peers would try to connect to the private IP and fail.
+- **The server has multiple public IPs** — you want to control which one is advertised to peers.
+- **You want to use a DNS name** — some setups use DNS names instead of raw IPs.
+
+```bash
+nauka hypervisor init --endpoint 203.0.113.10:51820 ...
+```
+
+The endpoint is included in the peer list sent to joining nodes, so getting it wrong means new nodes won't be able to connect. If you realize the endpoint is wrong after init, you'll need to `leave` and re-init.
+
+## Network modes
+
+The `--mode` flag selects the network backend. All nodes in a mesh must use the same mode.
+
+| Mode | Use case | What's different |
+|---|---|---|
+| `wireguard` | Production | Full WireGuard mesh with kernel-level encryption. Control plane and storage are bootstrapped. This is the default. |
+| `direct` | Testing on private networks | Direct IP connectivity without WireGuard. No encryption, no tunnel interface. Control plane and storage are **not** bootstrapped. |
+| `mock` | Development and CI | In-memory networking. No system changes at all. Useful for running automated tests. |
+
+In `direct` and `mock` modes, init only performs steps 1-3 (mesh identity, hypervisor identity, basic setup). The control plane and storage are skipped, and the step count drops from 8 to 2.
+
+## Files created
+
+After a successful init in `wireguard` mode, these files exist on disk:
+
+| Path | Purpose |
+|---|---|
+| `~/.nauka/` | Nauka home directory |
+| `~/.nauka/fabric.redb` | Embedded state database — contains the mesh identity, hypervisor identity, peer list, and network mode |
+| `/etc/wireguard/nauka0.conf` | WireGuard interface configuration (private key, listen port, peers) |
+| `/etc/systemd/system/nauka-wg.service` | Manages the `nauka0` WireGuard interface |
+| `/etc/systemd/system/nauka-announce.service` | Persistent announce listener for peer updates |
+| `/etc/systemd/system/nauka-pd.service` | TiKV Placement Driver |
+| `/etc/systemd/system/nauka-tikv.service` | TiKV data store |
+| `/etc/systemd/system/nauka-zerofs-<region>.service` | ZeroFS storage mount for the region |
+
+## Cleanup on failure
+
+If any step fails during init, Nauka rolls back automatically — it stops and removes any services that were started, deletes the state database, and exits with an error message. This means you can safely re-run `init` after fixing the underlying issue (e.g. a wrong S3 endpoint, a port conflict, or missing permissions).
+
+## Next steps
+
+Once the mesh is initialized, [add more nodes](/stable/getting-started/adding-nodes/).

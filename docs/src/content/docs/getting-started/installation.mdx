@@ -1,0 +1,118 @@
+---
+title: Installation
+description: Install Nauka on a Linux server — from the official release, a pre-release channel, or from source.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Nauka runs on Linux servers — bare-metal or VPS, from any provider. It ships as a single static binary with no runtime dependencies. The install script downloads it, verifies the SHA-256 checksum, and places it in `/usr/local/bin`.
+
+## Prerequisites
+
+Before installing, make sure your servers meet these requirements:
+
+| Requirement | Details |
+|---|---|
+| **OS** | Linux x86_64 or aarch64 |
+| **Privileges** | Root access (required for WireGuard interface management and systemd service installation) |
+| **Kernel** | WireGuard support (built-in on Linux 5.6+ and backported to most distribution kernels) |
+| **Init system** | systemd (Nauka creates service units for WireGuard, the announce listener, TiKV, and storage) |
+| **Network** | Public IP reachable by other nodes, or private network with direct connectivity between all servers |
+
+You do **not** need to install WireGuard manually — Nauka detects your distribution's package manager (apt, dnf, yum, pacman, apk, zypper) and installs `wireguard-tools` automatically during `init` or `join` if it's missing.
+
+## Install
+
+<Tabs>
+  <TabItem label="Stable">
+    The stable channel tracks tagged releases. This is what you should use for production.
+
+    ```bash
+    curl -fsSL https://get.getnauka.com | bash
+    ```
+  </TabItem>
+  <TabItem label="Beta">
+    Beta releases are tested pre-releases that preview upcoming stable features. Use this if you want to try new capabilities before they ship.
+
+    ```bash
+    curl -fsSL https://get.getnauka.com | bash -s -- --beta
+    ```
+  </TabItem>
+  <TabItem label="Nightly">
+    Nightly builds are cut from the main branch. They contain the latest code but may break without notice. Use this for development and testing only.
+
+    ```bash
+    curl -fsSL https://get.getnauka.com | bash -s -- --nightly
+    ```
+  </TabItem>
+  <TabItem label="From source">
+    Building from source requires Rust (stable). The build produces a single static binary.
+
+    ```bash
+    git clone https://github.com/sifrah/nauka.git
+    cd nauka
+    cargo build --release
+    sudo install -m 755 target/release/nauka /usr/local/bin/nauka
+    ```
+  </TabItem>
+</Tabs>
+
+The install script performs several steps: it detects your platform (Linux x86_64 or aarch64), fetches the latest release from GitHub, downloads the tarball, verifies the SHA-256 checksum against the published `SHA256SUMS.txt`, extracts the binary, and installs it.
+
+## Verify
+
+After installation, verify that the binary is on your PATH and reports the expected version:
+
+```bash
+nauka --version
+```
+
+## Update
+
+Nauka can update itself in-place. It downloads the new binary, verifies the checksum, creates a backup of the current binary, and replaces it:
+
+```bash
+nauka update
+```
+
+By default, the update stays on whichever channel you originally installed from (stable, beta, or nightly). To switch channels:
+
+```bash
+nauka update --channel beta
+nauka update --channel nightly
+nauka update --channel stable
+```
+
+Use `--force` to reinstall even if you're already on the latest version, and `--yes` to skip the confirmation prompt (useful in scripts).
+
+## Firewall
+
+Nauka uses three ports per node. All three are derived from a single base port (default 51820), which you can change with the `--port` flag during init or join:
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| 51820 | UDP | **WireGuard data plane** — all mesh traffic flows through this port. Must be open to all other nodes in the mesh. |
+| 51821 | TCP | **Peering listener** — the join protocol. Only needs to be open when you're actively accepting new nodes. |
+| 51822 | TCP | **Announce listener** — receives peer updates (new joins, leaves). Must be open to all mesh members. |
+
+If you configure a different base port (e.g. `--port 41820`), peering uses `41821` and announce uses `41822`.
+
+:::tip
+After all nodes have joined and peering is stopped, you can restrict port 51821 to mesh members only (or close it entirely). The announce listener on 51822 handles ongoing peer updates. The peering port is only needed during active join operations.
+:::
+
+## What gets installed
+
+Nauka installs a single binary — `/usr/local/bin/nauka`. There are no config files, no data directories, and no services until you run `nauka hypervisor init` or `join`. At that point, Nauka creates:
+
+- `~/.nauka/` — the Nauka home directory, containing the embedded state database
+- `/etc/wireguard/nauka0.conf` — the WireGuard interface configuration
+- Several systemd service units in `/etc/systemd/system/`
+
+See [Creating a Mesh](/stable/getting-started/creating-a-mesh/) for the full list of files and services.
+
+## Next steps
+
+Once Nauka is installed on your servers, head to the [Quick Start](/stable/getting-started/quick-start/) to create your first mesh.

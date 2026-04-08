@@ -1,0 +1,32 @@
+---
+interface Props {
+  chart: string;
+}
+const { chart } = Astro.props;
+---
+
+<div class="mermaid-wrapper">
+  <pre class="mermaid">{chart}</pre>
+</div>
+
+<style>
+  .mermaid-wrapper {
+    margin: 1.5rem 0;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    background: var(--sl-color-bg-inline-code);
+    overflow-x: auto;
+  }
+  .mermaid-wrapper pre {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0;
+    text-align: center;
+  }
+  .mermaid-wrapper :global(svg) {
+    max-width: 100%;
+    height: auto;
+  }
+</style>

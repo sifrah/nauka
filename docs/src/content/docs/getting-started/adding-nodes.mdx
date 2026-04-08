@@ -1,0 +1,208 @@
+---
+title: Adding Nodes
+description: Join additional servers to an existing Nauka mesh — the join protocol, concurrent joins, and scaling to N nodes.
+sidebar:
+  order: 5
+---
+
+import { Steps } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+
+Once a mesh is [initialized](/stable/getting-started/creating-a-mesh/), additional servers join it with `nauka hypervisor join`. The join process is where Nauka's design really comes together — in a single command, a fresh Linux server goes from isolated machine to a full member of the mesh with encrypted connectivity, a distributed control plane, and shared storage.
+
+This page covers the join protocol in detail, how to manage peering, and how the mesh handles concurrent joins and scaling.
+
+## Basic usage
+
+```bash
+nauka hypervisor join \
+  --target 203.0.113.10:51821 \
+  --pin G7CCZX \
+  --name node-2 \
+  --region eu \
+  --zone nbg1
+```
+
+The `--target` is the IP (or IP:port) of any node in the mesh that has peering active. The `--pin` is the PIN displayed during `init` or `peering`. Together, they authenticate the join request.
+
+## Arguments reference
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--target` | Yes | — | IP or IP:port of an existing node with peering active. If the port is omitted, Nauka defaults to 51821. |
+| `--pin` | No | — | PIN for automatic acceptance. Without it, the join request will be rejected. |
+| `--name` | No | hostname | Node name. Pick something meaningful — this is what shows up in `nauka hv list`. |
+| `--region` | No | `default` | Region label. This determines which S3 storage backend the node uses. It must match a region that was configured during init. |
+| `--zone` | No | `default` | Zone label within the region. Informational today. |
+| `--port` | No | `51820` | WireGuard listen port on this node. Use a different value if 51820 is taken. |
+| `--mode` | No | `wireguard` | Network backend. Must match the mesh — all nodes use the same mode. |
+
+## What happens during join
+
+The join process is more complex than it might appear. Understanding it helps diagnose issues and appreciate the security model.
+
+<Steps>
+
+1. **Install WireGuard**
+
+   Like init, join starts by ensuring `wireguard-tools` is installed. Nauka auto-detects the package manager and installs it if missing.
+
+2. **TLS handshake**
+
+   The new node opens a TCP connection to the target's peering port (default 51821) and performs a TLS handshake. Nauka uses Trust On First Use (TOFU) — the first connection trusts the server's certificate, and subsequent connections verify it matches. This is similar to how SSH handles host keys.
+
+3. **Authentication**
+
+   The node sends a `JoinRequest` message containing its name, region, zone, WireGuard public key, and the PIN. The peering server validates the PIN against the mesh secret. If the PIN is wrong, the request is rejected. After 5 failed attempts from the same source, the server imposes a 10-minute lockout to prevent brute-force attacks.
+
+4. **Mesh secret exchange**
+
+   On success, the peering server responds with a `JoinResponse` containing:
+   - The mesh secret — the node needs this to participate in future peering operations and to derive the storage encryption key
+   - The /48 IPv6 prefix — the address space of the mesh
+   - The mesh ID — the cluster identifier
+   - The complete peer list — every node currently in the mesh, with their names, regions, zones, WireGuard public keys, endpoints, and mesh IPv6 addresses
+
+   This is the only time the mesh secret crosses the network. It travels over the TLS connection, never in the clear.
+
+5. **WireGuard setup**
+
+   The new node derives its mesh IPv6 address from the prefix and its own public key (the same HKDF derivation used during init). It then creates the `nauka0` interface configured with **all existing peers** — not just the node it joined through. From this moment, it has direct encrypted tunnels to every node in the mesh.
+
+6. **Control plane join**
+
+   The node installs TiKV locally and starts a TiKV store that connects to the existing PD cluster. If the cluster has fewer than 3 PD members, it also starts a PD member on this node. This grows the control plane's capacity and fault tolerance as the mesh grows.
+
+7. **Storage setup**
+
+   The node contacts the TiKV cluster (now reachable over the mesh) and fetches the storage configuration for its region. It derives the same encryption key as other nodes in the region (`SHA-256(s3_secret_key + ":zerofs:" + region)`) and starts a local ZeroFS instance. No credentials are passed on the command line — they come from the control plane.
+
+8. **Announce**
+
+   The node installs the `nauka-announce.service` for persistent peer updates. After a short delay (3 seconds, to let other concurrent joiners finish), it broadcasts a self-announcement to all known peers. This ensures that even nodes which were still joining when the peering server's initial broadcast went out will learn about this node.
+
+</Steps>
+
+## Enabling peering
+
+A node can only accept joins when its peering listener is active. There are two ways to start it:
+
+**During init** — the `--peering` flag keeps the listener running after init completes:
+
+```bash
+nauka hypervisor init --peering ...
+```
+
+**After init** — run the peering command on any initialized node:
+
+```bash
+nauka hypervisor peering
+```
+
+The peering listener displays the PIN and blocks until Ctrl+C or timeout (default 1 hour):
+
+```
+  Peering active on port 51821
+  PIN: G7CCZX
+
+  Nodes can join with:
+    nauka hypervisor join --target <this-ip>:51821 --pin G7CCZX
+
+  Waiting for joins... (Ctrl+C to stop)
+```
+
+You can customize the timeout:
+
+```bash
+nauka hypervisor peering --timeout 7200  # 2 hours
+```
+
+Only one node needs to run peering — all joins go through that single listener. Any initialized node can serve as the peering host, not just the one that ran init.
+
+## Scaling to N nodes
+
+Adding a third, fourth, or fiftieth node is the same process — point `--target` at any node running peering and use the mesh PIN:
+
+```bash
+# Server 3
+nauka hypervisor join --target 203.0.113.10:51821 --pin G7CCZX \
+  --name node-3 --region eu --zone hel1
+
+# Server 4 (different region)
+nauka hypervisor join --target 203.0.113.10:51821 --pin G7CCZX \
+  --name node-4 --region us --zone ash1
+```
+
+Each new node receives the complete peer list at join time. After joining, it has direct WireGuard tunnels to every existing node — not just the one it joined through.
+
+<Mermaid chart={`graph TD
+    subgraph "After 4 nodes join"
+        A[node-1] <--> B[node-2]
+        A <--> C[node-3]
+        A <--> D[node-4]
+        B <--> C
+        B <--> D
+        C <--> D
+    end
+`} />
+
+:::tip
+You only need one node running `nauka hypervisor peering` at a time. All join requests go through that listener. After peering ends, every node's announce service handles ongoing peer updates (new joins, leaves).
+:::
+
+## Concurrent joins
+
+What happens when multiple nodes join at the same time? This is a real scenario — you might be provisioning 10 servers at once.
+
+The peering server processes join requests **sequentially** (one at a time). Each joiner receives the full peer list known at that moment, which might not include other nodes that are joining concurrently.
+
+Three mechanisms ensure every node eventually discovers every other node:
+
+1. **Persistent announce listener** — every node runs `nauka-announce.service`, a systemd unit that listens on port+2 for incoming peer announcements indefinitely. When a new peer is announced, the listener adds it to the local WireGuard config and peer list.
+
+2. **Self-announce** — after joining, each node broadcasts itself to all known peers. This covers the case where the peering server's broadcast arrived before a peer's announce listener was fully running.
+
+3. **Periodic reconciliation** — the peering node (the one running `nauka hypervisor peering`) runs a background reconciliation loop every 30 seconds. It re-reads the complete peer list from the database and re-announces every peer to every other peer. This is idempotent — peers that already know each other skip the update.
+
+The result: **the mesh converges to full connectivity within ~60 seconds** (2 reconciliation cycles) of the last join, regardless of join ordering or timing.
+
+## Multi-region setup
+
+Nodes in different regions use different S3 storage backends. The storage configuration is set during `init` for the first region. When a node joins with `--region eu`, it automatically fetches the `eu` storage config from the control plane.
+
+For additional regions, the storage config must be published before nodes can join that region. Currently, this means a region's first node must be initialized with `init` and the corresponding S3 flags, or the config must be published through another mechanism.
+
+```bash
+# First region — configured during init
+nauka hypervisor init --region eu \
+  --s3-endpoint https://s3.eu-central-1.amazonaws.com \
+  --s3-bucket nauka-eu ...
+
+# Same region — storage config fetched automatically
+nauka hypervisor join --region eu --target ...
+
+# Different region — needs its storage config to exist in the control plane
+nauka hypervisor join --region us --target ...
+```
+
+All nodes share the same mesh and WireGuard tunnels regardless of region. Region only affects which S3 storage backend a node uses.
+
+## Verify the mesh
+
+After all nodes have joined, verify everything is working:
+
+```bash
+# List all nodes — should show every node as "available"
+nauka hypervisor list
+
+# Detailed status of the current node
+nauka hypervisor status
+
+# Full health check — WireGuard, control plane, storage, system
+nauka hypervisor doctor
+```
+
+## Next steps
+
+- [Operations](/stable/getting-started/operations/) — manage the mesh day-to-day (status, start, stop, doctor, leave)
+- [Troubleshooting](/stable/getting-started/troubleshooting/) — diagnose common issues after join

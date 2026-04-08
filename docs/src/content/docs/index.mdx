@@ -3,8 +3,133 @@ title: Introduction
 description: Nauka — an open-source platform that turns bare-metal servers into a programmable cloud.
 ---
 
-Nauka is an open-source platform that transforms dedicated servers into a unified cloud. Infrastructure as it should be — simple, fast, yours.
+import { Card, CardGrid, LinkCard, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../components/Mermaid.astro';
 
-:::note[What's new in this version]
-Versioned documentation is now live. Each release has its own snapshot. You are reading a version deployed **after nightly.37**.
+Nauka is an open-source platform that transforms dedicated servers into a unified, programmable cloud. You bring the servers — Nauka connects them into a secure mesh, sets up a distributed control plane, and gives you a single CLI to manage everything.
+
+## The problem
+
+Cloud providers charge a premium for convenience. A dedicated server that costs 40 EUR/month on Hetzner delivers the same compute as a 200+ EUR/month cloud instance. The tradeoff is that bare-metal servers are isolated machines — you have to build the networking, orchestration, and storage layers yourself.
+
+Most teams either pay the cloud tax or spend months cobbling together Ansible playbooks, WireGuard configs, and custom scripts to make dedicated servers work together. Neither option is great.
+
+## What Nauka does
+
+Nauka bridges that gap. It takes any set of Linux servers — regardless of provider, datacenter, or geography — and turns them into a single cluster with:
+
+- **Encrypted mesh networking** — Every server gets a WireGuard tunnel to every other server. Traffic between nodes is always encrypted, even across datacenters and providers. Each node gets a stable IPv6 address on the mesh.
+
+- **Zero-trust admission** — New servers join the mesh through a PIN-based peering protocol over TLS. No automatic discovery, no DHCP, no broadcast. An operator explicitly approves every join.
+
+- **Distributed control plane** — A TiKV cluster runs on the mesh, providing a distributed key-value store for cluster-wide configuration, storage metadata, and membership tracking. It is only reachable from within the mesh.
+
+- **S3-backed storage** — Each region has an S3-compatible storage backend with transparent encryption at rest. Nodes joining a region automatically fetch the storage configuration from the control plane.
+
+- **One CLI for everything** — `nauka hypervisor init` creates a mesh. `nauka hypervisor join` adds a server. `nauka hypervisor status` shows what's running. No YAML, no config management, no external dependencies.
+
+## How it works
+
+Nauka is a CLI orchestrator. It does not run as a daemon — it configures system services (WireGuard, TiKV, storage) and exits. The Linux kernel handles WireGuard encryption and routing. systemd manages service lifecycle. Nauka only runs when you invoke a command.
+
+The workflow is straightforward:
+
+<Mermaid chart={`graph LR
+    A["nauka hv init"] -->|creates mesh| B[First node]
+    B -->|peering listener| C["nauka hv join"]
+    C -->|WireGuard tunnel| D[Second node]
+    C -->|WireGuard tunnel| E[Nth node]
+    B <-->|encrypted mesh| D
+    B <-->|encrypted mesh| E
+    D <-->|encrypted mesh| E
+`} />
+
+1. **Initialize** the first server — this creates the mesh identity (a ULA /48 IPv6 prefix), generates WireGuard keys, bootstraps the control plane, and starts the peering listener.
+
+2. **Join** additional servers — each new node connects to the peering listener, authenticates with a PIN, receives the mesh secret and peer list, and configures its WireGuard interface. From that point on, it has encrypted connectivity to every other node.
+
+3. **Operate** — use `status`, `list`, `doctor` to monitor the mesh. Use `start`/`stop` to manage services. Use `leave` to remove a node cleanly.
+
+Every server in the mesh is a **hypervisor** — there is no separate controller or manager node. The mesh is symmetric: every node has the same capabilities and a direct tunnel to every other node.
+
+## Architecture
+
+Nauka is built in layers, each one a standalone Rust crate with a clear boundary:
+
+<Mermaid chart={`graph TD
+    A[nauka CLI] --> B[Hypervisor Layer]
+    B --> C[State Layer]
+    C --> D[Core Layer]
+    B --> E[WireGuard Mesh]
+    B --> F[Control Plane — TiKV]
+    B --> G[Storage — ZeroFS + S3]
+`} />
+
+- **Core** (`nauka-core`) — Pure types, cryptography, IPv6 addressing, resource framework, API generation, and CLI generation. No I/O, no async — everything here is deterministic and testable.
+
+- **State** (`nauka-state`) — Embedded persistence backed by [redb](https://github.com/cberner/redb). Crash-safe ACID transactions, typed tables, TTL, compare-and-swap, watch. This is the local state store for each node.
+
+- **Hypervisor** (`nauka-hypervisor`) — The operational layer. WireGuard mesh management, the peering protocol, systemd service lifecycle, the TiKV control plane, and S3-backed storage. This is where init, join, status, start, stop, and leave are implemented.
+
+- **CLI** (`bin/nauka`) — A thin binary that composes all layers. Zero logic — just wires up the resource definitions and handlers from the hypervisor layer into a clap + axum application.
+
+Lower layers never depend on higher layers. Core knows nothing about WireGuard. State knows nothing about peering. This makes each layer independently testable and replaceable.
+
+## Design principles
+
+<CardGrid>
+  <Card title="Hypervisor-centric" icon="laptop">
+    Every server is a hypervisor. There is no control plane node, no manager, no single point of failure. The mesh is symmetric — each node has the same role and the same capabilities. If one node goes down, the rest continue operating.
+  </Card>
+  <Card title="No daemon" icon="setting">
+    Nauka configures system services and exits. WireGuard runs in the kernel. TiKV runs as a systemd service. There is no Nauka process to monitor, restart, or update in-place. The CLI is stateless — it reads the database, performs the action, and exits.
+  </Card>
+  <Card title="Operator-driven" icon="approve-check">
+    Nothing happens automatically. No service discovery, no auto-scaling, no self-healing magic. The operator decides when to add a node, when to remove one, and which regions to configure. Nauka executes the operator's intent, predictably and transparently.
+  </Card>
+  <Card title="IPv6-native" icon="star">
+    Every mesh gets a ULA /48 prefix. Every node gets a /128 address derived from its public key. Addresses are deterministic and stable across restarts. The entire control plane and inter-node communication runs over IPv6 on the mesh.
+  </Card>
+</CardGrid>
+
+## What Nauka is not
+
+- **Not a container orchestrator.** Nauka doesn't schedule pods or manage containers (yet). It provides the infrastructure layer — networking, storage, control plane — that a container orchestrator would run on top of.
+- **Not a configuration management tool.** Nauka doesn't manage packages, users, or system configuration. It handles the mesh and the services that make the mesh work. Use Ansible, NixOS, or whatever you prefer for everything else.
+- **Not a cloud provider.** Nauka doesn't provision servers. You bring the servers — from Hetzner, OVH, Scaleway, your own rack, or a mix of all of them. Nauka connects them.
+
+## Current status
+
+| Feature | Status |
+|---|---|
+| WireGuard mesh | <Badge text="Stable" variant="success" /> |
+| Peering protocol | <Badge text="Stable" variant="success" /> |
+| S3 storage backend | <Badge text="Beta" variant="caution" /> |
+| Control plane (TiKV) | <Badge text="Beta" variant="caution" /> |
+| VM management | <Badge text="Planned" variant="note" /> |
+| Container runtime | <Badge text="Planned" variant="note" /> |
+
+:::note
+Nauka is in active development. APIs may change between versions.
+:::
+
+## Get started
+
+<CardGrid>
+  <LinkCard title="Installation" description="Install Nauka on your Linux servers — one command." href="/stable/getting-started/installation/" />
+  <LinkCard title="Quick Start" description="Create a two-node mesh in five minutes." href="/stable/getting-started/quick-start/" />
+  <LinkCard title="Core Concepts" description="Understand the mesh, peering, addressing, and control plane." href="/stable/getting-started/concepts/" />
+</CardGrid>
+
+## Explore the layers
+
+<CardGrid>
+  <LinkCard title="Core Layer" description="Pure types, crypto, addressing, resource framework. No I/O, no async." href="/stable/layers/core/overview/" />
+  <LinkCard title="State Layer" description="Embedded key-value persistence backed by redb. Crash-safe ACID." href="/stable/layers/state/overview/" />
+  <LinkCard title="Hypervisor Layer" description="WireGuard mesh, peering protocol, service lifecycle." href="/stable/layers/hypervisor/overview/" />
+  <LinkCard title="API Reference" description="Auto-generated REST API documentation via Scalar." href="/stable/rest/" />
+</CardGrid>
+
+:::tip[Getting help]
+Join the conversation on [GitHub Discussions](https://github.com/sifrah/nauka/discussions) or file an issue on the [bug tracker](https://github.com/sifrah/nauka/issues).
 :::

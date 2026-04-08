@@ -1,7 +1,7 @@
 /* ── Zinc theme (dark default, applied before JS) ── */
 :root {
 	--sl-nav-height: 4rem;
-	--sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+	--sl-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 	--sl-sidebar-width: 17rem;
 	--sl-color-white: #fafafa;
 	--sl-color-gray-1: #e4e4e7;
@@ -371,46 +371,70 @@ dialog::backdrop {
 }
 
 /* ══════════════════════════════════════════
-   Content typography
+   Page title
    ══════════════════════════════════════════ */
 
-/* Headings */
-.sl-markdown-content :is(h1, h2, h3, h4, h5, h6):not(:where(.not-content *)) {
+.content-panel:first-child h1 {
+	font-size: 1.75rem;
 	font-weight: 700;
-	letter-spacing: -0.02em;
-}
-
-.sl-markdown-content h1:not(:where(.not-content *)) {
-	font-size: 2.25rem;
 	letter-spacing: -0.03em;
-}
-
-.sl-markdown-content h2:not(:where(.not-content *)) {
-	font-size: 1.5rem;
-	padding-bottom: 0.5rem;
+	color: var(--sl-color-text);
+	padding-bottom: 0.75rem;
 	border-bottom: 1px solid var(--sl-color-gray-5);
 }
 
-.sl-markdown-content h3:not(:where(.not-content *)) {
-	font-size: 1.25rem;
+.content-panel + .content-panel {
+	border-top: none !important;
 }
 
-/* Body text */
+/* ══════════════════════════════════════════
+   Content typography
+   ══════════════════════════════════════════ */
+
+/* Body */
 .sl-markdown-content {
 	line-height: 1.8;
 	color: var(--sl-color-gray-2);
 }
 
-/* Paragraphs — slightly lighter for readability */
-.sl-markdown-content p:not(:where(.not-content *)) {
+/* Headings */
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6):not(:where(.not-content *)) {
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	color: var(--sl-color-text);
+}
+
+.sl-markdown-content h2:not(:where(.not-content *)) {
+	font-size: 1.35rem;
+	margin-top: 2.5rem;
+	padding-bottom: 0.5rem;
+	border-bottom: 1px solid var(--sl-color-gray-5);
+}
+
+.sl-markdown-content h3:not(:where(.not-content *)) {
+	font-size: 1.1rem;
+	margin-top: 2rem;
+}
+
+.sl-markdown-content h4:not(:where(.not-content *)) {
+	font-size: 0.95rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
 	color: var(--sl-color-gray-2);
 }
 
-/* Links in content */
+/* Paragraphs */
+.sl-markdown-content p:not(:where(.not-content *)) {
+	color: var(--sl-color-gray-2);
+	font-size: 0.95rem;
+}
+
+/* Links */
 .sl-markdown-content a:not(:where(.not-content *)) {
 	text-decoration: none;
+	color: var(--sl-color-text);
 	border-bottom: 1px solid var(--sl-color-gray-4);
-	transition: color 0.15s ease, border-color 0.15s ease;
+	transition: border-color 0.15s ease;
 }
 
 .sl-markdown-content a:hover:not(:where(.not-content *)) {
@@ -419,44 +443,124 @@ dialog::backdrop {
 
 /* Inline code */
 .sl-markdown-content code:not(:where(.not-content *)) {
-	border-radius: 0.25rem;
-	font-size: 0.875em;
-	padding: 0.15rem 0.4rem;
+	background: var(--sl-color-bg-inline-code);
 	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.25rem;
+	font-size: 0.85em;
+	padding: 0.1em 0.35em;
+	font-weight: 500;
 }
 
 /* Code blocks */
 .sl-markdown-content pre:not(:where(.not-content *)) {
+	border: 1px solid var(--sl-color-gray-5);
 	border-radius: 0.5rem;
-	font-size: 0.875rem;
-	line-height: 1.7;
-	padding: 1rem 1.25rem;
+	font-size: 0.8rem;
+	line-height: 1.75;
+	padding: 1.25rem 1.5rem;
+}
+
+/* ── Expressive code blocks ── */
+.expressive-code {
+	margin: 1.75rem 0 !important;
+}
+
+.expressive-code .frame {
+	border-radius: 0.5rem !important;
+	border: 1px solid var(--sl-color-gray-5) !important;
+	box-shadow: none !important;
+	overflow: hidden;
+}
+
+/* Tab bar / file header */
+.expressive-code .header {
+	background: var(--sl-color-gray-6) !important;
+	border-bottom: 1px solid var(--sl-color-gray-5) !important;
+	padding: 0.5rem 1rem !important;
+}
+
+.expressive-code .title {
+	font-size: 0.75rem !important;
+	font-weight: 500 !important;
+	color: var(--sl-color-gray-3) !important;
+	letter-spacing: 0.02em;
+}
+
+/* Copy button */
+.expressive-code .copy button {
+	background: var(--sl-color-gray-5) !important;
+	border: none !important;
+	border-radius: 0.25rem !important;
+	opacity: 0;
+	transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.expressive-code .frame:hover .copy button {
+	opacity: 1;
+}
+
+.expressive-code .copy button:hover {
+	background: var(--sl-color-gray-4) !important;
+}
+
+/* Line highlighting */
+.expressive-code .highlight {
+	background: var(--sl-color-gray-5) !important;
+	border-inline-start: 2px solid var(--sl-color-gray-3);
+}
+
+/* Diff lines */
+.expressive-code .ins {
+	background: rgba(34, 197, 94, 0.08) !important;
+	border-inline-start: 2px solid rgba(34, 197, 94, 0.4);
+}
+
+.expressive-code .del {
+	background: rgba(239, 68, 68, 0.08) !important;
+	border-inline-start: 2px solid rgba(239, 68, 68, 0.4);
 }
 
 /* Blockquotes */
 .sl-markdown-content blockquote:not(:where(.not-content *)) {
-	border-inline-start: 2px solid var(--sl-color-gray-4);
-	padding-inline-start: 1.25rem;
+	border-inline-start: 2px solid var(--sl-color-gray-5);
+	padding: 0.5rem 0 0.5rem 1.25rem;
 	color: var(--sl-color-gray-3);
 	font-style: italic;
+	font-size: 0.95rem;
 }
 
 /* Tables */
+.sl-markdown-content table:not(:where(.not-content *)) {
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.5rem;
+	overflow: hidden;
+}
+
 .sl-markdown-content th:not(:where(.not-content *)) {
-	font-size: 0.75rem;
+	font-size: 0.7rem;
+	font-weight: 600;
 	text-transform: uppercase;
-	letter-spacing: 0.05em;
+	letter-spacing: 0.08em;
 	color: var(--sl-color-gray-3);
+	background: var(--sl-color-gray-6);
+	border-bottom: 1px solid var(--sl-color-gray-5);
 }
 
 .sl-markdown-content :is(th, td):not(:where(.not-content *)) {
-	padding: 0.75rem 1rem;
+	padding: 0.625rem 1rem;
+	font-size: 0.875rem;
+	border-bottom-color: var(--sl-color-gray-5);
+}
+
+.sl-markdown-content td:not(:where(.not-content *)) {
+	color: var(--sl-color-gray-2);
 }
 
 /* Horizontal rules */
 .sl-markdown-content hr:not(:where(.not-content *)) {
-	margin: 2.5rem 0;
-	border-bottom-color: var(--sl-color-gray-5);
+	margin: 3rem 0;
+	border: none;
+	border-bottom: 1px solid var(--sl-color-gray-5);
 }
 
 /* Lists */
@@ -466,26 +570,95 @@ dialog::backdrop {
 
 .sl-markdown-content li:not(:where(.not-content *)) {
 	color: var(--sl-color-gray-2);
+	font-size: 0.95rem;
+	line-height: 1.75;
 }
 
-/* Page title area */
-.content-panel h1 {
-	letter-spacing: -0.03em;
+.sl-markdown-content li::marker {
+	color: var(--sl-color-gray-4);
 }
 
-/* Right sidebar — "On this page" */
+/* ══════════════════════════════════════════
+   Asides / Callouts — monochrome zinc
+   ══════════════════════════════════════════ */
+
+.starlight-aside {
+	border-radius: 0.5rem;
+	border-inline-start: 3px solid var(--sl-color-gray-4);
+	background: var(--sl-color-gray-5) !important;
+	padding: 1rem 1.25rem;
+	margin: 1.5rem 0;
+}
+
+.starlight-aside--note {
+	--sl-color-asides-text-accent: #a1a1aa;
+	border-color: #52525b;
+}
+
+.starlight-aside--tip {
+	--sl-color-asides-text-accent: #6ee7b7;
+	border-color: #34d399;
+}
+
+.starlight-aside--caution {
+	--sl-color-asides-text-accent: #fcd34d;
+	border-color: #fbbf24;
+}
+
+.starlight-aside--danger {
+	--sl-color-asides-text-accent: #fca5a5;
+	border-color: #f87171;
+}
+
+:root[data-theme='light'] .starlight-aside--tip {
+	--sl-color-asides-text-accent: #059669;
+	border-color: #10b981;
+}
+
+:root[data-theme='light'] .starlight-aside--caution {
+	--sl-color-asides-text-accent: #d97706;
+	border-color: #f59e0b;
+}
+
+:root[data-theme='light'] .starlight-aside--danger {
+	--sl-color-asides-text-accent: #dc2626;
+	border-color: #ef4444;
+}
+
+.starlight-aside__title {
+	font-size: 0.8rem !important;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.starlight-aside__content {
+	font-size: 0.875rem;
+	color: var(--sl-color-gray-2);
+}
+
+.starlight-aside__content p {
+	color: var(--sl-color-gray-2);
+}
+
+/* ══════════════════════════════════════════
+   Right sidebar — "On this page"
+   ══════════════════════════════════════════ */
+
 .right-sidebar-panel h2 {
-	font-size: 0.7rem;
+	font-size: 0.65rem;
+	font-weight: 700;
 	text-transform: uppercase;
 	letter-spacing: 0.1em;
-	color: var(--sl-color-gray-3);
-	font-weight: 600;
+	color: var(--sl-color-gray-4);
+	margin-bottom: 0.75rem;
 }
 
 .right-sidebar a {
-	font-size: 0.85rem;
+	font-size: 0.8rem;
 	color: var(--sl-color-gray-3);
 	transition: color 0.15s ease;
+	line-height: 1.6;
 }
 
 .right-sidebar a:hover {
@@ -495,4 +668,33 @@ dialog::backdrop {
 .right-sidebar a[aria-current="true"] {
 	color: var(--sl-color-text);
 	font-weight: 500;
+}
+
+/* ══════════════════════════════════════════
+   Content panels — spacing
+   ══════════════════════════════════════════ */
+
+.content-panel + .content-panel {
+	border-top-color: var(--sl-color-gray-5) !important;
+}
+
+/* Pagination links */
+.pagination-links a {
+	border: 1px solid var(--sl-color-gray-5) !important;
+	border-radius: 0.5rem !important;
+	transition: border-color 0.15s ease;
+}
+
+.pagination-links a:hover {
+	border-color: var(--sl-color-gray-3) !important;
+}
+
+/* Anchor links on headings */
+.sl-heading-wrapper .sl-anchor-link {
+	color: var(--sl-color-gray-4);
+	transition: color 0.15s ease;
+}
+
+.sl-heading-wrapper:hover .sl-anchor-link {
+	color: var(--sl-color-gray-2);
 }

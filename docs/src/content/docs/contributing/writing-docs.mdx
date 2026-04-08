@@ -1,0 +1,385 @@
+---
+title: Writing Documentation
+description: How to write and structure Nauka documentation — components, syntax, and conventions.
+---
+
+import { Steps, Card, CardGrid, Tabs, TabItem, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+
+This guide covers everything you need to write documentation for Nauka. The docs site is built with [Astro](https://astro.build) + [Starlight](https://starlight.astro.build) and supports MDX, custom components, Mermaid diagrams, and more.
+
+## File structure
+
+Documentation pages live in `docs/src/content/docs/`. The file path determines the URL.
+
+<FileTree>
+- docs/
+  - src/
+    - content/
+      - docs/
+        - index.mdx → /
+        - contributing/
+          - writing-docs.mdx → /contributing/writing-docs/
+        - layers/
+          - core/
+            - overview.mdx → /layers/core/overview/
+          - state/
+          - hypervisor/
+        - cloud/
+    - components/ Custom Astro components
+    - assets/ Logos, images
+    - styles/
+      - custom.css Global theme overrides
+  - public/ Static files (favicon, logos)
+  - astro.config.mjs Site configuration
+</FileTree>
+
+## Frontmatter
+
+Every `.mdx` file starts with YAML frontmatter:
+
+```yaml title="example.mdx"
+---
+title: Page Title
+description: A short description for SEO and link previews.
+---
+```
+
+The `title` appears as the page heading and in the sidebar. The `description` is used in meta tags.
+
+## Basic Markdown
+
+### Headings
+
+Use `##` for sections, `###` for subsections, `####` for sub-subsections. Never use `#` — the page title comes from the frontmatter.
+
+```md
+## Section title
+### Subsection
+#### Sub-subsection
+```
+
+### Text formatting
+
+**Bold text** for emphasis.
+*Italic text* for terms or titles.
+`inline code` for commands, file names, config keys.
+[Link text](https://example.com) for URLs.
+
+Write: `**bold**`, `*italic*`, `` `code` ``, `[text](url)`.
+
+### Lists
+
+- Unordered item
+- Another item
+  - Nested item
+
+1. First step
+2. Second step
+3. Third step
+
+### Blockquotes
+
+> This is a blockquote. Use it for quotes or
+> important callouts that don't fit an aside.
+
+Write with `>` at the start of each line.
+
+### Tables
+
+| Column A | Column B | Column C |
+|----------|----------|----------|
+| Cell 1   | Cell 2   | Cell 3   |
+| Cell 4   | Cell 5   | Cell 6   |
+
+---
+
+## Code blocks
+
+### Basic
+
+```bash
+nauka hypervisor status
+```
+
+Use triple backticks with a language identifier: `` ```bash ``, `` ```toml ``, `` ```rust ``, etc.
+
+### With title
+
+Show the file name or command in a header bar by adding `title="..."`:
+
+```toml title="~/.nauka/fabric.toml"
+[mesh]
+id = "mesh_7f3a2b"
+```
+
+### With line highlighting
+
+Highlight specific lines with curly braces after the language:
+
+```bash {2,4}
+Mesh:    mesh_7f3a2b
+Prefix:  fd12:3456:789a::/48
+Region:  eu
+Peers:   3 connected
+```
+
+Add `{2,4}` or `{1,3-5}` after the language to highlight those lines.
+
+### Diff
+
+Show additions and deletions:
+
+```diff lang="toml" title="config.toml"
+  [peering]
+  listen = "[::]:9876"
++
++ [storage]
++ backend = "s3"
+```
+
+Use `diff` as the language, add `lang="toml"` for syntax highlighting. Lines starting with `+` are green, `-` are red.
+
+### Supported languages
+
+Common: `bash`, `toml`, `yaml`, `json`, `rust`, `typescript`, `sql`, `diff`, `md`.
+
+---
+
+## Components
+
+All components must be imported at the top of the MDX file, after the frontmatter.
+
+Imports needed:
+
+```mdx
+import { Steps, Card, CardGrid, Tabs, TabItem, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+import Mermaid from '../../../components/Mermaid.astro';
+```
+
+:::note
+Adjust the relative path to `Mermaid.astro` based on the depth of your file.
+:::
+
+---
+
+### Steps
+
+Numbered step-by-step instructions with a vertical line connector. Wrap ordered list items in a Steps component. **Blank lines after the opening tag and before each number are required.**
+
+<Steps>
+
+1. **Step title**
+
+   Step description with details.
+
+   ```bash
+   command example
+   ```
+
+2. **Another step**
+
+   More details here.
+
+</Steps>
+
+---
+
+### Tabs
+
+Group content by variant (OS, language, method). Each tab is a `TabItem` with a `label`.
+
+<Tabs>
+  <TabItem label="Linux">
+    ```bash
+    curl -fsSL https://get.getnauka.com | bash
+    ```
+  </TabItem>
+  <TabItem label="macOS">
+    ```bash
+    brew install nauka
+    ```
+  </TabItem>
+  <TabItem label="From source">
+    ```bash
+    cargo build --release
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+### Cards
+
+Display information in a grid of cards with icons. Wrap `Card` components in a `CardGrid`.
+
+<CardGrid>
+  <Card title="Card title" icon="laptop">
+    Card description text.
+  </Card>
+  <Card title="Another card" icon="setting">
+    Another description.
+  </Card>
+</CardGrid>
+
+Available icons: `laptop`, `setting`, `document`, `star`, `pencil`, `warning`, `error`, `information`, `rocket`, `puzzle`, `magnifier`, `list-format`, `open-book`, `approve-check-circle`, `heart`.
+
+---
+
+### LinkCards
+
+Clickable cards that link to another page. Takes `title`, `description`, and `href` props.
+
+<CardGrid>
+  <LinkCard
+    title="Core Layer"
+    description="Types, crypto, addressing."
+    href="/stable/layers/core/overview/"
+  />
+  <LinkCard
+    title="Hypervisor Layer"
+    description="WireGuard mesh, peering."
+    href="/stable/layers/hypervisor/overview/"
+  />
+</CardGrid>
+
+---
+
+### FileTree
+
+Display a file/folder structure. Directories end with `/`. Text after the file name is shown as a comment.
+
+<FileTree>
+- src/
+  - main.rs Entry point
+  - lib.rs Library root
+  - config/
+    - mod.rs Config module
+    - schema.rs Validation
+- Cargo.toml
+- README.md
+</FileTree>
+
+---
+
+### Badge
+
+Inline status indicators. Use in text or tables.
+
+<Badge text="Stable" variant="success" /> <Badge text="Beta" variant="caution" /> <Badge text="Deprecated" variant="danger" /> <Badge text="New" variant="note" /> <Badge text="Default" />
+
+Variants: `success` (green), `caution` (yellow), `danger` (red), `note` (gray), or default (neutral).
+
+In a table:
+
+| Feature | Status |
+|---------|--------|
+| Mesh | <Badge text="Stable" variant="success" /> |
+| Storage | <Badge text="Beta" variant="caution" /> |
+| VMs | <Badge text="Planned" variant="note" /> |
+
+---
+
+### Mermaid diagrams
+
+Render diagrams using [Mermaid](https://mermaid.js.org) syntax. Import the `Mermaid` component and pass the chart as a string prop.
+
+#### Flowchart
+
+<Mermaid chart={`graph TD
+    A[Start] --> B{Decision}
+    B -->|Yes| C[Action A]
+    B -->|No| D[Action B]
+    C --> E[End]
+    D --> E
+`} />
+
+#### Sequence diagram
+
+<Mermaid chart={`sequenceDiagram
+    participant C as Client
+    participant S1 as Node 1
+    participant S2 as Node 2
+    C->>S1: nauka hypervisor join
+    S1->>S1: Verify PIN
+    S1->>S2: PeerAnnounce
+    S2-->>S1: ACK
+    S1-->>C: Join successful
+`} />
+
+Supported types: `graph`, `sequenceDiagram`, `classDiagram`, `stateDiagram-v2`, `erDiagram`, `gantt`, `pie`.
+
+See the full [Mermaid syntax reference](https://mermaid.js.org/intro/syntax-reference.html).
+
+---
+
+## Asides
+
+Callout boxes for notes, tips, warnings, and errors. Four levels of severity:
+
+:::note
+Neutral information. Use for supplementary details.
+:::
+
+:::tip[Custom title]
+Helpful advice. The title in brackets is optional.
+:::
+
+:::caution
+Something to be careful about. Use for potential pitfalls.
+:::
+
+:::danger
+Critical warning — data loss or breakage possible.
+:::
+
+Write with triple colons: `:::note`, `:::tip[Title]`, `:::caution`, `:::danger`. Close with `:::`.
+
+---
+
+## Collapsible sections
+
+Use native HTML for content hidden by default:
+
+<details>
+<summary>Click to expand</summary>
+
+Hidden content here. Supports **Markdown** formatting.
+
+- List items work
+- Code blocks too
+
+</details>
+
+Write with `<details>` and `<summary>` HTML tags. Leave a blank line before the Markdown content.
+
+---
+
+## Sidebar configuration
+
+The sidebar is configured in `docs/astro.config.mjs`. Each section can be manually defined or auto-generated from a directory:
+
+```js title="astro.config.mjs"
+sidebar: [
+  {
+    label: 'Getting Started',
+    items: [
+      { label: 'Introduction', slug: '' },
+    ],
+  },
+  { label: 'Core', autogenerate: { directory: 'layers/core' } },
+],
+```
+
+With `autogenerate`, every `.mdx` file in the directory becomes a sidebar entry.
+
+---
+
+## Conventions
+
+- **One page per concept** — don't put multiple topics on one page
+- **Frontmatter is required** — every page needs `title` and `description`
+- **Use components** — prefer Steps, Tabs, Cards over raw Markdown when it improves readability
+- **No `#` headings** — the page title comes from frontmatter, start with `##`
+- **Code blocks need a language** — always specify `bash`, `toml`, `rust`, etc.
+- **Keep it concise** — write for engineers who want answers, not essays
