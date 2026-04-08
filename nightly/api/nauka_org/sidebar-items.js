@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["handlers","store","types"]};
+window.SIDEBAR_ITEMS = {"fn":["connect_cluster_db","now","registration"],"mod":["handlers","project","store","types"]};

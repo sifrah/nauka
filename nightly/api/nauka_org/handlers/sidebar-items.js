@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["connect_store","env_def","env_handler","env_registration","org_def","org_handler","org_registration","project_def","project_handler","project_registration"]};
+window.SIDEBAR_ITEMS = {"fn":["handler","resource_def"]};
