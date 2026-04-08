@@ -204,11 +204,25 @@ pub fn restart() -> Result<(), NaukaError> {
     service::restart()
 }
 
-/// Uninstall the control plane. Deregisters TiKV store and PD member first.
+/// Uninstall the control plane. Deregisters TiKV store, adjusts replicas,
+/// waits for region migration, then removes PD member.
 pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
-    // Deregister TiKV store before stopping
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+
+    // 1. Deregister TiKV store (marks it as Tombstone in PD)
     let _ = service::deregister_store(mesh_ipv6);
-    // Deregister PD member before stopping (prevents zombie members on rejoin)
+
+    // 2. Count remaining active stores (excluding the one we just removed)
+    //    and adjust max-replicas so Raft can still form quorums
+    let active = service::count_active_stores(&pd_url);
+    let remaining = if active > 0 { active - 1 } else { 0 };
+    if remaining > 0 {
+        let _ = service::adjust_max_replicas(&pd_url, remaining);
+        // 3. Wait for PD to migrate region peers off the dead store
+        let _ = service::wait_regions_healthy(&pd_url, 30);
+    }
+
+    // 4. Deregister PD member (prevents zombie members on rejoin)
     let _ = service::deregister_pd_member(mesh_ipv6);
     service::uninstall()
 }
