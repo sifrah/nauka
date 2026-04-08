@@ -7,6 +7,7 @@ members = [
     "layers/hypervisor",
     "layers/hypervisor/tests/e2e",
     "layers/org",
+    "layers/network",
     "bin/nauka",
 ]
 
@@ -32,3 +33,4 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper = "1"
 openssl = { version = "0.10", features = ["vendored"] }
+ipnet = "2"

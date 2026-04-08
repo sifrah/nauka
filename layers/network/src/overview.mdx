@@ -1,0 +1,50 @@
+---
+title: Network Layer
+description: Virtual networking — VPCs, subnets, and peering for isolated cloud networks over the WireGuard mesh.
+sidebar:
+  order: 1
+---
+
+The network layer provides virtual networking on top of the WireGuard mesh. Every VM runs inside a VPC (Virtual Private Cloud) with its own isolated network, connected to a subnet with a private IP address.
+
+## Architecture
+
+```
+VPC (prod-net, CIDR 10.0.0.0/16, VNI 100)
+├── Subnet (web, 10.0.1.0/24, gateway 10.0.1.1)
+├── Subnet (api, 10.0.2.0/24, gateway 10.0.2.1)
+└── Peering → partner-net
+```
+
+- **VPC** — an isolated L2 network backed by a VXLAN tunnel. Each VPC gets a unique VNI (VXLAN Network Identifier). Traffic between VPCs is blocked unless peered.
+- **Subnet** — an IP allocation range within a VPC. Subnets are cross-zone (a VM in any zone can use any subnet).
+- **Peering** — connects two VPCs so their VMs can communicate. CIDRs must not overlap.
+
+## VPC scoping
+
+A VPC belongs to an organization. Optionally, it can be scoped to a project or environment:
+
+```bash
+# Shared VPC (available to all projects in the org)
+nauka vpc create shared-net --org acme --cidr 10.0.0.0/16
+
+# Dedicated to a project
+nauka vpc create backend-net --org acme --cidr 10.1.0.0/16 --project backend
+
+# Dedicated to an environment
+nauka vpc create prod-net --org acme --cidr 10.2.0.0/16 --project backend --env production
+```
+
+## Quick start
+
+```bash
+# Create a VPC
+nauka vpc create prod-net --org acme --cidr 10.0.0.0/16
+
+# Add subnets
+nauka vpc subnet create web --vpc prod-net --cidr 10.0.1.0/24
+nauka vpc subnet create api --vpc prod-net --cidr 10.0.2.0/24
+
+# Peer two VPCs
+nauka vpc peering create --vpc prod-net --peer-vpc staging-net
+```

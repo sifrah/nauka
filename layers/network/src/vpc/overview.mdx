@@ -1,0 +1,43 @@
+---
+title: VPCs
+description: Virtual Private Clouds — isolated networks with private CIDR ranges and automatic VNI assignment.
+sidebar:
+  order: 2
+---
+
+A VPC is an isolated virtual network. Each VPC gets a unique VXLAN Network Identifier (VNI) and a private CIDR block. VMs in different VPCs cannot communicate unless the VPCs are peered.
+
+## Creating a VPC
+
+```bash
+nauka vpc create prod-net --org acme --cidr 10.0.0.0/16
+```
+
+```
+  Name:            prod-net
+  ID:              vpc-01knq...
+  CIDR:            10.0.0.0/16
+  VNI:             100
+  Organization:    acme
+```
+
+The CIDR must be a private range (RFC 1918) with a prefix between /8 and /24.
+
+## Listing and inspecting
+
+```bash
+nauka vpc list --org acme
+nauka vpc get prod-net --org acme
+```
+
+## Deleting
+
+A VPC cannot be deleted while it has subnets:
+
+```
+Error: vpc 'prod-net' has 2 subnet(s). Delete them first.
+```
+
+## VNI assignment
+
+Each VPC automatically receives a unique VNI starting at 100. VNIs are never reused. The VNI maps directly to a VXLAN tunnel that isolates the VPC's traffic on the mesh.

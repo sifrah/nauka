@@ -1444,6 +1444,7 @@ dependencies = [
  "http 1.4.0",
  "nauka-core",
  "nauka-hypervisor",
+ "nauka-network",
  "nauka-org",
  "nauka-state",
  "openssl",
@@ -1546,6 +1547,25 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower 0.5.3",
+]
+
+[[package]]
+name = "nauka-network"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "ipnet",
+ "nauka-core",
+ "nauka-hypervisor",
+ "nauka-org",
+ "nauka-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-client",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
