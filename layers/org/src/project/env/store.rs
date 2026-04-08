@@ -97,16 +97,23 @@ impl EnvStore {
             }
         }
 
+        // Filter accepts both names and IDs (API passes IDs, CLI passes names)
         match (project_name, org_name) {
             (Some(proj), Some(org)) => Ok(envs
                 .into_iter()
-                .filter(|e| e.project_name == proj && e.org_name == org)
+                .filter(|e| {
+                    (e.project_name == proj || e.project_id.as_str() == proj)
+                        && (e.org_name == org || e.org_id.as_str() == org)
+                })
                 .collect()),
             (Some(proj), None) => Ok(envs
                 .into_iter()
-                .filter(|e| e.project_name == proj)
+                .filter(|e| e.project_name == proj || e.project_id.as_str() == proj)
                 .collect()),
-            (None, Some(org)) => Ok(envs.into_iter().filter(|e| e.org_name == org).collect()),
+            (None, Some(org)) => Ok(envs
+                .into_iter()
+                .filter(|e| e.org_name == org || e.org_id.as_str() == org)
+                .collect()),
             (None, None) => Ok(envs),
         }
     }

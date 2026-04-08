@@ -85,7 +85,7 @@ impl ProjectStore {
         match org_name {
             Some(name) => Ok(projects
                 .into_iter()
-                .filter(|p| p.org_name == name)
+                .filter(|p| p.org_name == name || p.org_id.as_str() == name)
                 .collect()),
             None => Ok(projects),
         }
