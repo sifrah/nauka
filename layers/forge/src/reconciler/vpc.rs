@@ -63,9 +63,12 @@ impl super::Reconciler for VpcReconciler {
             .collect();
         for bridge in &actual_bridges {
             if !needed_bridge_names.contains(bridge) {
-                // Reverse-lookup: find VPC ID from bridge name (try all known VPCs)
                 tracing::info!(bridge, "removing orphaned bridge");
-                // We can't easily reverse the hash, so just delete the bridge directly
+                // Derive VXLAN name from bridge name (nkb-HASH → nkx-HASH)
+                let vxlan = bridge.replace("nkb-", "nkx-");
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "del", &vxlan])
+                    .status();
                 let _ = std::process::Command::new("ip")
                     .args(["link", "del", bridge])
                     .status();
