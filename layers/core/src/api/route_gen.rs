@@ -59,9 +59,9 @@ fn add_resource_routes(
     reg: &Arc<ResourceRegistration>,
     prefix: &str,
 ) -> Router {
-    let kind = reg.def.identity.cli_name;
+    let plural = reg.def.identity.plural;
     let parents = &reg.def.scope.parents;
-    let base = build_base_path(prefix, kind, parents);
+    let base = build_base_path(prefix, plural, parents);
     let has_parents = !parents.is_empty();
 
     // Collect parent param names for scope extraction
@@ -244,20 +244,20 @@ fn extract_scope(path_params: &HashMap<String, String>, parent_kinds: &[String])
 
 /// #10: Build a route path incorporating scope parents.
 ///
-/// No parents: `/admin/v1/org`
-/// With parents: `/admin/v1/org/{org_id}/project/{project_id}/vpc`
-fn build_base_path(prefix: &str, kind: &str, parents: &[crate::resource::ParentRef]) -> String {
+/// No parents: `/admin/v1/orgs`
+/// With parents: `/admin/v1/orgs/{org_id}/projects/{project_id}/environments`
+fn build_base_path(prefix: &str, plural: &str, parents: &[crate::resource::ParentRef]) -> String {
     if parents.is_empty() {
-        return format!("{prefix}/{kind}");
+        return format!("{prefix}/{plural}");
     }
 
     let mut path = prefix.to_string();
     for parent in parents {
-        let parent_kind = parent.kind;
-        let param = format!("{{{parent_kind}_id}}");
-        path = format!("{path}/{parent_kind}/{param}");
+        let parent_plural = format!("{}s", parent.kind);
+        let param = format!("{{{}_id}}", parent.kind);
+        path = format!("{path}/{parent_plural}/{param}");
     }
-    format!("{path}/{kind}")
+    format!("{path}/{plural}")
 }
 
 /// Handle an operation with scope values pre-populated.
@@ -289,14 +289,35 @@ async fn handle_scoped(
         .map_err(|e: anyhow::Error| ApiError(NaukaError::internal(e.to_string())))?;
 
     match response {
-        OperationResponse::Resource(v) => Ok(axum::Json(v).into_response()),
-        OperationResponse::ResourceList(items) => Ok(axum::Json(serde_json::json!({
-            "items": items,
-            "count": items.len(),
-        }))
-        .into_response()),
+        OperationResponse::Resource(v) => {
+            let status = if operation == "create" {
+                axum::http::StatusCode::CREATED
+            } else {
+                axum::http::StatusCode::OK
+            };
+            Ok((status, axum::Json(v)).into_response())
+        }
+        OperationResponse::ResourceList(items) => {
+            let total = items.len();
+            Ok(axum::Json(serde_json::json!({
+                "data": items,
+                "pagination": {
+                    "page": 1,
+                    "per_page": 25,
+                    "total_pages": 1,
+                    "total_entries": total,
+                    "next_page": null,
+                    "previous_page": null
+                }
+            }))
+            .into_response())
+        }
         OperationResponse::Message(msg) => {
-            Ok(axum::Json(serde_json::json!({"message": msg})).into_response())
+            if operation == "delete" {
+                Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+            } else {
+                Ok(axum::Json(serde_json::json!({"message": msg})).into_response())
+            }
         }
         OperationResponse::None => Ok(axum::http::StatusCode::NO_CONTENT.into_response()),
     }
@@ -315,7 +336,7 @@ pub fn list_routes(registrations: &[ResourceRegistration], prefix: &str) -> Vec<
 
 fn collect_routes(reg: &ResourceRegistration, prefix: &str, routes: &mut Vec<RouteInfo>) {
     let kind = reg.def.identity.cli_name;
-    let base = build_base_path(prefix, kind, &reg.def.scope.parents);
+    let base = build_base_path(prefix, reg.def.identity.plural, &reg.def.scope.parents);
 
     for op in &reg.def.operations {
         let (method, path) = match &op.semantics {
@@ -488,15 +509,15 @@ mod tests {
         assert!(
             paths
                 .iter()
-                .any(|p| p.contains("vpc") && p.contains("subnet")),
+                .any(|p| p.contains("vpcs") && p.contains("subnets")),
             "expected scoped path, got: {paths:?}"
         );
     }
 
     #[test]
     fn base_path_no_parents() {
-        let path = build_base_path("/admin/v1", "org", &[]);
-        assert_eq!(path, "/admin/v1/org");
+        let path = build_base_path("/admin/v1", "orgs", &[]);
+        assert_eq!(path, "/admin/v1/orgs");
     }
 
     #[test]
@@ -508,8 +529,8 @@ mod tests {
             required_on_resolve: false,
             description: "Organization",
         }];
-        let path = build_base_path("/admin/v1", "project", &parents);
-        assert_eq!(path, "/admin/v1/org/{org_id}/project");
+        let path = build_base_path("/admin/v1", "projects", &parents);
+        assert_eq!(path, "/admin/v1/orgs/{org_id}/projects");
     }
 
     #[test]
@@ -530,8 +551,8 @@ mod tests {
                 description: "Project",
             },
         ];
-        let path = build_base_path("/v1", "vpc", &parents);
-        assert_eq!(path, "/v1/org/{org_id}/project/{project_id}/vpc");
+        let path = build_base_path("/v1", "vpcs", &parents);
+        assert_eq!(path, "/v1/orgs/{org_id}/projects/{project_id}/vpcs");
     }
 
     // ── Scope extraction ──
@@ -580,7 +601,10 @@ mod tests {
             ScopeValues::default(),
         )
         .await;
-        assert!(resp.into_response().status().is_success());
+        assert_eq!(
+            resp.into_response().status(),
+            axum::http::StatusCode::NO_CONTENT
+        );
     }
 
     // #7: OpenAPI spec
@@ -588,10 +612,10 @@ mod tests {
     fn openapi_spec_generates() {
         let spec = openapi_spec(&[test_resource()], "/admin/v1");
         assert_eq!(spec["openapi"], "3.0.0");
-        assert!(spec["paths"]["/admin/v1/widget"]["get"].is_object());
-        assert!(spec["paths"]["/admin/v1/widget"]["post"].is_object());
-        assert!(spec["paths"]["/admin/v1/widget/{id}"]["get"].is_object());
-        assert!(spec["paths"]["/admin/v1/widget/{id}"]["delete"].is_object());
+        assert!(spec["paths"]["/admin/v1/widgets"]["get"].is_object());
+        assert!(spec["paths"]["/admin/v1/widgets"]["post"].is_object());
+        assert!(spec["paths"]["/admin/v1/widgets/{id}"]["get"].is_object());
+        assert!(spec["paths"]["/admin/v1/widgets/{id}"]["delete"].is_object());
     }
 
     #[test]

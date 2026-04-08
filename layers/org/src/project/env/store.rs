@@ -47,6 +47,9 @@ impl EnvStore {
             org_id: project.org_id.clone(),
             org_name: project.org_name.clone(),
             created_at: crate::now(),
+            updated_at: crate::now(),
+            status: "active".to_string(),
+            labels: std::collections::HashMap::new(),
         };
 
         self.db.put(NS_ENV, env.id.as_str(), &env).await?;

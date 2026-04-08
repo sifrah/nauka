@@ -68,10 +68,10 @@ fn api_route_generation() {
     assert!(ops.contains(&"list"));
     assert!(ops.contains(&"get"));
 
-    // List is GET /v1/widget
+    // List is GET /v1/widgets
     assert!(routes
         .iter()
-        .any(|r| r.method == "GET" && r.path == "/v1/widget"));
+        .any(|r| r.method == "GET" && r.path == "/v1/widgets"));
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn openapi_spec_generation() {
     let spec = nauka_core::api::openapi_spec(&[reg], "/v1");
 
     assert_eq!(spec["openapi"], "3.0.0");
-    assert!(spec["paths"]["/v1/widget"].is_object());
+    assert!(spec["paths"]["/v1/widgets"].is_object());
 }
 
 #[tokio::test]
@@ -92,9 +92,9 @@ async fn api_server_serves_routes() {
 
     let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
 
-    // GET /admin/v1/widget → list
+    // GET /admin/v1/widgets → list
     let req = Request::builder()
-        .uri("/admin/v1/widget")
+        .uri("/admin/v1/widgets")
         .body(Body::empty())
         .unwrap();
     let resp = server.admin_router().clone().oneshot(req).await.unwrap();

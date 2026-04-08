@@ -51,8 +51,13 @@ pub fn handler() -> HandlerFn {
                         let env = store.create(&name, &project, &org).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": env.name, "id": env.id.as_str(),
+                            "org_id": env.org_id.as_str(),
+                            "project_id": env.project_id.as_str(),
                             "project_name": env.project_name, "org_name": env.org_name,
-                            "created_at": env.created_at,
+                            "created_at": crate::to_iso8601(env.created_at),
+                            "updated_at": crate::to_iso8601(env.updated_at),
+                            "status": env.status,
+                            "labels": env.labels,
                         })))
                     }
                     "list" => {
@@ -61,8 +66,13 @@ pub fn handler() -> HandlerFn {
                         let envs = store.list(project.as_deref(), org.as_deref()).await?;
                         let items: Vec<serde_json::Value> = envs.iter().map(|e| serde_json::json!({
                             "name": e.name, "id": e.id.as_str(),
+                            "org_id": e.org_id.as_str(),
+                            "project_id": e.project_id.as_str(),
                             "project_name": e.project_name, "org_name": e.org_name,
-                            "created_at": e.created_at,
+                            "created_at": crate::to_iso8601(e.created_at),
+                            "updated_at": crate::to_iso8601(e.updated_at),
+                            "status": e.status,
+                            "labels": e.labels,
                         })).collect();
                         Ok(OperationResponse::ResourceList(items))
                     }
@@ -74,8 +84,13 @@ pub fn handler() -> HandlerFn {
                             .ok_or_else(|| anyhow::anyhow!("environment '{name}' not found"))?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": env.name, "id": env.id.as_str(),
+                            "org_id": env.org_id.as_str(),
+                            "project_id": env.project_id.as_str(),
                             "project_name": env.project_name, "org_name": env.org_name,
-                            "created_at": env.created_at,
+                            "created_at": crate::to_iso8601(env.created_at),
+                            "updated_at": crate::to_iso8601(env.updated_at),
+                            "status": env.status,
+                            "labels": env.labels,
                         })))
                     }
                     "delete" => {
