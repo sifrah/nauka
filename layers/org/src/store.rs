@@ -14,12 +14,18 @@ use nauka_hypervisor::controlplane::ClusterDb;
 use crate::types::{Environment, Org, Project};
 
 /// Namespaces in TiKV.
-const NS_ORGS: &str = "orgs";
-const NS_ORGS_IDX: &str = "orgs_idx";
-const NS_PROJECTS: &str = "projects";
-const NS_PROJECTS_IDX: &str = "projects_idx";
-const NS_ENVS: &str = "envs";
-const NS_ENVS_IDX: &str = "envs_idx";
+///
+/// Index namespaces use "idx:" prefix (not "_") to avoid colliding with
+/// data namespace prefix scans. In TiKV, `list("orgs", "")` scans
+/// `orgs/` → `orgs0`, and `_` (0x5F) falls in that range, but `:` (0x3A)
+/// does not since `0` (0x30) < `:` (0x3A).
+/// Wait — that's actually still in range. Use completely different prefixes.
+const NS_ORGS: &str = "org.data";
+const NS_ORGS_IDX: &str = "org.name";
+const NS_PROJECTS: &str = "proj.data";
+const NS_PROJECTS_IDX: &str = "proj.name";
+const NS_ENVS: &str = "env.data";
+const NS_ENVS_IDX: &str = "env.name";
 
 /// Store wrapping ClusterDb for org hierarchy CRUD.
 pub struct OrgStore {
