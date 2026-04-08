@@ -41,6 +41,11 @@
       "date": "2026-04-08"
     },
     {
+      "tag": "v0.0.1-nightly.12",
+      "channel": "nightly",
+      "date": "2026-04-08"
+    },
+    {
       "tag": "v0.0.1-nightly.11",
       "channel": "nightly",
       "date": "2026-04-08"
