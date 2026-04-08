@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["UniquenessScope"],"struct":["ParentRef","ScopeDef"]};
