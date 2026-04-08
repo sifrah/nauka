@@ -160,3 +160,13 @@ jobs:
             --prerelease \
             --notes "Nightly build ${VERSION}" \
             release/*
+
+      - name: Trigger docs build for tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          CHANNEL="nightly"
+          gh workflow run docs.yml \
+            -f channel="${CHANNEL}" \
+            -f tag="${TAG}"

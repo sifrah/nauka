@@ -20,6 +20,10 @@ on:
           - nightly
           - beta
           - stable
+      tag:
+        description: 'Release tag (e.g., v0.0.1-nightly.28). Leave empty for channel-only deploy.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -46,7 +50,7 @@ jobs:
             echo "tag=" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
-            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
             echo "tag=${TAG}" >> "$GITHUB_OUTPUT"

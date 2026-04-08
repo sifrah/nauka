@@ -104,3 +104,13 @@ jobs:
             $PRERELEASE \
             --notes "Promoted from ${{ inputs.source_tag }} to ${CHANNEL}" \
             artifacts/*
+
+      - name: Trigger docs build for tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ steps.version.outputs.tag }}
+          CHANNEL: ${{ inputs.target_channel }}
+        run: |
+          gh workflow run docs.yml \
+            -f channel="${CHANNEL}" \
+            -f tag="${TARGET_TAG}"
