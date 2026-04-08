@@ -126,11 +126,7 @@ impl OrgStore {
             .put(NS_PROJECTS, project.id.as_str(), &project)
             .await?;
         self.db
-            .put(
-                NS_PROJECTS_IDX,
-                &idx_key,
-                &project.id.as_str().to_string(),
-            )
+            .put(NS_PROJECTS_IDX, &idx_key, &project.id.as_str().to_string())
             .await?;
 
         Ok(project)
@@ -150,8 +146,8 @@ impl OrgStore {
         }
 
         // Resolve by name — need org to build index key
-        let org_name = org_name
-            .ok_or_else(|| anyhow::anyhow!("--org required to resolve project by name"))?;
+        let org_name =
+            org_name.ok_or_else(|| anyhow::anyhow!("--org required to resolve project by name"))?;
         let org = self
             .get_org(org_name)
             .await?
@@ -170,7 +166,10 @@ impl OrgStore {
         let projects: Vec<Project> = pairs.into_iter().map(|(_, v)| v).collect();
 
         match org_name {
-            Some(name) => Ok(projects.into_iter().filter(|p| p.org_name == name).collect()),
+            Some(name) => Ok(projects
+                .into_iter()
+                .filter(|p| p.org_name == name)
+                .collect()),
             None => Ok(projects),
         }
     }
@@ -179,12 +178,12 @@ impl OrgStore {
         let project = self
             .get_project(name_or_id, Some(org_name))
             .await?
-            .ok_or_else(|| anyhow::anyhow!("project '{name_or_id}' not found in org '{org_name}'"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("project '{name_or_id}' not found in org '{org_name}'")
+            })?;
 
         // Check for child environments
-        let envs = self
-            .list_envs(Some(&project.name), Some(org_name))
-            .await?;
+        let envs = self.list_envs(Some(&project.name), Some(org_name)).await?;
         if !envs.is_empty() {
             anyhow::bail!(
                 "project '{}' has {} environment(s). Delete them first.",
@@ -220,9 +219,7 @@ impl OrgStore {
         let idx_key = format!("{}/{}", project.id.as_str(), name);
         let existing: Option<String> = self.db.get(NS_ENVS_IDX, &idx_key).await?;
         if existing.is_some() {
-            anyhow::bail!(
-                "environment '{name}' already exists in project '{project_name}'"
-            );
+            anyhow::bail!("environment '{name}' already exists in project '{project_name}'");
         }
 
         let env = Environment {
@@ -250,11 +247,7 @@ impl OrgStore {
         org_name: Option<&str>,
     ) -> anyhow::Result<Option<Environment>> {
         if EnvId::looks_like_id(name_or_id) {
-            return self
-                .db
-                .get(NS_ENVS, name_or_id)
-                .await
-                .map_err(Into::into);
+            return self.db.get(NS_ENVS, name_or_id).await.map_err(Into::into);
         }
 
         let project_name = project_name
@@ -262,9 +255,7 @@ impl OrgStore {
         let project = self
             .get_project(project_name, org_name)
             .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("project '{project_name}' not found")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("project '{project_name}' not found"))?;
 
         let idx_key = format!("{}/{}", project.id.as_str(), name_or_id);
         let id: Option<String> = self.db.get(NS_ENVS_IDX, &idx_key).await?;
@@ -306,9 +297,7 @@ impl OrgStore {
             .get_env(name_or_id, Some(project_name), Some(org_name))
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "environment '{name_or_id}' not found in project '{project_name}'"
-                )
+                anyhow::anyhow!("environment '{name_or_id}' not found in project '{project_name}'")
             })?;
 
         let idx_key = format!("{}/{}", env.project_id.as_str(), env.name);
