@@ -92,6 +92,10 @@ impl ClusterDb {
     }
 
     /// List all keys with a prefix (scan).
+    ///
+    /// Note: TiKV's raw scan may not enforce end_key boundaries correctly
+    /// with the Rust client's keyspace encoding. We filter client-side
+    /// to ensure only keys within the namespace are returned.
     pub async fn list<T: DeserializeOwned>(
         &self,
         namespace: &str,
@@ -111,6 +115,12 @@ impl ClusterDb {
         for pair in pairs {
             let key_bytes: Vec<u8> = Vec::from(pair.key().clone());
             let key_str = String::from_utf8(key_bytes).unwrap_or_default();
+
+            // Client-side filter: skip keys outside our namespace
+            if !key_str.starts_with(&ns_prefix) {
+                continue;
+            }
+
             let short_key = key_str
                 .strip_prefix(&ns_prefix)
                 .unwrap_or(&key_str)
