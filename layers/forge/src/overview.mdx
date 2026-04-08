@@ -1,0 +1,52 @@
+---
+title: Forge
+description: The per-node reconciler that converges desired state (TiKV) to actual system state (kernel).
+sidebar:
+  order: 1
+---
+
+The Forge runs as a daemon on each hypervisor node. Every 30 seconds, it reads the desired state from TiKV (VPCs, VMs), compares it with what actually exists on the node (bridges, processes), and applies the delta.
+
+## How it works
+
+```
+TiKV (desired)          Forge             Kernel (actual)
+     │                    │                     │
+     │  read VMs/VPCs     │                     │
+     │◄───────────────────│                     │
+     │                    │  inspect bridges     │
+     │                    │────────────────────►│
+     │                    │  inspect processes   │
+     │                    │────────────────────►│
+     │                    │                     │
+     │                    │  diff: create/delete │
+     │                    │────────────────────►│
+     │  report status     │                     │
+     │◄───────────────────│                     │
+```
+
+## CLI
+
+```bash
+# Start the daemon (runs forever)
+nauka forge run
+
+# Trigger a single reconciliation cycle
+nauka forge reconcile
+
+# Check status
+nauka forge status
+```
+
+## Reconcilers
+
+The Forge runs reconcilers in dependency order:
+
+1. **VPC reconciler** — ensures VXLAN bridges exist for VPCs that have VMs on this node
+2. **VM reconciler** — ensures VMs assigned to this node are running as processes
+
+Each reconciler is idempotent: creating a bridge that exists is a no-op, starting a VM that's running is a no-op.
+
+## Systemd service
+
+The Forge installs as `nauka-forge.service`, started automatically during `nauka hypervisor init`. It restarts on failure with a 10-second backoff.

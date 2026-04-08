@@ -1444,6 +1444,7 @@ dependencies = [
  "http 1.4.0",
  "nauka-compute",
  "nauka-core",
+ "nauka-forge",
  "nauka-hypervisor",
  "nauka-network",
  "nauka-org",
@@ -1527,6 +1528,26 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower 0.5.3",
+]
+
+[[package]]
+name = "nauka-forge"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nauka-compute",
+ "nauka-core",
+ "nauka-hypervisor",
+ "nauka-network",
+ "nauka-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-client",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

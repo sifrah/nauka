@@ -9,6 +9,7 @@ members = [
     "layers/org",
     "layers/network",
     "layers/compute",
+    "layers/forge",
     "bin/nauka",
 ]
 
@@ -35,3 +36,4 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper = "1"
 openssl = { version = "0.10", features = ["vendored"] }
 ipnet = "2"
+async-trait = "0.1"
