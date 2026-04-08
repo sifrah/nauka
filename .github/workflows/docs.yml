@@ -31,21 +31,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Resolve channel from trigger ───────────────────────────
-  resolve-channel:
+  # ── Resolve channel + tag from trigger ───────────────────────
+  resolve:
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.ch.outputs.channel }}
+      tag: ${{ steps.ch.outputs.tag }}
     steps:
-      - name: Determine channel
+      - name: Determine channel and tag
         id: ch
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "channel=nightly" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "release" ]; then
             TAG="${{ github.event.release.tag_name }}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
             case "$TAG" in
               *-nightly.*) echo "channel=nightly" >> "$GITHUB_OUTPUT" ;;
               *-beta.*)    echo "channel=beta"    >> "$GITHUB_OUTPUT" ;;
@@ -53,9 +57,9 @@ jobs:
             esac
           fi
 
-  # ── Build docs for this channel ────────────────────────────
+  # ── Build docs ─────────────────────────────────────────────
   build:
-    needs: resolve-channel
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,20 +76,23 @@ jobs:
       - name: Generate OpenAPI spec
         run: cargo run --bin nauka-openapi --release > docs/public/openapi.json
 
-      - name: Build Starlight site
-        working-directory: docs
-        env:
-          DOCS_CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
-        run: |
-          npm ci
-          npx astro build
-
       - name: Build Rust API docs
         run: cargo doc --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "--default-theme ayu"
 
-      - name: Copy rustdoc into site
+      - name: Install docs dependencies
+        working-directory: docs
+        run: npm ci
+
+      # Build for channel path (e.g., /stable/)
+      - name: Build docs (channel)
+        working-directory: docs
+        env:
+          DOCS_CHANNEL: ${{ needs.resolve.outputs.channel }}
+        run: npx astro build
+
+      - name: Copy rustdoc into channel build
         run: cp -r target/doc docs/dist/api
 
       - uses: actions/upload-artifact@v4
@@ -93,50 +100,111 @@ jobs:
           name: docs-channel
           path: docs/dist
 
+      # Build for tag path (e.g., /v1.2.0/) — only on release
+      - name: Build docs (tag)
+        if: needs.resolve.outputs.tag != ''
+        working-directory: docs
+        env:
+          DOCS_CHANNEL: ${{ needs.resolve.outputs.tag }}
+        run: |
+          rm -rf dist
+          npx astro build
+
+      - name: Copy rustdoc into tag build
+        if: needs.resolve.outputs.tag != ''
+        run: cp -r target/doc docs/dist/api
+
+      - uses: actions/upload-artifact@v4
+        if: needs.resolve.outputs.tag != ''
+        with:
+          name: docs-tag
+          path: docs/dist
+
   # ── Merge into full site and deploy ────────────────────────
   deploy:
-    needs: [resolve-channel, build]
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Download current site
-        run: |
-          mkdir -p _site
-          PAGES_URL=$(curl -fsSL \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pages" \
-            | jq -r '.html_url // empty') || true
-          if [ -n "$PAGES_URL" ]; then
-            for ch in stable beta nightly; do
-              mkdir -p "_site/${ch}"
-              wget -q -r -np -nH -P "_site/${ch}" \
-                "${PAGES_URL}${ch}/" 2>/dev/null || true
-            done
-          fi
+      # Restore cached site (preserves old versioned docs)
+      - name: Restore site cache
+        uses: actions/cache@v4
+        with:
+          path: _site
+          key: gh-pages-site
+          restore-keys: gh-pages-site
 
-      - name: Download built channel
+      - name: Ensure site directory
+        run: mkdir -p _site
+
+      - name: Download channel artifact
         uses: actions/download-artifact@v4
         with:
           name: docs-channel
           path: _channel
 
-      - name: Merge channel into site
-        env:
-          CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
-        run: |
-          rm -rf "_site/${CHANNEL}"
-          cp -r _channel "_site/${CHANNEL}"
+      - name: Download tag artifact
+        if: needs.resolve.outputs.tag != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-tag
+          path: _tag
 
       - uses: actions/checkout@v4
         with:
           sparse-checkout: docs/root-index.html
           path: _repo
 
-      - name: Copy landing page
-        run: cp _repo/docs/root-index.html _site/index.html
+      - name: Merge into site
+        env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          # Landing page
+          cp _repo/docs/root-index.html _site/index.html
+
+          # Deploy channel (always)
+          rm -rf "_site/${CHANNEL}"
+          cp -r _channel "_site/${CHANNEL}"
+
+          # Deploy tag (if release)
+          if [ -n "${TAG}" ] && [ -d _tag ]; then
+            rm -rf "_site/${TAG}"
+            cp -r _tag "_site/${TAG}"
+          fi
+
+      - name: Update versions.json
+        env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          if [ ! -f _site/versions.json ]; then
+            echo '{"versions":[]}' > _site/versions.json
+          fi
+
+          if [ -n "${TAG}" ]; then
+            DATE=$(date -u +%Y-%m-%d)
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('_site/versions.json', 'utf8'));
+              if (!data.versions.find(v => v.tag === process.env.TAG)) {
+                data.versions.unshift({
+                  tag: process.env.TAG,
+                  channel: process.env.CHANNEL,
+                  date: '${DATE}'
+                });
+              }
+              fs.writeFileSync('_site/versions.json', JSON.stringify(data, null, 2));
+            "
+          fi
+
+      - name: Save site cache
+        uses: actions/cache/save@v4
+        with:
+          path: _site
+          key: gh-pages-site
 
       - uses: actions/upload-pages-artifact@v3
         with:

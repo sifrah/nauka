@@ -3,6 +3,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 const channel = process.env.DOCS_CHANNEL || 'stable';
+const isTag = channel.startsWith('v');
 const base = `/${channel}`;
 
 // https://astro.build/config
@@ -12,7 +13,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			customCss: ['./src/styles/custom.css'],
-			title: `Nauka${channel !== 'stable' ? ` (${channel})` : ''}`,
+			title: `Nauka${isTag ? ` ${channel}` : channel !== 'stable' ? ` (${channel})` : ''}`,
 			favicon: '/favicon.svg',
 			head: [
 				{ tag: 'link', attrs: { rel: 'icon', type: 'image/png', href: '/favicon.png' } },
