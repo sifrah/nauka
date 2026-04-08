@@ -277,7 +277,7 @@ fn env_def() -> ResourceDef {
         .alias("environment")
         .plural("environments")
         .parent("org", "--org", "Organization")
-        .parent_required("project", "--project", "Project")
+        .parent("project", "--project", "Project")
         .crud()
         .column("NAME", "name")
         .column("PROJECT", "project_name")
