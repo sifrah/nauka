@@ -53,6 +53,13 @@ pub fn bootstrap(
 
     steps.set("Waiting for TiKV");
     service::wait_tikv_ready(mesh_ipv6, 60)?;
+
+    // Single-node bootstrap: set max-replicas=1 so regions stay healthy
+    // even without additional stores. PD defaults to 3 which is wrong
+    // for a single-node cluster.
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let _ = service::adjust_max_replicas(&pd_url, 1);
+
     steps.inc();
 
     Ok(())
@@ -104,6 +111,14 @@ pub fn join(
         join_tikv_only(node_name, mesh_ipv6, existing_pd_endpoints)?;
     }
     steps.inc();
+
+    // Scale up max-replicas now that we have more stores.
+    // min(active_stores, MAX_PD_MEMBERS) — never exceed Raft group size.
+    let active = service::count_active_stores(&existing_pd_endpoints[0]);
+    let target_replicas = active.min(MAX_PD_MEMBERS);
+    if target_replicas > 0 {
+        let _ = service::adjust_max_replicas(&existing_pd_endpoints[0], target_replicas);
+    }
 
     // Waiting steps are inside join_with_pd / join_tikv_only
     // but the waits are already done — just mark the final step
@@ -204,11 +219,26 @@ pub fn restart() -> Result<(), NaukaError> {
     service::restart()
 }
 
-/// Uninstall the control plane. Deregisters TiKV store and PD member first.
+/// Uninstall the control plane. Deregisters TiKV store, adjusts replicas,
+/// waits for region migration, then removes PD member.
 pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
-    // Deregister TiKV store before stopping
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+
+    // 1. Deregister TiKV store (marks it as Tombstone in PD)
     let _ = service::deregister_store(mesh_ipv6);
-    // Deregister PD member before stopping (prevents zombie members on rejoin)
+
+    // 2. Count remaining active stores (excluding the one we just deregistered)
+    //    and adjust max-replicas so Raft can still form quorums
+    let active = service::count_active_stores(&pd_url);
+    let remaining = if active > 0 { active - 1 } else { 0 };
+    if remaining > 0 {
+        let target = remaining.min(MAX_PD_MEMBERS);
+        let _ = service::adjust_max_replicas(&pd_url, target);
+        // 3. Wait for PD to migrate region peers off the dead store
+        let _ = service::wait_regions_healthy(&pd_url, 30);
+    }
+
+    // 4. Deregister PD member (prevents zombie members on rejoin)
     let _ = service::deregister_pd_member(mesh_ipv6);
     service::uninstall()
 }

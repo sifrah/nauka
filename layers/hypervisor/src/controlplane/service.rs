@@ -465,6 +465,119 @@ pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaE
     Ok(())
 }
 
+/// Count active (Up) TiKV stores via PD API.
+pub fn count_active_stores(pd_url: &str) -> usize {
+    let stores_url = format!("{pd_url}/pd/api/v1/stores");
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &stores_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return 0,
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+
+    body["stores"]
+        .as_array()
+        .map(|stores| {
+            stores
+                .iter()
+                .filter(|s| s["store"]["state_name"].as_str() == Some("Up"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Set max-replicas to the given target if it differs from current.
+///
+/// Called on leave (scale down to prevent quorum loss) and on join
+/// (scale up to improve durability). Target should be
+/// `min(active_stores, MAX_PD_MEMBERS)`.
+pub fn adjust_max_replicas(pd_url: &str, target: usize) -> Result<(), NaukaError> {
+    if target == 0 {
+        return Ok(());
+    }
+
+    // Get current max-replicas
+    let config_url = format!("{pd_url}/pd/api/v1/config/replicate");
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &config_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(()),
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let current = body["max-replicas"].as_u64().unwrap_or(3) as usize;
+
+    if target != current {
+        tracing::info!(current, target, "adjusting max-replicas");
+        let payload = format!("{{\"max-replicas\": {target}}}");
+        let _ = Command::new("curl")
+            .args([
+                "-sf",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &payload,
+                "--max-time",
+                "5",
+                &config_url,
+            ])
+            .output();
+    }
+
+    Ok(())
+}
+
+/// Wait for all regions to have a leader (post-rebalance).
+/// Polls every 5s, up to timeout_secs.
+pub fn wait_regions_healthy(pd_url: &str, timeout_secs: u64) -> Result<(), NaukaError> {
+    let url = format!("{pd_url}/pd/api/v1/regions");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(output) = Command::new("curl")
+            .args(["-sf", "--max-time", "5", &url])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(regions) = body["regions"].as_array() {
+                        let total = regions.len();
+                        let with_leader = regions
+                            .iter()
+                            .filter(|r| r["leader"]["store_id"].as_u64().unwrap_or(0) > 0)
+                            .count();
+
+                        if total > 0 && with_leader == total {
+                            tracing::info!(total, "all regions have leaders");
+                            return Ok(());
+                        }
+                        tracing::debug!(with_leader, total, "waiting for region leaders");
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    // Not fatal — best effort
+    tracing::warn!("timed out waiting for region leaders, proceeding anyway");
+    Ok(())
+}
+
 /// Uninstall everything — stop services, remove configs, data.
 pub fn uninstall() -> Result<(), NaukaError> {
     let _ = run_systemctl(&["disable", "--now", TIKV_SERVICE]);
