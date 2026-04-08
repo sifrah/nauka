@@ -4,6 +4,7 @@
 //! which describes its identity, scope, schema, operations, and presentation.
 //! The CLI and API are generated automatically from these definitions.
 
+mod api_response;
 mod builder;
 mod cli_gen;
 mod constraint;
@@ -15,6 +16,7 @@ mod registry;
 mod schema;
 mod scope;
 
+pub use api_response::*;
 pub use builder::*;
 pub use cli_gen::*;
 pub use constraint::*;
