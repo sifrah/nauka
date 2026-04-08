@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "tag": "v0.0.1-nightly.8",
+      "channel": "nightly",
+      "date": "2026-04-08"
+    },
+    {
       "tag": "v0.0.1-nightly.7",
       "channel": "nightly",
       "date": "2026-04-08"
