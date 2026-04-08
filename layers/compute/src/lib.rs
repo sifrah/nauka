@@ -1,0 +1,54 @@
+//! Compute layer — virtual machine lifecycle.
+//!
+//! Structure:
+//! - **VM** — virtual machine scoped to an Org/Project/Env, placed on a subnet
+//!
+//! CLI: `nauka vm`
+
+pub mod vm;
+
+use nauka_core::resource::ResourceRegistration;
+use nauka_hypervisor::controlplane;
+use nauka_hypervisor::fabric;
+use nauka_state::LocalDb;
+
+/// Top-level registration: vm resource.
+pub fn registration() -> ResourceRegistration {
+    vm::handlers::registration()
+}
+
+/// Connect to ClusterDb via PD endpoints from fabric state.
+pub(crate) async fn connect_cluster_db() -> anyhow::Result<controlplane::ClusterDb> {
+    let dir = nauka_core::process::nauka_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let db = LocalDb::open("hypervisor")?;
+
+    let state = fabric::state::FabricState::load(&db)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cluster not initialized.\n\n\
+                 Initialize a cluster first with:\n\
+                 \x20 nauka hypervisor init"
+            )
+        })?;
+
+    let self_endpoint = format!(
+        "http://[{}]:{}",
+        state.hypervisor.mesh_ipv6,
+        controlplane::PD_CLIENT_PORT,
+    );
+    let mut endpoints = vec![self_endpoint];
+    for peer in &state.peers.peers {
+        endpoints.push(format!(
+            "http://[{}]:{}",
+            peer.mesh_ipv6,
+            controlplane::PD_CLIENT_PORT,
+        ));
+    }
+    let refs: Vec<&str> = endpoints.iter().map(|s| s.as_str()).collect();
+
+    controlplane::ClusterDb::connect(&refs)
+        .await
+        .map_err(Into::into)
+}

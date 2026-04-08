@@ -8,6 +8,7 @@ members = [
     "layers/hypervisor/tests/e2e",
     "layers/org",
     "layers/network",
+    "layers/compute",
     "bin/nauka",
 ]
 
