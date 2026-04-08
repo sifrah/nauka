@@ -65,6 +65,7 @@ export default defineConfig({
 				{ label: 'Core', autogenerate: { directory: 'layers/core' } },
 				{ label: 'State', autogenerate: { directory: 'layers/state' } },
 				{ label: 'Hypervisor', autogenerate: { directory: 'layers/hypervisor' } },
+				{ label: 'Organization', autogenerate: { directory: 'layers/org' } },
 				{
 					label: 'API Reference',
 					items: [
