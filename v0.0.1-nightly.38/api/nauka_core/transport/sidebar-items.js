@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_SOCKET_PATH","MAX_MESSAGE_SIZE"],"fn":["bind_listener","read_message","send_request","socket_path","write_message"],"struct":["Request","Response","Router"],"trait":["RequestHandler"]};

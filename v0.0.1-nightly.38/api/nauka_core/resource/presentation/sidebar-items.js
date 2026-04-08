@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Align","ColumnWidth","DisplayFormat"],"struct":["ColumnDef","DetailDef","DetailField","DetailSection","PresentationDef","TableDef"]};
