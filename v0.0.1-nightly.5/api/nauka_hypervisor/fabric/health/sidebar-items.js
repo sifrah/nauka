@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_INTERVAL_SECS","DEFAULT_STALE_THRESHOLD_SECS","NEW_PEER_GRACE_SECS"],"fn":["check_once","run_loop"],"struct":["HealthCheckResult"]};

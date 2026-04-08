@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Channel","Compatibility"],"fn":["backup_binary_path","backup_current_binary","check_compatibility","is_compatible","rollback"],"struct":["FeatureFlags","Version","VersionDiff"]};

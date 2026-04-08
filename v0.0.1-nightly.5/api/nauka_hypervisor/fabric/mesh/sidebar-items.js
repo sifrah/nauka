@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_hypervisor","create_mesh"],"struct":["HypervisorIdentity","MeshIdentity"]};

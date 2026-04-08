@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_interactive","prompt_enum","prompt_field","prompt_flag","prompt_integer","prompt_secret","prompt_string"],"type":["PromptResult"]};
