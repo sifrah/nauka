@@ -7,6 +7,14 @@ use super::ResourceDef;
 
 /// Generate a complete clap [`Command`] from a [`ResourceDef`].
 pub fn generate_command(def: &ResourceDef) -> Command {
+    generate_command_with_children(def, &[])
+}
+
+/// Generate a command with child resource subcommands.
+pub fn generate_command_with_children(
+    def: &ResourceDef,
+    children: &[&super::registry::ResourceRegistration],
+) -> Command {
     let mut cmd = Command::new(def.identity.cli_name)
         .about(def.identity.description)
         .subcommand_required(true)
@@ -18,6 +26,13 @@ pub fn generate_command(def: &ResourceDef) -> Command {
 
     for op in &def.operations {
         cmd = cmd.subcommand(generate_operation(def, op));
+    }
+
+    // Add child resource subcommands (e.g., org → project → env)
+    for child in children {
+        let child_refs: Vec<&super::registry::ResourceRegistration> =
+            child.children.iter().collect();
+        cmd = cmd.subcommand(generate_command_with_children(&child.def, &child_refs));
     }
 
     cmd

@@ -382,6 +382,7 @@ fn registry_find_by_name() {
     reg.register(ResourceRegistration {
         def: test_resource(),
         handler: Box::new(|_| Box::pin(async { Ok(OperationResponse::None) })),
+        children: vec![],
     });
     assert!(reg.find("widget").is_some());
     assert!(reg.find("wdg").is_some());
@@ -395,6 +396,7 @@ fn registry_len() {
     reg.register(ResourceRegistration {
         def: test_resource(),
         handler: Box::new(|_| Box::pin(async { Ok(OperationResponse::None) })),
+        children: vec![],
     });
     assert_eq!(reg.len(), 1);
 }

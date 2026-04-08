@@ -7,7 +7,7 @@
 
 use axum::extract::{Json, Path, Query};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, MethodRouter};
+use axum::routing::{get, post};
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,126 +18,228 @@ use crate::resource::{
     OperationRequest, OperationResponse, OperationSemantics, ResourceRegistration, ScopeValues,
 };
 
-/// Build an axum Router from resource registrations.
+/// Build an axum Router from resource registrations (including children).
 ///
-/// For resources with scope parents, generates nested routes:
-/// `/{prefix}/{parent}/{parent_id}/{resource}` etc.
+/// Flattens the registration tree and generates routes for each resource.
+/// Children inherit their parent scope through their ResourceDef parents field.
 pub fn build_router(registrations: Vec<ResourceRegistration>, prefix: &str) -> Router {
+    // Flatten tree into a list of Arc<ResourceRegistration>
+    let mut all = Vec::new();
+    for reg in registrations {
+        flatten_registrations(reg, &mut all);
+    }
+
     let mut router = Router::new();
+    for reg in &all {
+        router = add_resource_routes(router, reg, prefix);
+    }
+    router
+}
 
-    let shared: Vec<Arc<ResourceRegistration>> = registrations.into_iter().map(Arc::new).collect();
+/// Flatten a registration tree into a flat list.
+fn flatten_registrations(reg: ResourceRegistration, out: &mut Vec<Arc<ResourceRegistration>>) {
+    let ResourceRegistration {
+        def,
+        handler,
+        children,
+    } = reg;
+    for child in children {
+        flatten_registrations(child, out);
+    }
+    out.push(Arc::new(ResourceRegistration {
+        def,
+        handler,
+        children: vec![],
+    }));
+}
 
-    for reg in &shared {
-        let kind = reg.def.identity.cli_name;
+/// Add routes for a single (flattened) resource.
+fn add_resource_routes(
+    mut router: Router,
+    reg: &Arc<ResourceRegistration>,
+    prefix: &str,
+) -> Router {
+    let kind = reg.def.identity.cli_name;
+    let parents = &reg.def.scope.parents;
+    let base = build_base_path(prefix, kind, parents);
+    let has_parents = !parents.is_empty();
 
-        // #10: Build route path from scope parents
-        let base = build_base_path(prefix, kind, &reg.def.scope.parents);
+    // Collect parent param names for scope extraction
+    let parent_kinds: Vec<String> = parents.iter().map(|p| format!("{}_id", p.kind)).collect();
 
-        // Collect which methods we need on /{base} and /{base}/{id}
-        let mut collection_methods: Option<MethodRouter> = None;
-        let mut instance_methods: Option<MethodRouter> = None;
+    // ── Collection routes (list + create on /base) ──
 
-        for op in &reg.def.operations {
-            let r = Arc::clone(reg);
-            let op_name = op.name.to_string();
+    for op in &reg.def.operations {
+        let r = Arc::clone(reg);
+        let op_name = op.name.to_string();
+        let pkinds = parent_kinds.clone();
 
-            match &op.semantics {
-                // #3: List with pagination query params
-                OperationSemantics::List => {
-                    let name = op_name.clone();
-                    let handler = get(move |Query(params): Query<HashMap<String, String>>| {
-                        let r = Arc::clone(&r);
-                        let name = name.clone();
-                        async move { handle_operation(&r, &name, None, params).await }
-                    });
-                    collection_methods = Some(match collection_methods {
-                        Some(m) => m.merge(handler),
-                        None => handler,
-                    });
-                }
-                OperationSemantics::Create => {
-                    let name = op_name.clone();
-                    let handler = post(move |Json(body): Json<HashMap<String, String>>| {
-                        let r = Arc::clone(&r);
-                        let name = name.clone();
-                        async move {
-                            let resource_name = body.get("name").cloned();
-                            handle_operation(&r, &name, resource_name, body).await
-                        }
-                    });
-                    collection_methods = Some(match collection_methods {
-                        Some(m) => m.merge(handler),
-                        None => handler,
-                    });
-                }
-                // #11: GET and DELETE on same path — merged into one MethodRouter
-                OperationSemantics::Get => {
-                    let name = op_name.clone();
-                    let handler = get(move |Path(id): Path<String>| {
-                        let r = Arc::clone(&r);
-                        let name = name.clone();
-                        async move { handle_operation(&r, &name, Some(id), HashMap::new()).await }
-                    });
-                    instance_methods = Some(match instance_methods {
-                        Some(m) => m.merge(handler),
-                        None => handler,
-                    });
-                }
-                OperationSemantics::Delete => {
-                    let name = op_name.clone();
-                    let handler = axum::routing::delete(move |Path(id): Path<String>| {
-                        let r = Arc::clone(&r);
-                        let name = name.clone();
-                        async move { handle_operation(&r, &name, Some(id), HashMap::new()).await }
-                    });
-                    instance_methods = Some(match instance_methods {
-                        Some(m) => m.merge(handler),
-                        None => handler,
-                    });
-                }
-                OperationSemantics::Update { .. } => {
-                    let name = op_name.clone();
-                    let handler = axum::routing::patch(
-                        move |Path(id): Path<String>, Json(body): Json<HashMap<String, String>>| {
+        match &op.semantics {
+            OperationSemantics::List => {
+                if has_parents {
+                    let handler = get(
+                        move |Path(path_params): Path<HashMap<String, String>>,
+                              Query(query): Query<HashMap<String, String>>| {
                             let r = Arc::clone(&r);
-                            let name = name.clone();
-                            async move { handle_operation(&r, &name, Some(id), body).await }
+                            let op = op_name.clone();
+                            let pk = pkinds.clone();
+                            async move {
+                                let scope = extract_scope(&path_params, &pk);
+                                handle_scoped(&r, &op, None, query, scope).await
+                            }
                         },
                     );
-                    instance_methods = Some(match instance_methods {
-                        Some(m) => m.merge(handler),
-                        None => handler,
+                    router = router.route(&base, handler);
+                } else {
+                    let handler = get(move |Query(query): Query<HashMap<String, String>>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        async move { handle_scoped(&r, &op, None, query, ScopeValues::default()).await }
                     });
-                }
-                OperationSemantics::Action => {
-                    let name = op_name.clone();
-                    let route = format!("{base}/{}", op.name);
-                    router = router.route(
-                        &route,
-                        post(move |Json(body): Json<HashMap<String, String>>| {
-                            let r = Arc::clone(&r);
-                            let name = name.clone();
-                            async move {
-                                let resource_name = body.get("name").cloned();
-                                handle_operation(&r, &name, resource_name, body).await
-                            }
-                        }),
-                    );
+                    router = router.route(&base, handler);
                 }
             }
+            OperationSemantics::Create => {
+                if has_parents {
+                    let handler = post(
+                        move |Path(path_params): Path<HashMap<String, String>>,
+                              Json(body): Json<HashMap<String, String>>| {
+                            let r = Arc::clone(&r);
+                            let op = op_name.clone();
+                            let pk = pkinds.clone();
+                            async move {
+                                let scope = extract_scope(&path_params, &pk);
+                                let name = body.get("name").cloned();
+                                handle_scoped(&r, &op, name, body, scope).await
+                            }
+                        },
+                    );
+                    router = router.route(&base, handler);
+                } else {
+                    let handler = post(move |Json(body): Json<HashMap<String, String>>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        async move {
+                            let name = body.get("name").cloned();
+                            handle_scoped(&r, &op, name, body, ScopeValues::default()).await
+                        }
+                    });
+                    router = router.route(&base, handler);
+                }
+            }
+            _ => {}
         }
+    }
 
-        // Register merged routes
-        if let Some(methods) = collection_methods {
-            router = router.route(&base, methods);
-        }
-        if let Some(methods) = instance_methods {
-            let instance_path = format!("{base}/{{id}}");
-            router = router.route(&instance_path, methods);
+    // ── Instance routes (get + delete on /base/{id}) ──
+
+    let instance_path = format!("{base}/{{id}}");
+
+    for op in &reg.def.operations {
+        let r = Arc::clone(reg);
+        let op_name = op.name.to_string();
+        let pkinds = parent_kinds.clone();
+
+        match &op.semantics {
+            OperationSemantics::Get => {
+                if has_parents {
+                    let handler = get(move |Path(path_params): Path<HashMap<String, String>>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        let pk = pkinds.clone();
+                        async move {
+                            let scope = extract_scope(&path_params, &pk);
+                            let id = path_params.get("id").cloned();
+                            handle_scoped(&r, &op, id, HashMap::new(), scope).await
+                        }
+                    });
+                    router = router.route(&instance_path, handler);
+                } else {
+                    let handler = get(move |Path(id): Path<String>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        async move {
+                            handle_scoped(&r, &op, Some(id), HashMap::new(), ScopeValues::default())
+                                .await
+                        }
+                    });
+                    router = router.route(&instance_path, handler);
+                }
+            }
+            OperationSemantics::Delete => {
+                if has_parents {
+                    let handler = axum::routing::delete(
+                        move |Path(path_params): Path<HashMap<String, String>>| {
+                            let r = Arc::clone(&r);
+                            let op = op_name.clone();
+                            let pk = pkinds.clone();
+                            async move {
+                                let scope = extract_scope(&path_params, &pk);
+                                let id = path_params.get("id").cloned();
+                                handle_scoped(&r, &op, id, HashMap::new(), scope).await
+                            }
+                        },
+                    );
+                    router = router.route(&instance_path, handler);
+                } else {
+                    let handler = axum::routing::delete(move |Path(id): Path<String>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        async move {
+                            handle_scoped(&r, &op, Some(id), HashMap::new(), ScopeValues::default())
+                                .await
+                        }
+                    });
+                    router = router.route(&instance_path, handler);
+                }
+            }
+            OperationSemantics::Action => {
+                let route = format!("{base}/{}", op.name);
+                if has_parents {
+                    let handler = post(
+                        move |Path(path_params): Path<HashMap<String, String>>,
+                              Json(body): Json<HashMap<String, String>>| {
+                            let r = Arc::clone(&r);
+                            let op = op_name.clone();
+                            let pk = pkinds.clone();
+                            async move {
+                                let scope = extract_scope(&path_params, &pk);
+                                let name = body.get("name").cloned();
+                                handle_scoped(&r, &op, name, body, scope).await
+                            }
+                        },
+                    );
+                    router = router.route(&route, handler);
+                } else {
+                    let handler = post(move |Json(body): Json<HashMap<String, String>>| {
+                        let r = Arc::clone(&r);
+                        let op = op_name.clone();
+                        async move {
+                            let name = body.get("name").cloned();
+                            handle_scoped(&r, &op, name, body, ScopeValues::default()).await
+                        }
+                    });
+                    router = router.route(&route, handler);
+                }
+            }
+            _ => {}
         }
     }
 
     router
+}
+
+/// Extract scope values from path params (e.g., org_id → org).
+fn extract_scope(path_params: &HashMap<String, String>, parent_kinds: &[String]) -> ScopeValues {
+    let mut scope = ScopeValues::default();
+    for param in parent_kinds {
+        if let Some(value) = path_params.get(param) {
+            // param is "org_id" → scope key is "org"
+            let key = param.strip_suffix("_id").unwrap_or(param);
+            scope.set(key, value.clone());
+        }
+    }
+    scope
 }
 
 /// #10: Build a route path incorporating scope parents.
@@ -158,11 +260,13 @@ fn build_base_path(prefix: &str, kind: &str, parents: &[crate::resource::ParentR
     format!("{path}/{kind}")
 }
 
-async fn handle_operation(
+/// Handle an operation with scope values pre-populated.
+async fn handle_scoped(
     reg: &ResourceRegistration,
     operation: &str,
     name: Option<String>,
     fields: HashMap<String, String>,
+    scope: ScopeValues,
 ) -> impl IntoResponse {
     let op_def = reg.def.operations.iter().find(|o| o.name == operation);
     if let Some(op_def) = op_def {
@@ -176,7 +280,7 @@ async fn handle_operation(
     let request = OperationRequest {
         operation: operation.to_string(),
         name,
-        scope: ScopeValues::default(),
+        scope,
         fields,
     };
 
@@ -203,30 +307,39 @@ pub fn list_routes(registrations: &[ResourceRegistration], prefix: &str) -> Vec<
     let mut routes = Vec::new();
 
     for reg in registrations {
-        let kind = reg.def.identity.cli_name;
-        let base = build_base_path(prefix, kind, &reg.def.scope.parents);
-
-        for op in &reg.def.operations {
-            let (method, path) = match &op.semantics {
-                OperationSemantics::List => ("GET", base.clone()),
-                OperationSemantics::Create => ("POST", base.clone()),
-                OperationSemantics::Get => ("GET", format!("{base}/{{id}}")),
-                OperationSemantics::Delete => ("DELETE", format!("{base}/{{id}}")),
-                OperationSemantics::Update { .. } => ("PATCH", format!("{base}/{{id}}")),
-                OperationSemantics::Action => ("POST", format!("{base}/{}", op.name)),
-            };
-
-            routes.push(RouteInfo {
-                method: method.to_string(),
-                path,
-                operation: op.name.to_string(),
-                resource: kind.to_string(),
-                description: op.description.to_string(),
-            });
-        }
+        collect_routes(reg, prefix, &mut routes);
     }
 
     routes
+}
+
+fn collect_routes(reg: &ResourceRegistration, prefix: &str, routes: &mut Vec<RouteInfo>) {
+    let kind = reg.def.identity.cli_name;
+    let base = build_base_path(prefix, kind, &reg.def.scope.parents);
+
+    for op in &reg.def.operations {
+        let (method, path) = match &op.semantics {
+            OperationSemantics::List => ("GET", base.clone()),
+            OperationSemantics::Create => ("POST", base.clone()),
+            OperationSemantics::Get => ("GET", format!("{base}/{{id}}")),
+            OperationSemantics::Delete => ("DELETE", format!("{base}/{{id}}")),
+            OperationSemantics::Update { .. } => ("PATCH", format!("{base}/{{id}}")),
+            OperationSemantics::Action => ("POST", format!("{base}/{}", op.name)),
+        };
+
+        routes.push(RouteInfo {
+            method: method.to_string(),
+            path,
+            operation: op.name.to_string(),
+            resource: kind.to_string(),
+            description: op.description.to_string(),
+        });
+    }
+
+    // Recurse into children
+    for child in &reg.children {
+        collect_routes(child, prefix, routes);
+    }
 }
 
 /// #7: OpenAPI-compatible route listing.
@@ -311,7 +424,11 @@ mod tests {
             })
         });
 
-        ResourceRegistration { def, handler }
+        ResourceRegistration {
+            def,
+            handler,
+            children: vec![],
+        }
     }
 
     fn scoped_resource() -> ResourceRegistration {
@@ -332,7 +449,11 @@ mod tests {
         let handler: HandlerFn =
             Box::new(|_req| Box::pin(async move { Ok(OperationResponse::ResourceList(vec![])) }));
 
-        ResourceRegistration { def, handler }
+        ResourceRegistration {
+            def,
+            handler,
+            children: vec![],
+        }
     }
 
     // ── Route generation ──
@@ -413,26 +534,52 @@ mod tests {
         assert_eq!(path, "/v1/org/{org_id}/project/{project_id}/vpc");
     }
 
+    // ── Scope extraction ──
+
+    #[test]
+    fn extract_scope_from_path() {
+        let mut params = HashMap::new();
+        params.insert("org_id".to_string(), "org-123".to_string());
+        params.insert("project_id".to_string(), "proj-456".to_string());
+        let scope = extract_scope(&params, &["org_id".to_string(), "project_id".to_string()]);
+        assert_eq!(scope.get("org"), Some("org-123"));
+        assert_eq!(scope.get("project"), Some("proj-456"));
+    }
+
     // ── Handler ──
 
     #[tokio::test]
     async fn handle_operation_list() {
         let reg = test_resource();
-        let resp = handle_operation(&reg, "list", None, HashMap::new()).await;
+        let resp = handle_scoped(&reg, "list", None, HashMap::new(), ScopeValues::default()).await;
         assert!(resp.into_response().status().is_success());
     }
 
     #[tokio::test]
     async fn handle_operation_create() {
         let reg = test_resource();
-        let resp = handle_operation(&reg, "create", Some("w1".into()), HashMap::new()).await;
+        let resp = handle_scoped(
+            &reg,
+            "create",
+            Some("w1".into()),
+            HashMap::new(),
+            ScopeValues::default(),
+        )
+        .await;
         assert!(resp.into_response().status().is_success());
     }
 
     #[tokio::test]
     async fn handle_operation_delete() {
         let reg = test_resource();
-        let resp = handle_operation(&reg, "delete", Some("w1".into()), HashMap::new()).await;
+        let resp = handle_scoped(
+            &reg,
+            "delete",
+            Some("w1".into()),
+            HashMap::new(),
+            ScopeValues::default(),
+        )
+        .await;
         assert!(resp.into_response().status().is_success());
     }
 
