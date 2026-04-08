@@ -236,4 +236,4 @@ jobs:
             exit 0
           fi
           git commit -m "docs: deploy ${{ needs.resolve.outputs.channel }}${{ needs.resolve.outputs.tag && format(' ({0})', needs.resolve.outputs.tag) || '' }}"
-          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:gh-pages --force
