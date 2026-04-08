@@ -20,6 +20,7 @@ nauka-state = { path = "../../layers/state" }
 nauka-hypervisor = { path = "../../layers/hypervisor" }
 nauka-org = { path = "../../layers/org" }
 nauka-network = { path = "../../layers/network" }
+nauka-compute = { path = "../../layers/compute" }
 clap.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

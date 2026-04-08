@@ -1442,6 +1442,7 @@ dependencies = [
  "clap",
  "flate2",
  "http 1.4.0",
+ "nauka-compute",
  "nauka-core",
  "nauka-hypervisor",
  "nauka-network",
@@ -1458,6 +1459,25 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nauka-compute"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "nauka-core",
+ "nauka-hypervisor",
+ "nauka-network",
+ "nauka-org",
+ "nauka-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tikv-client",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

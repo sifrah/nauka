@@ -18,6 +18,9 @@ fn build_registry() -> ResourceRegistry {
     // Network (vpc → subnet, peering)
     registry.register(nauka_network::registration());
 
+    // Compute (vm)
+    registry.register(nauka_compute::registration());
+
     registry
 }
 
