@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INTERFACE_NAME"],"fn":["add_peer","create_interface","destroy_interface","get_peer_handshakes","get_status","interface_exists","remove_peer","run_cmd"],"struct":["PeerHandshake","WgStatus"]};
