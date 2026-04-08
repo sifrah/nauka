@@ -189,7 +189,7 @@ async fn api_server_health() {
 
     // List endpoint (empty — not initialized)
     let req = Request::builder()
-        .uri("/admin/v1/hypervisor")
+        .uri("/admin/v1/hypervisors")
         .body(Body::empty())
         .unwrap();
     let resp = server.admin_router().clone().oneshot(req).await.unwrap();
