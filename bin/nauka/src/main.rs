@@ -12,7 +12,10 @@ fn build_registry() -> ResourceRegistry {
     // Hypervisor — the core resource
     registry.register(nauka_hypervisor::handlers::registration());
 
-    // Future: vm, vpc, org, subnet, etc.
+    // Org hierarchy
+    registry.register(nauka_org::handlers::org_registration());
+    registry.register(nauka_org::handlers::project_registration());
+    registry.register(nauka_org::handlers::env_registration());
 
     registry
 }
