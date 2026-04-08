@@ -492,13 +492,13 @@ pub fn count_active_stores(pd_url: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Adjust max-replicas to match active store count (prevents quorum loss).
+/// Set max-replicas to the given target if it differs from current.
 ///
-/// When a node leaves, the remaining stores may be fewer than max-replicas.
-/// If we don't reduce it, Raft regions with peers on dead stores can't form
-/// a quorum and become permanently unavailable.
-pub fn adjust_max_replicas(pd_url: &str, active_stores: usize) -> Result<(), NaukaError> {
-    if active_stores == 0 {
+/// Called on leave (scale down to prevent quorum loss) and on join
+/// (scale up to improve durability). Target should be
+/// `min(active_stores, MAX_PD_MEMBERS)`.
+pub fn adjust_max_replicas(pd_url: &str, target: usize) -> Result<(), NaukaError> {
+    if target == 0 {
         return Ok(());
     }
 
@@ -518,15 +518,9 @@ pub fn adjust_max_replicas(pd_url: &str, active_stores: usize) -> Result<(), Nau
     };
 
     let current = body["max-replicas"].as_u64().unwrap_or(3) as usize;
-    let target = current.min(active_stores);
 
-    if target < current {
-        tracing::info!(
-            current,
-            target,
-            active_stores,
-            "reducing max-replicas for quorum safety"
-        );
+    if target != current {
+        tracing::info!(current, target, "adjusting max-replicas");
         let payload = format!("{{\"max-replicas\": {target}}}");
         let _ = Command::new("curl")
             .args([
