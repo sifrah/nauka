@@ -5,6 +5,7 @@
 //!
 //! CLI: `nauka vm`
 
+pub mod scheduler;
 pub mod vm;
 
 use nauka_core::resource::ResourceRegistration;

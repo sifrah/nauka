@@ -97,7 +97,7 @@ impl VmStore {
             region: region.to_string(),
             zone: zone.to_string(),
             private_ip: None,
-            hypervisor_id: None,
+            hypervisor_id: Some(crate::scheduler::schedule(region, zone)?),
             state: VmState::Pending,
         };
 
