@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["service","wg"],"struct":["WireGuardBackend"]};

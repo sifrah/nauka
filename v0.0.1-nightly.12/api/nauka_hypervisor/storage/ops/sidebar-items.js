@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FETCH_RETRIES","FETCH_RETRY_DELAY_MS","TIKV_STORAGE_NS"],"fn":["fetch_region_config","leave","publish_region_config","remove_region","setup_region","start_all","status","stop_all"],"struct":["RegionStatus"]};
