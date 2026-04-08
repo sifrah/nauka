@@ -26,7 +26,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -68,7 +68,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Checkout the tag commit when building versioned docs
           ref: ${{ needs.resolve.outputs.tag || github.sha }}
 
       - uses: actions/setup-node@v4
@@ -127,24 +126,33 @@ jobs:
           name: docs-tag
           path: docs/dist
 
-  # ── Merge into full site and deploy ────────────────────────
+  # ── Deploy to gh-pages branch ──────────────────────────────
   deploy:
     needs: [resolve, build]
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      # Restore cached site (preserves old versioned docs)
-      - name: Restore site cache
-        uses: actions/cache/restore@v4
+      # Checkout gh-pages branch (the persistent store)
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
         with:
+          ref: gh-pages
           path: _site
-          key: gh-pages-site-${{ github.run_id }}
-          restore-keys: gh-pages-site-
+          fetch-depth: 1
+        continue-on-error: true
 
-      - name: Ensure site directory
-        run: mkdir -p _site
+      - name: Init gh-pages if needed
+        run: |
+          if [ ! -d _site/.git ]; then
+            mkdir -p _site
+            cd _site
+            git init
+            git checkout --orphan gh-pages
+            touch .nojekyll
+            git add .nojekyll
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "init gh-pages"
+          fi
 
       - name: Download channel artifact
         uses: actions/download-artifact@v4
@@ -159,8 +167,10 @@ jobs:
           name: docs-tag
           path: _tag
 
-      - uses: actions/checkout@v4
+      - name: Checkout root-index
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           sparse-checkout: docs/root-index.html
           path: _repo
 
@@ -171,6 +181,9 @@ jobs:
         run: |
           # Landing page
           cp _repo/docs/root-index.html _site/index.html
+
+          # .nojekyll
+          touch _site/.nojekyll
 
           # Deploy channel (always)
           rm -rf "_site/${CHANNEL}"
@@ -187,7 +200,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          # Fetch all releases from GitHub API and build versions.json
           node -e "
             const { execSync } = require('child_process');
             const result = execSync(
@@ -205,7 +217,6 @@ jobs:
                 date: r.date ? r.date.split('T')[0] : ''
               };
             });
-            // Sort by date descending
             versions.sort((a, b) => b.date.localeCompare(a.date));
             require('fs').writeFileSync(
               '_site/versions.json',
@@ -214,15 +225,15 @@ jobs:
             console.log('versions.json: ' + versions.length + ' releases');
           "
 
-      - name: Save site cache
-        uses: actions/cache/save@v4
-        with:
-          path: _site
-          key: gh-pages-site-${{ github.run_id }}
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Commit and push to gh-pages
+        run: |
+          cd _site
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy"
+            exit 0
+          fi
+          git commit -m "docs: deploy ${{ needs.resolve.outputs.channel }}${{ needs.resolve.outputs.tag && format(' ({0})', needs.resolve.outputs.tag) || '' }}"
+          git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
