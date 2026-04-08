@@ -1,94 +1,91 @@
 ---
 const channel = import.meta.env.DOCS_CHANNEL || 'stable';
-
-// Detect if current build is a tag (e.g., v1.2.0) or a channel (stable/beta/nightly)
 const isTag = channel.startsWith('v');
 const displayLabel = isTag ? channel : channel.charAt(0).toUpperCase() + channel.slice(1);
 ---
 
-<nav class="version-picker">
-  <button type="button" class="version-trigger" aria-expanded="false" aria-haspopup="listbox">
+<nav class="version-picker" data-channel={channel}>
+  <button type="button" class="version-trigger" aria-expanded="false">
     <span class="version-label">{displayLabel}</span>
     <svg class="chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M2.5 3.75L5 6.25L7.5 3.75"/>
     </svg>
   </button>
-  <div class="version-menu">
-    <div class="version-menu-inner" id="version-menu-content">
-      <div class="version-loading">Loading...</div>
-    </div>
+  <div class="version-dropdown">
+    <div class="version-dropdown-inner"></div>
   </div>
 </nav>
 
-<script define:vars={{ channel }}>
-  const picker = document.querySelector('.version-picker');
-  const trigger = picker?.querySelector('.version-trigger');
-  const menu = picker?.querySelector('.version-menu');
-  const content = document.getElementById('version-menu-content');
-
-  function toggle(open) {
-    const next = open ?? trigger?.getAttribute('aria-expanded') !== 'true';
-    trigger?.setAttribute('aria-expanded', String(next));
-    menu?.classList.toggle('open', next);
-  }
-
-  trigger?.addEventListener('click', () => toggle());
-
-  document.addEventListener('click', (e) => {
-    if (!e.target?.closest('.version-picker')) toggle(false);
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') toggle(false);
-  });
-
-  // Resolve the root URL (strip the channel/tag base path)
-  const base = document.querySelector('link[rel="canonical"]')?.getAttribute('href') || '';
+<script>
+  // Version picker — handles multiple instances on the page
   const siteRoot = window.location.origin;
 
-  // Fetch versions.json from site root
-  fetch(`${siteRoot}/versions.json`)
-    .then((r) => r.ok ? r.json() : null)
-    .catch(() => null)
-    .then((data) => {
-      if (!content) return;
+  function initPicker(picker: Element) {
+    const channel = picker.getAttribute('data-channel') || 'stable';
+    const trigger = picker.querySelector('.version-trigger') as HTMLButtonElement;
+    const dropdown = picker.querySelector('.version-dropdown') as HTMLElement;
+    const inner = picker.querySelector('.version-dropdown-inner') as HTMLElement;
 
-      const channels = ['stable', 'beta', 'nightly'];
-      const versions = data?.versions || [];
+    if (!trigger || !dropdown || !inner) return;
 
-      // Group by channel
-      const grouped = {};
-      channels.forEach((ch) => { grouped[ch] = []; });
-      versions.forEach((v) => {
-        if (grouped[v.channel]) grouped[v.channel].push(v);
-      });
+    function toggle(open?: boolean) {
+      const next = open ?? trigger.getAttribute('aria-expanded') !== 'true';
+      trigger.setAttribute('aria-expanded', String(next));
+      dropdown.classList.toggle('open', next);
+    }
 
-      // Check which tag paths actually exist (async, best-effort)
-      const deployed = new Set();
-
-      let html = '';
-      channels.forEach((ch) => {
-        const label = ch.charAt(0).toUpperCase() + ch.slice(1);
-        const isCurrent = channel === ch;
-        const tags = grouped[ch];
-
-        html += `<div class="version-group-header">${label}</div>`;
-        html += `<a class="version-item${isCurrent ? ' current' : ''}" href="/${ch}/">
-          <span>latest${tags.length > 0 ? ' (' + tags[0].tag + ')' : ''}</span>
-          ${isCurrent ? '<svg class="check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
-        </a>`;
-
-        tags.forEach((v) => {
-          const isCurrentTag = channel === v.tag;
-          html += `<a class="version-item${isCurrentTag ? ' current' : ''}" href="/${v.tag}/">
-            <span>${v.tag}</span>
-            <span class="version-date">${v.date}</span>
-          </a>`;
-        });
-      });
-
-      content.innerHTML = html;
+    trigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle();
     });
+
+    document.addEventListener('click', (e) => {
+      if (!(e.target as Element)?.closest('.version-picker')) toggle(false);
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') toggle(false);
+    });
+
+    // Fetch and render versions
+    fetch(`${siteRoot}/versions.json`)
+      .then((r) => r.ok ? r.json() : null)
+      .catch(() => null)
+      .then((data) => {
+        const channels = ['stable', 'beta', 'nightly'];
+        const versions = data?.versions || [];
+
+        const grouped: Record<string, Array<{tag: string, date: string}>> = {};
+        channels.forEach((ch) => { grouped[ch] = []; });
+        versions.forEach((v: {tag: string, channel: string, date: string}) => {
+          if (grouped[v.channel]) grouped[v.channel].push(v);
+        });
+
+        let html = '';
+        channels.forEach((ch) => {
+          const label = ch.charAt(0).toUpperCase() + ch.slice(1);
+          const isCurrent = channel === ch;
+          const tags = grouped[ch];
+
+          html += `<div class="vp-group-header">${label}</div>`;
+          html += `<a class="vp-item${isCurrent ? ' vp-current' : ''}" href="/${ch}/">
+            latest${tags.length > 0 ? ' (' + tags[0].tag + ')' : ''}
+          </a>`;
+
+          tags.forEach((v) => {
+            const isCurrentTag = channel === v.tag;
+            html += `<a class="vp-item${isCurrentTag ? ' vp-current' : ''}" href="/${v.tag}/">
+              <span>${v.tag}</span>
+              <span class="vp-date">${v.date}</span>
+            </a>`;
+          });
+        });
+
+        inner.innerHTML = html;
+      });
+  }
+
+  document.querySelectorAll('.version-picker').forEach(initPicker);
 </script>
 
 <style>
@@ -127,12 +124,11 @@ const displayLabel = isTag ? channel : channel.charAt(0).toUpperCase() + channel
     transform: rotate(180deg);
   }
 
-  .version-menu {
+  .version-dropdown {
     position: absolute;
     top: calc(100% + 0.5rem);
     right: 0;
-    min-width: 12rem;
-    margin: 0;
+    min-width: 14rem;
     background: var(--sl-color-bg);
     border: 1px solid var(--sl-color-gray-5);
     border-radius: 0.5rem;
@@ -144,29 +140,22 @@ const displayLabel = isTag ? channel : channel.charAt(0).toUpperCase() + channel
     z-index: 100;
   }
 
-  .version-menu.open {
+  .version-dropdown.open {
     opacity: 1;
     visibility: visible;
     transform: translateY(0);
   }
 
-  .version-menu-inner {
+  .version-dropdown-inner {
     max-height: 20rem;
     overflow-y: auto;
     padding: 0.25rem;
     scrollbar-width: thin;
   }
-
-  .version-loading {
-    padding: 0.75rem;
-    font-size: 0.75rem;
-    color: var(--sl-color-gray-3);
-    text-align: center;
-  }
 </style>
 
 <style is:global>
-  .version-group-header {
+  .vp-group-header {
     padding: 0.5rem 0.75rem 0.2rem;
     font-size: 0.65rem;
     font-weight: 700;
@@ -176,13 +165,13 @@ const displayLabel = isTag ? channel : channel.charAt(0).toUpperCase() + channel
     user-select: none;
   }
 
-  .version-group-header:not(:first-child) {
+  .vp-group-header:not(:first-child) {
     margin-top: 0.25rem;
     border-top: 1px solid var(--sl-color-gray-5);
     padding-top: 0.5rem;
   }
 
-  .version-item {
+  .vp-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -195,22 +184,18 @@ const displayLabel = isTag ? channel : channel.charAt(0).toUpperCase() + channel
     transition: background 0.1s, color 0.1s;
   }
 
-  .version-item:hover {
+  .vp-item:hover {
     background: var(--sl-color-gray-5);
     color: var(--sl-color-text);
   }
 
-  .version-item.current {
+  .vp-item.vp-current {
     font-weight: 600;
     color: var(--sl-color-text);
   }
 
-  .version-date {
+  .vp-date {
     font-size: 0.7rem;
     color: var(--sl-color-gray-4);
-  }
-
-  .version-item .check {
-    color: var(--sl-color-text-accent);
   }
 </style>
