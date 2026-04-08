@@ -21,6 +21,9 @@ fn build_registry() -> ResourceRegistry {
     // Compute (vm)
     registry.register(nauka_compute::registration());
 
+    // Forge (reconciler)
+    registry.register(nauka_forge::registration());
+
     registry
 }
 
