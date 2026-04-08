@@ -67,6 +67,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Checkout the tag commit when building versioned docs
+          ref: ${{ needs.resolve.outputs.tag || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
