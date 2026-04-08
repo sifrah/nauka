@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_base_path","build_router","handle_operation","list_routes","openapi_spec"],"struct":["RouteInfo"]};
