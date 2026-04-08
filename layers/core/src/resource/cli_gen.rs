@@ -121,6 +121,7 @@ fn generate_operation(def: &ResourceDef, op: &super::operation::OperationDef) ->
         }
 
         OperationSemantics::Action => {
+            cmd = add_scope_args(cmd, def, false);
             for arg in &op.args {
                 match &arg.source {
                     super::operation::ArgSource::Custom(field) => {
