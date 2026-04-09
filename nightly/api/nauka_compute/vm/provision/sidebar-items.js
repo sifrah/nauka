@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["ensure_tap","iface_exists","iface_hash","list_taps","remove_tap","tap_name"]};
+window.SIDEBAR_ITEMS = {"fn":["ensure_tap","ensure_veth","iface_exists","iface_hash","list_taps","list_veths","remove_tap","remove_veth","setup_container_net","tap_name","veth_guest_name","veth_host_name"]};

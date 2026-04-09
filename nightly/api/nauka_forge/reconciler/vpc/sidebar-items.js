@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
+window.SIDEBAR_ITEMS = {"fn":["add_arp_in_container","get_container_pid","resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
