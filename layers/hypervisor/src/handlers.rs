@@ -84,6 +84,14 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("s3-region", "S3 region (e.g., eu-central-1)").with_default(""),
             ))
             .with_arg(OperationArg::optional(
+                "ipv6-block",
+                FieldDef::string("ipv6-block", "Public IPv6 /64 block from hosting provider (e.g., 2a01:4f8:c012:abcd::/64)"),
+            ))
+            .with_arg(OperationArg::optional(
+                "ipv4-public",
+                FieldDef::string("ipv4-public", "Public IPv4 address of this server"),
+            ))
+            .with_arg(OperationArg::optional(
                 "peering",
                 FieldDef::flag(
                     "peering",
@@ -127,6 +135,14 @@ pub fn resource_def() -> ResourceDef {
                 "mode",
                 FieldDef::string("mode", "Network mode: wireguard (default), direct, mock")
                     .with_default("wireguard"),
+            ))
+            .with_arg(OperationArg::optional(
+                "ipv6-block",
+                FieldDef::string("ipv6-block", "Public IPv6 /64 block from hosting provider (e.g., 2a01:4f8:c012:abcd::/64)"),
+            ))
+            .with_arg(OperationArg::optional(
+                "ipv4-public",
+                FieldDef::string("ipv4-public", "Public IPv4 address of this server"),
             ))
             .with_output(OutputKind::Resource)
             .with_example(
@@ -296,6 +312,9 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    let ipv6_block = req.fields.get("ipv6-block").cloned();
+    let ipv4_public = req.fields.get("ipv4-public").cloned();
+
     let db = open_db()?;
     let init_cfg = fabric::ops::InitConfig {
         node_name: &node_name,
@@ -305,6 +324,8 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         network_mode,
         fabric_interface,
         endpoint,
+        ipv6_block,
+        ipv4_public,
     };
 
     // Generate a deterministic encryption password from the S3 secret key + region.
@@ -476,6 +497,9 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
                 .unwrap_or_else(|| "node".to_string())
         });
 
+    let ipv6_block = req.fields.get("ipv6-block").cloned();
+    let ipv4_public = req.fields.get("ipv4-public").cloned();
+
     let db = open_db()?;
     let join_cfg = fabric::ops::JoinConfig {
         target: &target,
@@ -485,6 +509,8 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         port,
         pin,
         network_mode,
+        ipv6_block,
+        ipv4_public,
     };
 
     // Join: 2 (fabric) + 3 (control plane) + 1 (storage) + 3 (compute+forge) + 1 (announce) = 10

@@ -52,6 +52,12 @@ pub struct HypervisorIdentity {
     /// Compute runtime: "kvm" (Cloud Hypervisor) or "container" (gVisor).
     #[serde(default = "default_runtime")]
     pub runtime: String,
+    /// Public IPv6 /64 block allocated by the hosting provider (e.g., "2a01:4f8:c012:abcd::/64").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_block: Option<String>,
+    /// Public IPv4 address of this server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4_public: Option<String>,
 }
 
 fn default_runtime() -> String {
@@ -69,28 +75,35 @@ pub fn create_mesh() -> (MeshIdentity, MeshSecret) {
     (mesh, secret)
 }
 
+/// Configuration for creating a new hypervisor identity.
+pub struct CreateHypervisorConfig<'a> {
+    pub name: &'a str,
+    pub region: &'a str,
+    pub zone: &'a str,
+    pub port: u16,
+    pub endpoint: Option<String>,
+    pub fabric_interface: &'a str,
+    pub mesh_prefix: &'a Ipv6Addr,
+    pub ipv6_block: Option<String>,
+    pub ipv4_public: Option<String>,
+}
+
 /// Create a new node identity (called by both init and join).
 /// Validates name, region, zone, and port.
 pub fn create_hypervisor(
-    name: &str,
-    region: &str,
-    zone: &str,
-    port: u16,
-    endpoint: Option<String>,
-    fabric_interface: &str,
-    mesh_prefix: &Ipv6Addr,
+    cfg: &CreateHypervisorConfig<'_>,
 ) -> Result<HypervisorIdentity, nauka_core::error::NaukaError> {
-    nauka_core::validate::name(name)?;
-    nauka_core::validate::region(region)?;
-    nauka_core::validate::zone(zone)?;
-    nauka_core::validate::port(port)?;
+    nauka_core::validate::name(cfg.name)?;
+    nauka_core::validate::region(cfg.region)?;
+    nauka_core::validate::zone(cfg.zone)?;
+    nauka_core::validate::port(cfg.port)?;
 
     let (wg_private, wg_public) = crypto::generate_wg_keypair();
 
     let pub_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &wg_public)
         .unwrap_or_default();
 
-    let mesh_ipv6 = addressing::derive_node_address(mesh_prefix, &pub_bytes);
+    let mesh_ipv6 = addressing::derive_node_address(cfg.mesh_prefix, &pub_bytes);
 
     // Detect compute runtime: KVM if /dev/kvm exists, container (gVisor) otherwise
     let runtime = if std::path::Path::new("/dev/kvm").exists() {
@@ -101,22 +114,32 @@ pub fn create_hypervisor(
 
     Ok(HypervisorIdentity {
         id: nauka_core::id::HypervisorId::generate(),
-        name: name.to_string(),
-        region: region.to_string(),
-        zone: zone.to_string(),
+        name: cfg.name.to_string(),
+        region: cfg.region.to_string(),
+        zone: cfg.zone.to_string(),
         wg_private_key: wg_private,
         wg_public_key: wg_public,
-        wg_port: port,
-        endpoint,
-        fabric_interface: fabric_interface.to_string(),
+        wg_port: cfg.port,
+        endpoint: cfg.endpoint.clone(),
+        fabric_interface: cfg.fabric_interface.to_string(),
         mesh_ipv6,
         runtime,
+        ipv6_block: cfg.ipv6_block.clone(),
+        ipv4_public: cfg.ipv4_public.clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: create a hypervisor with minimal defaults.
+    fn make_hv(name: &str, region: &str, zone: &str, port: u16, endpoint: Option<String>, prefix: &Ipv6Addr) -> Result<HypervisorIdentity, nauka_core::error::NaukaError> {
+        create_hypervisor(&CreateHypervisorConfig {
+            name, region, zone, port, endpoint, fabric_interface: "", mesh_prefix: prefix,
+            ipv6_block: None, ipv4_public: None,
+        })
+    }
 
     #[test]
     fn create_mesh_generates_valid_identity() {
@@ -138,7 +161,7 @@ mod tests {
     fn create_node_has_valid_identity() {
         let (mesh, _) = create_mesh();
         let node =
-            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
 
         assert_eq!(node.name, "node-1");
         assert_eq!(node.region, "eu");
@@ -152,8 +175,8 @@ mod tests {
     #[test]
     fn create_node_unique_keys() {
         let (mesh, _) = create_mesh();
-        let a = create_hypervisor("node-aaa", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
-        let b = create_hypervisor("node-bbb", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+        let a = make_hv("node-aaa", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
+        let b = make_hv("node-bbb", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
         assert_ne!(a.wg_public_key, b.wg_public_key);
         assert_ne!(a.mesh_ipv6, b.mesh_ipv6);
     }
@@ -161,16 +184,7 @@ mod tests {
     #[test]
     fn create_node_with_endpoint() {
         let (mesh, _) = create_mesh();
-        let node = create_hypervisor(
-            "node-1",
-            "eu",
-            "fsn1",
-            51820,
-            Some("46.224.166.60:51820".into()),
-            "",
-            &mesh.prefix,
-        )
-        .unwrap();
+        let node = make_hv("node-1", "eu", "fsn1", 51820, Some("46.224.166.60:51820".into()), &mesh.prefix).unwrap();
         assert_eq!(node.endpoint, Some("46.224.166.60:51820".into()));
     }
 
@@ -178,7 +192,7 @@ mod tests {
     fn node_identity_serde_roundtrip() {
         let (mesh, _) = create_mesh();
         let node =
-            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
         let json = serde_json::to_string(&node).unwrap();
         let back: HypervisorIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "node-1");
@@ -190,25 +204,25 @@ mod tests {
     #[test]
     fn create_node_rejects_empty_name() {
         let (mesh, _) = create_mesh();
-        assert!(create_hypervisor("", "eu", "fsn1", 51820, None, "", &mesh.prefix).is_err());
+        assert!(make_hv("", "eu", "fsn1", 51820, None, &mesh.prefix).is_err());
     }
 
     #[test]
     fn create_node_rejects_bad_region() {
         let (mesh, _) = create_mesh();
-        assert!(create_hypervisor("node-1", "EU!", "fsn1", 51820, None, "", &mesh.prefix).is_err());
+        assert!(make_hv("node-1", "EU!", "fsn1", 51820, None, &mesh.prefix).is_err());
     }
 
     #[test]
     fn create_node_rejects_bad_zone() {
         let (mesh, _) = create_mesh();
-        assert!(create_hypervisor("node-1", "eu", "FSN 1", 51820, None, "", &mesh.prefix).is_err());
+        assert!(make_hv("node-1", "eu", "FSN 1", 51820, None, &mesh.prefix).is_err());
     }
 
     #[test]
     fn create_node_rejects_port_zero() {
         let (mesh, _) = create_mesh();
-        assert!(create_hypervisor("node-1", "eu", "fsn1", 0, None, "", &mesh.prefix).is_err());
+        assert!(make_hv("node-1", "eu", "fsn1", 0, None, &mesh.prefix).is_err());
     }
 
     // ── #5: Private key persistence ──
@@ -217,7 +231,7 @@ mod tests {
     fn private_key_survives_serde() {
         let (mesh, _) = create_mesh();
         let node =
-            create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
         let original_private = node.wg_private_key.clone();
         assert!(!original_private.is_empty());
 
@@ -241,10 +255,10 @@ mod tests {
     fn create_node_long_name() {
         let (mesh, _) = create_mesh();
         let long_name = "a".repeat(63); // max allowed
-        assert!(create_hypervisor(&long_name, "eu", "fsn1", 51820, None, "", &mesh.prefix).is_ok());
+        assert!(make_hv(&long_name, "eu", "fsn1", 51820, None, &mesh.prefix).is_ok());
 
         let too_long = "a".repeat(64);
-        assert!(create_hypervisor(&too_long, "eu", "fsn1", 51820, None, "", &mesh.prefix).is_err());
+        assert!(make_hv(&too_long, "eu", "fsn1", 51820, None, &mesh.prefix).is_err());
     }
 
     #[test]

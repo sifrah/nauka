@@ -121,6 +121,7 @@ pub fn registration() -> ResourceRegistration {
         children: vec![
             super::subnet::handlers::registration(),
             super::peering::handlers::registration(),
+            super::natgw::handlers::registration(),
         ],
     }
 }

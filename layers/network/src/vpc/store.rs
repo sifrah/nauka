@@ -129,6 +129,16 @@ impl VpcStore {
             );
         }
 
+        // Check for child NAT gateways
+        let natgw_store = super::natgw::store::NatGwStore::new(self.db.clone());
+        let natgws = natgw_store.list(Some(&vpc.meta.name)).await?;
+        if !natgws.is_empty() {
+            anyhow::bail!(
+                "vpc '{}' has a NAT gateway. Delete it first.",
+                vpc.meta.name,
+            );
+        }
+
         let idx_key = format!("{}/{}", vpc.org_id.as_str(), vpc.meta.name);
         self.db.delete(NS_VPC, &vpc.meta.id).await?;
         self.db.delete(NS_VPC_IDX, &idx_key).await?;

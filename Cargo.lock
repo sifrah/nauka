@@ -1597,6 +1597,7 @@ name = "nauka-network"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "hex",
  "ipnet",
  "nauka-core",
  "nauka-hypervisor",
@@ -1604,6 +1605,7 @@ dependencies = [
  "nauka-state",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tikv-client",

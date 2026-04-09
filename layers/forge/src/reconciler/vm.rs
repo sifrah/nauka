@@ -98,6 +98,13 @@ impl super::Reconciler for VmReconciler {
                     None => ("0.0.0.0".to_string(), "0.0.0.0/0".to_string()),
                 };
 
+                // Resolve VPC CIDR for DNS64/NAT64 setup
+                let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                let vpc_cidr = vpc_store
+                    .get(vm.vpc_id.as_str(), None)
+                    .await?
+                    .map(|v| v.cidr);
+
                 let config = VmRunConfig {
                     vm_id: vm.meta.id.clone(),
                     vm_name: vm.meta.name.clone(),
@@ -113,6 +120,7 @@ impl super::Reconciler for VmReconciler {
                     private_ip: vm.private_ip.clone().unwrap_or_default(),
                     gateway,
                     subnet_cidr: cidr,
+                    vpc_cidr,
                 };
 
                 match rt.start(&config) {

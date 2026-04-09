@@ -148,6 +148,7 @@ pub fn setup_container_net(
     ip: &str,
     gateway: &str,
     mac: &str,
+    vpc_cidr: Option<&str>,
 ) -> anyhow::Result<()> {
     let guest = veth_guest_name(vm_id);
     let pid = container_pid.to_string();
@@ -203,6 +204,22 @@ pub fn setup_container_net(
 
     // Default route via gateway
     nsenter(&["ip", "route", "add", "default", "via", gateway])?;
+
+    // IPv6 for DNS64/NAT64: add ULA IPv6 + route for 64:ff9b::/96
+    // The bridge gateway runs a DNS64 resolver (unbound) that synthesizes
+    // AAAA records using 64:ff9b::/96. VMs need IPv6 connectivity to the
+    // bridge to send traffic through Jool NAT64.
+    if let Some(vpc_cidr) = vpc_cidr {
+        let gw_v6 = nauka_network::vpc::natgw::provision::bridge_ipv6_gateway(vpc_cidr);
+        let vm_v6 = nauka_network::vpc::natgw::provision::bridge_ipv6_vm(vpc_cidr, 0);
+        let vm_v6_cidr = format!("{}/64", vm_v6);
+        let gw_v6_str = gw_v6.to_string();
+        nsenter(&["ip", "-6", "addr", "add", &vm_v6_cidr, "dev", "eth0"])?;
+        // Route NAT64 prefix through the bridge gateway
+        nsenter(&["ip", "-6", "route", "add", "64:ff9b::/96", "via", &gw_v6_str])?;
+        // Default IPv6 route for direct IPv6 sites (NAT66 SNAT on host)
+        nsenter(&["ip", "-6", "route", "add", "default", "via", &gw_v6_str])?;
+    }
 
     tracing::info!(vm_id, ip, "container networking ready");
     Ok(())

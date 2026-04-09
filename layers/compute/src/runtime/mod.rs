@@ -67,4 +67,6 @@ pub struct VmRunConfig {
     pub private_ip: String,
     pub gateway: String,
     pub subnet_cidr: String,
+    /// VPC CIDR — used for DNS64/NAT64 IPv6 addressing. None if no NAT GW.
+    pub vpc_cidr: Option<String>,
 }
