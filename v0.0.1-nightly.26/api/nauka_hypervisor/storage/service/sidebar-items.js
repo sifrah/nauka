@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ZEROFS_BIN","ZEROFS_CONF_DIR","ZEROFS_DATA_DIR","ZEROFS_MOUNT_DIR"],"fn":["conf_path","ensure_installed","generate_config","generate_unit","install_region","is_installed","is_region_active","run_systemctl","service_name","start_region","stop_region","uninstall_all","uninstall_region","unit_path"]};

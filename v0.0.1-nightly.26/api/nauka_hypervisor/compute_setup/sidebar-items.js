@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IMAGES_DIR"],"fn":["install","install_crun","prepare_ubuntu_image"]};
