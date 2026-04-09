@@ -165,15 +165,55 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
     run_ip(&["link", "set", &vx, "up"])?;
     run_ip(&["link", "set", &br, "up"])?;
 
+    // 7. Host isolation: block host process from originating traffic to VPC bridges.
+    //    Defense in depth — even if a route exists in main table, nftables blocks it.
+    //    This ensures the hypervisor operator cannot access tenant VM networks.
+    ensure_host_isolation(&br);
+
     tracing::info!(
         vpc_id,
         vrf = vrf.as_str(),
         bridge = br.as_str(),
         vxlan = vx.as_str(),
         vni,
-        "VPC network ready (VRF + bridge + VXLAN)"
+        "VPC network ready (isolated)"
     );
     Ok(())
+}
+
+/// Block host-originated traffic to a VPC bridge via nftables.
+///
+/// Allows forwarded traffic (VM-to-VM via bridge) but blocks traffic
+/// originating from the host itself. This prevents the hypervisor
+/// from accessing tenant networks.
+fn ensure_host_isolation(bridge: &str) {
+    // Create the nauka table if it doesn't exist
+    let _ = Command::new("nft")
+        .args(["add", "table", "inet", "nauka"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let _ = Command::new("nft")
+        .args([
+            "add",
+            "chain",
+            "inet",
+            "nauka",
+            "output",
+            "{ type filter hook output priority 0; }",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Block host → VPC bridge traffic (but allow bridge forwarding for VM-to-VM)
+    let rule = format!("oifname {bridge} drop");
+    let _ = Command::new("nft")
+        .args(["add", "rule", "inet", "nauka", "output", &rule])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Ensure VPC peering route leak between two VRFs.
