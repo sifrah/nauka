@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CliVisibility","FieldType","Mutability","RefResolution"],"struct":["EnumDef","FieldDef","RefDef","ResourceSchema"]};

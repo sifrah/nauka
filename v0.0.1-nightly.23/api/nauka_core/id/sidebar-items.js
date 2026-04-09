@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IdError"],"fn":["generate_ulid","timestamp_from_ulid"],"macro":["define_id"],"struct":["EnvId","HypervisorId","MeshId","NatGwId","NicId","NodeId","OrgId","PeeringId","ProjectId","RouteTableId","RuleId","SgId","SnapshotId","SubnetId","VmId","VolumeId","VpcId"]};
