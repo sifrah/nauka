@@ -9,6 +9,7 @@
 //! - **compute**: VM/container runtime (future)
 //! - **storage**: ZeroFS volumes, S3 backend (future)
 
+pub mod compute_setup;
 pub mod controlplane;
 pub mod doctor;
 pub mod fabric;
