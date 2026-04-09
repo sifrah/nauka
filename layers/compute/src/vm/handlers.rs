@@ -256,6 +256,6 @@ pub fn registration() -> ResourceRegistration {
     ResourceRegistration {
         def: resource_def(),
         handler: handler(),
-        children: vec![],
+        children: vec![crate::image::handlers::registration()],
     }
 }
