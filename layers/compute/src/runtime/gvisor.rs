@@ -52,9 +52,12 @@ impl Runtime for GVisorRuntime {
             );
         }
 
-        // Try overlay filesystem (instant, no copy) then fall back to cp
-        let upper_dir = vm_dir.join("upper");
-        let work_dir = vm_dir.join("work");
+        // Try overlay filesystem (instant, no copy) then fall back to cp.
+        // Overlay needs upper/work dirs on a real filesystem (not tmpfs).
+        // Use /var/lib/nauka/vms/ for persistence.
+        let persist_dir = PathBuf::from("/var/lib/nauka/vms").join(&config.vm_id);
+        let upper_dir = persist_dir.join("upper");
+        let work_dir = persist_dir.join("work");
         std::fs::create_dir_all(&upper_dir)?;
         std::fs::create_dir_all(&work_dir)?;
 
@@ -80,9 +83,17 @@ impl Runtime for GVisorRuntime {
             .map(|s| s.success())
             .unwrap_or(false);
 
-        if !overlay_ok {
+        if overlay_ok {
+            tracing::info!(
+                vm_id = config.vm_id.as_str(),
+                "using overlay filesystem (instant)"
+            );
+        } else {
             // Fallback: full copy
-            tracing::debug!("overlayfs not available, falling back to cp");
+            tracing::info!(
+                vm_id = config.vm_id.as_str(),
+                "overlay not available, copying rootfs"
+            );
             let status = Command::new("cp")
                 .args(["-a", "--reflink=auto"])
                 .arg(format!("{}/.", base_image.display()))
@@ -119,6 +130,15 @@ impl Runtime for GVisorRuntime {
         }
         // Ensure /run/sshd exists (required by sshd)
         let _ = std::fs::create_dir_all(rootfs_dir.join("run/sshd"));
+
+        // Write init script that starts sshd + keeps container alive
+        std::fs::write(
+            rootfs_dir.join("nauka-init.sh"),
+            "#!/bin/sh\nmkdir -p /run/sshd\n/usr/sbin/sshd -D &\nexec sleep infinity\n",
+        )?;
+        let _ = Command::new("chmod")
+            .args(["+x", rootfs_dir.join("nauka-init.sh").to_str().unwrap()])
+            .status();
 
         // 3. Generate OCI config.json
         let oci_config = generate_oci_config(config);
@@ -235,6 +255,10 @@ impl Runtime for GVisorRuntime {
 
         let _ = std::fs::remove_dir_all(&vm_dir);
 
+        // Clean persistent overlay data
+        let persist_dir = PathBuf::from("/var/lib/nauka/vms").join(vm_id);
+        let _ = std::fs::remove_dir_all(&persist_dir);
+
         Ok(())
     }
 
@@ -290,7 +314,7 @@ fn generate_oci_config(config: &VmRunConfig) -> String {
         "process": {
             "terminal": false,
             "user": {"uid": 0, "gid": 0},
-            "args": ["/bin/sh", "-c", "/usr/sbin/sshd; exec sleep infinity"],
+            "args": ["/bin/sh", "/nauka-init.sh"],
             "cwd": "/",
             "env": [
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
