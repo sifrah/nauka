@@ -188,14 +188,11 @@ impl super::Reconciler for VpcReconciler {
         }
 
         // 8. VPC Peering — route leak between VRFs
-        //    Ensure ip_forward is enabled so traffic can transit between bridges.
         let peering_store = nauka_network::vpc::peering::store::PeeringStore::new(ctx.db.clone());
-        let mut has_active_peering = false;
+        let mut peered_bridge_pairs: Vec<(String, String)> = Vec::new();
         for (vpc_id, _) in &needed_vpcs {
-            // Find peerings involving this VPC
             let peerings = peering_store.list(Some(vpc_id)).await.unwrap_or_default();
             for peering in &peerings {
-                // Only process active peerings
                 if !matches!(
                     peering.state,
                     nauka_network::vpc::peering::types::PeeringState::Active
@@ -203,19 +200,23 @@ impl super::Reconciler for VpcReconciler {
                     continue;
                 }
 
-                // Resolve both VPCs to get their CIDRs
                 let vpc_a = vpc_store.get(peering.vpc_id.as_str(), None).await?;
                 let vpc_b = vpc_store.get(peering.peer_vpc_id.as_str(), None).await?;
 
                 if let (Some(a), Some(b)) = (vpc_a, vpc_b) {
-                    // Only add routes if both bridges exist on this node
                     let br_a = provision::bridge_name(a.meta.id.as_str());
                     let br_b = provision::bridge_name(b.meta.id.as_str());
 
                     if crate::observer::network::bridge_exists(&br_a)
                         && crate::observer::network::bridge_exists(&br_b)
                     {
-                        has_active_peering = true;
+                        // Deduplicate — peering is seen from both VPCs
+                        if !peered_bridge_pairs
+                            .iter()
+                            .any(|(a, b)| (a == &br_a && b == &br_b) || (a == &br_b && b == &br_a))
+                        {
+                            peered_bridge_pairs.push((br_a.clone(), br_b.clone()));
+                        }
                         let _ = provision::ensure_peering_routes(
                             a.meta.id.as_str(),
                             &a.cidr,
@@ -229,13 +230,95 @@ impl super::Reconciler for VpcReconciler {
             }
         }
 
-        // 9. Enable IP forwarding if any active peerings exist
-        if has_active_peering {
-            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-            let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
-        }
+        // 9. IP forwarding + nftables FORWARD chain
+        //    Enable ip_forward globally (required for L3 peering between bridges)
+        //    but lock down with nftables: only allow forwarding between peered bridges.
+        ensure_forward_rules(&peered_bridge_pairs);
 
         Ok(result)
+    }
+}
+
+/// Set up nftables FORWARD rules to only allow traffic between peered bridges.
+///
+/// - Enables ip_forward globally (required for L3 route leak between bridges)
+/// - Creates a FORWARD chain with policy DROP
+/// - Whitelists only the specific peered bridge pairs (bidirectional)
+/// - If no peerings exist, disables ip_forward and removes the chain
+fn ensure_forward_rules(peered_pairs: &[(String, String)]) {
+    use std::process::Command;
+
+    if peered_pairs.is_empty() {
+        // No peerings — disable forwarding and clean up
+        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "0");
+        let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "0");
+        let _ = Command::new("nft")
+            .args(["delete", "chain", "inet", "nauka", "forward"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        return;
+    }
+
+    // Enable forwarding (required for peering)
+    let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+    let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+
+    // Ensure nauka table exists
+    let _ = Command::new("nft")
+        .args(["add", "table", "inet", "nauka"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Recreate forward chain with policy drop (flush if exists)
+    let _ = Command::new("nft")
+        .args(["delete", "chain", "inet", "nauka", "forward"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let _ = Command::new("nft")
+        .args([
+            "add",
+            "chain",
+            "inet",
+            "nauka",
+            "forward",
+            "{ type filter hook forward priority 0; policy drop; }",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Allow established/related connections (for return traffic)
+    let _ = Command::new("nft")
+        .args([
+            "add",
+            "rule",
+            "inet",
+            "nauka",
+            "forward",
+            "ct state established,related accept",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Whitelist each peered bridge pair (bidirectional)
+    for (br_a, br_b) in peered_pairs {
+        let rule_ab = format!("iifname {br_a} oifname {br_b} accept");
+        let rule_ba = format!("iifname {br_b} oifname {br_a} accept");
+        let _ = Command::new("nft")
+            .args(["add", "rule", "inet", "nauka", "forward", &rule_ab])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = Command::new("nft")
+            .args(["add", "rule", "inet", "nauka", "forward", &rule_ba])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 
