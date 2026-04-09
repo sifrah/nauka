@@ -11,7 +11,7 @@ use nauka_core::ui;
 
 const IMAGES_DIR: &str = "/opt/nauka/images";
 
-/// Install compute runtime + base image. Consumes 2 steps.
+/// Install compute runtime + base image + forge service. Consumes 3 steps.
 pub fn install(steps: &ui::Steps) -> Result<String, NaukaError> {
     let has_kvm = Path::new("/dev/kvm").exists();
     let runtime = if has_kvm { "kvm" } else { "container" };
@@ -28,12 +28,15 @@ pub fn install(steps: &ui::Steps) -> Result<String, NaukaError> {
     if !has_kvm {
         install_crun()?;
     }
-    // KVM mode: cloud-hypervisor install is a future step
 
     steps.inc();
 
     steps.set("Preparing base image");
     prepare_ubuntu_image()?;
+    steps.inc();
+
+    steps.set("Starting forge");
+    install_forge_service()?;
     steps.inc();
 
     Ok(runtime.to_string())
@@ -110,7 +113,7 @@ fn prepare_ubuntu_image() -> Result<(), NaukaError> {
         return Err(NaukaError::internal("debootstrap failed"));
     }
 
-    // Install networking tools
+    // Install networking tools + SSH server
     let _ = Command::new("chroot")
         .args([
             &image_dir,
@@ -121,9 +124,62 @@ fn prepare_ubuntu_image() -> Result<(), NaukaError> {
             "iproute2",
             "iputils-ping",
             "net-tools",
+            "openssh-server",
+            "passwd",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .status();
+
+    // Configure SSH: permit root login, no password
+    let sshd_dir = format!("{image_dir}/etc/ssh/sshd_config.d");
+    let _ = std::fs::create_dir_all(&sshd_dir);
+    let _ = std::fs::write(
+        format!("{sshd_dir}/nauka.conf"),
+        "PermitRootLogin yes\nPasswordAuthentication no\nPubkeyAuthentication yes\n",
+    );
+
+    // Create /run/sshd (required by sshd)
+    let _ = std::fs::create_dir_all(format!("{image_dir}/run/sshd"));
+
+    // Generate host keys
+    let _ = Command::new("chroot")
+        .args([&image_dir, "ssh-keygen", "-A"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
+/// Install and start the Forge systemd service.
+fn install_forge_service() -> Result<(), NaukaError> {
+    let unit = r#"[Unit]
+Description=Nauka Forge Reconciler
+After=network-online.target nauka-wg.service nauka-tikv.service
+Wants=network-online.target
+Requires=nauka-wg.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nauka forge run
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+"#;
+
+    let unit_path = "/etc/systemd/system/nauka-forge.service";
+
+    std::fs::write(unit_path, unit)
+        .map_err(|e| NaukaError::internal(format!("write forge unit failed: {e}")))?;
+
+    let _ = Command::new("systemctl").args(["daemon-reload"]).status();
+
+    let _ = Command::new("systemctl")
+        .args(["enable", "--now", "nauka-forge"])
         .status();
 
     Ok(())
