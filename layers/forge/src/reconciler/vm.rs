@@ -87,7 +87,7 @@ impl super::Reconciler for VmReconciler {
                 }
             }
 
-            // If process is already running but state is pending, correct it
+            // If process is already running, check health and correct state
             if actual_processes.contains(&vm.meta.id) {
                 if vm.state == VmState::Pending {
                     if let Err(e) = vm_store
@@ -103,6 +103,22 @@ impl super::Reconciler for VmReconciler {
                         result.updated += 1;
                     }
                 }
+
+                // Health check: ensure sshd is alive inside containers
+                if use_veth && !crate::observer::health::is_sshd_alive(&vm.meta.id) {
+                    match crate::observer::health::restart_sshd(&vm.meta.id) {
+                        Ok(()) => {
+                            tracing::info!(vm_id = vm.meta.id.as_str(), "restarted sshd");
+                            result.updated += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to restart sshd");
+                            result.failed += 1;
+                            result.errors.push(format!("sshd {}: {e}", vm.meta.id));
+                        }
+                    }
+                }
+
                 continue;
             }
 
