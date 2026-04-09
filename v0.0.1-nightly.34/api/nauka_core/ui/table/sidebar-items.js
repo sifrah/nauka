@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["strip_ansi","strip_ansi_width","truncate","visible_columns"],"struct":["Table"]};

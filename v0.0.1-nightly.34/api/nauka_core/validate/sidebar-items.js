@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cidr","cidr_any","cidr_v6","duration","email","endpoint","file_exists","hostname","ip_addr","ipv4","ipv6","label","mac_address","memory_mb","name","path_exists","port","port_range","port_str","region","size_gb","url","vcpus","zone"]};
