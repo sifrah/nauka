@@ -1,0 +1,77 @@
+---
+title: Chaos Monkey Testing
+description: Systematic resilience testing for Nauka — break things on purpose, verify recovery.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Chaos Monkey tests validate that Nauka recovers gracefully from failures at every layer. The strategy is **bottom-up**: test the foundation (fabric) first, then each layer above it. If the foundation holds, the upper layers can recover.
+
+## Testing strategy
+
+```
+Layer 5: Forge          ← reconciler crash/restart
+Layer 4: Compute        ← container kill, rootfs loss, image loss
+Layer 3: Network        ← bridge/VXLAN/FDB destruction
+Layer 2: State          ← TiKV/PD kill, quorum loss, data corruption
+Layer 1: Fabric         ← WireGuard mesh disruption, partition, reboot
+```
+
+Each layer depends on the layers below it. A fabric failure (Layer 1) cascades to everything above. A container kill (Layer 4) only affects that specific VM.
+
+## Test prerequisites
+
+- **3-node cluster** across different zones (e.g., nbg1, fsn1, hel1)
+- **VMs running** with verified cross-node connectivity before each test
+- **Baseline check** before breaking anything:
+  ```bash
+  # Verify mesh
+  ping6 -c 1 {peer_mesh_ipv6}
+  
+  # Verify TiKV
+  nauka org list
+  
+  # Verify VMs
+  nauka vm list
+  
+  # Verify cross-node ping
+  nsenter --net --target={pid} ping -c 1 {remote_vm_ip}
+  ```
+
+## Test format
+
+Each test follows the same structure:
+
+| Field | Description |
+|---|---|
+| **ID** | Unique identifier (e.g., CM-001) |
+| **Layer** | Which layer is being tested |
+| **Action** | The exact command that breaks something |
+| **Expected failure** | What should break |
+| **Expected resilience** | What should keep working |
+| **Recovery** | How to restore + what happens automatically |
+| **Recovery time** | How long until full recovery |
+| **Severity** | Impact level (low/medium/high/critical) |
+
+## Severity levels
+
+| Level | Meaning |
+|---|---|
+| **Low** | Single VM or interface affected. Other VMs continue normally. |
+| **Medium** | Node partially degraded. Cross-node traffic to/from that node disrupted. |
+| **High** | Node fully offline. VMs on that node unreachable. Other nodes continue. |
+| **Critical** | Cluster-wide impact. State store unavailable. No writes possible. |
+
+<Aside type="caution">
+Never run chaos tests on production clusters. Always use dedicated test environments that can be destroyed without consequence.
+</Aside>
+
+## Available test suites
+
+- [Layer 1: Fabric](/chaos-monkey/layer-1-fabric/) — WireGuard mesh resilience (10 tests)
+- Layer 2: State — TiKV/PD consensus (planned)
+- Layer 3: Network — VPC overlay resilience (planned)
+- Layer 4: Compute — container lifecycle resilience (planned)
+- Layer 5: Forge — reconciler resilience (planned)

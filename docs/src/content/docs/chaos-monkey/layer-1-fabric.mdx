@@ -1,0 +1,509 @@
+---
+title: "Layer 1: Fabric"
+description: Chaos tests for the WireGuard mesh — the foundation of all inter-node communication.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The fabric is the WireGuard mesh that connects all hypervisor nodes. Every inter-node communication — TiKV replication, VXLAN tunnels, peer announcements — flows through this mesh. If the fabric breaks, everything above it is affected.
+
+## Setup
+
+Provision a 3-node cluster:
+
+```bash
+# Node 1 (nbg1)
+nauka hypervisor init --name node-nbg --region eu --zone nbg1 ...
+
+# Node 2 (fsn1)
+nauka hypervisor join --target {node1_ip} --pin {pin} --name node-fsn --region eu --zone fsn1
+
+# Node 3 (hel1)
+nauka hypervisor join --target {node1_ip} --pin {pin} --name node-hel --region eu --zone hel1
+
+# Create VMs
+nauka org create acme && nauka vpc create net --org acme --cidr 10.0.0.0/16
+nauka vpc subnet create web --vpc net --org acme --cidr 10.0.1.0/24
+nauka vm create vm-nbg ... --zone nbg1
+nauka vm create vm-fsn ... --zone fsn1
+nauka vm create vm-hel ... --zone hel1
+
+# Verify baseline
+nauka hypervisor list           # 3 nodes, all available
+nauka forge reconcile           # all in sync
+# Cross-node ping works between all VM pairs
+```
+
+---
+
+## CM-001: Kill WireGuard interface (down)
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Bring down the WireGuard interface on one node |
+| **Blast radius** | The target node loses all mesh connectivity |
+
+### Break
+
+```bash
+# On node-nbg:
+ip link set nauka0 down
+```
+
+### Expected failure
+
+- Node-nbg loses connectivity to all other nodes
+- `ping6 {peer_mesh_ipv6}` fails from node-nbg
+- TiKV on node-nbg loses contact with PD leader
+- VMs on node-nbg cannot reach VMs on other nodes (VXLAN tunnel broken)
+- VMs on node-fsn and node-hel **continue to communicate** with each other (mesh is full-mesh, not hub-and-spoke)
+
+### Expected resilience
+
+- VMs on node-nbg continue running locally (containers still alive)
+- Local VM-to-VM traffic within node-nbg still works (same bridge)
+- Nodes fsn1 and hel1 maintain full connectivity
+- TiKV cluster still has quorum (2/3 nodes)
+
+### Recovery
+
+```bash
+# On node-nbg:
+ip link set nauka0 up
+```
+
+### Expected recovery
+
+- WireGuard handshakes resume within 25 seconds (persistent keepalive)
+- TiKV reconnects to the cluster
+- VXLAN traffic resumes — cross-node pings recover
+- Recovery time: **25-30 seconds** (WireGuard keepalive interval)
+
+### Verification
+
+```bash
+# From node-nbg:
+ping6 -c 1 {node_fsn_mesh_ipv6}              # mesh recovered
+nauka org list                                 # TiKV works
+nsenter --net --target={pid} ping 10.0.1.3    # cross-node ping recovered
+```
+
+---
+
+## CM-002: Delete WireGuard interface
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Completely remove the WireGuard interface |
+| **Blast radius** | More severe than CM-001 — interface must be recreated |
+
+### Break
+
+```bash
+# On node-nbg:
+ip link del nauka0
+```
+
+### Expected failure
+
+- Same as CM-001, but the interface no longer exists
+- `ip link show nauka0` returns "Device not found"
+- Unlike CM-001, bringing it "up" won't work — it must be recreated
+
+### Recovery
+
+```bash
+# On node-nbg:
+nauka hypervisor start
+```
+
+This re-reads the fabric state from `~/.nauka/hypervisor.json`, recreates the WireGuard interface, and re-adds all peers.
+
+### Expected recovery
+
+- Interface recreated with the same private key (preserved in state)
+- All peers re-added with the same public keys
+- Recovery time: **5-10 seconds** (interface creation + WG handshake)
+
+---
+
+## CM-003: Kill announce listener
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Stop the peer announcement service |
+| **Blast radius** | New peer announcements not received, existing connectivity unaffected |
+
+### Break
+
+```bash
+# On node-nbg:
+systemctl stop nauka-announce
+```
+
+### Expected failure
+
+- The node stops receiving new peer announcements
+- If a new node joins the cluster, node-nbg won't learn about it until the announce service restarts
+- **All existing connectivity is unaffected** — WireGuard peers are already configured
+
+### Expected resilience
+
+- Cross-node pings continue working
+- TiKV continues working
+- VMs continue working
+
+### Recovery
+
+```bash
+systemctl start nauka-announce
+```
+
+### Expected recovery
+
+- Immediate — the service resumes listening
+- Any missed announcements are replayed by the next reconciliation cycle
+
+---
+
+## CM-004: Remove a specific WireGuard peer
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Remove one peer from the WireGuard configuration |
+| **Blast radius** | Connectivity to that specific peer lost, others unaffected |
+
+### Break
+
+```bash
+# On node-nbg, remove node-fsn as a peer:
+wg set nauka0 peer {node_fsn_public_key} remove
+```
+
+### Expected failure
+
+- node-nbg cannot reach node-fsn (and vice versa)
+- node-nbg can still reach node-hel
+- node-fsn can still reach node-hel
+- The mesh degrades from full-mesh to partial-mesh
+
+### Expected resilience
+
+- VMs on node-hel can reach VMs on both other nodes (unaffected paths)
+- TiKV still has quorum (node-nbg and node-hel can still reach PD via node-hel)
+
+### Recovery
+
+```bash
+nauka hypervisor start
+```
+
+Re-reads state and re-adds the missing peer.
+
+### Expected recovery
+
+- Peer re-added, WireGuard handshake within seconds
+- Recovery time: **5 seconds**
+
+---
+
+## CM-005: Kill peering server during join
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Kill the peering listener while a node is mid-join |
+| **Blast radius** | Join fails, cluster state not corrupted |
+
+### Break
+
+```bash
+# On node-nbg (peering host):
+# While node-hel is joining:
+pkill -9 -f "nauka hypervisor peering"
+```
+
+### Expected failure
+
+- The joining node receives "Connection reset" or "Connection refused"
+- Join operation fails with an error
+- The partially joined node may have WireGuard configured but no TiKV
+
+### Expected resilience
+
+- Existing nodes are completely unaffected
+- No partial state corruption in TiKV (join is transactional)
+
+### Recovery
+
+```bash
+# On the failed joiner:
+nauka hypervisor leave --yes
+
+# Restart peering on the host:
+nauka hypervisor peering
+
+# Re-join:
+nauka hypervisor join --target {host_ip} --pin {pin} ...
+```
+
+### Expected recovery
+
+- Clean re-join, no artifacts from the failed attempt
+- Recovery time: **1-2 minutes** (re-join includes TiKV setup)
+
+---
+
+## CM-006: Reboot one node
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Hard reboot a node |
+| **Blast radius** | Node fully offline during reboot, VMs on that node stop |
+
+### Break
+
+```bash
+# On node-nbg:
+reboot
+```
+
+### Expected failure
+
+- Node-nbg is completely offline for 30-60 seconds
+- VMs on node-nbg stop (containers killed by reboot)
+- Cross-node traffic to/from node-nbg fails
+- TiKV may briefly lose quorum if this was the PD leader
+
+### Expected resilience
+
+- Nodes fsn1 and hel1 continue full operation
+- VMs on fsn1 and hel1 continue running and communicating
+- TiKV cluster elects a new PD leader within 5-10 seconds
+
+### Recovery
+
+Automatic:
+1. Server boots
+2. `nauka-wg.service` starts → WireGuard mesh reconnects
+3. `nauka-pd.service` / `nauka-tikv.service` start → TiKV rejoins cluster
+4. `nauka-forge.service` starts → Forge reconciles → VMs recreated
+5. Container overlay mounts → VMs start → networking configured → sshd starts
+
+### Expected recovery
+
+- Mesh: **30-60 seconds** (server boot time)
+- TiKV: **+5 seconds** (rejoin + sync)
+- VMs: **+30 seconds** (Forge reconcile cycle)
+- Total: **~2 minutes** from reboot to full recovery
+
+---
+
+## CM-007: Network partition
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Block traffic between two nodes using iptables |
+| **Blast radius** | Simulates a datacenter network failure |
+
+### Break
+
+```bash
+# On node-nbg, block all traffic from node-fsn:
+iptables -A INPUT -s {node_fsn_public_ip} -j DROP
+iptables -A OUTPUT -d {node_fsn_public_ip} -j DROP
+```
+
+### Expected failure
+
+- node-nbg and node-fsn cannot communicate
+- WireGuard handshakes fail between these two nodes
+- VXLAN traffic between these nodes stops
+- If PD leader is on one side of the partition, the minority side loses writes
+
+### Expected resilience
+
+- node-hel can still reach both nodes (unless also partitioned)
+- VMs on the same node continue working locally
+- TiKV maintains quorum if the majority partition has 2+ nodes
+
+### Recovery
+
+```bash
+iptables -D INPUT -s {node_fsn_public_ip} -j DROP
+iptables -D OUTPUT -d {node_fsn_public_ip} -j DROP
+```
+
+### Expected recovery
+
+- WireGuard reconnects within 25 seconds (keepalive)
+- TiKV re-syncs any writes that happened during partition
+- Recovery time: **25-30 seconds**
+
+<Aside type="caution">
+Network partitions can cause split-brain in TiKV if the cluster has exactly 2 nodes. Always use 3+ nodes for production deployments.
+</Aside>
+
+---
+
+## CM-008: Corrupt fabric state
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Overwrite the local fabric state with garbage |
+| **Blast radius** | Nauka CLI commands fail, but WireGuard keeps running |
+
+### Break
+
+```bash
+echo '{"corrupted": true}' > ~/.nauka/hypervisor.json
+```
+
+### Expected failure
+
+- `nauka hypervisor status` fails with a parse error
+- `nauka forge reconcile` fails (can't read node identity)
+- `nauka vm create` fails (can't connect to TiKV — no PD endpoints)
+
+### Expected resilience
+
+- **WireGuard keeps running** — it's a systemd service with kernel-level config, independent of the JSON file
+- **TiKV keeps running** — its config is in `/etc/nauka/tikv.toml`, not the JSON file
+- **Existing VMs keep running** — containers are managed by crun, not by the JSON file
+- Cross-node networking continues working (VXLAN/bridges are kernel state)
+
+### Recovery
+
+```bash
+# Option 1: Re-join the cluster (if another node is available)
+nauka hypervisor leave --yes
+nauka hypervisor join --target {peer_ip} --pin {pin} ...
+
+# Option 2: Restore from backup (if you have one)
+cp ~/.nauka/hypervisor.json.bak ~/.nauka/hypervisor.json
+```
+
+### Expected recovery
+
+- After re-join: full recovery, new identity
+- After backup restore: immediate recovery, same identity
+- VMs need to be recreated after re-join (old VM assignments point to old node ID)
+
+---
+
+## CM-009: Block WireGuard UDP port
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Block the WireGuard listen port |
+| **Blast radius** | All mesh traffic stops, but interface remains up |
+
+### Break
+
+```bash
+# On node-nbg:
+iptables -A INPUT -p udp --dport 51820 -j DROP
+```
+
+### Expected failure
+
+- WireGuard interface stays up but no handshakes complete
+- All mesh traffic stops (looks like the network is down)
+- TiKV connections time out
+- VXLAN traffic stops (encapsulated in WG)
+
+### Expected resilience
+
+- Local VMs continue running (containers alive)
+- Local VM-to-VM on same node works (same bridge, no WG needed)
+- Other nodes detect this node as unreachable after 300 seconds (health check threshold)
+
+### Recovery
+
+```bash
+iptables -D INPUT -p udp --dport 51820 -j DROP
+```
+
+### Expected recovery
+
+- WireGuard resumes handshakes immediately
+- Recovery time: **5-25 seconds** (next keepalive + handshake)
+
+---
+
+## CM-010: Simultaneous multi-node failure
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Reboot 2 out of 3 nodes simultaneously |
+| **Blast radius** | TiKV loses quorum, cluster-wide write failure |
+
+### Break
+
+```bash
+# Simultaneously on node-nbg AND node-fsn:
+reboot
+```
+
+### Expected failure
+
+- Only node-hel is running
+- TiKV has 1/3 nodes → **no quorum** → all writes fail
+- `nauka org create` → error (TiKV unreachable)
+- VMs on node-hel continue running (container + networking are local)
+- Cross-node traffic from node-hel fails (no peers online)
+
+### Expected resilience
+
+- VMs on node-hel keep running locally
+- node-hel's TiKV has a read-only copy of the data (stale but accessible)
+- The Forge on node-hel continues running (reconcile succeeds for local resources)
+
+### Recovery
+
+Automatic — when nodes reboot:
+1. Both nodes boot → WireGuard reconnects
+2. TiKV rejoins → quorum restored (3/3)
+3. PD elects leader → writes resume
+4. Forge reconciles → VMs on rebooted nodes are recreated
+
+### Expected recovery
+
+- Quorum restored: **1-2 minutes** (boot + TiKV sync)
+- Full cluster recovery: **~3 minutes** (+ Forge reconcile on each node)
+
+<Aside type="tip">
+To test this safely, stagger the reboots by 30 seconds. This lets you observe the quorum loss and recovery separately.
+</Aside>
+
+---
+
+## Results template
+
+After running each test, record:
+
+```markdown
+## CM-XXX Results
+
+- **Date**: YYYY-MM-DD
+- **Cluster**: 3 nodes (nbg1, fsn1, hel1)
+- **Nauka version**: v0.x.x
+- **Action taken**: [exact command]
+- **Failure observed**: [what broke]
+- **Resilience confirmed**: [what kept working]
+- **Recovery method**: [automatic / manual command]
+- **Recovery time**: [measured in seconds]
+- **Pass/Fail**: [did the behavior match expectations?]
+- **Notes**: [anything unexpected]
+```

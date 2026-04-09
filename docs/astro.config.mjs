@@ -104,6 +104,7 @@ export default defineConfig({
 					],
 				},
 				...layerSidebar,
+				{ label: 'Chaos Monkey', autogenerate: { directory: 'chaos-monkey' } },
 				{
 					label: 'API Reference',
 					items: [
