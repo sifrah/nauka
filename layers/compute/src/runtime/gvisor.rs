@@ -231,6 +231,43 @@ fn generate_oci_config(config: &VmRunConfig) -> String {
             "readonly": false
         },
         "hostname": config.vm_name,
+        "mounts": [
+            {
+                "destination": "/proc",
+                "type": "proc",
+                "source": "proc"
+            },
+            {
+                "destination": "/dev",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": ["nosuid", "strictatime", "mode=755", "size=65536k"]
+            },
+            {
+                "destination": "/dev/pts",
+                "type": "devpts",
+                "source": "devpts",
+                "options": ["nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620"]
+            },
+            {
+                "destination": "/dev/shm",
+                "type": "tmpfs",
+                "source": "shm",
+                "options": ["nosuid", "noexec", "nodev", "mode=1777", "size=65536k"]
+            },
+            {
+                "destination": "/sys",
+                "type": "sysfs",
+                "source": "sysfs",
+                "options": ["nosuid", "noexec", "nodev", "ro"]
+            },
+            {
+                "destination": "/tmp",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": ["nosuid", "noexec", "nodev"]
+            }
+        ],
         "linux": {
             "namespaces": [
                 {"type": "pid"},
