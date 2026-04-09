@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["handler","registration","resolve_hypervisor","resource_def"]};

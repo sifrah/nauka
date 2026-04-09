@@ -5,7 +5,7 @@
   },
   "openapi": "3.0.0",
   "paths": {
-    "/admin/v1/hypervisor": {
+    "/admin/v1/hypervisors": {
       "get": {
         "operationId": "hypervisor_list",
         "summary": "List resources",
@@ -14,7 +14,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/announce-listen": {
+    "/admin/v1/hypervisors/announce-listen": {
       "post": {
         "operationId": "hypervisor_announce-listen",
         "summary": "Run the announce listener (internal)",
@@ -23,7 +23,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/doctor": {
+    "/admin/v1/hypervisors/doctor": {
       "post": {
         "operationId": "hypervisor_doctor",
         "summary": "Diagnose hypervisor health",
@@ -32,7 +32,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/drain": {
+    "/admin/v1/hypervisors/drain": {
       "post": {
         "operationId": "hypervisor_drain",
         "summary": "Evacuate all VMs before maintenance",
@@ -41,7 +41,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/enable": {
+    "/admin/v1/hypervisors/enable": {
       "post": {
         "operationId": "hypervisor_enable",
         "summary": "Enable for VM scheduling",
@@ -50,7 +50,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/init": {
+    "/admin/v1/hypervisors/init": {
       "post": {
         "operationId": "hypervisor_init",
         "summary": "Initialize a new cluster",
@@ -59,7 +59,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/join": {
+    "/admin/v1/hypervisors/join": {
       "post": {
         "operationId": "hypervisor_join",
         "summary": "Join an existing cluster",
@@ -68,7 +68,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/leave": {
+    "/admin/v1/hypervisors/leave": {
       "post": {
         "operationId": "hypervisor_leave",
         "summary": "Leave the cluster and uninstall services",
@@ -77,7 +77,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/peering": {
+    "/admin/v1/hypervisors/peering": {
       "post": {
         "operationId": "hypervisor_peering",
         "summary": "Start peering listener to accept new nodes",
@@ -86,7 +86,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/start": {
+    "/admin/v1/hypervisors/start": {
       "post": {
         "operationId": "hypervisor_start",
         "summary": "Start hypervisor services (fabric, storage, tikv)",
@@ -95,7 +95,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/status": {
+    "/admin/v1/hypervisors/status": {
       "post": {
         "operationId": "hypervisor_status",
         "summary": "Show hypervisor status",
@@ -104,7 +104,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/stop": {
+    "/admin/v1/hypervisors/stop": {
       "post": {
         "operationId": "hypervisor_stop",
         "summary": "Stop hypervisor services (fabric, storage, tikv)",
@@ -113,7 +113,7 @@
         ]
       }
     },
-    "/admin/v1/hypervisor/{id}": {
+    "/admin/v1/hypervisors/{id}": {
       "get": {
         "operationId": "hypervisor_get",
         "summary": "Get resource details",
