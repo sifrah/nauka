@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["handlers","peering","provision","store","subnet","types"]};
+window.SIDEBAR_ITEMS = {"mod":["handlers","natgw","peering","provision","store","subnet","types"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bridge_ipv6_gateway","bridge_ipv6_vm","detect_bridge_ipv4","detect_default_gateway","ensure_dns64","ensure_nat_gateway","ensure_nft_nat4","ensure_nft_nat6","fix_host_isolation","jool_available","jool_instance_name","remove_nat_gateway","run_cmd","run_nft"]};
