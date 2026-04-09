@@ -52,14 +52,46 @@ impl Runtime for GVisorRuntime {
             );
         }
 
-        let status = Command::new("cp")
-            .args(["-a", "--reflink=auto"])
-            .arg(format!("{}/.", base_image.display()))
-            .arg(rootfs_dir.to_str().unwrap())
+        // Try overlay filesystem (instant, no copy) then fall back to cp
+        let upper_dir = vm_dir.join("upper");
+        let work_dir = vm_dir.join("work");
+        std::fs::create_dir_all(&upper_dir)?;
+        std::fs::create_dir_all(&work_dir)?;
+
+        let overlay_opts = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            base_image.display(),
+            upper_dir.display(),
+            work_dir.display()
+        );
+
+        let overlay_ok = Command::new("mount")
+            .args([
+                "-t",
+                "overlay",
+                "overlay",
+                "-o",
+                &overlay_opts,
+                rootfs_dir.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
-            .map_err(|e| anyhow::anyhow!("cp rootfs failed: {e}"))?;
-        if !status.success() {
-            anyhow::bail!("failed to copy rootfs from {}", base_image.display());
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !overlay_ok {
+            // Fallback: full copy
+            tracing::debug!("overlayfs not available, falling back to cp");
+            let status = Command::new("cp")
+                .args(["-a", "--reflink=auto"])
+                .arg(format!("{}/.", base_image.display()))
+                .arg(rootfs_dir.to_str().unwrap())
+                .status()
+                .map_err(|e| anyhow::anyhow!("cp rootfs failed: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("failed to copy rootfs from {}", base_image.display());
+            }
         }
 
         // 2. Configure networking inside the rootfs
@@ -192,7 +224,15 @@ impl Runtime for GVisorRuntime {
             .stderr(std::process::Stdio::null())
             .status();
 
+        // Unmount overlay if mounted
         let vm_dir = PathBuf::from(VM_RUN_DIR).join(vm_id);
+        let rootfs = vm_dir.join("bundle/rootfs");
+        let _ = Command::new("umount")
+            .arg(rootfs.to_str().unwrap_or(""))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
         let _ = std::fs::remove_dir_all(&vm_dir);
 
         Ok(())
