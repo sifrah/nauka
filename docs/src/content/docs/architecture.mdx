@@ -1,0 +1,107 @@
+---
+title: Architecture
+description: How Nauka turns bare-metal servers into a programmable cloud — layers, resource model, and the reconciliation loop.
+sidebar:
+  order: 1
+---
+
+import Mermaid from '../../components/Mermaid.astro';
+
+Nauka is built as a stack of layers, each responsible for one concern. Lower layers never depend on higher layers. The CLI and REST API are auto-generated from resource definitions — you define a resource once and get both interfaces for free.
+
+## Layer stack
+
+<Mermaid chart={`
+graph TD
+  subgraph "Platform Layers"
+    Compute["Compute<br/>VM lifecycle, scheduler"]
+    Network["Network<br/>VPC, subnet, IPAM, peering"]
+    Org["Organization<br/>Org → Project → Env"]
+  end
+  subgraph "Infrastructure Layers"
+    Forge["Forge<br/>Per-node reconciler"]
+    Hypervisor["Hypervisor<br/>WireGuard mesh, TiKV, ZeroFS"]
+  end
+  subgraph "Foundation"
+    Core["Core<br/>Resource framework, IDs, crypto"]
+    State["State<br/>LocalDb + ClusterDb"]
+  end
+  Compute --> Network
+  Compute --> Org
+  Network --> Org
+  Forge --> Compute
+  Forge --> Network
+  Compute --> Hypervisor
+  Network --> Hypervisor
+  Org --> Hypervisor
+  Hypervisor --> Core
+  Hypervisor --> State
+`} />
+
+| Layer | Crate | Purpose |
+|---|---|---|
+| **Core** | `nauka-core` | Resource framework, typed IDs, crypto, validation, API generation |
+| **State** | `nauka-state` | Local persistence (JSON) + distributed persistence (TiKV) |
+| **Hypervisor** | `nauka-hypervisor` | WireGuard mesh, TiKV control plane, ZeroFS storage, compute setup |
+| **Organization** | `nauka-org` | Org → Project → Environment hierarchy |
+| **Network** | `nauka-network` | VPC, Subnet, IPAM, VPC Peering, VXLAN provisioning |
+| **Compute** | `nauka-compute` | VM lifecycle, scheduler, OCI runtime (crun/Cloud Hypervisor) |
+| **Forge** | `nauka-forge` | Per-node reconciler — bridges desired state (TiKV) to actual state (kernel) |
+
+## Resource model
+
+Every cloud resource follows the same pattern:
+
+1. **ResourceDef** — declares the resource (name, fields, operations, parent scope)
+2. **CLI** — auto-generated from the ResourceDef (`nauka vpc create ...`)
+3. **REST API** — auto-generated with plural URLs (`POST /v1/vpcs`)
+4. **Store** — CRUD in TiKV with name index + ID registry
+5. **ApiResource trait** — enforces consistent JSON responses (ISO 8601 timestamps, status, labels)
+
+Resources are organized as **peers** (independent layers) or **children** (nested within a parent):
+
+```
+Peers (flat):        Children (nested):
+  hypervisor           org → project → env
+  org                  vpc → subnet
+  vpc                       → peering
+  vm
+  forge
+```
+
+Rule: **flat for peers, nested for children.** A project can't exist without an org (child). A VPC can exist independently of any org (peer, references org via `--org`).
+
+## Desired state vs actual state
+
+Nauka separates what you want from what exists:
+
+```
+nauka vm create web-1 ...
+  → writes desired state to TiKV: "VM web-1 should exist with 2 vCPUs, 4GB RAM"
+
+nauka forge reconcile
+  → reads TiKV: "VM web-1 should exist"
+  → reads kernel: "no such container"
+  → action: create VXLAN bridge, create veth pair, start container
+  → reports: "vm: 1 desired, 0 actual — created:1"
+```
+
+The Forge runs as a daemon on each node, polling TiKV every 30 seconds. It never modifies TiKV — it only reads desired state and converges the kernel toward it.
+
+## Dual runtime
+
+Each node detects its compute capability at `hypervisor init`:
+
+| `/dev/kvm` | Runtime | Isolation | Use case |
+|---|---|---|---|
+| Present | Cloud Hypervisor | Hardware (VT-x) | Bare-metal servers |
+| Absent | crun (OCI container) | Linux namespaces | VPS, cloud instances |
+
+The user never sees the difference — `nauka vm create` works the same on both.
+
+## IDs and naming
+
+- **IDs**: lowercase ULID with type prefix (`vpc-01knqczg...`, `vm-01knrtj0...`)
+- **Names**: immutable, unique within parent scope, DNS-label format (3-63 chars, lowercase alphanumeric + hyphens)
+- **Scheduler**: uses node **names** (not IDs) for cross-node resolution
+- **MAC addresses**: derived deterministically from IP (`02:00:{ip_hex}`)

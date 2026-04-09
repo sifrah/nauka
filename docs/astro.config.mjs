@@ -96,6 +96,13 @@ export default defineConfig({
 						{ label: 'Troubleshooting', slug: 'getting-started/troubleshooting' },
 					],
 				},
+				{
+					label: 'Platform',
+					items: [
+						{ label: 'Architecture', slug: 'architecture' },
+						{ label: 'Networking', slug: 'networking' },
+					],
+				},
 				...layerSidebar,
 				{
 					label: 'API Reference',
