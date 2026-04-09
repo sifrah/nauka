@@ -7,6 +7,12 @@ sidebar:
 
 The compute layer manages virtual machines across hypervisor nodes. A VM is placed in an organization's project and environment, connected to a VPC subnet.
 
+Key components:
+- **VM** — lifecycle management (create, start, stop, delete)
+- **Scheduler** — automatic hypervisor assignment by zone
+- **Runtime** — dual runtime: Cloud Hypervisor (KVM) or crun (container)
+- **Images** — pre-built OS images pulled from a GitHub catalog, cached locally, mounted via overlay filesystem
+
 ## Creating a VM
 
 ```bash
