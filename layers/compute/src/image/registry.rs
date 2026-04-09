@@ -120,6 +120,57 @@ pub fn list() -> Vec<(String, u64)> {
     .collect()
 }
 
+/// List images available in the remote registry (GitHub Releases).
+pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
+    let arch = std::env::consts::ARCH;
+    let arch_name = match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => arch,
+    };
+
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest");
+
+    let client = reqwest::Client::builder().user_agent("nauka").build()?;
+
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("failed to fetch image catalog from registry");
+    }
+
+    let release: serde_json::Value = resp.json().await?;
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("invalid registry response"))?;
+
+    let suffix = format!("-{arch_name}.tar.gz");
+    let mut entries = Vec::new();
+
+    for asset in assets {
+        let filename = asset["name"].as_str().unwrap_or_default();
+        if let Some(name) = filename.strip_suffix(&suffix) {
+            let size = asset["size"].as_u64().unwrap_or(0);
+            let local = exists(name);
+            entries.push(CatalogEntry {
+                name: name.to_string(),
+                arch: arch_name.to_string(),
+                size,
+                local,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+/// An image available in the remote registry.
+pub struct CatalogEntry {
+    pub name: String,
+    pub arch: String,
+    pub size: u64,
+    pub local: bool,
+}
+
 /// Check if an image exists locally.
 pub fn exists(name: &str) -> bool {
     Path::new(&format!("{IMAGES_DIR}/{name}/bin/sh")).exists()

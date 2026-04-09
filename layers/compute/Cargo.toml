@@ -20,7 +20,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 tikv-client = "0.4"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = "0.3"
 
 [dev-dependencies]

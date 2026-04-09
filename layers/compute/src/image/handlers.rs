@@ -23,6 +23,8 @@ pub fn resource_def() -> ResourceDef {
         })
         .action("list", "List locally available images")
         .op(|op| op.with_output(OutputKind::ResourceList))
+        .action("catalog", "List images available in the registry")
+        .op(|op| op.with_output(OutputKind::ResourceList))
         .action("delete", "Delete a local image")
         .op(|op| {
             op.with_arg(OperationArg::required(
@@ -31,14 +33,14 @@ pub fn resource_def() -> ResourceDef {
             ))
         })
         .column("NAME", "name")
-        .column("STATUS", "status")
         .column("SIZE", "size")
+        .column("ARCH", "arch")
+        .column("LOCAL", "local")
         .empty_message("No images found. Pull one with: nauka vm image pull ubuntu-24.04")
         .detail_section(
             None,
             vec![
                 DetailField::new("Name", "name"),
-                DetailField::new("Status", "status"),
                 DetailField::new("Size", "size"),
             ],
         )
@@ -58,7 +60,7 @@ pub fn handler() -> HandlerFn {
                             .get("name")
                             .ok_or_else(|| anyhow::anyhow!("--name is required"))?
                             .clone();
-                        let size = registry::pull(&name)?;
+                        let size = registry::pull(&name).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": name,
                             "status": "ready",
@@ -73,8 +75,22 @@ pub fn handler() -> HandlerFn {
                             .map(|(name, size)| {
                                 serde_json::json!({
                                     "name": name,
-                                    "status": "ready",
                                     "size": format_size(*size),
+                                })
+                            })
+                            .collect();
+                        Ok(OperationResponse::ResourceList(items))
+                    }
+                    "catalog" => {
+                        let entries = registry::catalog().await?;
+                        let items: Vec<serde_json::Value> = entries
+                            .iter()
+                            .map(|e| {
+                                serde_json::json!({
+                                    "name": e.name,
+                                    "arch": e.arch,
+                                    "size": format_size(e.size),
+                                    "local": if e.local { "✓" } else { "✗" },
                                 })
                             })
                             .collect();
