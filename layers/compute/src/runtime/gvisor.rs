@@ -209,6 +209,23 @@ impl Runtime for GVisorRuntime {
             }
         }
 
+        // 6b. Start sshd inside the container via nsenter
+        if pid > 0 {
+            let pid_str = pid.to_string();
+            let _ = Command::new("nsenter")
+                .args([
+                    "--pid",
+                    "--mount",
+                    "--net",
+                    &format!("--target={pid_str}"),
+                    "/usr/sbin/sshd",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            tracing::info!(vm_id = config.vm_id.as_str(), "sshd started");
+        }
+
         // 7. Write PID + runtime marker
         std::fs::write(vm_dir.join("pid"), pid.to_string())?;
         std::fs::write(vm_dir.join("runtime"), "container")?;
