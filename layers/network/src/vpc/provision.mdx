@@ -10,17 +10,21 @@ When the Forge detects that a VPC needs a network bridge on this node (because a
 ## Interface layout
 
 ```
-VM TAP (future)
+Container veth / VM TAP
     │
     ▼
 nkb-{hash}    Linux bridge     ← L2 switch for this VPC
-    │
+    │              │
+    │              ▼
+    │         nkv-{hash}    VRF          ← L3 isolation (if kernel supports it)
     ▼
 nkx-{hash}    VXLAN interface  ← encapsulates frames over the WireGuard mesh
     │
     ▼
 nauka0        WireGuard         ← encrypted tunnel to other nodes
 ```
+
+The VRF (`nkv-{hash}`) provides L3 routing isolation — each VPC has its own routing table. On kernels without VRF support (some cloud VPS), the bridge operates without a VRF and uses the global routing table instead.
 
 ## Interface naming
 
