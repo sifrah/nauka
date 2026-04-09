@@ -87,6 +87,22 @@ impl super::Reconciler for VmReconciler {
                 }
             }
 
+            // If process is already running but state is pending, correct it
+            if actual_processes.contains(&vm.meta.id) {
+                if vm.state == VmState::Pending {
+                    if let Err(e) = vm_store
+                        .update_state(&vm.meta.id, VmState::Running, None, None, None)
+                        .await
+                    {
+                        tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to correct VM state");
+                    } else {
+                        tracing::info!(vm_id = vm.meta.id.as_str(), "corrected state: pending -> running");
+                        result.updated += 1;
+                    }
+                }
+                continue;
+            }
+
             // Ensure process is running
             if !actual_processes.contains(&vm.meta.id) {
                 let subnet_store =
@@ -131,6 +147,14 @@ impl super::Reconciler for VmReconciler {
                             runtime = %ctx.runtime,
                             "VM process started"
                         );
+                        if vm.state == VmState::Pending {
+                            if let Err(e) = vm_store
+                                .update_state(&vm.meta.id, VmState::Running, None, None, None)
+                                .await
+                            {
+                                tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to update VM state");
+                            }
+                        }
                         result.created += 1;
                     }
                     Err(e) => {
