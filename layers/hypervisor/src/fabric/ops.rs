@@ -554,6 +554,66 @@ pub fn stop(db: &LayerDb) -> Result<(), NaukaError> {
     backend.stop()
 }
 
+/// Configuration for updating hypervisor fields.
+pub struct UpdateConfig {
+    pub ipv6_block: Option<String>,
+    pub ipv4_public: Option<String>,
+    pub name: Option<String>,
+}
+
+/// Update mutable hypervisor fields on a live node.
+pub fn update(db: &LayerDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, NaukaError> {
+    let mut state = FabricState::load(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
+        })?;
+
+    let mut changed = false;
+
+    if let Some(ref block) = cfg.ipv6_block {
+        if !block.contains('/') {
+            return Err(NaukaError::validation(
+                "ipv6-block must be a CIDR (e.g., 2a01:4f8:c012:abcd::/64)",
+            ));
+        }
+        let prefix = block.split('/').next().unwrap_or_default();
+        if prefix.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(NaukaError::validation("ipv6-block: invalid IPv6 address"));
+        }
+        state.hypervisor.ipv6_block = Some(block.clone());
+        changed = true;
+    }
+
+    if let Some(ref ip) = cfg.ipv4_public {
+        if ip.parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(NaukaError::validation("ipv4-public: invalid IPv4 address"));
+        }
+        state.hypervisor.ipv4_public = Some(ip.clone());
+        changed = true;
+    }
+
+    if let Some(ref name) = cfg.name {
+        nauka_core::validate::name(name)?;
+        state.hypervisor.name = name.clone();
+        changed = true;
+    }
+
+    if !changed {
+        return Err(NaukaError::validation(
+            "no fields to update. Pass --ipv6-block, --ipv4-public, or --name",
+        ));
+    }
+
+    state
+        .save(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+    tracing::info!(node = state.hypervisor.name.as_str(), "hypervisor updated");
+
+    Ok(state.hypervisor)
+}
+
 /// Number of removal broadcast attempts before giving up.
 const LEAVE_BROADCAST_ATTEMPTS: usize = 4;
 /// Delay between removal broadcast retries.

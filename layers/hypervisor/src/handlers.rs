@@ -149,6 +149,23 @@ pub fn resource_def() -> ResourceDef {
                 "nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1",
             )
         })
+        .action("update", "Update hypervisor configuration")
+        .op(|op| {
+            op.with_arg(OperationArg::optional(
+                "ipv6-block",
+                FieldDef::string("ipv6-block", "Public IPv6 /64 block (e.g., 2a01:4f8:c012:abcd::/64)"),
+            ))
+            .with_arg(OperationArg::optional(
+                "ipv4-public",
+                FieldDef::string("ipv4-public", "Public IPv4 address"),
+            ))
+            .with_arg(OperationArg::optional(
+                "name",
+                FieldDef::string("name", "Node name"),
+            ))
+            .with_output(OutputKind::Resource)
+            .with_example("nauka hypervisor update --ipv6-block 2a01:4f8:c012:abcd::/64")
+        })
         .action("status", "Show hypervisor status")
         .op(|op| op.with_output(OutputKind::Resource))
         .action("start", "Start hypervisor services (fabric, storage, tikv)")
@@ -208,6 +225,7 @@ pub fn handler() -> HandlerFn {
         Box::pin(async move {
             match req.operation.as_str() {
                 "init" => handle_init(req).await,
+                "update" => handle_update(req).await,
                 "status" => handle_status().await,
                 "start" => handle_start().await,
                 "stop" => handle_stop().await,
@@ -674,6 +692,33 @@ async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationRespon
     Ok(OperationResponse::Message(format!(
         "{accepted} node(s) joined."
     )))
+}
+
+async fn handle_update(req: OperationRequest) -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+
+    let ipv6_block = req.fields.get("ipv6-block").cloned();
+    let ipv4_public = req.fields.get("ipv4-public").cloned();
+    let name = req.fields.get("name").cloned();
+
+    let cfg = fabric::ops::UpdateConfig {
+        ipv6_block,
+        ipv4_public,
+        name,
+    };
+
+    let hv = fabric::ops::update(&db, &cfg)?;
+
+    Ok(OperationResponse::Resource(serde_json::json!({
+        "name": hv.name,
+        "id": hv.id.as_str(),
+        "region": hv.region,
+        "zone": hv.zone,
+        "mesh_ipv6": hv.mesh_ipv6.to_string(),
+        "ipv6_block": hv.ipv6_block,
+        "ipv4_public": hv.ipv4_public,
+        "state": "available",
+    })))
 }
 
 async fn handle_status() -> anyhow::Result<OperationResponse> {
