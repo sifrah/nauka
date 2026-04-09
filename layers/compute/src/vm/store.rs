@@ -78,8 +78,21 @@ impl VmStore {
             anyhow::bail!("vm '{name}' already exists in environment '{env_name}'");
         }
 
+        // Generate VM ID first — needed for IPAM allocation
+        let vm_id = VmId::generate().to_string();
+
+        // Allocate private IP from subnet IPAM
+        let private_ip = nauka_network::vpc::subnet::ipam::allocate(
+            &self.db,
+            &subnet.meta.id,
+            &subnet.cidr,
+            &subnet.gateway,
+            &vm_id,
+        )
+        .await?;
+
         let vm = Vm {
-            meta: ResourceMeta::new(VmId::generate().to_string(), name),
+            meta: ResourceMeta::new(vm_id, name),
             org_id: org.meta.id.clone().into(),
             org_name: org.meta.name.clone(),
             project_id: project.meta.id.clone().into(),
@@ -96,7 +109,7 @@ impl VmStore {
             image: image.to_string(),
             region: region.to_string(),
             zone: zone.to_string(),
-            private_ip: None,
+            private_ip: Some(private_ip),
             hypervisor_id: Some(crate::scheduler::schedule(region, zone)?),
             state: VmState::Pending,
         };
@@ -220,6 +233,10 @@ impl VmStore {
                 vm.state
             );
         }
+
+        // Release IPAM allocation
+        nauka_network::vpc::subnet::ipam::release(&self.db, vm.subnet_id.as_str(), &vm.meta.id)
+            .await?;
 
         let idx_key = format!("{}/{}", vm.env_id.as_str(), vm.meta.name);
         self.db.delete(NS_VM, &vm.meta.id).await?;

@@ -39,6 +39,30 @@ fn iface_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Remove all stale nauka network interfaces (nkb-*, nkx-*, nkt-*).
+///
+/// Called during cleanup or when stale interfaces from a previous cluster exist.
+pub fn cleanup_all() {
+    let output = match Command::new("ip").args(["-o", "link", "show"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(name) = line.split(':').nth(1).map(|s| s.trim()) {
+            if name.starts_with("nkb-") || name.starts_with("nkx-") || name.starts_with("nkt-") {
+                tracing::info!(iface = name, "cleaning up stale interface");
+                let _ = Command::new("ip")
+                    .args(["link", "del", name])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+}
+
 /// Ensure the VXLAN + bridge for a VPC exist and are up.
 ///
 /// Idempotent: skips creation if interfaces already exist.
@@ -48,6 +72,9 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
 
     // 1. Create VXLAN interface (if needed)
     if !iface_exists(&vx) {
+        // Clean up any stale VXLAN with the same VNI but different name
+        cleanup_stale_vxlan(vni);
+
         tracing::info!(vpc_id, vni, iface = vx.as_str(), "creating VXLAN interface");
         let status = Command::new("ip")
             .args([
@@ -143,6 +170,38 @@ pub fn list_active_bridges() -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Remove any VXLAN interface using a specific VNI (stale from previous cluster).
+fn cleanup_stale_vxlan(vni: u32) {
+    let output = match Command::new("ip")
+        .args(["-d", "-o", "link", "show"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+
+    let vni_str = format!("vxlan id {vni} ");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains(&vni_str) {
+            if let Some(name) = line
+                .split(':')
+                .nth(1)
+                .map(|s| s.trim().split('@').next().unwrap_or("").trim())
+            {
+                if !name.is_empty() {
+                    tracing::info!(
+                        iface = name,
+                        vni,
+                        "removing stale VXLAN with conflicting VNI"
+                    );
+                    let _ = Command::new("ip").args(["link", "del", name]).status();
+                }
+            }
+        }
+    }
 }
 
 fn run_ip(args: &[&str]) -> anyhow::Result<()> {
