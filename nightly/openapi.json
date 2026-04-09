@@ -113,6 +113,15 @@
         ]
       }
     },
+    "/admin/v1/hypervisors/update": {
+      "post": {
+        "operationId": "hypervisor_update",
+        "summary": "Update hypervisor configuration",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
     "/admin/v1/hypervisors/{id}": {
       "get": {
         "operationId": "hypervisor_get",
