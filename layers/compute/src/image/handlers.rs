@@ -30,6 +30,18 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("name", "Image name to delete"),
             ))
         })
+        .column("NAME", "name")
+        .column("STATUS", "status")
+        .column("SIZE", "size")
+        .empty_message("No images found. Pull one with: nauka vm image pull ubuntu-24.04")
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("Status", "status"),
+                DetailField::new("Size", "size"),
+            ],
+        )
         .done()
 }
 

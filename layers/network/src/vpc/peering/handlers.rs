@@ -16,6 +16,7 @@ pub fn resource_def() -> ResourceDef {
                 "peer-vpc",
                 FieldDef::string("peer-vpc", "VPC to peer with"),
             ))
+            .with_output(OutputKind::Resource)
         })
         .list()
         .get()
