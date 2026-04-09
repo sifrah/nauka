@@ -188,7 +188,9 @@ impl super::Reconciler for VpcReconciler {
         }
 
         // 8. VPC Peering — route leak between VRFs
+        //    Ensure ip_forward is enabled so traffic can transit between bridges.
         let peering_store = nauka_network::vpc::peering::store::PeeringStore::new(ctx.db.clone());
+        let mut has_active_peering = false;
         for (vpc_id, _) in &needed_vpcs {
             // Find peerings involving this VPC
             let peerings = peering_store.list(Some(vpc_id)).await.unwrap_or_default();
@@ -213,6 +215,7 @@ impl super::Reconciler for VpcReconciler {
                     if crate::observer::network::bridge_exists(&br_a)
                         && crate::observer::network::bridge_exists(&br_b)
                     {
+                        has_active_peering = true;
                         let _ = provision::ensure_peering_routes(
                             a.meta.id.as_str(),
                             &a.cidr,
@@ -224,6 +227,12 @@ impl super::Reconciler for VpcReconciler {
                     }
                 }
             }
+        }
+
+        // 9. Enable IP forwarding if any active peerings exist
+        if has_active_peering {
+            let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+            let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
         }
 
         Ok(result)
