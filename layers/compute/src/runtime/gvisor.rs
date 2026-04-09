@@ -128,7 +128,26 @@ impl Runtime for GVisorRuntime {
             0
         };
 
-        // 6. Write PID + runtime marker
+        // 6. Set up container networking (veth into netns)
+        if pid > 0 && !config.private_ip.is_empty() {
+            let mac = nauka_network::vpc::provision::mac_from_ip(&config.private_ip)
+                .unwrap_or_else(|| "02:00:00:00:00:00".to_string());
+            if let Err(e) = crate::vm::provision::setup_container_net(
+                &config.vm_id,
+                pid,
+                &config.private_ip,
+                &config.gateway,
+                &mac,
+            ) {
+                tracing::warn!(
+                    vm_id = config.vm_id.as_str(),
+                    error = %e,
+                    "container networking setup failed (container still running)"
+                );
+            }
+        }
+
+        // 7. Write PID + runtime marker
         std::fs::write(vm_dir.join("pid"), pid.to_string())?;
         std::fs::write(vm_dir.join("runtime"), "container")?;
 
