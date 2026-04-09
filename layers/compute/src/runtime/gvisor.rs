@@ -115,9 +115,19 @@ impl Runtime for GVisorRuntime {
                 config.private_ip, config.gateway,
             ),
         )?;
+        // Point DNS to the bridge gateway which runs DNS64 (unbound).
+        // Falls back to 8.8.8.8 if no gateway configured.
+        // Must remove symlink to systemd-resolved first (Ubuntu containers).
+        let dns_server = if config.gateway.is_empty() {
+            "8.8.8.8".to_string()
+        } else {
+            config.gateway.clone()
+        };
+        let resolv_path = rootfs_dir.join("etc/resolv.conf");
+        let _ = std::fs::remove_file(&resolv_path);
         std::fs::write(
-            rootfs_dir.join("etc/resolv.conf"),
-            "nameserver 8.8.8.8\nnameserver 8.8.4.4\n",
+            &resolv_path,
+            format!("nameserver {}\nnameserver 8.8.8.8\n", dns_server),
         )?;
         std::fs::write(rootfs_dir.join("etc/hostname"), &config.vm_name)?;
 
@@ -202,6 +212,7 @@ impl Runtime for GVisorRuntime {
                 &config.private_ip,
                 &config.gateway,
                 &mac,
+                config.vpc_cidr.as_deref(),
             ) {
                 tracing::warn!(
                     vm_id = config.vm_id.as_str(),

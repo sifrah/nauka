@@ -66,9 +66,18 @@ mod tests {
 
     fn make_state() -> FabricState {
         let (mesh_id, secret) = mesh::create_mesh();
-        let node =
-            mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh_id.prefix)
-                .unwrap();
+        let node = mesh::create_hypervisor(&mesh::CreateHypervisorConfig {
+            name: "node-1",
+            region: "eu",
+            zone: "fsn1",
+            port: 51820,
+            endpoint: None,
+            fabric_interface: "",
+            mesh_prefix: &mesh_id.prefix,
+            ipv6_block: None,
+            ipv4_public: None,
+        })
+        .unwrap();
 
         FabricState {
             mesh: mesh_id,

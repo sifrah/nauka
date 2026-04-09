@@ -30,6 +30,8 @@ pub struct InitConfig<'a> {
     pub network_mode: super::backend::NetworkMode,
     pub fabric_interface: &'a str,
     pub endpoint: Option<String>,
+    pub ipv6_block: Option<String>,
+    pub ipv4_public: Option<String>,
 }
 
 /// Initialize a new mesh.
@@ -64,15 +66,17 @@ pub fn init(
     // Create identities
     steps.set("Creating mesh");
     let (mesh_id, secret) = mesh::create_mesh();
-    let hv = mesh::create_hypervisor(
-        cfg.node_name,
-        cfg.region,
-        cfg.zone,
-        cfg.port,
-        cfg.endpoint.clone(),
-        cfg.fabric_interface,
-        &mesh_id.prefix,
-    )?;
+    let hv = mesh::create_hypervisor(&mesh::CreateHypervisorConfig {
+        name: cfg.node_name,
+        region: cfg.region,
+        zone: cfg.zone,
+        port: cfg.port,
+        endpoint: cfg.endpoint.clone(),
+        fabric_interface: cfg.fabric_interface,
+        mesh_prefix: &mesh_id.prefix,
+        ipv6_block: cfg.ipv6_block.clone(),
+        ipv4_public: cfg.ipv4_public.clone(),
+    })?;
 
     // Setup network via backend
     backend.setup(&hv.wg_private_key, cfg.port, &hv.mesh_ipv6, &[])?;
@@ -281,6 +285,8 @@ pub struct JoinConfig<'a> {
     pub port: u16,
     pub pin: Option<&'a str>,
     pub network_mode: super::backend::NetworkMode,
+    pub ipv6_block: Option<String>,
+    pub ipv4_public: Option<String>,
 }
 
 /// Join an existing cluster.
@@ -364,6 +370,8 @@ pub async fn join(
         fabric_interface: String::new(),
         mesh_ipv6,
         runtime,
+        ipv6_block: cfg.ipv6_block.clone(),
+        ipv4_public: cfg.ipv4_public.clone(),
     };
 
     // Use mesh ID from the accepting node (consistent across cluster)

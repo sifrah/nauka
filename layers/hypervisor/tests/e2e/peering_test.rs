@@ -25,7 +25,18 @@ fn temp_db() -> (tempfile::TempDir, LocalDb) {
 
 fn init_node(db: &LocalDb, name: &str) -> (FabricState, String) {
     let (mesh_id, secret) = mesh::create_mesh();
-    let hv = mesh::create_hypervisor(name, "eu", "test", 51820, None, "", &mesh_id.prefix).unwrap();
+    let hv = mesh::create_hypervisor(&mesh::CreateHypervisorConfig {
+        name,
+        region: "eu",
+        zone: "test",
+        port: 51820,
+        endpoint: None,
+        fabric_interface: "",
+        mesh_prefix: &mesh_id.prefix,
+        ipv6_block: None,
+        ipv4_public: None,
+    })
+    .unwrap();
 
     let secret_str = secret.to_string();
     let pin = secret.derive_pin();
@@ -243,8 +254,18 @@ fn mesh_identity_generation() {
     assert!(mesh.id.as_str().starts_with("mesh-"));
     assert!(secret.to_string().starts_with("syf_sk_"));
 
-    let hv =
-        mesh::create_hypervisor("node-1", "eu", "fsn1", 51820, None, "", &mesh.prefix).unwrap();
+    let hv = mesh::create_hypervisor(&mesh::CreateHypervisorConfig {
+        name: "node-1",
+        region: "eu",
+        zone: "fsn1",
+        port: 51820,
+        endpoint: None,
+        fabric_interface: "",
+        mesh_prefix: &mesh.prefix,
+        ipv6_block: None,
+        ipv4_public: None,
+    })
+    .unwrap();
     assert_eq!(hv.name, "node-1");
     assert!(!hv.wg_private_key.is_empty());
     assert!(!hv.wg_public_key.is_empty());

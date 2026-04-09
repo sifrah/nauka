@@ -3,6 +3,7 @@
 //! Each resource type (VPC, VM) implements `Reconciler`.
 //! The `run_all` function executes them in dependency order.
 
+pub mod natgw;
 pub mod vm;
 pub mod vpc;
 
@@ -23,8 +24,11 @@ pub trait Reconciler: Send + Sync {
 /// VPCs first (bridges must exist before VMs can attach TAPs),
 /// then VMs.
 pub async fn run_all(ctx: &ReconcileContext) -> Vec<ReconcileResult> {
-    let reconcilers: Vec<Box<dyn Reconciler>> =
-        vec![Box::new(vpc::VpcReconciler), Box::new(vm::VmReconciler)];
+    let reconcilers: Vec<Box<dyn Reconciler>> = vec![
+        Box::new(vpc::VpcReconciler),
+        Box::new(natgw::NatGwReconciler),
+        Box::new(vm::VmReconciler),
+    ];
 
     let mut results = Vec::new();
     for r in &reconcilers {
