@@ -86,6 +86,159 @@ pub fn remove_tap(vm_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════
+// Veth pair — for container networking
+// ═══════════════════════════════════════════════════
+
+/// Host-side veth name for a container.
+pub fn veth_host_name(vm_id: &str) -> String {
+    format!("nkh-{}", iface_hash(vm_id))
+}
+
+/// Guest-side veth name (before being renamed to eth0 in the container).
+pub fn veth_guest_name(vm_id: &str) -> String {
+    format!("nkg-{}", iface_hash(vm_id))
+}
+
+/// Create a veth pair and attach the host side to the VPC bridge.
+///
+/// The guest side stays in the host netns until `move_veth_to_container`
+/// moves it into the container's network namespace.
+pub fn ensure_veth(vm_id: &str, vpc_bridge: &str) -> anyhow::Result<()> {
+    let host = veth_host_name(vm_id);
+    let guest = veth_guest_name(vm_id);
+
+    if !iface_exists(&host) {
+        tracing::info!(
+            vm_id,
+            host = host.as_str(),
+            guest = guest.as_str(),
+            "creating veth pair"
+        );
+
+        let status = Command::new("ip")
+            .args(["link", "add", &host, "type", "veth", "peer", "name", &guest])
+            .status()
+            .map_err(|e| anyhow::anyhow!("ip link add veth failed: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("failed to create veth pair {host}/{guest}");
+        }
+    }
+
+    // Attach host side to bridge
+    let _ = Command::new("ip")
+        .args(["link", "set", &host, "master", vpc_bridge])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Bring host side up
+    let _ = Command::new("ip")
+        .args(["link", "set", &host, "up"])
+        .status();
+
+    Ok(())
+}
+
+/// Move the guest-side veth into the container's network namespace
+/// and configure IP address + default route.
+pub fn setup_container_net(
+    vm_id: &str,
+    container_pid: u32,
+    ip: &str,
+    gateway: &str,
+    mac: &str,
+) -> anyhow::Result<()> {
+    let guest = veth_guest_name(vm_id);
+    let pid = container_pid.to_string();
+
+    tracing::info!(
+        vm_id,
+        pid = pid.as_str(),
+        ip,
+        gateway,
+        "setting up container networking"
+    );
+
+    // 1. Move guest veth into container netns
+    let status = Command::new("ip")
+        .args(["link", "set", &guest, "netns", &pid])
+        .status()
+        .map_err(|e| anyhow::anyhow!("move veth to netns failed: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to move {guest} to netns of PID {pid}");
+    }
+
+    // 2. Inside the container netns: rename to eth0, set MAC, configure IP, bring up
+    let nsenter = |args: &[&str]| -> anyhow::Result<()> {
+        let status = Command::new("nsenter")
+            .args(["--net", &format!("--target={pid}")])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| anyhow::anyhow!("nsenter failed: {e}"))?;
+        if !status.success() {
+            tracing::debug!(
+                args = args.join(" ").as_str(),
+                "nsenter command returned non-zero"
+            );
+        }
+        Ok(())
+    };
+
+    // Rename to eth0
+    nsenter(&["ip", "link", "set", &guest, "name", "eth0"])?;
+
+    // Set MAC address (deterministic from IP)
+    nsenter(&["ip", "link", "set", "eth0", "address", mac])?;
+
+    // Add IP address
+    let cidr = format!("{ip}/24");
+    nsenter(&["ip", "addr", "add", &cidr, "dev", "eth0"])?;
+
+    // Bring up lo and eth0
+    nsenter(&["ip", "link", "set", "lo", "up"])?;
+    nsenter(&["ip", "link", "set", "eth0", "up"])?;
+
+    // Default route via gateway
+    nsenter(&["ip", "route", "add", "default", "via", gateway])?;
+
+    tracing::info!(vm_id, ip, "container networking ready");
+    Ok(())
+}
+
+/// Remove veth pair for a container.
+pub fn remove_veth(vm_id: &str) -> anyhow::Result<()> {
+    let host = veth_host_name(vm_id);
+    if iface_exists(&host) {
+        tracing::info!(vm_id, iface = host.as_str(), "removing veth pair");
+        let _ = Command::new("ip").args(["link", "del", &host]).status();
+    }
+    Ok(())
+}
+
+/// List VM IDs that have active veth host interfaces on this node.
+pub fn list_veths() -> Vec<String> {
+    let output = match Command::new("ip").args(["-o", "link", "show"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let name = line.split(':').nth(1)?.trim();
+            if name.starts_with("nkh-") {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// List VM IDs that have active TAP interfaces on this node.
 pub fn list_taps() -> Vec<String> {
     let output = match Command::new("ip").args(["-o", "link", "show"]).output() {

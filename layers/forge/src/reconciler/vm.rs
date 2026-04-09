@@ -57,19 +57,33 @@ impl super::Reconciler for VmReconciler {
         let actual_processes = crate::observer::process::list_vms();
         result.actual = actual_processes.len();
 
-        // 3. Create TAPs + start processes for missing VMs
+        // 3. Create network interface + start processes for missing VMs
+        let use_veth = ctx.runtime == RuntimeMode::Container;
         for vm in &should_exist {
-            let expected_tap = provision::tap_name(&vm.meta.id);
-            let actual_taps = provision::list_taps();
+            let bridge = vpc_provision::bridge_name(vm.vpc_id.as_str());
 
-            // Ensure TAP exists
-            if !actual_taps.iter().any(|t| t == &expected_tap) {
-                let bridge = vpc_provision::bridge_name(vm.vpc_id.as_str());
-                if let Err(e) = provision::ensure_tap(&vm.meta.id, &bridge) {
-                    tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to create TAP");
-                    result.failed += 1;
-                    result.errors.push(format!("tap {}: {e}", vm.meta.id));
-                    continue;
+            // Ensure network interface exists (veth for containers, TAP for KVM)
+            if use_veth {
+                let expected = provision::veth_host_name(&vm.meta.id);
+                let actual = provision::list_veths();
+                if !actual.iter().any(|v| v == &expected) {
+                    if let Err(e) = provision::ensure_veth(&vm.meta.id, &bridge) {
+                        tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to create veth");
+                        result.failed += 1;
+                        result.errors.push(format!("veth {}: {e}", vm.meta.id));
+                        continue;
+                    }
+                }
+            } else {
+                let expected = provision::tap_name(&vm.meta.id);
+                let actual = provision::list_taps();
+                if !actual.iter().any(|t| t == &expected) {
+                    if let Err(e) = provision::ensure_tap(&vm.meta.id, &bridge) {
+                        tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to create TAP");
+                        result.failed += 1;
+                        result.errors.push(format!("tap {}: {e}", vm.meta.id));
+                        continue;
+                    }
                 }
             }
 
@@ -91,7 +105,11 @@ impl super::Reconciler for VmReconciler {
                     memory_mb: vm.memory_mb,
                     disk_gb: vm.disk_gb,
                     image: vm.image.clone(),
-                    tap_name: provision::tap_name(&vm.meta.id),
+                    tap_name: if use_veth {
+                        provision::veth_guest_name(&vm.meta.id)
+                    } else {
+                        provision::tap_name(&vm.meta.id)
+                    },
                     private_ip: vm.private_ip.clone().unwrap_or_default(),
                     gateway,
                     subnet_cidr: cidr,
@@ -116,13 +134,17 @@ impl super::Reconciler for VmReconciler {
             }
         }
 
-        // 4. Remove orphaned processes + TAPs
+        // 4. Remove orphaned processes + network interfaces
         let needed_ids: Vec<&str> = should_exist.iter().map(|vm| vm.meta.id.as_str()).collect();
         for vm_id in &actual_processes {
             if !needed_ids.contains(&vm_id.as_str()) {
                 tracing::info!(vm_id, "stopping orphaned VM");
                 let _ = rt.stop(vm_id);
-                let _ = provision::remove_tap(vm_id);
+                if use_veth {
+                    let _ = provision::remove_veth(vm_id);
+                } else {
+                    let _ = provision::remove_tap(vm_id);
+                }
                 result.deleted += 1;
             }
         }
