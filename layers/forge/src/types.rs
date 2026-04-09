@@ -2,6 +2,7 @@
 
 use std::net::Ipv6Addr;
 
+use nauka_compute::runtime::RuntimeMode;
 use nauka_hypervisor::controlplane::ClusterDb;
 
 /// Shared context for all reconcilers in a cycle.
@@ -14,6 +15,8 @@ pub struct ReconcileContext {
     pub node_name: String,
     /// This node's mesh IPv6.
     pub mesh_ipv6: Ipv6Addr,
+    /// Compute runtime mode (KVM or container).
+    pub runtime: RuntimeMode,
     /// Cycle number (monotonically increasing).
     pub cycle: u64,
 }

@@ -1467,6 +1467,7 @@ name = "nauka-compute"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "libc",
  "nauka-core",
  "nauka-hypervisor",
  "nauka-network",
@@ -1536,6 +1537,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "libc",
  "nauka-compute",
  "nauka-core",
  "nauka-hypervisor",

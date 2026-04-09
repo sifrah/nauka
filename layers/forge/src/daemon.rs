@@ -49,11 +49,18 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("not initialized"))?;
 
+    let runtime = if state.hypervisor.runtime == "container" {
+        nauka_compute::runtime::RuntimeMode::Container
+    } else {
+        nauka_compute::runtime::RuntimeMode::Kvm
+    };
+
     let ctx = ReconcileContext {
         db,
         hypervisor_id: state.hypervisor.id.as_str().to_string(),
         node_name: state.hypervisor.name.clone(),
         mesh_ipv6: state.hypervisor.mesh_ipv6,
+        runtime,
         cycle,
     };
 

@@ -346,6 +346,12 @@ pub async fn join(
     nauka_core::validate::port(cfg.port)?;
 
     // Build hypervisor identity
+    let runtime = if std::path::Path::new("/dev/kvm").exists() {
+        "kvm".to_string()
+    } else {
+        "container".to_string()
+    };
+
     let hv = HypervisorIdentity {
         id: nauka_core::id::HypervisorId::generate(),
         name: cfg.node_name.to_string(),
@@ -357,6 +363,7 @@ pub async fn join(
         endpoint: None,
         fabric_interface: String::new(),
         mesh_ipv6,
+        runtime,
     };
 
     // Use mesh ID from the accepting node (consistent across cluster)

@@ -5,6 +5,7 @@
 //!
 //! CLI: `nauka vm`
 
+pub mod runtime;
 pub mod scheduler;
 pub mod vm;
 
