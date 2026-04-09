@@ -69,6 +69,11 @@ pub fn handler() -> HandlerFn {
                         })))
                     }
                     "list" => {
+                        let arch = match std::env::consts::ARCH {
+                            "x86_64" => "amd64",
+                            "aarch64" => "arm64",
+                            other => other,
+                        };
                         let images = registry::list();
                         let items: Vec<serde_json::Value> = images
                             .iter()
@@ -76,6 +81,8 @@ pub fn handler() -> HandlerFn {
                                 serde_json::json!({
                                     "name": name,
                                     "size": format_size(*size),
+                                    "arch": arch,
+                                    "local": "✓",
                                 })
                             })
                             .collect();
