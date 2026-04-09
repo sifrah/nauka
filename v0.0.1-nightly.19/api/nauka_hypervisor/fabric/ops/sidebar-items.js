@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LEAVE_BROADCAST_ATTEMPTS","LEAVE_RETRY_DELAY","RECONCILE_INTERVAL_SECS"],"fn":["init","join","leave","listen_for_peers","reconcile_mesh","start","status","stop"],"struct":["InitConfig","InitResult","JoinConfig","JoinResult","StatusResult"]};
