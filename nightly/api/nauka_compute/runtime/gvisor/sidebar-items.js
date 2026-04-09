@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["VM_RUN_DIR"],"struct":["GVisorRuntime"]};
+window.SIDEBAR_ITEMS = {"constant":["IMAGES_DIR","VM_RUN_DIR"],"fn":["generate_oci_config","runtime_binary"],"struct":["GVisorRuntime"]};
