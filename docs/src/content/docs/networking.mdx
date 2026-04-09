@@ -35,14 +35,33 @@ internet
 
 ## VPC isolation
 
-Each VPC gets a unique VXLAN Network Identifier (VNI). VNIs start at 100 and are auto-assigned. Frames with different VNIs never mix — this is the isolation boundary.
+VPC isolation works at two layers:
+
+**L2 isolation (VXLAN)** — each VPC gets a unique VXLAN Network Identifier (VNI). VNIs start at 100 and are auto-assigned. Frames with different VNIs never mix.
+
+**L3 isolation (VRF)** — each VPC gets a Linux VRF (Virtual Routing and Forwarding) with its own routing table. This prevents cross-VPC traffic at the IP layer, even on the same host.
 
 ```
-VPC prod-net (VNI 100)  →  bridge nkb-fa3639
-VPC staging-net (VNI 101)  →  bridge nkb-abc123  (separate bridge, no crosstalk)
+VPC prod-net (VNI 100):
+  nkv-fa3639 (VRF, routing table 100)
+    └── nkb-fa3639 (bridge)
+          └── nkx-fa3639 (VXLAN)
+
+VPC staging-net (VNI 101):
+  nkv-abc123 (VRF, routing table 101)    ← completely separate routing
+    └── nkb-abc123 (bridge)
+          └── nkx-abc123 (VXLAN)
 ```
 
 Two VMs in different VPCs cannot communicate unless the VPCs are peered.
+
+<Aside type="caution">
+**VRF requires kernel support.** Some cloud VPS providers (notably Hetzner Cloud) ship kernels without the `vrf` module. On these systems, Nauka falls back gracefully: VXLAN L2 isolation still works (separate bridges per VPC), but L3 isolation via VRF is not enforced. The Forge logs a warning:
+```
+VRF not supported on this kernel — continuing without L3 isolation
+```
+Bare-metal servers with standard kernels support VRF fully.
+</Aside>
 
 ## Subnets
 
@@ -156,14 +175,30 @@ The hash is derived from the VPC ID (for bridges/VXLAN) or VM ID (for veth/TAP),
 
 ## VPC peering
 
-Two VPCs can be peered to allow their VMs to communicate. Requirements:
-- CIDRs must not overlap
-- Cannot peer a VPC with itself
-- Only one peering per VPC pair
+Two VPCs can be peered to allow their VMs to communicate. Peering is implemented as a **route leak** between VRFs — the Forge adds cross-VRF routes so traffic can flow between the peered VPCs.
 
 ```bash
 nauka vpc peering create --vpc prod-net --peer-vpc partner-net
 ```
+
+When the Forge detects an active peering, it adds routes on each node where both VPCs have bridges:
+
+```
+# With VRF (bare-metal):
+ip route replace 10.1.0.0/16 dev nkb-staging vrf vrf-prod
+ip route replace 10.0.0.0/16 dev nkb-prod vrf vrf-staging
+
+# Without VRF (VPS fallback):
+ip route replace 10.1.0.0/16 dev nkb-staging
+ip route replace 10.0.0.0/16 dev nkb-prod
+```
+
+VMs don't know about peering — they send everything to their gateway. The host routes cross-VPC traffic transparently.
+
+Requirements:
+- CIDRs must not overlap (routing would be ambiguous)
+- Cannot peer a VPC with itself
+- Only one peering per VPC pair
 
 ## Design decisions
 
@@ -174,3 +209,7 @@ nauka vpc peering create --vpc prod-net --peer-vpc partner-net
 **Why deterministic MACs?** — Derived from IP, so no MAC allocation service needed. Every node can compute the MAC for any VM independently.
 
 **Why cross-zone subnets (GCP model)?** — The WireGuard mesh is a flat full-mesh. Zone boundaries are metadata for the scheduler, not network boundaries. A subnet that spans zones is simpler and matches the overlay topology.
+
+**Why VRF per VPC?** — VRFs provide L3 isolation between VPCs using separate routing tables. This is the same pattern used by Cisco EVPN, DigitalOcean Transit Gateway, and GCP VPC peering. Without VRF, bridges still provide L2 isolation (separate VXLAN VNIs), but a misconfigured route on the host could theoretically leak traffic between VPCs.
+
+**Why is VRF optional?** — Some cloud VPS kernels don't include the `vrf` module. Rather than failing the entire init, Nauka degrades gracefully: L2 isolation via VXLAN still works, peering uses global routes instead of VRF-scoped routes. On bare-metal with standard kernels, VRF provides full L3 isolation.
