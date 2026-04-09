@@ -24,9 +24,25 @@ pub async fn join(target: &str, request: JoinRequest) -> Result<JoinResponse, Na
     };
 
     // TCP connect
-    let tcp_stream = TcpStream::connect(addr)
-        .await
-        .map_err(|e| NaukaError::network(format!("failed to connect to {addr}: {e}")))?;
+    let tcp_stream = TcpStream::connect(addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+            NaukaError::network(format!(
+                "could not reach the peering listener at {addr} (connection refused).\n\n  \
+                 The target node may not be in peering mode. Run:\n    \
+                 nauka hypervisor peering\n  \
+                 on the target node before joining."
+            ))
+        } else if e.kind() == std::io::ErrorKind::TimedOut {
+            NaukaError::network(format!(
+                "connection to {addr} timed out.\n\n  \
+                 Check that the target IP is correct and that port {} is reachable\n  \
+                 (firewall, security group).",
+                addr.port()
+            ))
+        } else {
+            NaukaError::network(format!("failed to connect to {addr}: {e}"))
+        }
+    })?;
 
     // TLS handshake (TOFU — accept any cert, PIN provides auth)
     let tls_config = super::tls::client_config();
@@ -47,8 +63,13 @@ pub async fn join(target: &str, request: JoinRequest) -> Result<JoinResponse, Na
 
     if !response.accepted {
         let reason = response.reason.unwrap_or_else(|| "unknown".to_string());
+        let hint = if reason.contains("PIN") || reason.contains("pin") {
+            "\n\n  Check the PIN displayed on the target node during:\n    nauka hypervisor peering"
+        } else {
+            ""
+        };
         return Err(NaukaError::permission_denied(format!(
-            "join rejected: {reason}"
+            "join rejected: {reason}{hint}"
         )));
     }
 
