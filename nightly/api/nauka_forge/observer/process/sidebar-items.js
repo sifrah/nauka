@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["list_vms"]};
+window.SIDEBAR_ITEMS = {"constant":["VM_RUN_DIR"],"fn":["list_vms"]};

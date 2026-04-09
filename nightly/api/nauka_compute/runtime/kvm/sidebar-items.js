@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VM_RUN_DIR"],"fn":["list_vm_dirs","process_alive"],"struct":["KvmRuntime"]};
