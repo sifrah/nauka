@@ -77,8 +77,9 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
     let vx = vxlan_name(vpc_id);
 
     // 1. Create VRF (isolated routing table for this VPC)
-    if !iface_exists(&vrf) {
-        tracing::info!(vpc_id, vrf = vrf.as_str(), table = vni, "creating VRF");
+    //    Optional: some kernels (Hetzner Cloud VPS) don't support VRF module.
+    //    If VRF fails, we continue without it — bridges still work for same-VPC traffic.
+    let vrf_supported = if !iface_exists(&vrf) {
         let status = Command::new("ip")
             .args([
                 "link",
@@ -89,13 +90,26 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
                 "table",
                 &vni.to_string(),
             ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
-            .map_err(|e| anyhow::anyhow!("ip link add vrf failed: {e}"))?;
-        if !status.success() {
-            anyhow::bail!("failed to create VRF {vrf}");
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if status {
+            run_ip(&["link", "set", &vrf, "up"])?;
+            tracing::info!(vpc_id, vrf = vrf.as_str(), "VRF created");
+            true
+        } else {
+            tracing::warn!(
+                vpc_id,
+                "VRF not supported on this kernel — continuing without L3 isolation"
+            );
+            false
         }
-        run_ip(&["link", "set", &vrf, "up"])?;
-    }
+    } else {
+        true
+    };
 
     // 2. Create VXLAN interface (if needed)
     if !iface_exists(&vx) {
@@ -136,8 +150,10 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
         }
     }
 
-    // 4. Attach bridge to VRF (isolation)
-    run_ip(&["link", "set", &br, "master", &vrf])?;
+    // 4. Attach bridge to VRF (isolation) — only if VRF was created
+    if vrf_supported {
+        run_ip(&["link", "set", &br, "master", &vrf])?;
+    }
 
     // 5. Attach VXLAN to bridge
     run_ip(&["link", "set", &vx, "master", &br])?;
@@ -179,18 +195,26 @@ pub fn ensure_peering_routes(
         route = format!("{peer_vpc_cidr} via {br_b}").as_str(),
         "adding peering route"
     );
-    run_ip(&[
-        "route",
-        "replace",
-        peer_vpc_cidr,
-        "dev",
-        &br_b,
-        "vrf",
-        &vrf_a,
-    ])?;
+    // Try VRF-aware routes first, fall back to global routes
+    if iface_exists(&vrf_a) {
+        run_ip(&[
+            "route",
+            "replace",
+            peer_vpc_cidr,
+            "dev",
+            &br_b,
+            "vrf",
+            &vrf_a,
+        ])?;
+    } else {
+        run_ip(&["route", "replace", peer_vpc_cidr, "dev", &br_b])?;
+    }
 
-    // In VRF-B: route to this VPC CIDR via this bridge
-    run_ip(&["route", "replace", vpc_cidr, "dev", &br_a, "vrf", &vrf_b])?;
+    if iface_exists(&vrf_b) {
+        run_ip(&["route", "replace", vpc_cidr, "dev", &br_a, "vrf", &vrf_b])?;
+    } else {
+        run_ip(&["route", "replace", vpc_cidr, "dev", &br_a])?;
+    }
 
     Ok(())
 }
