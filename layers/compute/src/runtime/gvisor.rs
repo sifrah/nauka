@@ -151,29 +151,31 @@ impl Runtime for GVisorRuntime {
             .stderr(std::process::Stdio::null())
             .status();
 
-        let create = Command::new(rt)
+        let create_status = Command::new(rt)
             .args([
                 "create",
                 "--bundle",
                 bundle_dir.to_str().unwrap(),
                 &config.vm_id,
             ])
-            .output()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
             .map_err(|e| anyhow::anyhow!("{rt} create failed: {e}"))?;
 
-        if !create.status.success() {
-            let stderr = String::from_utf8_lossy(&create.stderr);
-            anyhow::bail!("{rt} create failed: {stderr}");
+        if !create_status.success() {
+            anyhow::bail!("{rt} create failed (exit {})", create_status);
         }
 
-        let start = Command::new(rt)
+        let start_status = Command::new(rt)
             .args(["start", &config.vm_id])
-            .output()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
             .map_err(|e| anyhow::anyhow!("{rt} start failed: {e}"))?;
 
-        if !start.status.success() {
-            let stderr = String::from_utf8_lossy(&start.stderr);
-            anyhow::bail!("{rt} start failed: {stderr}");
+        if !start_status.success() {
+            anyhow::bail!("{rt} start failed (exit {})", start_status);
         }
 
         // 5. Get the container PID
