@@ -150,6 +150,9 @@ impl super::Reconciler for VpcReconciler {
                     .await
                 {
                     let gw_cidr = format!("{}/24", subnet.gateway);
+                    let table = vni.to_string();
+
+                    // Set gateway IP on the bridge
                     let _ = std::process::Command::new("ip")
                         .args(["addr", "replace", &gw_cidr, "dev", &br])
                         .stdout(std::process::Stdio::null())
@@ -157,7 +160,6 @@ impl super::Reconciler for VpcReconciler {
                         .status();
 
                     // Add subnet route in the VPC's routing table (for policy routing)
-                    let table = vni.to_string();
                     let _ = std::process::Command::new("ip")
                         .args([
                             "route",
@@ -168,6 +170,16 @@ impl super::Reconciler for VpcReconciler {
                             "table",
                             &table,
                         ])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+
+                    // HOST ISOLATION: remove the auto-created route from the main
+                    // routing table. The kernel adds a connected route when we set
+                    // the IP, but we only want the route in the VPC's table.
+                    // This prevents the host from reaching VM IPs directly.
+                    let _ = std::process::Command::new("ip")
+                        .args(["route", "del", &subnet.cidr, "dev", &br, "table", "main"])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
