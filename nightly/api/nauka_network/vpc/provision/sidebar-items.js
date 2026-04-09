@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["bridge_name","ensure_bridge","iface_exists","iface_hash","list_active_bridges","remove_bridge","run_ip","vxlan_name"]};
+window.SIDEBAR_ITEMS = {"fn":["bridge_name","cleanup_all","cleanup_stale_vxlan","ensure_bridge","iface_exists","iface_hash","list_active_bridges","remove_bridge","run_ip","vxlan_name"]};

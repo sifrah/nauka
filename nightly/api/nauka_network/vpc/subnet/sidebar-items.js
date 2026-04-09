@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["handlers","store","types"]};
+window.SIDEBAR_ITEMS = {"mod":["handlers","ipam","store","types"]};
