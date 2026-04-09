@@ -75,6 +75,7 @@ pub fn resource_def() -> ResourceDef {
                 "name",
                 FieldDef::string("name", "VM name or ID"),
             ))
+            .with_output(OutputKind::Resource)
         })
         .action("stop", "Stop a running VM")
         .op(|op| {
@@ -82,6 +83,7 @@ pub fn resource_def() -> ResourceDef {
                 "name",
                 FieldDef::string("name", "VM name or ID"),
             ))
+            .with_output(OutputKind::Resource)
         })
         .column("NAME", "name")
         .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
