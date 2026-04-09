@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ensure_nauka_dir","nauka_dir","socket_path"]};
