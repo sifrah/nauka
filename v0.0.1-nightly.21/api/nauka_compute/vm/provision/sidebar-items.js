@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ensure_tap","iface_exists","iface_hash","list_taps","remove_tap","tap_name"]};
