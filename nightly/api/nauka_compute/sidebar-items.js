@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["registration"],"mod":["runtime","scheduler","vm"]};
+window.SIDEBAR_ITEMS = {"fn":["registration"],"mod":["image","runtime","scheduler","vm"]};
