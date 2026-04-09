@@ -204,6 +204,135 @@ fn cleanup_stale_vxlan(vni: u32) {
     }
 }
 
+// ═══════════════════════════════════════════════════
+// FDB — Forwarding Database for VXLAN cross-node traffic
+// ═══════════════════════════════════════════════════
+
+/// Derive a deterministic MAC address from an IPv4 address.
+///
+/// Format: `02:00:{a}.{b}.{c}.{d}` where a.b.c.d are the IP octets in hex.
+/// The `02` prefix marks it as a locally administered unicast MAC.
+pub fn mac_from_ip(ip: &str) -> Option<String> {
+    let addr: std::net::Ipv4Addr = ip.parse().ok()?;
+    let octets = addr.octets();
+    Some(format!(
+        "02:00:{:02x}:{:02x}:{:02x}:{:02x}",
+        octets[0], octets[1], octets[2], octets[3]
+    ))
+}
+
+/// Add an FDB entry for a remote VM.
+///
+/// Tells the VXLAN interface: "frames destined for this MAC should be
+/// sent via VXLAN to this remote mesh IPv6 address."
+pub fn add_fdb_entry(vpc_id: &str, mac: &str, remote_ipv6: &Ipv6Addr) -> anyhow::Result<()> {
+    let vx = vxlan_name(vpc_id);
+
+    tracing::info!(
+        vpc_id,
+        mac,
+        remote = %remote_ipv6,
+        vxlan = vx.as_str(),
+        "adding FDB entry"
+    );
+
+    // bridge fdb add <mac> dev <vxlan> dst <remote_ipv6>
+    let _ = Command::new("bridge")
+        .args([
+            "fdb",
+            "replace",
+            mac,
+            "dev",
+            &vx,
+            "dst",
+            &remote_ipv6.to_string(),
+            "self",
+            "permanent",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
+/// Add an ARP proxy entry for a remote VM.
+///
+/// The bridge answers ARP requests on behalf of the remote VM,
+/// so local VMs don't need to broadcast ARP over the VXLAN.
+pub fn add_arp_proxy(vpc_id: &str, ip: &str, mac: &str) -> anyhow::Result<()> {
+    let br = bridge_name(vpc_id);
+
+    let _ = Command::new("ip")
+        .args([
+            "neigh",
+            "replace",
+            ip,
+            "lladdr",
+            mac,
+            "dev",
+            &br,
+            "nud",
+            "permanent",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
+/// Remove FDB + ARP entries for a remote VM.
+pub fn remove_fdb_entry(vpc_id: &str, mac: &str, ip: &str) -> anyhow::Result<()> {
+    let vx = vxlan_name(vpc_id);
+    let br = bridge_name(vpc_id);
+
+    let _ = Command::new("bridge")
+        .args(["fdb", "del", mac, "dev", &vx])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let _ = Command::new("ip")
+        .args(["neigh", "del", ip, "dev", &br])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    Ok(())
+}
+
+/// List current FDB entries for a VXLAN interface.
+pub fn list_fdb_entries(vpc_id: &str) -> Vec<(String, String)> {
+    let vx = vxlan_name(vpc_id);
+
+    let output = match Command::new("bridge")
+        .args(["fdb", "show", "dev", &vx])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            // Format: "02:00:0a:00:01:03 dst fd47:... self permanent"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 && parts[1] == "dst" {
+                let mac = parts[0].to_string();
+                let dst = parts[2].to_string();
+                // Skip 00:00:00:00:00:00 (default entry)
+                if !mac.starts_with("00:00:00:00:00:00") {
+                    return Some((mac, dst));
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 fn run_ip(args: &[&str]) -> anyhow::Result<()> {
     let status = Command::new("ip")
         .args(args)
@@ -245,6 +374,28 @@ mod tests {
         let name = bridge_name("vpc-01knqczg3xabdsv9wmvgzdsswe");
         assert!(name.len() <= 15, "name too long: {name} ({})", name.len());
         assert!(name.starts_with("nkb-"));
+    }
+
+    #[test]
+    fn mac_from_ip_format() {
+        assert_eq!(
+            mac_from_ip("10.0.1.2"),
+            Some("02:00:0a:00:01:02".to_string())
+        );
+        assert_eq!(
+            mac_from_ip("192.168.1.100"),
+            Some("02:00:c0:a8:01:64".to_string())
+        );
+    }
+
+    #[test]
+    fn mac_from_ip_deterministic() {
+        assert_eq!(mac_from_ip("10.0.1.5"), mac_from_ip("10.0.1.5"));
+    }
+
+    #[test]
+    fn mac_from_ip_invalid() {
+        assert!(mac_from_ip("not-an-ip").is_none());
     }
 
     #[test]
