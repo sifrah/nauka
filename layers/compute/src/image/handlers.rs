@@ -103,6 +103,7 @@ pub fn handler() -> HandlerFn {
                                 serde_json::json!({
                                     "name": e.name,
                                     "type": e.image_type,
+                                    "size": format_size(e.size),
                                     "arch": e.arch,
                                     "local": if e.local { "✓" } else { "✗" },
                                 })
