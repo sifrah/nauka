@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["VpcReconciler"]};
+window.SIDEBAR_ITEMS = {"fn":["resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
