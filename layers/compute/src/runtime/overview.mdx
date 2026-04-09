@@ -1,6 +1,6 @@
 ---
 title: Runtime
-description: Dual compute runtime — Cloud Hypervisor (KVM) on bare-metal, gVisor on VPS.
+description: Dual compute runtime — Cloud Hypervisor (KVM) on bare-metal, crun (OCI containers) on VPS.
 sidebar:
   order: 4
 ---
@@ -10,7 +10,7 @@ Nauka automatically detects the compute capability of each node and selects the 
 | Node type | `/dev/kvm` | Runtime | Isolation |
 |---|---|---|---|
 | Bare-metal (Hetzner dedicated) | Present | **Cloud Hypervisor** | Hardware (VT-x/AMD-V) |
-| VPS (Hetzner cloud, no nested virt) | Absent | **gVisor (runsc)** | Userspace kernel |
+| VPS (Hetzner cloud, no nested virt) | Absent | **crun (OCI container)** | Linux namespaces + cgroups |
 
 ## How it works
 
@@ -35,12 +35,12 @@ nauka vm create web-1 --org acme --project backend --env production \
 ```
 
 On bare-metal: Cloud Hypervisor starts a real VM with its own kernel.
-On VPS: gVisor starts a sandboxed container with a userspace kernel.
+On VPS: crun starts an OCI container with Linux namespace isolation.
 
 ## Security comparison
 
 - **Cloud Hypervisor (KVM)**: hardware-enforced isolation. Each VM has its own kernel, memory space, and virtual hardware. Strongest isolation possible.
-- **gVisor (runsc)**: reimplements ~200 Linux syscalls in Go. The container sees a fake kernel (Sentry) that intercepts all syscalls and makes only ~70 restricted calls to the real host kernel. Much stronger than plain containers (runc/crun).
+- **crun (OCI container)**: lightweight C-based OCI runtime using Linux namespaces (pid, net, mount, ipc, uts) and cgroups for resource limits. Each container gets its own network namespace with a veth pair, overlay filesystem, and SSH access via nsenter.
 
 ## Checking the runtime
 
