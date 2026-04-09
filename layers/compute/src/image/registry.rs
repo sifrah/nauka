@@ -6,13 +6,16 @@
 use std::path::Path;
 use std::process::Command;
 
+use futures_util::StreamExt;
+use nauka_core::ui;
+
 const IMAGES_DIR: &str = "/opt/nauka/images";
 const GITHUB_REPO: &str = "sifrah/nauka-images";
 
 /// Pull an image from the GitHub registry.
 ///
 /// Downloads the tar.gz from GitHub Releases and extracts to /opt/nauka/images/{name}/
-pub fn pull(name: &str) -> anyhow::Result<u64> {
+pub async fn pull(name: &str) -> anyhow::Result<u64> {
     let arch = std::env::consts::ARCH;
     let arch_name = match arch {
         "x86_64" => "amd64",
@@ -24,7 +27,6 @@ pub fn pull(name: &str) -> anyhow::Result<u64> {
 
     // Check if already exists
     if Path::new(&image_dir).join("bin/sh").exists() {
-        tracing::info!(name, "image already exists");
         let size = dir_size(&image_dir);
         return Ok(size);
     }
@@ -33,21 +35,41 @@ pub fn pull(name: &str) -> anyhow::Result<u64> {
     let asset_name = format!("{name}-{arch_name}.tar.gz");
     let url = format!("https://github.com/{GITHUB_REPO}/releases/download/latest/{asset_name}");
 
-    tracing::info!(name, url = url.as_str(), "pulling image");
-
     let tmp_file = format!("/tmp/nauka-image-{name}.tar.gz");
 
-    // Download with curl (follows redirects, GitHub Releases redirect to CDN)
-    let status = Command::new("curl")
-        .args(["-fsSL", "-o", &tmp_file, &url])
-        .status()
-        .map_err(|e| anyhow::anyhow!("download failed: {e}"))?;
+    // Stream download with progress bar
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()?;
 
-    if !status.success() {
-        anyhow::bail!("image '{name}' not found in registry ({})", url);
+    let resp = client.get(&url).send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("image '{name}' not found in registry ({url})");
     }
 
+    let total_size = resp.content_length().unwrap_or(0);
+    let pb = ui::progress(&format!("Downloading {name}"), total_size);
+
+    let mut stream = resp.bytes_stream();
+    let mut file = tokio::fs::File::create(&tmp_file).await?;
+
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+        pb.inc(chunk.len() as u64);
+    }
+    file.flush().await?;
+    drop(file);
+
+    ui::progress_finish(
+        &pb,
+        &format!("Downloaded {name} ({})", format_size(total_size)),
+    );
+
     // Extract
+    let sp = ui::spinner(&format!("Extracting {name}"));
     std::fs::create_dir_all(&image_dir)?;
     let status = Command::new("tar")
         .args(["-xzf", &tmp_file, "-C", &image_dir])
@@ -57,13 +79,13 @@ pub fn pull(name: &str) -> anyhow::Result<u64> {
     if !status.success() {
         let _ = std::fs::remove_dir_all(&image_dir);
         let _ = std::fs::remove_file(&tmp_file);
+        ui::finish_fail(&sp, &format!("Failed to extract {name}"));
         anyhow::bail!("failed to extract image '{name}'");
     }
 
     let _ = std::fs::remove_file(&tmp_file);
-
     let size = dir_size(&image_dir);
-    tracing::info!(name, size_mb = size / 1024 / 1024, "image ready");
+    ui::finish_ok(&sp, &format!("Extracted {name} ({})", format_size(size)));
 
     Ok(size)
 }
@@ -73,7 +95,6 @@ pub fn delete(name: &str) -> anyhow::Result<()> {
     let image_dir = format!("{IMAGES_DIR}/{name}");
     if Path::new(&image_dir).exists() {
         std::fs::remove_dir_all(&image_dir)?;
-        tracing::info!(name, "image deleted");
     }
     Ok(())
 }
@@ -117,4 +138,14 @@ fn dir_size(path: &str) -> u64 {
                 .and_then(|s| s.parse().ok())
         })
         .unwrap_or(0)
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
 }
