@@ -126,11 +126,76 @@ impl super::Reconciler for VpcReconciler {
 
                 let _ = provision::add_fdb_entry(vpc_id, &mac, &remote_ipv6);
                 let _ = provision::add_arp_proxy(vpc_id, ip, &mac);
+
+                // Add static ARP inside local containers so they can reach this remote VM
+                for local_vm in &local_vms {
+                    if local_vm.vpc_id.as_str() == *vpc_id {
+                        if let Some(pid) = get_container_pid(&local_vm.meta.id) {
+                            let _ = add_arp_in_container(pid, ip, &mac);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Set gateway IP on bridges so containers can reach the gateway
+        for (vpc_id, _) in &needed_vpcs {
+            let br = provision::bridge_name(vpc_id);
+            // Look up the subnet gateway from any local VM in this VPC
+            if let Some(local_vm) = local_vms.iter().find(|vm| vm.vpc_id.as_str() == *vpc_id) {
+                let subnet_store =
+                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                if let Ok(Some(subnet)) = subnet_store
+                    .get(local_vm.subnet_id.as_str(), None, None)
+                    .await
+                {
+                    let gw_cidr = format!("{}/24", subnet.gateway);
+                    let _ = std::process::Command::new("ip")
+                        .args(["addr", "replace", &gw_cidr, "dev", &br])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
             }
         }
 
         Ok(result)
     }
+}
+
+/// Get the PID of a running container by VM ID.
+fn get_container_pid(vm_id: &str) -> Option<u32> {
+    let pid_path = std::path::PathBuf::from("/run/nauka/vms")
+        .join(vm_id)
+        .join("pid");
+    std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&pid| unsafe { libc::kill(pid as i32, 0) == 0 })
+}
+
+/// Add a static ARP entry inside a container's network namespace.
+fn add_arp_in_container(container_pid: u32, ip: &str, mac: &str) -> anyhow::Result<()> {
+    let pid = container_pid.to_string();
+    let _ = std::process::Command::new("nsenter")
+        .args([
+            "--net",
+            &format!("--target={pid}"),
+            "ip",
+            "neigh",
+            "replace",
+            ip,
+            "lladdr",
+            mac,
+            "dev",
+            "eth0",
+            "nud",
+            "permanent",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
 }
 
 /// Resolve a hypervisor identifier (HV ID or name) to its mesh IPv6.
