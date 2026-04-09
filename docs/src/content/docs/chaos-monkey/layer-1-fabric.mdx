@@ -18,10 +18,10 @@ Provision a 3-node cluster:
 nauka hypervisor init --name node-nbg --region eu --zone nbg1 ...
 
 # Node 2 (fsn1)
-nauka hypervisor join --target {node1_ip} --pin {pin} --name node-fsn --region eu --zone fsn1
+nauka hypervisor join --target NODE1_IP --pin PIN --name node-fsn --region eu --zone fsn1
 
 # Node 3 (hel1)
-nauka hypervisor join --target {node1_ip} --pin {pin} --name node-hel --region eu --zone hel1
+nauka hypervisor join --target NODE1_IP --pin PIN --name node-hel --region eu --zone hel1
 
 # Create VMs
 nauka org create acme && nauka vpc create net --org acme --cidr 10.0.0.0/16
@@ -56,7 +56,7 @@ ip link set nauka0 down
 ### Expected failure
 
 - Node-nbg loses connectivity to all other nodes
-- `ping6 {peer_mesh_ipv6}` fails from node-nbg
+- `ping6 PEER_MESH_IPV6` fails from node-nbg
 - TiKV on node-nbg loses contact with PD leader
 - VMs on node-nbg cannot reach VMs on other nodes (VXLAN tunnel broken)
 - VMs on node-fsn and node-hel **continue to communicate** with each other (mesh is full-mesh, not hub-and-spoke)
@@ -86,9 +86,9 @@ ip link set nauka0 up
 
 ```bash
 # From node-nbg:
-ping6 -c 1 {node_fsn_mesh_ipv6}              # mesh recovered
+ping6 -c 1 NODE_FSN_MESH_IPV6              # mesh recovered
 nauka org list                                 # TiKV works
-nsenter --net --target={pid} ping 10.0.1.3    # cross-node ping recovered
+nsenter --net --target=PID ping 10.0.1.3    # cross-node ping recovered
 ```
 
 ---
@@ -183,7 +183,7 @@ systemctl start nauka-announce
 
 ```bash
 # On node-nbg, remove node-fsn as a peer:
-wg set nauka0 peer {node_fsn_public_key} remove
+wg set nauka0 peer NODE_FSN_PUBKEY remove
 ```
 
 ### Expected failure
@@ -250,7 +250,7 @@ nauka hypervisor leave --yes
 nauka hypervisor peering
 
 # Re-join:
-nauka hypervisor join --target {host_ip} --pin {pin} ...
+nauka hypervisor join --target {host_ip} --pin PIN ...
 ```
 
 ### Expected recovery
@@ -318,8 +318,8 @@ Automatic:
 
 ```bash
 # On node-nbg, block all traffic from node-fsn:
-iptables -A INPUT -s {node_fsn_public_ip} -j DROP
-iptables -A OUTPUT -d {node_fsn_public_ip} -j DROP
+iptables -A INPUT -s NODE_FSN_PUBLIC_IP -j DROP
+iptables -A OUTPUT -d NODE_FSN_PUBLIC_IP -j DROP
 ```
 
 ### Expected failure
@@ -338,8 +338,8 @@ iptables -A OUTPUT -d {node_fsn_public_ip} -j DROP
 ### Recovery
 
 ```bash
-iptables -D INPUT -s {node_fsn_public_ip} -j DROP
-iptables -D OUTPUT -d {node_fsn_public_ip} -j DROP
+iptables -D INPUT -s NODE_FSN_PUBLIC_IP -j DROP
+iptables -D OUTPUT -d NODE_FSN_PUBLIC_IP -j DROP
 ```
 
 ### Expected recovery
@@ -386,7 +386,7 @@ echo '{"corrupted": true}' > ~/.nauka/hypervisor.json
 ```bash
 # Option 1: Re-join the cluster (if another node is available)
 nauka hypervisor leave --yes
-nauka hypervisor join --target {peer_ip} --pin {pin} ...
+nauka hypervisor join --target {peer_ip} --pin PIN ...
 
 # Option 2: Restore from backup (if you have one)
 cp ~/.nauka/hypervisor.json.bak ~/.nauka/hypervisor.json

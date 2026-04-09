@@ -68,10 +68,14 @@ Each test follows the same structure:
 Never run chaos tests on production clusters. Always use dedicated test environments that can be destroyed without consequence.
 </Aside>
 
-## Available test suites
+## Test suites
 
-- [Layer 1: Fabric](/chaos-monkey/layer-1-fabric/) — WireGuard mesh resilience (10 tests)
-- Layer 2: State — TiKV/PD consensus (planned)
-- Layer 3: Network — VPC overlay resilience (planned)
-- Layer 4: Compute — container lifecycle resilience (planned)
-- Layer 5: Forge — reconciler resilience (planned)
+| Layer | Tests | Focus |
+|---|---|---|
+| [Layer 1: Fabric](/chaos-monkey/layer-1-fabric/) | CM-001 → CM-010 | WireGuard mesh, peers, partitions |
+| [Layer 2: State](/chaos-monkey/layer-2-state/) | CM-011 → CM-020 | TiKV/PD consensus, quorum, data integrity |
+| [Layer 3: Network](/chaos-monkey/layer-3-network/) | CM-021 → CM-030 | Bridges, VXLAN, FDB, routing, nftables |
+| [Layer 4: Compute](/chaos-monkey/layer-4-compute/) | CM-031 → CM-040 | Containers, overlay FS, images, sshd |
+| [Layer 5: Forge](/chaos-monkey/layer-5-forge/) | CM-041 → CM-050 | Reconciler crash, race conditions, total wipe |
+
+**50 tests total** covering every failure mode from a single interface down to complete node destruction.

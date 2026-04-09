@@ -1,0 +1,413 @@
+---
+title: "Layer 3: Network"
+description: Chaos tests for VPC overlay networking — bridges, VXLAN, FDB, policy routing.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The network layer creates virtual networks on top of the WireGuard mesh. Each VPC gets a bridge + VXLAN + routing rules. The Forge is responsible for recreating any missing infrastructure.
+
+## Setup
+
+Same as Layer 1: 3-node cluster with VMs, verified cross-node ping before each test.
+
+---
+
+## CM-021: Delete VPC bridge
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Delete the Linux bridge for a VPC |
+| **Blast radius** | All VMs in that VPC on this node lose connectivity |
+
+### Break
+
+```bash
+ip link del nkb-HASH
+```
+
+### Expected failure
+
+- All veth pairs detach (their master bridge is gone)
+- VMs on this node can't reach each other or remote VMs
+- VXLAN orphaned (no bridge to attach to)
+
+### Expected resilience
+
+- VMs on **other nodes** continue communicating
+- VMs keep running (containers alive, just no network)
+- TiKV unaffected
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge recreates bridge + reattaches VXLAN + reattaches veths
+- FDB and ARP entries re-populated
+- Recovery time: **< 1 second** (overlay mount, no rootfs copy)
+
+---
+
+## CM-022: Delete VXLAN interface
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Delete the VXLAN tunnel interface |
+| **Blast radius** | Cross-node traffic stops, local traffic on same bridge continues |
+
+### Break
+
+```bash
+ip link del nkx-HASH
+```
+
+### Expected failure
+
+- Cross-node VM traffic stops (no encapsulation path)
+- VMs on the same node/same bridge can still talk (local bridging)
+- FDB entries still reference the deleted interface
+
+### Expected resilience
+
+- Local VM-to-VM on same node continues
+- TiKV unaffected (uses WireGuard directly, not VXLAN)
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge recreates VXLAN with same VNI, reattaches to bridge
+- FDB entries re-created
+- Recovery time: **< 1 second**
+
+---
+
+## CM-023: Delete all FDB entries
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Flush FDB entries for the VPC VXLAN |
+| **Blast radius** | Cross-node traffic fails (bridge doesn't know where to send frames) |
+
+### Break
+
+```bash
+bridge fdb flush dev nkx-HASH
+```
+
+### Expected failure
+
+- Cross-node pings fail (unknown destination MAC → frame dropped)
+- Local pings still work (bridge learns local MACs automatically)
+
+### Expected resilience
+
+- VMs continue running
+- Bridge and VXLAN still intact
+- Local connectivity works
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-adds all FDB entries for remote VMs
+- Cross-node pings resume
+- Recovery time: **< 1 second**
+
+---
+
+## CM-024: Delete policy routing rules
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Remove the ip rules that isolate VPC traffic |
+| **Blast radius** | VPC isolation broken — cross-VPC traffic may be possible |
+
+### Break
+
+```bash
+ip rule del iif nkb-HASH table VNI
+ip rule del oif nkb-HASH table VNI
+```
+
+### Expected failure
+
+- VPC traffic falls through to the main routing table
+- If another VPC has the same CIDR, routing becomes ambiguous
+- Host might be able to reach VM IPs (isolation breach)
+
+### Expected resilience
+
+- VMs continue running
+- Same-VPC traffic continues (bridge still forwards locally)
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-creates ip rules
+- Isolation restored
+- Recovery time: **< 1 second**
+
+---
+
+## CM-025: Delete veth pair for a VM
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Delete the host-side veth, disconnecting a single VM |
+| **Blast radius** | One VM loses network, others unaffected |
+
+### Break
+
+```bash
+ip link del nkh-HASH
+# This automatically deletes the guest-side veth (nkg-) too
+```
+
+### Expected failure
+
+- The target VM loses its eth0 interface
+- Pings to/from this VM fail
+- Other VMs on the same bridge are unaffected
+
+### Expected resilience
+
+- The container keeps running (just no network)
+- Other VMs fully operational
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge creates new veth pair, reattaches to bridge and container netns
+- IP and MAC reconfigured
+- Recovery time: **< 1 second**
+
+---
+
+## CM-026: Corrupt nftables rules
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Flush the nauka nftables table |
+| **Blast radius** | Host isolation lost — host can reach VM networks |
+
+### Break
+
+```bash
+nft flush table inet nauka
+```
+
+### Expected failure
+
+- Host-to-VM isolation broken
+- Host can now ping VMs directly and SSH into them
+- Security boundary violated
+
+### Expected resilience
+
+- VM-to-VM traffic unaffected
+- Cross-node traffic unaffected
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-adds nftables output drop rules for each bridge
+- Host isolation restored
+- Recovery time: **< 1 second**
+
+---
+
+## CM-027: Delete gateway IP from bridge
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Remove the gateway IP address from the VPC bridge |
+| **Blast radius** | VMs can't reach their gateway — inter-subnet routing breaks |
+
+### Break
+
+```bash
+ip addr del 10.0.1.1/24 dev nkb-HASH
+```
+
+### Expected failure
+
+- VMs in this subnet can't route to other subnets (no gateway)
+- Same-subnet VMs can still talk (direct L2)
+- ARP for the gateway fails
+
+### Expected resilience
+
+- Cross-node same-subnet traffic still works (FDB + VXLAN)
+- VMs on other nodes unaffected
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-adds the gateway IP + route in the VPC routing table
+- Re-deletes the route from the main table (host isolation)
+- Recovery time: **< 1 second**
+
+---
+
+## CM-028: Delete ARP proxy entries inside container
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Flush ARP table inside a container |
+| **Blast radius** | Container can't resolve remote VM MACs |
+
+### Break
+
+```bash
+PID=$(crun state VM_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['pid'])")
+nsenter --net --target=$PID ip neigh flush all
+```
+
+### Expected failure
+
+- Container's ARP table is empty
+- Next ping to a remote VM triggers ARP broadcast (which may not be answered without ARP proxy)
+- Cross-node pings fail
+
+### Expected resilience
+
+- Local loopback works
+- The container is otherwise healthy
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-injects static ARP entries into the container
+- Cross-node pings resume
+- Recovery time: **< 1 second**
+
+---
+
+## CM-029: Delete VPC peering routes
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Remove the route leak entries between two peered VPCs |
+| **Blast radius** | Cross-VPC traffic stops |
+
+### Break
+
+```bash
+ip route del PEER_CIDR table VNI
+```
+
+### Expected failure
+
+- VMs in VPC A can't reach VMs in VPC B
+- Within each VPC, traffic continues normally
+
+### Expected resilience
+
+- Each VPC works independently
+- TiKV unaffected
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-reads peerings from TiKV, re-adds routes
+- Recovery time: **< 1 second**
+
+---
+
+## CM-030: Delete all network interfaces simultaneously
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Delete every nauka network interface on a node |
+| **Blast radius** | Complete network destruction on one node |
+
+### Break
+
+```bash
+ip link show | grep -oP 'nk[bxthgv]-[a-f0-9]+' | sort -u | while read iface; do
+  ip link del $iface 2>/dev/null
+done
+```
+
+### Expected failure
+
+- All VMs on this node lose networking
+- No bridges, no VXLAN, no veths
+- Cross-node traffic to this node fails
+
+### Expected resilience
+
+- VMs keep running (containers alive)
+- Other nodes fully operational
+- TiKV continues (WireGuard is separate from nk* interfaces)
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge recreates everything: VRF/rules → bridge → VXLAN → veths → FDB → ARP → nftables
+- Full network recovery in a single reconcile cycle
+- Recovery time: **< 1 second**
+
+<Aside type="tip">
+This is the ultimate network resilience test. If the Forge can recover from total network destruction in under a second, the overlay networking is truly robust.
+</Aside>
