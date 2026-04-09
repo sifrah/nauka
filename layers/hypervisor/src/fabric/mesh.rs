@@ -49,6 +49,13 @@ pub struct HypervisorIdentity {
     /// In WG mode: ULA derived from prefix + pubkey.
     /// In direct mode: real IP of the fabric interface.
     pub mesh_ipv6: Ipv6Addr,
+    /// Compute runtime: "kvm" (Cloud Hypervisor) or "container" (gVisor).
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
+}
+
+fn default_runtime() -> String {
+    "kvm".to_string()
 }
 
 /// Create a new mesh (called by `hypervisor init`).
@@ -85,6 +92,13 @@ pub fn create_hypervisor(
 
     let mesh_ipv6 = addressing::derive_node_address(mesh_prefix, &pub_bytes);
 
+    // Detect compute runtime: KVM if /dev/kvm exists, container (gVisor) otherwise
+    let runtime = if std::path::Path::new("/dev/kvm").exists() {
+        "kvm".to_string()
+    } else {
+        "container".to_string()
+    };
+
     Ok(HypervisorIdentity {
         id: nauka_core::id::HypervisorId::generate(),
         name: name.to_string(),
@@ -96,6 +110,7 @@ pub fn create_hypervisor(
         endpoint,
         fabric_interface: fabric_interface.to_string(),
         mesh_ipv6,
+        runtime,
     })
 }
 
