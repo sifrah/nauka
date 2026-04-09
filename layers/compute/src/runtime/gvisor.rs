@@ -78,6 +78,16 @@ impl Runtime for GVisorRuntime {
         )?;
         std::fs::write(rootfs_dir.join("etc/hostname"), &config.vm_name)?;
 
+        // 2b. Configure SSH access — inject host's authorized keys
+        let ssh_dir = rootfs_dir.join("root/.ssh");
+        let _ = std::fs::create_dir_all(&ssh_dir);
+        // Copy host's authorized_keys into the container
+        if let Ok(host_keys) = std::fs::read_to_string("/root/.ssh/authorized_keys") {
+            let _ = std::fs::write(ssh_dir.join("authorized_keys"), &host_keys);
+        }
+        // Ensure /run/sshd exists (required by sshd)
+        let _ = std::fs::create_dir_all(rootfs_dir.join("run/sshd"));
+
         // 3. Generate OCI config.json
         let oci_config = generate_oci_config(config);
         std::fs::write(bundle_dir.join("config.json"), oci_config)?;
@@ -240,7 +250,7 @@ fn generate_oci_config(config: &VmRunConfig) -> String {
         "process": {
             "terminal": false,
             "user": {"uid": 0, "gid": 0},
-            "args": ["sleep", "infinity"],
+            "args": ["/bin/sh", "-c", "/usr/sbin/sshd; exec sleep infinity"],
             "cwd": "/",
             "env": [
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

@@ -329,11 +329,11 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         is_default: true,
     };
 
-    // Init: 2 (fabric) + 4 (control plane) + 2 (storage) + 2 (compute) = 10
+    // Init: 2 (fabric) + 4 (control plane) + 2 (storage) + 3 (compute+forge) = 11
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        10
+        11
     } else {
-        4 // fabric + compute
+        5 // fabric + compute + forge
     };
     let steps = ui::Steps::new(step_count);
 
@@ -487,11 +487,11 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         network_mode,
     };
 
-    // Join: 2 (fabric) + 3 (control plane) + 1 (storage) + 2 (compute) + 1 (announce) = 9
+    // Join: 2 (fabric) + 3 (control plane) + 1 (storage) + 3 (compute+forge) + 1 (announce) = 10
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        9
+        10
     } else {
-        5
+        6
     };
     let steps = ui::Steps::new(step_count);
 
