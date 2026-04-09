@@ -1,0 +1,511 @@
+---
+title: "Layer 5: Forge"
+description: Chaos tests for the reconciler itself — what happens when the thing that fixes things breaks.
+sidebar:
+  order: 6
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The Forge is the daemon that fixes everything else. These tests verify what happens when the Forge itself fails, and whether the system can survive without it.
+
+---
+
+## CM-041: Kill the Forge process
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Stop the Forge systemd service |
+| **Blast radius** | No new reconciliation — but everything currently running continues |
+
+### Break
+
+```bash
+systemctl stop nauka-forge
+```
+
+### Expected failure
+
+- No reconciliation happens
+- New VMs created via `nauka vm create` stay in "pending" forever
+- Deleted bridges/veths/containers are not recreated
+
+### Expected resilience
+
+- **Everything currently running continues** — the Forge is not in the data path
+- VMs keep running, networking keeps working, TiKV keeps working
+- The only thing lost is the ability to converge new changes
+
+### Recovery
+
+```bash
+systemctl start nauka-forge
+```
+
+### Expected recovery
+
+- Forge runs a reconcile cycle immediately
+- All pending VMs are created, missing bridges rebuilt
+- Recovery time: **< 1 second** (reconcile cycle)
+
+<Aside type="note">
+The Forge is a **control plane** component, not a **data plane** component. Killing it doesn't affect running workloads — only the ability to change them.
+</Aside>
+
+---
+
+## CM-042: Forge crash loop
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Cause the Forge to crash on every reconcile cycle |
+| **Blast radius** | Forge enters restart loop, systemd rate-limits restarts |
+
+### Break
+
+```bash
+# Corrupt TiKV to make the Forge crash on connect:
+systemctl stop nauka-tikv
+systemctl start nauka-forge
+# Forge tries to connect to TiKV → fails → crashes → systemd restarts
+```
+
+### Expected failure
+
+- Forge starts, tries to connect to TiKV, fails, exits with error
+- systemd restarts it after 10 seconds (RestartSec=10)
+- After 5 failures, systemd may rate-limit further restarts
+
+### Expected resilience
+
+- VMs keep running (not affected by Forge crashes)
+- CPU usage is minimal (crash + 10s sleep + crash)
+- The system is degraded but not broken
+
+### Recovery
+
+```bash
+systemctl start nauka-tikv
+# Forge will succeed on next restart cycle
+```
+
+### Expected recovery
+
+- Next Forge startup connects to TiKV successfully
+- Reconcile cycle runs normally
+- Recovery time: **10 seconds** (next RestartSec interval)
+
+---
+
+## CM-043: Forge runs with stale state
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Create VMs while the Forge's TiKV connection is partitioned |
+| **Blast radius** | Forge reconciles based on old data, missing new VMs |
+
+### Break
+
+```bash
+# On node-nbg, block TiKV port so Forge can't read:
+iptables -A OUTPUT -p tcp --dport 20160 -j DROP
+# Create new VMs from another node:
+# (on node-fsn): nauka vm create new-vm ...
+# Forge on nbg doesn't see the new VM
+```
+
+### Expected failure
+
+- Forge on node-nbg doesn't know about new VMs assigned to it
+- New VMs are not provisioned on node-nbg
+- Existing VMs continue running (already reconciled)
+
+### Recovery
+
+```bash
+iptables -D OUTPUT -p tcp --dport 20160 -j DROP
+```
+
+### Expected recovery
+
+- Next Forge cycle reads fresh data from TiKV
+- New VMs are provisioned
+- Recovery time: **30 seconds** (next reconcile cycle)
+
+---
+
+## CM-044: Forge reconcile during network destruction
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Delete network interfaces while the Forge is mid-reconcile |
+| **Blast radius** | Race condition — Forge creates interfaces, chaos deletes them |
+
+### Break
+
+```bash
+# In parallel:
+# Terminal 1: run Forge reconcile
+nauka forge reconcile &
+
+# Terminal 2: delete interfaces as they're created
+while true; do
+  ip link show | grep -oP 'nk[bxthg]-[a-f0-9]+' | while read iface; do
+    ip link del $iface 2>/dev/null
+  done
+  sleep 0.1
+done
+```
+
+### Expected failure
+
+- Forge creates an interface, chaos deletes it immediately
+- Forge may report success even though the interface was deleted after creation
+- Cross-node traffic fails intermittently
+
+### Expected resilience
+
+- Forge doesn't crash (all operations handle "interface not found" gracefully)
+- No data corruption (TiKV state is unaffected)
+- Next full reconcile cycle fixes everything
+
+### Recovery
+
+```bash
+# Stop the chaos:
+# Kill Terminal 2
+
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Full reconcile with no interference succeeds
+- Recovery time: **< 1 second**
+
+---
+
+## CM-045: Delete the Forge systemd unit
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Remove the Forge service file |
+| **Blast radius** | Forge won't restart after next failure or reboot |
+
+### Break
+
+```bash
+systemctl stop nauka-forge
+rm /etc/systemd/system/nauka-forge.service
+systemctl daemon-reload
+```
+
+### Expected failure
+
+- Forge is stopped and won't auto-restart
+- `systemctl start nauka-forge` → "Unit not found"
+- No reconciliation happens
+
+### Expected resilience
+
+- Everything currently running continues
+- Manual `nauka forge reconcile` still works (the binary exists, just no systemd unit)
+
+### Recovery
+
+```bash
+# Option 1: Re-run compute setup
+nauka hypervisor init  # Would reinstall, but also reinitializes the cluster
+
+# Option 2: Recreate the unit manually
+cat > /etc/systemd/system/nauka-forge.service << 'EOF'
+[Unit]
+Description=Nauka Forge Reconciler
+After=network-online.target nauka-wg.service nauka-tikv.service
+Wants=network-online.target
+Requires=nauka-wg.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nauka forge run
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now nauka-forge
+```
+
+### Expected recovery
+
+- Forge service recreated and started
+- Recovery time: **immediate** (manual unit creation)
+
+---
+
+## CM-046: Forge with conflicting concurrent reconciles
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Run two Forge reconcile cycles simultaneously |
+| **Blast radius** | Race conditions in container creation or network setup |
+
+### Break
+
+```bash
+nauka forge reconcile &
+nauka forge reconcile &
+wait
+```
+
+### Expected failure
+
+- Two processes try to create the same bridge/container simultaneously
+- One succeeds, the other gets "already exists" errors
+- Possible: duplicate veth pairs or containers
+
+### Expected resilience
+
+- No data corruption (TiKV operations are atomic)
+- The next single reconcile cycle cleans up duplicates
+
+### Recovery
+
+```bash
+nauka forge reconcile  # Single clean cycle
+```
+
+### Expected recovery
+
+- Idempotent operations converge to correct state
+- Recovery time: **< 1 second**
+
+<Aside type="tip">
+In production, the Forge daemon ensures only one reconcile runs at a time (sequential loop). This test validates that even concurrent runs don't cause permanent damage.
+</Aside>
+
+---
+
+## CM-047: Forge with empty TiKV (all data deleted)
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Delete all Nauka keys from TiKV |
+| **Blast radius** | Forge sees no desired state — tries to clean up everything |
+
+### Break
+
+```bash
+# This would require direct TiKV API access to delete all keys
+# Or: recreate TiKV from scratch
+systemctl stop nauka-tikv
+rm -rf /var/lib/nauka/tikv
+systemctl start nauka-tikv
+# TiKV starts empty (if single-node, data is gone)
+```
+
+### Expected failure
+
+- Forge reads empty TiKV: no VMs, no VPCs
+- Forge sees running containers as "orphaned" — kills them all
+- All bridges, VXLANs deleted (no VPCs in desired state)
+- Total infrastructure cleanup
+
+### Expected resilience
+
+- The cleanup is **correct** from the Forge's perspective (no desired state = nothing should exist)
+- WireGuard mesh continues (independent of TiKV data)
+
+### Recovery
+
+```bash
+# Recreate everything:
+nauka org create acme
+nauka vpc create net --org acme --cidr 10.0.0.0/16
+nauka vpc subnet create web --vpc net --org acme --cidr 10.0.1.0/24
+nauka vm create web-1 ... 
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Full recreation from scratch
+- Recovery time: depends on how much state needs to be recreated
+
+<Aside type="caution">
+This test is destructive. On a 3-node cluster with `max-replicas=3`, deleting TiKV data on one node is recoverable (Raft replicates). Deleting on all nodes is permanent data loss.
+</Aside>
+
+---
+
+## CM-048: Forge PID file becomes stale
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Write a fake PID into the VM's PID file |
+| **Blast radius** | Forge thinks the VM is running when it's not |
+
+### Break
+
+```bash
+echo "99999" > /run/nauka/vms/VM_ID/pid
+```
+
+### Expected failure
+
+- Forge checks `kill(99999, 0)` — returns false (no such process)
+- Forge correctly detects the VM is not running
+- Forge recreates the container
+
+### Expected resilience
+
+- The PID check is the source of truth, not the file content
+- If PID 99999 happens to exist, Forge might incorrectly think the VM is running
+
+### Recovery
+
+Automatic — Forge's PID liveness check handles this.
+
+---
+
+## CM-049: Forge with incorrect node identity
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Modify the node name in fabric state |
+| **Blast radius** | Forge can't match VMs to this node |
+
+### Break
+
+```bash
+# Edit hypervisor.json to change the node name
+python3 -c "
+import json
+with open('/root/.nauka/hypervisor.json', 'r+') as f:
+    data = json.load(f)
+    data['fabric/state']['hypervisor']['name'] = 'wrong-name'
+    f.seek(0)
+    json.dump(data, f)
+    f.truncate()
+"
+```
+
+### Expected failure
+
+- Forge reads node name "wrong-name" from state
+- No VMs have `hypervisor_id = "wrong-name"` → Forge sees 0 desired VMs
+- Forge deletes all containers as "orphaned"
+
+### Expected resilience
+
+- The deletion is correct from the Forge's perspective (wrong identity = not my VMs)
+- TiKV data is intact — VMs still exist, just not assigned to "wrong-name"
+
+### Recovery
+
+```bash
+# Fix the name back:
+python3 -c "
+import json
+with open('/root/.nauka/hypervisor.json', 'r+') as f:
+    data = json.load(f)
+    data['fabric/state']['hypervisor']['name'] = 'node-nbg'
+    f.seek(0)
+    json.dump(data, f)
+    f.truncate()
+"
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge matches VMs again, recreates containers
+- Recovery time: **< 1 second**
+
+---
+
+## CM-050: Complete Forge + infrastructure wipe
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Kill everything: Forge, containers, network, overlay mounts |
+| **Blast radius** | Total destruction on one node — only TiKV state and base image remain |
+
+### Break
+
+```bash
+# Kill Forge
+systemctl stop nauka-forge
+
+# Kill all containers
+crun list -f json | python3 -c "import sys,json; [print(c['id']) for c in json.load(sys.stdin)]" | while read id; do
+  crun kill $id SIGKILL 2>/dev/null; sleep 1; crun delete --force $id 2>/dev/null
+done
+
+# Unmount overlays
+for mp in $(mount | grep "nauka/vms" | awk '{print $3}'); do umount -l $mp; done
+
+# Delete all network interfaces
+ip link show | grep -oP 'nk[bxthgv]-[a-f0-9]+' | sort -u | while read iface; do
+  ip link del $iface 2>/dev/null
+done
+
+# Delete runtime state
+rm -rf /run/nauka/vms /var/lib/nauka/vms
+
+# Flush nftables
+nft flush table inet nauka 2>/dev/null
+
+# Delete ip rules
+for rule in $(ip rule show | grep nkb- | awk '{print $NF}'); do
+  ip rule del table $rule 2>/dev/null
+done
+```
+
+### Expected failure
+
+- No containers, no network, no firewall, no overlay mounts
+- Node is a blank slate (only WireGuard + TiKV still running)
+
+### Expected resilience
+
+- TiKV has all desired state intact
+- WireGuard mesh operational
+- Other nodes continue full operation
+- Base image still exists at `/opt/nauka/images/`
+
+### Recovery
+
+```bash
+systemctl start nauka-forge
+# Wait one reconcile cycle (30 seconds)
+```
+
+### Expected recovery
+
+The Forge rebuilds **everything** from scratch:
+1. Reads VMs from TiKV → finds VMs assigned to this node
+2. Creates VRF/rules → bridge → VXLAN for each VPC
+3. Sets gateway IPs, FDB entries, ARP proxies
+4. Mounts overlay → starts containers → configures networking → starts sshd
+5. Adds nftables host isolation rules
+6. Removes host routes from main table
+
+**Total recovery time: < 1 second** (single reconcile cycle with overlay filesystem)
+
+<Aside type="tip">
+This is the ultimate test. If the Forge can recover from total destruction to full operation in under a second, the reconciliation architecture is sound.
+</Aside>

@@ -1,0 +1,407 @@
+---
+title: "Layer 4: Compute"
+description: Chaos tests for containers, overlay filesystem, images, and the OCI runtime.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The compute layer manages VM containers — rootfs overlay, crun lifecycle, sshd, and the init process. These tests verify that the Forge can recover containers from various failure modes.
+
+---
+
+## CM-031: Kill a container
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Force-kill a running container |
+| **Blast radius** | One VM stops, others unaffected |
+
+### Break
+
+```bash
+crun kill VM_ID SIGKILL
+```
+
+### Expected failure
+
+- Container process dies (PID gone)
+- The VM's veth guest-side disappears (netns destroyed)
+- sshd stops
+
+### Expected resilience
+
+- Other VMs continue running
+- Network interfaces (bridge, VXLAN) remain intact
+- TiKV state still shows the VM as "pending" (Forge will restart it)
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge detects the container is not running
+- Recreates overlay mount, starts new container, sets up networking, starts sshd
+- Recovery time: **< 1 second**
+
+---
+
+## CM-032: Delete container runtime state
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Delete crun's internal state for a container |
+| **Blast radius** | crun can't manage the container anymore |
+
+### Break
+
+```bash
+rm -rf /run/user/0/crun/VM_ID
+```
+
+### Expected failure
+
+- `crun state VM_ID` returns "not found"
+- `crun exec VM_ID` fails
+- The container process may still be running (orphaned)
+
+### Expected resilience
+
+- Container process continues (Linux doesn't kill it just because crun forgot about it)
+- Other VMs unaffected
+
+### Recovery
+
+```bash
+# Kill orphaned process:
+kill $(cat /run/nauka/vms/VM_ID/pid)
+# Let Forge recreate:
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge detects no running container, recreates it
+- Recovery time: **< 1 second** (after orphan kill)
+
+---
+
+## CM-033: Unmount overlay filesystem
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Unmount the container's rootfs overlay |
+| **Blast radius** | Container loses its filesystem mid-run |
+
+### Break
+
+```bash
+umount /run/nauka/vms/VM_ID/bundle/rootfs
+```
+
+### Expected failure
+
+- Container may crash (filesystem suddenly empty)
+- Or container continues with stale file handles but new reads fail
+- sshd stops accepting connections
+
+### Expected resilience
+
+- Other VMs unaffected (each has its own overlay mount)
+- Base image intact (read-only lowerdir)
+
+### Recovery
+
+```bash
+crun kill VM_ID SIGKILL 2>/dev/null
+crun delete --force VM_ID 2>/dev/null
+rm -rf /run/nauka/vms/VM_ID
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge remounts overlay from base image, starts fresh container
+- VM data in the upper layer is lost (ephemeral by design)
+- Recovery time: **< 1 second**
+
+---
+
+## CM-034: Delete base image
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Delete the shared base image |
+| **Blast radius** | Running VMs continue (overlay has cached data), new VMs can't start |
+
+### Break
+
+```bash
+rm -rf /opt/nauka/images/ubuntu-24.04
+```
+
+### Expected failure
+
+- Running VMs **keep working** (overlay upper layer has cached writes, lower layer files are in page cache)
+- New `nauka forge reconcile` for new VMs fails: "image not found"
+- `nauka vm image list` shows no images
+
+### Expected resilience
+
+- Existing containers unaffected (already mounted)
+- TiKV, networking, mesh all fine
+
+### Recovery
+
+```bash
+nauka vm image pull ubuntu-24.04
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Image re-downloaded from GitHub (42MB, ~10 seconds)
+- New VMs can start again
+- Recovery time: **10 seconds** (download) + **< 1 second** (reconcile)
+
+---
+
+## CM-035: Delete VM runtime directory
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Delete everything in /run/nauka/vms/VM_ID/ |
+| **Blast radius** | PID file, bundle, overlay state all gone |
+
+### Break
+
+```bash
+umount /run/nauka/vms/VM_ID/bundle/rootfs 2>/dev/null
+rm -rf /run/nauka/vms/VM_ID
+```
+
+### Expected failure
+
+- Forge can't find the PID file → thinks the VM is not running
+- Container may still be alive (orphaned)
+
+### Recovery
+
+```bash
+# Kill orphaned container:
+crun delete --force VM_ID 2>/dev/null
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Full recreation: overlay + container + networking + sshd
+- Recovery time: **< 1 second**
+
+---
+
+## CM-036: Kill sshd inside container
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Kill the sshd process inside a container |
+| **Blast radius** | SSH access lost, container still running |
+
+### Break
+
+```bash
+PID=$(crun state VM_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['pid'])")
+nsenter --pid --mount --net --target=$PID kill $(nsenter --pid --mount --target=$PID pgrep sshd)
+```
+
+### Expected failure
+
+- SSH connections to the VM fail
+- Container and networking still functional
+- Pings still work
+
+### Expected resilience
+
+- Container's init process (sleep infinity) keeps running
+- Network interfaces intact
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge re-runs nsenter to start sshd
+- Recovery time: **< 1 second**
+
+<Aside type="note">
+sshd is not the container's init process — it's started separately via nsenter. If it dies, only SSH access is lost, not the container itself.
+</Aside>
+
+---
+
+## CM-037: Fill the overlay upper layer disk
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Fill /var/lib/nauka/vms/VM_ID/upper/ with data |
+| **Blast radius** | Container can't write new files |
+
+### Break
+
+```bash
+dd if=/dev/zero of=/var/lib/nauka/vms/VM_ID/upper/fill bs=1M count=500
+```
+
+### Expected failure
+
+- Container writes fail with "No space left on device"
+- sshd may stop accepting new connections
+- Existing processes continue (cached in memory)
+
+### Expected resilience
+
+- Other VMs unaffected (separate upper dirs)
+- Base image intact
+
+### Recovery
+
+```bash
+rm /var/lib/nauka/vms/VM_ID/upper/fill
+```
+
+### Expected recovery
+
+- Immediate — filesystem space freed
+- No reconcile needed
+
+---
+
+## CM-038: Corrupt OCI config.json
+
+| | |
+|---|---|
+| **Severity** | Low |
+| **Action** | Overwrite the container's OCI spec |
+| **Blast radius** | Running container unaffected, but recreation would fail |
+
+### Break
+
+```bash
+echo '{}' > /run/nauka/vms/VM_ID/bundle/config.json
+```
+
+### Expected failure
+
+- Running container **continues** (config is only read at create time)
+- If the container is killed and Forge tries to recreate it, `crun create` fails
+
+### Expected resilience
+
+- The Forge regenerates config.json on each reconcile, overwriting the corrupted file
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge writes a fresh config.json and recreates the container
+- Recovery time: **< 1 second**
+
+---
+
+## CM-039: Kill all containers simultaneously
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Kill every container on a node |
+| **Blast radius** | All VMs on this node stop |
+
+### Break
+
+```bash
+crun list -f json | python3 -c "import sys,json; [print(c['id']) for c in json.load(sys.stdin)]" | while read id; do
+  crun kill $id SIGKILL
+done
+```
+
+### Expected failure
+
+- All VMs on this node stop
+- All VM veths disappear (netns destroyed)
+- FDB entries become stale (MACs point to dead containers)
+
+### Expected resilience
+
+- VMs on other nodes continue
+- Network infrastructure (bridge, VXLAN) remains
+- TiKV unaffected
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- Forge recreates all containers in a single cycle
+- Full recovery in **< 1 second** per VM (overlay mount, no copy)
+
+---
+
+## CM-040: Exhaust cgroup memory limit
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Allocate more memory than the container's cgroup limit |
+| **Blast radius** | OOM killer terminates processes inside the container |
+
+### Break
+
+```bash
+PID=$(crun state VM_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['pid'])")
+nsenter --pid --mount --net --target=$PID sh -c "dd if=/dev/zero of=/dev/null bs=1M &"
+# Or: stress-test memory allocation inside the container
+```
+
+### Expected failure
+
+- Linux OOM killer kills processes inside the container
+- sshd or sleep infinity may be killed
+- If init process is killed, container stops
+
+### Expected resilience
+
+- OOM is contained to the cgroup — host and other VMs unaffected
+- cgroup limits prevent one VM from affecting others
+
+### Recovery
+
+```bash
+nauka forge reconcile
+```
+
+### Expected recovery
+
+- If container is dead: Forge recreates it
+- If only sshd was killed: Forge restarts sshd
+- Recovery time: **< 1 second**

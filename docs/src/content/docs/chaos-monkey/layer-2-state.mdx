@@ -1,0 +1,465 @@
+---
+title: "Layer 2: State"
+description: Chaos tests for TiKV/PD — the distributed state store that holds all cluster data.
+sidebar:
+  order: 3
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+TiKV is the distributed key-value store that holds all Nauka state: organizations, VPCs, VMs, IPAM allocations, peerings. PD (Placement Driver) manages consensus via Raft. If the state store breaks, the control plane is blind — but existing VMs keep running.
+
+## Setup
+
+Same as Layer 1: 3-node cluster with VMs, verified baseline.
+
+---
+
+## CM-011: Kill TiKV on one node (quorum maintained)
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Stop TiKV on one node while 2 others are healthy |
+| **Blast radius** | One storage replica lost, cluster continues with 2/3 quorum |
+
+### Break
+
+```bash
+# On node-nbg:
+systemctl stop nauka-tikv
+```
+
+### Expected failure
+
+- TiKV on node-nbg stops responding
+- PD detects the store as "Disconnected" within 30 seconds
+
+### Expected resilience
+
+- **All reads and writes continue** — Raft quorum is 2/3, still met
+- `nauka org list`, `nauka vm create` work normally from any node
+- VMs on node-nbg keep running (they don't depend on local TiKV)
+- Cross-node networking unaffected (VXLAN is in the kernel, not TiKV)
+
+### Recovery
+
+```bash
+systemctl start nauka-tikv
+```
+
+### Expected recovery
+
+- TiKV rejoins the cluster, syncs missed writes from Raft log
+- PD marks the store as "Up" within 30 seconds
+- Recovery time: **10-30 seconds**
+
+---
+
+## CM-012: Kill PD leader
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Stop PD on the node that is currently the Raft leader |
+| **Blast radius** | Brief write unavailability during leader election |
+
+### Break
+
+```bash
+# Find the PD leader:
+curl -s http://[MESH_IPV6]:2379/pd/api/v1/leader | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])"
+
+# Kill PD on that node:
+systemctl stop nauka-pd
+```
+
+### Expected failure
+
+- PD leader is gone — remaining PD members start election
+- Writes may fail for 1-2 seconds during election
+- `nauka org create` may return "Leader not found" briefly
+
+### Expected resilience
+
+- Election completes within 2 seconds (Raft election timeout)
+- After new leader elected, all operations resume
+- TiKV continues serving reads during election
+- VMs and networking unaffected
+
+### Recovery
+
+```bash
+systemctl start nauka-pd
+```
+
+### Expected recovery
+
+- PD rejoins as follower, syncs from new leader
+- Recovery time: **2-5 seconds** (election) + **10 seconds** (rejoin)
+
+---
+
+## CM-013: Kill TiKV on 2 nodes (quorum lost)
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Stop TiKV on 2 out of 3 nodes |
+| **Blast radius** | Raft quorum lost — all writes fail cluster-wide |
+
+### Break
+
+```bash
+# On node-nbg AND node-fsn:
+systemctl stop nauka-tikv
+```
+
+### Expected failure
+
+- Only 1/3 TiKV nodes alive — **quorum lost**
+- All writes fail: `nauka org create` → "Leader not found"
+- All reads may fail or return stale data
+- `nauka vm create` fails (can't write to TiKV)
+
+### Expected resilience
+
+- **VMs keep running** — containers are kernel state, not TiKV state
+- **Networking keeps working** — bridges, VXLAN, FDB are kernel state
+- The Forge on node-hel continues reconciling local resources
+- WireGuard mesh fully operational
+
+### Recovery
+
+```bash
+# On both nodes:
+systemctl start nauka-tikv
+```
+
+### Expected recovery
+
+- Quorum restored as soon as 2 nodes are back
+- Missed writes are impossible (they were rejected)
+- Recovery time: **10-30 seconds** per node
+
+<Aside type="caution">
+With `max-replicas=1` (single-node bootstrap), killing the only TiKV means total data loss if the disk is also lost. Always scale to 3 nodes for production.
+</Aside>
+
+---
+
+## CM-014: Kill all PD members simultaneously
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Stop PD on all nodes |
+| **Blast radius** | TiKV has no metadata service — can't find regions/leaders |
+
+### Break
+
+```bash
+# On ALL nodes:
+systemctl stop nauka-pd
+```
+
+### Expected failure
+
+- TiKV can't reach PD — all region operations fail
+- No leader elections, no region splits, no scheduling
+- All Nauka CLI commands that touch TiKV fail
+
+### Expected resilience
+
+- **VMs and networking continue** (kernel state, independent of PD)
+- TiKV data is intact on disk (RocksDB files)
+
+### Recovery
+
+```bash
+# Start PD on all nodes:
+systemctl start nauka-pd
+```
+
+### Expected recovery
+
+- PD members re-form Raft group, elect leader
+- TiKV reconnects, regions find their leaders
+- Recovery time: **10-20 seconds**
+
+---
+
+## CM-015: Corrupt TiKV data directory
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Delete TiKV data on one node |
+| **Blast radius** | One replica's data lost, Raft replicates from others |
+
+### Break
+
+```bash
+# On node-nbg:
+systemctl stop nauka-tikv
+rm -rf /var/lib/nauka/tikv
+systemctl start nauka-tikv
+```
+
+### Expected failure
+
+- TiKV on node-nbg starts with empty data
+- PD detects a new empty store
+- Raft begins replicating data from the other 2 nodes
+
+### Expected resilience
+
+- Cluster continues operating (2/3 replicas still have all data)
+- Reads and writes work normally during re-replication
+
+### Recovery
+
+Automatic — Raft replication restores the missing data.
+
+### Expected recovery
+
+- Small dataset (< 100 MB): **seconds**
+- Large dataset: proportional to data size
+
+---
+
+## CM-016: Delete PD data directory
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Delete PD metadata on one node |
+| **Blast radius** | One PD member loses its Raft log and state |
+
+### Break
+
+```bash
+# On node-nbg (non-leader):
+systemctl stop nauka-pd
+rm -rf /var/lib/nauka/pd
+systemctl start nauka-pd
+```
+
+### Expected failure
+
+- PD on node-nbg starts fresh, rejoins as empty member
+- PD leader detects a new member, adds it to the Raft group
+
+### Expected resilience
+
+- Other PD members have full state
+- Leader continues operating
+
+### Recovery
+
+Automatic — PD member syncs from leader.
+
+### Expected recovery
+
+- Recovery time: **5-10 seconds**
+
+<Aside type="caution">
+Never delete PD data on the leader. Stop PD, wait for a new leader to be elected, then delete and rejoin.
+</Aside>
+
+---
+
+## CM-017: TiKV slow disk simulation
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Throttle I/O on TiKV's data directory |
+| **Blast radius** | Writes slow down, Raft may lag behind |
+
+### Break
+
+```bash
+# Simulate slow disk with cgroup I/O throttle:
+TIKV_PID=$(systemctl show nauka-tikv --property=MainPID --value)
+echo "$TIKV_PID" > /sys/fs/cgroup/system.slice/nauka-tikv.service/cgroup.procs
+echo "8:0 wbps=1048576" > /sys/fs/cgroup/system.slice/nauka-tikv.service/io.max  # 1MB/s write limit
+```
+
+### Expected failure
+
+- TiKV writes slow down dramatically
+- Raft log application lags
+- `nauka vm create` takes seconds instead of milliseconds
+
+### Expected resilience
+
+- Reads still work (from memory/cache)
+- Other nodes compensate (Raft leader may move to a faster node)
+- VMs continue running
+
+### Recovery
+
+```bash
+echo "" > /sys/fs/cgroup/system.slice/nauka-tikv.service/io.max
+```
+
+### Expected recovery
+
+- Immediate — TiKV catches up from Raft log
+- Recovery time: **seconds** (depends on backlog size)
+
+---
+
+## CM-018: Max-replicas mismatch
+
+| | |
+|---|---|
+| **Severity** | Critical |
+| **Action** | Set max-replicas higher than available stores |
+| **Blast radius** | Regions can't form quorum — writes fail |
+
+### Break
+
+```bash
+# On a 2-node cluster, set max-replicas=3:
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"max-replicas": 3}' \
+  http://[MESH_IPV6]:2379/pd/api/v1/config/replicate
+```
+
+### Expected failure
+
+- PD tries to place 3 replicas on 2 stores — impossible
+- New regions can't be fully replicated
+- Some writes may fail
+
+### Expected resilience
+
+- Existing regions with 2 replicas continue working
+- Nauka's `leave_with_mesh` auto-adjusts max-replicas (this is the bug we fixed in PR #21)
+
+### Recovery
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"max-replicas": 2}' \
+  http://[MESH_IPV6]:2379/pd/api/v1/config/replicate
+```
+
+### Expected recovery
+
+- PD stops trying to place impossible replicas
+- Recovery time: **immediate** (next scheduling round)
+
+---
+
+## CM-019: TiKV network partition (store isolated from PD)
+
+| | |
+|---|---|
+| **Severity** | High |
+| **Action** | Block TiKV traffic to PD on one node |
+| **Blast radius** | One store can't heartbeat to PD, marked offline |
+
+### Break
+
+```bash
+# On node-nbg, block PD port:
+iptables -A OUTPUT -p tcp --dport 2379 -j DROP
+```
+
+### Expected failure
+
+- TiKV on node-nbg can't reach PD
+- PD marks this store as "Disconnected" after 30 seconds
+- Regions with leader on this store lose their leader
+
+### Expected resilience
+
+- Other stores have replicas, PD schedules new leaders
+- WireGuard mesh works (different port)
+- VXLAN traffic works (different port)
+
+### Recovery
+
+```bash
+iptables -D OUTPUT -p tcp --dport 2379 -j DROP
+```
+
+### Expected recovery
+
+- TiKV reconnects to PD
+- Store marked "Up", regions rebalance
+- Recovery time: **30 seconds**
+
+---
+
+## CM-020: Concurrent writes during leader failover
+
+| | |
+|---|---|
+| **Severity** | Medium |
+| **Action** | Create VMs rapidly while killing the PD leader |
+| **Blast radius** | Some writes may fail during the 1-2 second election window |
+
+### Break
+
+```bash
+# In parallel:
+# Terminal 1: create VMs in a loop
+for i in $(seq 1 20); do
+  nauka vm create "stress-$i" --org acme --project backend --env prod \
+    --vpc net --subnet web --cpu 1 --memory 1024 --disk 10 --image ubuntu-24.04 &
+done
+
+# Terminal 2: kill PD leader mid-write
+sleep 2
+systemctl stop nauka-pd  # on the leader node
+```
+
+### Expected failure
+
+- Some VM creates fail with "Leader not found"
+- Other VM creates succeed (hit the new leader after election)
+- No duplicate VMs (IPAM allocation is atomic)
+
+### Expected resilience
+
+- VMs that were successfully created are correctly stored
+- IPAM allocations are consistent (no duplicate IPs)
+- The cluster state is not corrupted
+
+### Recovery
+
+```bash
+systemctl start nauka-pd
+# Retry failed VM creates:
+nauka vm create "stress-3" ...  # the ones that failed
+```
+
+### Expected recovery
+
+- PD rejoins, writes resume
+- Recovery time: **2-5 seconds**
+
+---
+
+## Results template
+
+```markdown
+## CM-0XX Results
+
+- **Date**: YYYY-MM-DD
+- **Cluster**: 3 nodes (nbg1, fsn1, hel1)
+- **Nauka version**: v0.x.x
+- **TiKV stores**: [count, statuses]
+- **PD members**: [count, leader]
+- **Action taken**: [exact command]
+- **Failure observed**: [what broke]
+- **Resilience confirmed**: [what kept working]
+- **Recovery method**: [automatic / manual command]
+- **Recovery time**: [measured]
+- **Data integrity**: [verified — no corruption / duplicates]
+- **Pass/Fail**: [did the behavior match expectations?]
+```
