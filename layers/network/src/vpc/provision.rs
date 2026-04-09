@@ -28,6 +28,11 @@ pub fn vxlan_name(vpc_id: &str) -> String {
     format!("nkx-{}", iface_hash(vpc_id))
 }
 
+/// VRF name for a VPC.
+pub fn vrf_name(vpc_id: &str) -> String {
+    format!("nkv-{}", iface_hash(vpc_id))
+}
+
 /// Check if a network interface exists.
 fn iface_exists(name: &str) -> bool {
     Command::new("ip")
@@ -67,12 +72,33 @@ pub fn cleanup_all() {
 ///
 /// Idempotent: skips creation if interfaces already exist.
 pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::Result<()> {
+    let vrf = vrf_name(vpc_id);
     let br = bridge_name(vpc_id);
     let vx = vxlan_name(vpc_id);
 
-    // 1. Create VXLAN interface (if needed)
+    // 1. Create VRF (isolated routing table for this VPC)
+    if !iface_exists(&vrf) {
+        tracing::info!(vpc_id, vrf = vrf.as_str(), table = vni, "creating VRF");
+        let status = Command::new("ip")
+            .args([
+                "link",
+                "add",
+                &vrf,
+                "type",
+                "vrf",
+                "table",
+                &vni.to_string(),
+            ])
+            .status()
+            .map_err(|e| anyhow::anyhow!("ip link add vrf failed: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("failed to create VRF {vrf}");
+        }
+        run_ip(&["link", "set", &vrf, "up"])?;
+    }
+
+    // 2. Create VXLAN interface (if needed)
     if !iface_exists(&vx) {
-        // Clean up any stale VXLAN with the same VNI but different name
         cleanup_stale_vxlan(vni);
 
         tracing::info!(vpc_id, vni, iface = vx.as_str(), "creating VXLAN interface");
@@ -98,7 +124,7 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
         }
     }
 
-    // 2. Create bridge (if needed)
+    // 3. Create bridge (if needed)
     if !iface_exists(&br) {
         tracing::info!(vpc_id, iface = br.as_str(), "creating bridge");
         let status = Command::new("ip")
@@ -110,20 +136,78 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
         }
     }
 
-    // 3. Attach VXLAN to bridge
+    // 4. Attach bridge to VRF (isolation)
+    run_ip(&["link", "set", &br, "master", &vrf])?;
+
+    // 5. Attach VXLAN to bridge
     run_ip(&["link", "set", &vx, "master", &br])?;
 
-    // 4. Bring both up
+    // 6. Bring everything up
     run_ip(&["link", "set", &vx, "up"])?;
     run_ip(&["link", "set", &br, "up"])?;
 
     tracing::info!(
         vpc_id,
+        vrf = vrf.as_str(),
         bridge = br.as_str(),
         vxlan = vx.as_str(),
         vni,
-        "VPC bridge ready"
+        "VPC network ready (VRF + bridge + VXLAN)"
     );
+    Ok(())
+}
+
+/// Ensure VPC peering route leak between two VRFs.
+///
+/// Adds routes in both directions so traffic can flow between the peered VPCs.
+/// Idempotent: `ip route replace` overwrites existing routes.
+pub fn ensure_peering_routes(
+    vpc_id: &str,
+    vpc_cidr: &str,
+    peer_vpc_id: &str,
+    peer_vpc_cidr: &str,
+) -> anyhow::Result<()> {
+    let vrf_a = vrf_name(vpc_id);
+    let vrf_b = vrf_name(peer_vpc_id);
+    let br_b = bridge_name(peer_vpc_id);
+    let br_a = bridge_name(vpc_id);
+
+    // In VRF-A: route to peer VPC CIDR via peer bridge
+    tracing::info!(
+        vpc_id,
+        peer_vpc_id,
+        route = format!("{peer_vpc_cidr} via {br_b}").as_str(),
+        "adding peering route"
+    );
+    run_ip(&[
+        "route",
+        "replace",
+        peer_vpc_cidr,
+        "dev",
+        &br_b,
+        "vrf",
+        &vrf_a,
+    ])?;
+
+    // In VRF-B: route to this VPC CIDR via this bridge
+    run_ip(&["route", "replace", vpc_cidr, "dev", &br_a, "vrf", &vrf_b])?;
+
+    Ok(())
+}
+
+/// Remove VPC peering routes.
+pub fn remove_peering_routes(
+    vpc_id: &str,
+    vpc_cidr: &str,
+    peer_vpc_id: &str,
+    peer_vpc_cidr: &str,
+) -> anyhow::Result<()> {
+    let vrf_a = vrf_name(vpc_id);
+    let vrf_b = vrf_name(peer_vpc_id);
+
+    let _ = run_ip(&["route", "del", peer_vpc_cidr, "vrf", &vrf_a]);
+    let _ = run_ip(&["route", "del", vpc_cidr, "vrf", &vrf_b]);
+
     Ok(())
 }
 
@@ -131,6 +215,7 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
 ///
 /// Idempotent: skips if interfaces don't exist.
 pub fn remove_bridge(vpc_id: &str) -> anyhow::Result<()> {
+    let vrf = vrf_name(vpc_id);
     let br = bridge_name(vpc_id);
     let vx = vxlan_name(vpc_id);
 
@@ -142,6 +227,11 @@ pub fn remove_bridge(vpc_id: &str) -> anyhow::Result<()> {
     if iface_exists(&br) {
         tracing::info!(vpc_id, iface = br.as_str(), "removing bridge");
         run_ip(&["link", "del", &br])?;
+    }
+
+    if iface_exists(&vrf) {
+        tracing::info!(vpc_id, iface = vrf.as_str(), "removing VRF");
+        run_ip(&["link", "del", &vrf])?;
     }
 
     Ok(())
@@ -403,5 +493,12 @@ mod tests {
         let name = vxlan_name("vpc-01knqczg3xabdsv9wmvgzdsswe");
         assert!(name.len() <= 15, "name too long: {name} ({})", name.len());
         assert!(name.starts_with("nkx-"));
+    }
+
+    #[test]
+    fn vrf_name_within_limit() {
+        let name = vrf_name("vpc-01knqczg3xabdsv9wmvgzdsswe");
+        assert!(name.len() <= 15, "name too long: {name} ({})", name.len());
+        assert!(name.starts_with("nkv-"));
     }
 }

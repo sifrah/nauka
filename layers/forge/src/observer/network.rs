@@ -26,3 +26,14 @@ pub fn list_bridges() -> Vec<String> {
         })
         .collect()
 }
+
+/// Check if a specific bridge interface exists.
+pub fn bridge_exists(name: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}

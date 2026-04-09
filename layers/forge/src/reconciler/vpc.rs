@@ -159,6 +159,43 @@ impl super::Reconciler for VpcReconciler {
             }
         }
 
+        // 8. VPC Peering — route leak between VRFs
+        let peering_store = nauka_network::vpc::peering::store::PeeringStore::new(ctx.db.clone());
+        for (vpc_id, _) in &needed_vpcs {
+            // Find peerings involving this VPC
+            let peerings = peering_store.list(Some(vpc_id)).await.unwrap_or_default();
+            for peering in &peerings {
+                // Only process active peerings
+                if !matches!(
+                    peering.state,
+                    nauka_network::vpc::peering::types::PeeringState::Active
+                ) {
+                    continue;
+                }
+
+                // Resolve both VPCs to get their CIDRs
+                let vpc_a = vpc_store.get(peering.vpc_id.as_str(), None).await?;
+                let vpc_b = vpc_store.get(peering.peer_vpc_id.as_str(), None).await?;
+
+                if let (Some(a), Some(b)) = (vpc_a, vpc_b) {
+                    // Only add routes if both bridges exist on this node
+                    let br_a = provision::bridge_name(a.meta.id.as_str());
+                    let br_b = provision::bridge_name(b.meta.id.as_str());
+
+                    if crate::observer::network::bridge_exists(&br_a)
+                        && crate::observer::network::bridge_exists(&br_b)
+                    {
+                        let _ = provision::ensure_peering_routes(
+                            a.meta.id.as_str(),
+                            &a.cidr,
+                            b.meta.id.as_str(),
+                            &b.cidr,
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(result)
     }
 }
