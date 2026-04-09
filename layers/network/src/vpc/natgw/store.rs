@@ -87,7 +87,11 @@ impl NatGwStore {
             if let Some(vpc) = vpc_store.get(vpc_ref, org_name).await? {
                 let idx_key = format!("{}/{}", vpc.meta.id, name_or_id);
                 if let Some(id) = self.db.get::<String>(NS_NATGW_IDX, &idx_key).await? {
-                    return self.db.get::<NatGw>(NS_NATGW, &id).await.map_err(Into::into);
+                    return self
+                        .db
+                        .get::<NatGw>(NS_NATGW, &id)
+                        .await
+                        .map_err(Into::into);
                 }
             }
         }

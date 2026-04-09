@@ -134,10 +134,24 @@ mod tests {
     use super::*;
 
     /// Test helper: create a hypervisor with minimal defaults.
-    fn make_hv(name: &str, region: &str, zone: &str, port: u16, endpoint: Option<String>, prefix: &Ipv6Addr) -> Result<HypervisorIdentity, nauka_core::error::NaukaError> {
+    fn make_hv(
+        name: &str,
+        region: &str,
+        zone: &str,
+        port: u16,
+        endpoint: Option<String>,
+        prefix: &Ipv6Addr,
+    ) -> Result<HypervisorIdentity, nauka_core::error::NaukaError> {
         create_hypervisor(&CreateHypervisorConfig {
-            name, region, zone, port, endpoint, fabric_interface: "", mesh_prefix: prefix,
-            ipv6_block: None, ipv4_public: None,
+            name,
+            region,
+            zone,
+            port,
+            endpoint,
+            fabric_interface: "",
+            mesh_prefix: prefix,
+            ipv6_block: None,
+            ipv4_public: None,
         })
     }
 
@@ -160,8 +174,7 @@ mod tests {
     #[test]
     fn create_node_has_valid_identity() {
         let (mesh, _) = create_mesh();
-        let node =
-            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
+        let node = make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
 
         assert_eq!(node.name, "node-1");
         assert_eq!(node.region, "eu");
@@ -184,15 +197,22 @@ mod tests {
     #[test]
     fn create_node_with_endpoint() {
         let (mesh, _) = create_mesh();
-        let node = make_hv("node-1", "eu", "fsn1", 51820, Some("46.224.166.60:51820".into()), &mesh.prefix).unwrap();
+        let node = make_hv(
+            "node-1",
+            "eu",
+            "fsn1",
+            51820,
+            Some("46.224.166.60:51820".into()),
+            &mesh.prefix,
+        )
+        .unwrap();
         assert_eq!(node.endpoint, Some("46.224.166.60:51820".into()));
     }
 
     #[test]
     fn node_identity_serde_roundtrip() {
         let (mesh, _) = create_mesh();
-        let node =
-            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
+        let node = make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
         let json = serde_json::to_string(&node).unwrap();
         let back: HypervisorIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "node-1");
@@ -230,8 +250,7 @@ mod tests {
     #[test]
     fn private_key_survives_serde() {
         let (mesh, _) = create_mesh();
-        let node =
-            make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
+        let node = make_hv("node-1", "eu", "fsn1", 51820, None, &mesh.prefix).unwrap();
         let original_private = node.wg_private_key.clone();
         assert!(!original_private.is_empty());
 

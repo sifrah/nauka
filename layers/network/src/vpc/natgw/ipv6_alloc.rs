@@ -48,7 +48,9 @@ fn derive_ipv6(prefix_str: &str, nat_gw_id: &str) -> anyhow::Result<Ipv6Addr> {
         u16::from_be_bytes([hash[6], hash[7]]),
     ];
 
-    let addr = Ipv6Addr::new(segs[0], segs[1], segs[2], segs[3], iid[0], iid[1], iid[2], iid[3]);
+    let addr = Ipv6Addr::new(
+        segs[0], segs[1], segs[2], segs[3], iid[0], iid[1], iid[2], iid[3],
+    );
 
     // Avoid ::1 (host) and :: (network)
     if addr == prefix || addr.segments()[4..] == [0, 0, 0, 1] {
@@ -100,11 +102,7 @@ pub async fn allocate(
 }
 
 /// Release the IPv6 address allocated to a NAT gateway.
-pub async fn release(
-    db: &ClusterDb,
-    hypervisor_id: &str,
-    nat_gw_id: &str,
-) -> anyhow::Result<()> {
+pub async fn release(db: &ClusterDb, hypervisor_id: &str, nat_gw_id: &str) -> anyhow::Result<()> {
     let mut allocs = load(db, hypervisor_id).await?;
     allocs.entries.retain(|a| a.nat_gw_id != nat_gw_id);
     save(db, hypervisor_id, &allocs).await
@@ -117,11 +115,7 @@ async fn load(db: &ClusterDb, hypervisor_id: &str) -> anyhow::Result<Ipv6Allocat
     }))
 }
 
-async fn save(
-    db: &ClusterDb,
-    hypervisor_id: &str,
-    allocs: &Ipv6Allocations,
-) -> anyhow::Result<()> {
+async fn save(db: &ClusterDb, hypervisor_id: &str, allocs: &Ipv6Allocations) -> anyhow::Result<()> {
     db.put(NS_NATGW_IPV6, hypervisor_id, allocs).await?;
     Ok(())
 }

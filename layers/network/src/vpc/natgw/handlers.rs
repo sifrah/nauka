@@ -6,41 +6,47 @@ use nauka_core::resource::*;
 use super::store::NatGwStore;
 
 pub fn resource_def() -> ResourceDef {
-    ResourceDef::build("nat-gateway", "Manage NAT gateways for outbound internet access")
-        .plural("nat-gateways")
-        .parent("org", "--org", "Organization")
-        .parent("vpc", "--vpc", "VPC")
-        .create()
-        .op(|op| {
-            op.with_arg(OperationArg::optional(
+    ResourceDef::build(
+        "nat-gateway",
+        "Manage NAT gateways for outbound internet access",
+    )
+    .plural("nat-gateways")
+    .parent("org", "--org", "Organization")
+    .parent("vpc", "--vpc", "VPC")
+    .create()
+    .op(|op| {
+        op.with_arg(OperationArg::optional(
+            "hypervisor",
+            FieldDef::string(
                 "hypervisor",
-                FieldDef::string("hypervisor", "Hypervisor to provision on (auto-selected if omitted)"),
-            ))
-            .with_example("nauka vpc nat-gateway create egress --vpc prod-net --org acme")
-        })
-        .list()
-        .get()
-        .delete()
-        .column("NAME", "name")
-        .column("VPC", "vpc_name")
-        .column("PUBLIC IPv6", "public_ipv6")
-        .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
-        .column("ID", "id")
-        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
-        .empty_message("No NAT gateways found.")
-        .detail_section(
-            None,
-            vec![
-                DetailField::new("Name", "name"),
-                DetailField::new("ID", "id"),
-                DetailField::new("VPC", "vpc_name"),
-                DetailField::new("Public IPv6", "public_ipv6"),
-                DetailField::new("Hypervisor", "hypervisor_id"),
-                DetailField::new("State", "state").with_format(DisplayFormat::Status),
-                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
-            ],
-        )
-        .done()
+                "Hypervisor to provision on (auto-selected if omitted)",
+            ),
+        ))
+        .with_example("nauka vpc nat-gateway create egress --vpc prod-net --org acme")
+    })
+    .list()
+    .get()
+    .delete()
+    .column("NAME", "name")
+    .column("VPC", "vpc_name")
+    .column("PUBLIC IPv6", "public_ipv6")
+    .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
+    .column("ID", "id")
+    .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
+    .empty_message("No NAT gateways found.")
+    .detail_section(
+        None,
+        vec![
+            DetailField::new("Name", "name"),
+            DetailField::new("ID", "id"),
+            DetailField::new("VPC", "vpc_name"),
+            DetailField::new("Public IPv6", "public_ipv6"),
+            DetailField::new("Hypervisor", "hypervisor_id"),
+            DetailField::new("State", "state").with_format(DisplayFormat::Status),
+            DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+        ],
+    )
+    .done()
 }
 
 pub fn handler() -> HandlerFn {

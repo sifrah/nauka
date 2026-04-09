@@ -67,10 +67,9 @@ impl super::Reconciler for NatGwReconciler {
                 }
                 Err(e) => {
                     result.failed += 1;
-                    result.errors.push(format!(
-                        "natgw '{}': {}",
-                        natgw.meta.name, e
-                    ));
+                    result
+                        .errors
+                        .push(format!("natgw '{}': {}", natgw.meta.name, e));
                     tracing::error!(
                         natgw = natgw.meta.name,
                         error = %e,

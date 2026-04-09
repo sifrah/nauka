@@ -216,7 +216,15 @@ pub fn setup_container_net(
         let gw_v6_str = gw_v6.to_string();
         nsenter(&["ip", "-6", "addr", "add", &vm_v6_cidr, "dev", "eth0"])?;
         // Route NAT64 prefix through the bridge gateway
-        nsenter(&["ip", "-6", "route", "add", "64:ff9b::/96", "via", &gw_v6_str])?;
+        nsenter(&[
+            "ip",
+            "-6",
+            "route",
+            "add",
+            "64:ff9b::/96",
+            "via",
+            &gw_v6_str,
+        ])?;
         // Default IPv6 route for direct IPv6 sites (NAT66 SNAT on host)
         nsenter(&["ip", "-6", "route", "add", "default", "via", &gw_v6_str])?;
     }

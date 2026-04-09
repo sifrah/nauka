@@ -227,11 +227,19 @@ mod tests {
 
         // Create state with no peers
         let (mesh, secret) = super::super::mesh::create_mesh();
-        let hv = super::super::mesh::create_hypervisor(&super::super::mesh::CreateHypervisorConfig {
-            name: "node-1", region: "eu", zone: "fsn1", port: 51820,
-            endpoint: None, fabric_interface: "", mesh_prefix: &mesh.prefix,
-            ipv6_block: None, ipv4_public: None,
-        }).unwrap();
+        let hv =
+            super::super::mesh::create_hypervisor(&super::super::mesh::CreateHypervisorConfig {
+                name: "node-1",
+                region: "eu",
+                zone: "fsn1",
+                port: 51820,
+                endpoint: None,
+                fabric_interface: "",
+                mesh_prefix: &mesh.prefix,
+                ipv6_block: None,
+                ipv4_public: None,
+            })
+            .unwrap();
         let state = FabricState {
             mesh,
             hypervisor: hv,
@@ -253,11 +261,19 @@ mod tests {
         let db = LayerDb::open_at(&dir.path().join("test.redb")).unwrap();
 
         let (mesh, secret) = super::super::mesh::create_mesh();
-        let hv = super::super::mesh::create_hypervisor(&super::super::mesh::CreateHypervisorConfig {
-            name: "node-1", region: "eu", zone: "fsn1", port: 51820,
-            endpoint: None, fabric_interface: "", mesh_prefix: &mesh.prefix,
-            ipv6_block: None, ipv4_public: None,
-        }).unwrap();
+        let hv =
+            super::super::mesh::create_hypervisor(&super::super::mesh::CreateHypervisorConfig {
+                name: "node-1",
+                region: "eu",
+                zone: "fsn1",
+                port: 51820,
+                endpoint: None,
+                fabric_interface: "",
+                mesh_prefix: &mesh.prefix,
+                ipv6_block: None,
+                ipv4_public: None,
+            })
+            .unwrap();
         let mut peers = super::super::peer::PeerList::new();
         peers
             .add(super::super::peer::Peer::new(

@@ -72,8 +72,15 @@ pub fn ensure_nat_gateway(
         let _ = run_cmd(
             "ip",
             &[
-                "route", "replace", "default", "via", &gw, "dev", public_interface,
-                "table", &table,
+                "route",
+                "replace",
+                "default",
+                "via",
+                &gw,
+                "dev",
+                public_interface,
+                "table",
+                &table,
             ],
         );
     }
@@ -81,7 +88,9 @@ pub fn ensure_nat_gateway(
     // ── 2b. ip rule: return traffic for VPC CIDR uses VPC routing table ──
     let _ = run_cmd(
         "ip",
-        &["rule", "add", "to", vpc_cidr, "lookup", &table, "priority", "32763"],
+        &[
+            "rule", "add", "to", vpc_cidr, "lookup", &table, "priority", "32763",
+        ],
     );
 
     // ── 3. NAT44 MASQUERADE for IPv4 outbound (fallback) ──
@@ -96,7 +105,14 @@ pub fn ensure_nat_gateway(
     );
     let _ = run_cmd(
         "jool",
-        &["instance", "add", &instance, "--netfilter", "--pool6", "64:ff9b::/96"],
+        &[
+            "instance",
+            "add",
+            &instance,
+            "--netfilter",
+            "--pool6",
+            "64:ff9b::/96",
+        ],
     );
 
     // ── 5. NAT66 SNAT: VM IPv6 traffic from this VPC exits with its NAT GW public IPv6 ──
@@ -164,9 +180,8 @@ fn detect_bridge_ipv4(bridge: &str) -> Option<String> {
 /// NAT44: MASQUERADE for IPv4 traffic from VPC bridges.
 fn ensure_nft_nat4(out_iface: &str) -> anyhow::Result<()> {
     let _ = run_nft("add table ip nauka_nat4");
-    let _ = run_nft(
-        "add chain ip nauka_nat4 postrouting { type nat hook postrouting priority 100 ; }",
-    );
+    let _ =
+        run_nft("add chain ip nauka_nat4 postrouting { type nat hook postrouting priority 100 ; }");
     let existing = Command::new("nft")
         .args(["list", "chain", "ip", "nauka_nat4", "postrouting"])
         .output()
@@ -188,9 +203,8 @@ fn ensure_nft_nat6(
     out_iface: &str,
 ) -> anyhow::Result<()> {
     let _ = run_nft("add table ip6 nauka_nat");
-    let _ = run_nft(
-        "add chain ip6 nauka_nat postrouting { type nat hook postrouting priority 100 ; }",
-    );
+    let _ =
+        run_nft("add chain ip6 nauka_nat postrouting { type nat hook postrouting priority 100 ; }");
     let ipv6_str = public_ipv6.to_string();
     let existing = Command::new("nft")
         .args(["list", "chain", "ip6", "nauka_nat", "postrouting"])
@@ -256,7 +270,14 @@ fn ensure_dns64(bridge: &str, vpc_cidr: &str) -> anyhow::Result<()> {
     // Add ULA IPv6 to bridge
     let _ = run_cmd(
         "ip",
-        &["-6", "addr", "add", &format!("{}/64", gw_ipv6), "dev", bridge],
+        &[
+            "-6",
+            "addr",
+            "add",
+            &format!("{}/64", gw_ipv6),
+            "dev",
+            bridge,
+        ],
     );
 
     // Clean old nauka DNS64 configs to avoid conflicts
