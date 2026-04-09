@@ -171,8 +171,10 @@ pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
 
         // Only show images available for this architecture
         if archs.iter().any(|a| a == arch_name) {
+            let size = image["sizes"][arch_name].as_u64().unwrap_or(0);
             entries.push(CatalogEntry {
                 name: name.to_string(),
+                size,
                 image_type: image_type.to_string(),
                 arch: arch_name.to_string(),
                 description: description.to_string(),
@@ -188,6 +190,7 @@ pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
 /// An image available in the remote registry.
 pub struct CatalogEntry {
     pub name: String,
+    pub size: u64,
     pub image_type: String,
     pub arch: String,
     pub description: String,
