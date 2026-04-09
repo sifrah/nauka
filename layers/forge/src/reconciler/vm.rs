@@ -96,7 +96,10 @@ impl super::Reconciler for VmReconciler {
                     {
                         tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to correct VM state");
                     } else {
-                        tracing::info!(vm_id = vm.meta.id.as_str(), "corrected state: pending -> running");
+                        tracing::info!(
+                            vm_id = vm.meta.id.as_str(),
+                            "corrected state: pending -> running"
+                        );
                         result.updated += 1;
                     }
                 }
