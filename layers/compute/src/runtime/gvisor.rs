@@ -141,17 +141,25 @@ impl Runtime for GVisorRuntime {
         // Ensure /run/sshd exists (required by sshd)
         let _ = std::fs::create_dir_all(rootfs_dir.join("run/sshd"));
 
-        // Write init script that starts sshd + keeps container alive
+        // Write init script that starts sshd + stays alive.
+        // tini runs as PID 1 (set in OCI args) and reaps zombies.
         std::fs::write(
             rootfs_dir.join("nauka-init.sh"),
-            "#!/bin/sh\nmkdir -p /run/sshd\n/usr/sbin/sshd -D &\nexec sleep infinity\n",
+            concat!(
+                "#!/bin/sh\n",
+                "mkdir -p /run/sshd\n",
+                "/usr/sbin/sshd\n",
+                "exec sleep infinity\n",
+            ),
         )?;
         let _ = Command::new("chmod")
             .args(["+x", rootfs_dir.join("nauka-init.sh").to_str().unwrap()])
             .status();
 
         // 3. Generate OCI config.json
-        let oci_config = generate_oci_config(config);
+        // Use tini as PID 1 if available in the image (reaps zombies)
+        let has_tini = rootfs_dir.join("usr/bin/tini").exists();
+        let oci_config = generate_oci_config(config, has_tini);
         std::fs::write(bundle_dir.join("config.json"), oci_config)?;
 
         // 4. Create and start the container
@@ -338,13 +346,19 @@ impl Runtime for GVisorRuntime {
 }
 
 /// Generate an OCI runtime spec (config.json) for the container.
-fn generate_oci_config(config: &VmRunConfig) -> String {
+fn generate_oci_config(config: &VmRunConfig, has_tini: bool) -> String {
+    let args: Vec<&str> = if has_tini {
+        vec!["/usr/bin/tini", "--", "/bin/sh", "/nauka-init.sh"]
+    } else {
+        vec!["/bin/sh", "/nauka-init.sh"]
+    };
+
     serde_json::json!({
         "ociVersion": "1.0.2",
         "process": {
             "terminal": false,
             "user": {"uid": 0, "gid": 0},
-            "args": ["/bin/sh", "/nauka-init.sh"],
+            "args": args,
             "cwd": "/",
             "env": [
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
