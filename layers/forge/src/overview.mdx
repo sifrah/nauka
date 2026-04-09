@@ -7,6 +7,8 @@ sidebar:
 
 The Forge runs as a daemon on each hypervisor node. Every 30 seconds, it reads the desired state from TiKV (VPCs, VMs), compares it with what actually exists on the node (bridges, processes), and applies the delta.
 
+A single reconciliation cycle takes **~0.16 seconds** thanks to overlay filesystem (no rootfs copy).
+
 ## How it works
 
 ```
@@ -25,28 +27,70 @@ TiKV (desired)          Forge             Kernel (actual)
      │◄───────────────────│                     │
 ```
 
+## Auto-start
+
+The Forge is installed and started automatically during `nauka hypervisor init` and `nauka hypervisor join`. No manual setup needed.
+
+```bash
+# Installed as a systemd service
+systemctl status nauka-forge
+```
+
 ## CLI
 
 ```bash
-# Start the daemon (runs forever)
-nauka forge run
-
-# Trigger a single reconciliation cycle
+# Trigger a single reconciliation cycle (for debugging)
 nauka forge reconcile
 
 # Check status
 nauka forge status
 ```
 
-## Reconcilers
+## What the Forge provisions
 
-The Forge runs reconcilers in dependency order:
+For each reconciliation cycle, the Forge:
 
-1. **VPC reconciler** — ensures VXLAN bridges exist for VPCs that have VMs on this node
-2. **VM reconciler** — ensures VMs assigned to this node are running as processes
+### VPC reconciler
+1. Creates VRF or policy routing rules (L3 isolation)
+2. Creates VXLAN interface (L2 tunnel)
+3. Creates Linux bridge (L2 switch)
+4. Sets gateway IP on the bridge
+5. Adds FDB entries for remote VMs (cross-node forwarding)
+6. Adds ARP proxy entries (no broadcast needed)
+7. Injects static ARP into container network namespaces
+8. Removes host route from main table (host isolation)
+9. Adds nftables rules (host isolation firewall)
+10. Applies VPC peering routes (route leak between VRFs)
+11. Removes orphaned bridges (VPC has no local VMs)
 
-Each reconciler is idempotent: creating a bridge that exists is a no-op, starting a VM that's running is a no-op.
+### VM reconciler
+1. Creates veth pair (container) or TAP (KVM)
+2. Attaches host-side veth to VPC bridge
+3. Starts container via crun (with overlay filesystem)
+4. Moves guest-side veth into container network namespace
+5. Configures IP, MAC, gateway inside the container
+6. Starts sshd inside the container
+7. Removes orphaned containers and network interfaces
 
-## Systemd service
+## Overlay filesystem
 
-The Forge installs as `nauka-forge.service`, started automatically during `nauka hypervisor init`. It restarts on failure with a 10-second backoff.
+VM rootfs is mounted instantly via Linux overlay filesystem:
+
+```
+/opt/nauka/images/ubuntu-24.04/           ← base image (read-only, shared)
+/var/lib/nauka/vms/{vm_id}/upper/         ← per-VM writes
+/var/lib/nauka/vms/{vm_id}/work/          ← overlay workdir
+/run/nauka/vms/{vm_id}/bundle/rootfs/     ← overlay mount point
+```
+
+No rootfs copy — 10 VMs share the same 117MB base image. Each VM only stores its delta.
+
+## Idempotency
+
+Every operation is idempotent:
+- Creating a bridge that exists → no-op
+- Starting a container that's running → no-op
+- Adding an FDB entry that exists → replaced
+- Removing a bridge that doesn't exist → no-op
+
+The Forge can crash and restart at any point without leaving inconsistent state.

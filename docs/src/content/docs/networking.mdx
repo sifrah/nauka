@@ -188,9 +188,9 @@ When the Forge detects an active peering, it adds routes on each node where both
 ip route replace 10.1.0.0/16 dev nkb-staging vrf vrf-prod
 ip route replace 10.0.0.0/16 dev nkb-prod vrf vrf-staging
 
-# Without VRF (VPS fallback):
-ip route replace 10.1.0.0/16 dev nkb-staging
-ip route replace 10.0.0.0/16 dev nkb-prod
+# With policy routing (VPS, no VRF module):
+ip route replace 10.1.0.0/16 dev nkb-staging table 100
+ip route replace 10.0.0.0/16 dev nkb-prod table 101
 ```
 
 VMs don't know about peering — they send everything to their gateway. The host routes cross-VPC traffic transparently.
@@ -199,6 +199,44 @@ Requirements:
 - CIDRs must not overlap (routing would be ambiguous)
 - Cannot peer a VPC with itself
 - Only one peering per VPC pair
+
+## Host isolation
+
+The hypervisor host **cannot access tenant VM networks**. This matches the AWS/GCP security model where the hypervisor is a black box.
+
+Two layers of isolation:
+
+**1. Routing isolation** — the subnet route is removed from the host's main routing table. It only exists in the VPC's policy routing table. The host kernel cannot route to VM IPs.
+
+**2. nftables firewall** — as defense in depth, nftables blocks host-originated traffic to VPC bridges:
+```
+nft add rule inet nauka output oifname nkb-{hash} drop
+```
+
+Bridge forwarding (VM-to-VM) is unaffected — only traffic originating from host processes is blocked.
+
+```
+Host → VM:        ✗ blocked (no route + nftables drop)
+VM → VM:          ✓ works (bridge forwarding via policy routing)
+Control plane:    ✓ works (crun exec, nsenter — not via network)
+```
+
+## Policy routing
+
+When the kernel doesn't support the `vrf` module, Nauka uses **policy-based routing** (`ip rule`) to achieve the same isolation. Each VPC bridge gets its own routing table:
+
+```
+ip rule add iif nkb-{hash} table {vni}
+ip rule add oif nkb-{hash} table {vni}
+ip route add {subnet_cidr} dev nkb-{hash} table {vni}
+```
+
+This means two VPCs with the same CIDR (`10.0.0.0/16`) can coexist on the same host without conflicting — each has its own routing table.
+
+| Kernel | Mechanism | Isolation |
+|---|---|---|
+| With `vrf` module | VRF device | Full L3 isolation |
+| Without `vrf` module | `ip rule` + routing tables | Full L3 isolation |
 
 ## Design decisions
 
@@ -212,4 +250,6 @@ Requirements:
 
 **Why VRF per VPC?** — VRFs provide L3 isolation between VPCs using separate routing tables. This is the same pattern used by Cisco EVPN, DigitalOcean Transit Gateway, and GCP VPC peering. Without VRF, bridges still provide L2 isolation (separate VXLAN VNIs), but a misconfigured route on the host could theoretically leak traffic between VPCs.
 
-**Why is VRF optional?** — Some cloud VPS kernels don't include the `vrf` module. Rather than failing the entire init, Nauka degrades gracefully: L2 isolation via VXLAN still works, peering uses global routes instead of VRF-scoped routes. On bare-metal with standard kernels, VRF provides full L3 isolation.
+**Why is VRF optional?** — Some cloud VPS kernels don't include the `vrf` module. Rather than failing, Nauka uses policy-based routing (`ip rule` + separate routing tables) as a universal fallback. Both mechanisms provide the same L3 isolation — the only difference is implementation. VRF is preferred when available (cleaner kernel integration).
+
+**Why host isolation?** — In a multi-tenant cloud, the hypervisor operator must not be able to access tenant VM networks. The subnet route is removed from the host's main routing table, and nftables blocks host-originated traffic to VPC bridges. VM management is done through the control plane (crun exec), not the network.
