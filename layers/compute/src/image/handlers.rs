@@ -18,9 +18,11 @@ pub fn resource_def() -> ResourceDef {
                 "name",
                 FieldDef::string("name", "Image name (e.g., ubuntu-24.04)"),
             ))
+            .with_output(OutputKind::Resource)
             .with_example("nauka vm image pull ubuntu-24.04")
         })
         .action("list", "List locally available images")
+        .op(|op| op.with_output(OutputKind::ResourceList))
         .action("delete", "Delete a local image")
         .op(|op| {
             op.with_arg(OperationArg::required(
