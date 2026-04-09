@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bridge_exists","list_bridges"]};
