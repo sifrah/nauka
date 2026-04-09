@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["network","process"]};
+window.SIDEBAR_ITEMS = {"mod":["health","network","process"]};
