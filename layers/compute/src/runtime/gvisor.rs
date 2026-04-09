@@ -1,12 +1,10 @@
-//! gVisor runtime — launches VMs as sandboxed containers (no KVM needed).
+//! Container runtime — launches VMs as OCI containers.
 //!
-//! Uses `runsc` (gVisor's OCI-compatible runtime) to run containers
-//! with a userspace kernel for strong isolation without hardware virtualization.
-//!
+//! Uses `crun` (or `runsc` if available and compatible) to run containers.
 //! Each VM gets:
 //! - A copy of the base rootfs image
-//! - An OCI config.json with network namespace
-//! - A `runsc` process managed by PID file
+//! - An OCI config.json with resource limits
+//! - A container process managed via the OCI lifecycle
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -14,13 +12,29 @@ use std::process::Command;
 use super::{RunningVm, Runtime, VmRunConfig};
 
 const VM_RUN_DIR: &str = "/run/nauka/vms";
-const RUNSC_ROOT: &str = "/run/runsc";
 const IMAGES_DIR: &str = "/opt/nauka/images";
 
 pub struct GVisorRuntime;
 
+/// Detect which OCI runtime binary to use.
+fn runtime_binary() -> &'static str {
+    // Prefer crun (works everywhere) over runsc (needs special kernel support)
+    if Command::new("crun")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return "crun";
+    }
+    "runsc"
+}
+
 impl Runtime for GVisorRuntime {
     fn start(&self, config: &VmRunConfig) -> anyhow::Result<u32> {
+        let rt = runtime_binary();
         let vm_dir = PathBuf::from(VM_RUN_DIR).join(&config.vm_id);
         let bundle_dir = vm_dir.join("bundle");
         let rootfs_dir = bundle_dir.join("rootfs");
@@ -38,7 +52,6 @@ impl Runtime for GVisorRuntime {
             );
         }
 
-        // Use cp -a for fast copy (preserves permissions)
         let status = Command::new("cp")
             .args(["-a", "--reflink=auto"])
             .arg(format!("{}/.", base_image.display()))
@@ -50,69 +63,62 @@ impl Runtime for GVisorRuntime {
         }
 
         // 2. Configure networking inside the rootfs
-        //    Write /etc/network/interfaces for the container
-        let interfaces = format!(
-            "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n  address {ip}\n  netmask 255.255.255.0\n  gateway {gw}\n",
-            ip = config.private_ip,
-            gw = config.gateway,
-        );
         let etc_net = rootfs_dir.join("etc/network");
         let _ = std::fs::create_dir_all(&etc_net);
-        std::fs::write(etc_net.join("interfaces"), &interfaces)?;
-
-        // Also write resolv.conf
+        std::fs::write(
+            etc_net.join("interfaces"),
+            format!(
+                "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n  address {}\n  netmask 255.255.255.0\n  gateway {}\n",
+                config.private_ip, config.gateway,
+            ),
+        )?;
         std::fs::write(
             rootfs_dir.join("etc/resolv.conf"),
             "nameserver 8.8.8.8\nnameserver 8.8.4.4\n",
         )?;
-
-        // Set hostname
         std::fs::write(rootfs_dir.join("etc/hostname"), &config.vm_name)?;
 
         // 3. Generate OCI config.json
         let oci_config = generate_oci_config(config);
         std::fs::write(bundle_dir.join("config.json"), oci_config)?;
 
-        // 4. Create and start the container with runsc
-        //    Delete any stale container first
-        let _ = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "delete", "--force", &config.vm_id])
+        // 4. Create and start the container
+        let _ = Command::new(rt)
+            .args(["delete", "--force", &config.vm_id])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
 
-        let create = Command::new("runsc")
+        let create = Command::new(rt)
             .args([
-                "--root",
-                RUNSC_ROOT,
                 "create",
                 "--bundle",
                 bundle_dir.to_str().unwrap(),
                 &config.vm_id,
             ])
             .output()
-            .map_err(|e| anyhow::anyhow!("runsc create failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{rt} create failed: {e}"))?;
 
         if !create.status.success() {
             let stderr = String::from_utf8_lossy(&create.stderr);
-            anyhow::bail!("runsc create failed: {stderr}");
+            anyhow::bail!("{rt} create failed: {stderr}");
         }
 
-        let start = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "start", &config.vm_id])
+        let start = Command::new(rt)
+            .args(["start", &config.vm_id])
             .output()
-            .map_err(|e| anyhow::anyhow!("runsc start failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{rt} start failed: {e}"))?;
 
         if !start.status.success() {
             let stderr = String::from_utf8_lossy(&start.stderr);
-            anyhow::bail!("runsc start failed: {stderr}");
+            anyhow::bail!("{rt} start failed: {stderr}");
         }
 
         // 5. Get the container PID
-        let state = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "state", &config.vm_id])
+        let state = Command::new(rt)
+            .args(["state", &config.vm_id])
             .output()
-            .map_err(|e| anyhow::anyhow!("runsc state failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("{rt} state failed: {e}"))?;
 
         let pid = if state.status.success() {
             let state_json: serde_json::Value =
@@ -132,31 +138,31 @@ impl Runtime for GVisorRuntime {
             pid,
             ip = config.private_ip.as_str(),
             image = config.image.as_str(),
-            "gVisor container started"
+            runtime = rt,
+            "container started"
         );
 
         Ok(pid)
     }
 
     fn stop(&self, vm_id: &str) -> anyhow::Result<()> {
-        tracing::info!(vm_id, "stopping gVisor container");
+        let rt = runtime_binary();
+        tracing::info!(vm_id, runtime = rt, "stopping container");
 
-        let _ = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "kill", vm_id, "SIGKILL"])
+        let _ = Command::new(rt)
+            .args(["kill", vm_id, "SIGKILL"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
 
-        // Wait briefly then delete
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        let _ = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "delete", "--force", vm_id])
+        let _ = Command::new(rt)
+            .args(["delete", "--force", vm_id])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
 
-        // Clean up VM directory
         let vm_dir = PathBuf::from(VM_RUN_DIR).join(vm_id);
         let _ = std::fs::remove_dir_all(&vm_dir);
 
@@ -164,10 +170,8 @@ impl Runtime for GVisorRuntime {
     }
 
     fn is_running(&self, vm_id: &str) -> Option<u32> {
-        let output = Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "state", vm_id])
-            .output()
-            .ok()?;
+        let rt = runtime_binary();
+        let output = Command::new(rt).args(["state", vm_id]).output().ok()?;
 
         if !output.status.success() {
             return None;
@@ -182,10 +186,8 @@ impl Runtime for GVisorRuntime {
     }
 
     fn list_running(&self) -> Vec<RunningVm> {
-        let output = match Command::new("runsc")
-            .args(["--root", RUNSC_ROOT, "list", "-format", "json"])
-            .output()
-        {
+        let rt = runtime_binary();
+        let output = match Command::new(rt).args(["list", "-f", "json"]).output() {
             Ok(o) if o.status.success() => o,
             _ => return vec![],
         };
