@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_arp_proxy","add_fdb_entry","bridge_name","cleanup_all","cleanup_stale_vxlan","ensure_bridge","ensure_host_isolation","ensure_peering_routes","iface_exists","iface_hash","list_active_bridges","list_fdb_entries","mac_from_ip","remove_bridge","remove_fdb_entry","remove_peering_routes","run_ip","vrf_name","vxlan_name"]};

@@ -229,73 +229,79 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#227 id=227 data-nosnippet>227</a>
 <a href=#228 id=228 data-nosnippet>228</a>        <span class="comment">// Create state with no peers
 <a href=#229 id=229 data-nosnippet>229</a>        </span><span class="kw">let </span>(mesh, secret) = <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_mesh();
-<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>hv = <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_hypervisor(
-<a href=#231 id=231 data-nosnippet>231</a>            <span class="string">"node-1"</span>,
-<a href=#232 id=232 data-nosnippet>232</a>            <span class="string">"eu"</span>,
-<a href=#233 id=233 data-nosnippet>233</a>            <span class="string">"fsn1"</span>,
-<a href=#234 id=234 data-nosnippet>234</a>            <span class="number">51820</span>,
-<a href=#235 id=235 data-nosnippet>235</a>            <span class="prelude-val">None</span>,
-<a href=#236 id=236 data-nosnippet>236</a>            <span class="string">""</span>,
-<a href=#237 id=237 data-nosnippet>237</a>            <span class="kw-2">&amp;</span>mesh.prefix,
-<a href=#238 id=238 data-nosnippet>238</a>        )
-<a href=#239 id=239 data-nosnippet>239</a>        .unwrap();
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>state = FabricState {
-<a href=#241 id=241 data-nosnippet>241</a>            mesh,
-<a href=#242 id=242 data-nosnippet>242</a>            hypervisor: hv,
-<a href=#243 id=243 data-nosnippet>243</a>            secret: secret.to_string(),
-<a href=#244 id=244 data-nosnippet>244</a>            peers: <span class="kw">super</span>::<span class="kw">super</span>::peer::PeerList::new(),
-<a href=#245 id=245 data-nosnippet>245</a>            network_mode: <span class="kw">super</span>::<span class="kw">super</span>::backend::NetworkMode::default(),
-<a href=#246 id=246 data-nosnippet>246</a>        };
-<a href=#247 id=247 data-nosnippet>247</a>        state.save(<span class="kw-2">&amp;</span>db).unwrap();
-<a href=#248 id=248 data-nosnippet>248</a>
-<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">let </span>result = check_once(<span class="kw-2">&amp;</span>db, <span class="number">300</span>).unwrap();
-<a href=#250 id=250 data-nosnippet>250</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">0</span>);
-<a href=#251 id=251 data-nosnippet>251</a>        <span class="macro">assert_eq!</span>(result.active, <span class="number">0</span>);
-<a href=#252 id=252 data-nosnippet>252</a>        <span class="macro">assert_eq!</span>(result.changed, <span class="number">0</span>);
-<a href=#253 id=253 data-nosnippet>253</a>    }
-<a href=#254 id=254 data-nosnippet>254</a>
-<a href=#255 id=255 data-nosnippet>255</a>    <span class="attr">#[test]
-<a href=#256 id=256 data-nosnippet>256</a>    </span><span class="kw">fn </span>check_once_with_peers_no_wg() {
-<a href=#257 id=257 data-nosnippet>257</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
-<a href=#258 id=258 data-nosnippet>258</a>        <span class="kw">let </span>db = LayerDb::open_at(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"test.redb"</span>)).unwrap();
-<a href=#259 id=259 data-nosnippet>259</a>
-<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span>(mesh, secret) = <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_mesh();
-<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>hv = <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_hypervisor(
-<a href=#262 id=262 data-nosnippet>262</a>            <span class="string">"node-1"</span>,
-<a href=#263 id=263 data-nosnippet>263</a>            <span class="string">"eu"</span>,
-<a href=#264 id=264 data-nosnippet>264</a>            <span class="string">"fsn1"</span>,
-<a href=#265 id=265 data-nosnippet>265</a>            <span class="number">51820</span>,
-<a href=#266 id=266 data-nosnippet>266</a>            <span class="prelude-val">None</span>,
-<a href=#267 id=267 data-nosnippet>267</a>            <span class="string">""</span>,
-<a href=#268 id=268 data-nosnippet>268</a>            <span class="kw-2">&amp;</span>mesh.prefix,
-<a href=#269 id=269 data-nosnippet>269</a>        )
-<a href=#270 id=270 data-nosnippet>270</a>        .unwrap();
-<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">let </span><span class="kw-2">mut </span>peers = <span class="kw">super</span>::<span class="kw">super</span>::peer::PeerList::new();
-<a href=#272 id=272 data-nosnippet>272</a>        peers
-<a href=#273 id=273 data-nosnippet>273</a>            .add(<span class="kw">super</span>::<span class="kw">super</span>::peer::Peer::new(
-<a href=#274 id=274 data-nosnippet>274</a>                <span class="string">"node-2"</span>.into(),
-<a href=#275 id=275 data-nosnippet>275</a>                <span class="string">"eu"</span>.into(),
-<a href=#276 id=276 data-nosnippet>276</a>                <span class="string">"nbg1"</span>.into(),
-<a href=#277 id=277 data-nosnippet>277</a>                <span class="string">"key-2"</span>.into(),
-<a href=#278 id=278 data-nosnippet>278</a>                <span class="number">51820</span>,
-<a href=#279 id=279 data-nosnippet>279</a>                <span class="prelude-val">None</span>,
-<a href=#280 id=280 data-nosnippet>280</a>                <span class="string">"fd01::2"</span>.parse().unwrap(),
-<a href=#281 id=281 data-nosnippet>281</a>            ))
-<a href=#282 id=282 data-nosnippet>282</a>            .unwrap();
-<a href=#283 id=283 data-nosnippet>283</a>
-<a href=#284 id=284 data-nosnippet>284</a>        <span class="kw">let </span>state = FabricState {
-<a href=#285 id=285 data-nosnippet>285</a>            mesh,
-<a href=#286 id=286 data-nosnippet>286</a>            hypervisor: hv,
-<a href=#287 id=287 data-nosnippet>287</a>            secret: secret.to_string(),
-<a href=#288 id=288 data-nosnippet>288</a>            peers,
-<a href=#289 id=289 data-nosnippet>289</a>            network_mode: <span class="kw">super</span>::<span class="kw">super</span>::backend::NetworkMode::default(),
-<a href=#290 id=290 data-nosnippet>290</a>        };
-<a href=#291 id=291 data-nosnippet>291</a>        state.save(<span class="kw-2">&amp;</span>db).unwrap();
-<a href=#292 id=292 data-nosnippet>292</a>
-<a href=#293 id=293 data-nosnippet>293</a>        <span class="comment">// WG not running → get_peer_handshakes fails → all unreachable, changed=0
-<a href=#294 id=294 data-nosnippet>294</a>        </span><span class="kw">let </span>result = check_once(<span class="kw-2">&amp;</span>db, <span class="number">300</span>).unwrap();
-<a href=#295 id=295 data-nosnippet>295</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">1</span>);
-<a href=#296 id=296 data-nosnippet>296</a>        <span class="macro">assert_eq!</span>(result.unreachable, <span class="number">1</span>);
-<a href=#297 id=297 data-nosnippet>297</a>    }
-<a href=#298 id=298 data-nosnippet>298</a>}
+<a href=#230 id=230 data-nosnippet>230</a>        <span class="kw">let </span>hv =
+<a href=#231 id=231 data-nosnippet>231</a>            <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_hypervisor(<span class="kw-2">&amp;</span><span class="kw">super</span>::<span class="kw">super</span>::mesh::CreateHypervisorConfig {
+<a href=#232 id=232 data-nosnippet>232</a>                name: <span class="string">"node-1"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>                region: <span class="string">"eu"</span>,
+<a href=#234 id=234 data-nosnippet>234</a>                zone: <span class="string">"fsn1"</span>,
+<a href=#235 id=235 data-nosnippet>235</a>                port: <span class="number">51820</span>,
+<a href=#236 id=236 data-nosnippet>236</a>                endpoint: <span class="prelude-val">None</span>,
+<a href=#237 id=237 data-nosnippet>237</a>                fabric_interface: <span class="string">""</span>,
+<a href=#238 id=238 data-nosnippet>238</a>                mesh_prefix: <span class="kw-2">&amp;</span>mesh.prefix,
+<a href=#239 id=239 data-nosnippet>239</a>                ipv6_block: <span class="prelude-val">None</span>,
+<a href=#240 id=240 data-nosnippet>240</a>                ipv4_public: <span class="prelude-val">None</span>,
+<a href=#241 id=241 data-nosnippet>241</a>            })
+<a href=#242 id=242 data-nosnippet>242</a>            .unwrap();
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="kw">let </span>state = FabricState {
+<a href=#244 id=244 data-nosnippet>244</a>            mesh,
+<a href=#245 id=245 data-nosnippet>245</a>            hypervisor: hv,
+<a href=#246 id=246 data-nosnippet>246</a>            secret: secret.to_string(),
+<a href=#247 id=247 data-nosnippet>247</a>            peers: <span class="kw">super</span>::<span class="kw">super</span>::peer::PeerList::new(),
+<a href=#248 id=248 data-nosnippet>248</a>            network_mode: <span class="kw">super</span>::<span class="kw">super</span>::backend::NetworkMode::default(),
+<a href=#249 id=249 data-nosnippet>249</a>        };
+<a href=#250 id=250 data-nosnippet>250</a>        state.save(<span class="kw-2">&amp;</span>db).unwrap();
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>        <span class="kw">let </span>result = check_once(<span class="kw-2">&amp;</span>db, <span class="number">300</span>).unwrap();
+<a href=#253 id=253 data-nosnippet>253</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">0</span>);
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="macro">assert_eq!</span>(result.active, <span class="number">0</span>);
+<a href=#255 id=255 data-nosnippet>255</a>        <span class="macro">assert_eq!</span>(result.changed, <span class="number">0</span>);
+<a href=#256 id=256 data-nosnippet>256</a>    }
+<a href=#257 id=257 data-nosnippet>257</a>
+<a href=#258 id=258 data-nosnippet>258</a>    <span class="attr">#[test]
+<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">fn </span>check_once_with_peers_no_wg() {
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="kw">let </span>dir = tempfile::tempdir().unwrap();
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>db = LayerDb::open_at(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"test.redb"</span>)).unwrap();
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">let </span>(mesh, secret) = <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_mesh();
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw">let </span>hv =
+<a href=#265 id=265 data-nosnippet>265</a>            <span class="kw">super</span>::<span class="kw">super</span>::mesh::create_hypervisor(<span class="kw-2">&amp;</span><span class="kw">super</span>::<span class="kw">super</span>::mesh::CreateHypervisorConfig {
+<a href=#266 id=266 data-nosnippet>266</a>                name: <span class="string">"node-1"</span>,
+<a href=#267 id=267 data-nosnippet>267</a>                region: <span class="string">"eu"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>                zone: <span class="string">"fsn1"</span>,
+<a href=#269 id=269 data-nosnippet>269</a>                port: <span class="number">51820</span>,
+<a href=#270 id=270 data-nosnippet>270</a>                endpoint: <span class="prelude-val">None</span>,
+<a href=#271 id=271 data-nosnippet>271</a>                fabric_interface: <span class="string">""</span>,
+<a href=#272 id=272 data-nosnippet>272</a>                mesh_prefix: <span class="kw-2">&amp;</span>mesh.prefix,
+<a href=#273 id=273 data-nosnippet>273</a>                ipv6_block: <span class="prelude-val">None</span>,
+<a href=#274 id=274 data-nosnippet>274</a>                ipv4_public: <span class="prelude-val">None</span>,
+<a href=#275 id=275 data-nosnippet>275</a>            })
+<a href=#276 id=276 data-nosnippet>276</a>            .unwrap();
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span><span class="kw-2">mut </span>peers = <span class="kw">super</span>::<span class="kw">super</span>::peer::PeerList::new();
+<a href=#278 id=278 data-nosnippet>278</a>        peers
+<a href=#279 id=279 data-nosnippet>279</a>            .add(<span class="kw">super</span>::<span class="kw">super</span>::peer::Peer::new(
+<a href=#280 id=280 data-nosnippet>280</a>                <span class="string">"node-2"</span>.into(),
+<a href=#281 id=281 data-nosnippet>281</a>                <span class="string">"eu"</span>.into(),
+<a href=#282 id=282 data-nosnippet>282</a>                <span class="string">"nbg1"</span>.into(),
+<a href=#283 id=283 data-nosnippet>283</a>                <span class="string">"key-2"</span>.into(),
+<a href=#284 id=284 data-nosnippet>284</a>                <span class="number">51820</span>,
+<a href=#285 id=285 data-nosnippet>285</a>                <span class="prelude-val">None</span>,
+<a href=#286 id=286 data-nosnippet>286</a>                <span class="string">"fd01::2"</span>.parse().unwrap(),
+<a href=#287 id=287 data-nosnippet>287</a>            ))
+<a href=#288 id=288 data-nosnippet>288</a>            .unwrap();
+<a href=#289 id=289 data-nosnippet>289</a>
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span>state = FabricState {
+<a href=#291 id=291 data-nosnippet>291</a>            mesh,
+<a href=#292 id=292 data-nosnippet>292</a>            hypervisor: hv,
+<a href=#293 id=293 data-nosnippet>293</a>            secret: secret.to_string(),
+<a href=#294 id=294 data-nosnippet>294</a>            peers,
+<a href=#295 id=295 data-nosnippet>295</a>            network_mode: <span class="kw">super</span>::<span class="kw">super</span>::backend::NetworkMode::default(),
+<a href=#296 id=296 data-nosnippet>296</a>        };
+<a href=#297 id=297 data-nosnippet>297</a>        state.save(<span class="kw-2">&amp;</span>db).unwrap();
+<a href=#298 id=298 data-nosnippet>298</a>
+<a href=#299 id=299 data-nosnippet>299</a>        <span class="comment">// WG not running → get_peer_handshakes fails → all unreachable, changed=0
+<a href=#300 id=300 data-nosnippet>300</a>        </span><span class="kw">let </span>result = check_once(<span class="kw-2">&amp;</span>db, <span class="number">300</span>).unwrap();
+<a href=#301 id=301 data-nosnippet>301</a>        <span class="macro">assert_eq!</span>(result.total, <span class="number">1</span>);
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="macro">assert_eq!</span>(result.unreachable, <span class="number">1</span>);
+<a href=#303 id=303 data-nosnippet>303</a>    }
+<a href=#304 id=304 data-nosnippet>304</a>}
 </code></pre></div></section></main></body></html>

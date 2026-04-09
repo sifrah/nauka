@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["controlplane","doctor","fabric","handlers","storage"]};
+window.SIDEBAR_ITEMS = {"mod":["compute_setup","controlplane","doctor","fabric","handlers","storage"]};

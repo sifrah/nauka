@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NS_VM","NS_VM_IDX","REG_VMS"],"fn":["add_id","load_ids","remove_id"],"struct":["VmStore"]};
