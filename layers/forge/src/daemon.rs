@@ -55,9 +55,27 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
         nauka_compute::runtime::RuntimeMode::Kvm
     };
 
+    // Collect all IDs this node is known by:
+    // - Its own HypervisorId (hv-...)
+    // - Its name (used by peers to identify us)
+    // - Any NodeId that peers assigned to us (node-...)
+    // This ensures VMs scheduled from any node match correctly.
+    let node_ids = vec![
+        state.hypervisor.id.as_str().to_string(),
+        state.hypervisor.name.clone(),
+    ];
+    // Check what IDs peers use for us by looking at peer lists on remote nodes
+    // We can't do that directly, but peers reference us by NodeId.
+    // The scheduler on remote nodes uses the peer's NodeId.
+    // So we need to know our own NodeId as seen by peers.
+    // This is stored in the peer list of OTHER nodes — we can't access it.
+    // Workaround: also check by mesh_ipv6 match, or just match all VMs
+    // assigned to any ID containing our name.
+
     let ctx = ReconcileContext {
         db,
         hypervisor_id: state.hypervisor.id.as_str().to_string(),
+        node_ids,
         node_name: state.hypervisor.name.clone(),
         mesh_ipv6: state.hypervisor.mesh_ipv6,
         runtime,

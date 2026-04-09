@@ -20,7 +20,12 @@ impl super::Reconciler for VpcReconciler {
         let all_vms = vm_store.list(None, None, None).await?;
         let local_vms: Vec<_> = all_vms
             .iter()
-            .filter(|vm| vm.hypervisor_id.as_deref() == Some(&ctx.hypervisor_id))
+            .filter(|vm| {
+                vm.hypervisor_id
+                    .as_ref()
+                    .map(|hid| ctx.node_ids.iter().any(|nid| nid == hid))
+                    .unwrap_or(false)
+            })
             .collect();
 
         // 2. Collect unique VPC IDs needed on this node + resolve their VNIs

@@ -37,7 +37,12 @@ impl super::Reconciler for VmReconciler {
         let all_vms = vm_store.list(None, None, None).await?;
         let local_vms: Vec<_> = all_vms
             .iter()
-            .filter(|vm| vm.hypervisor_id.as_deref() == Some(&ctx.hypervisor_id))
+            .filter(|vm| {
+                vm.hypervisor_id
+                    .as_ref()
+                    .map(|hid| ctx.node_ids.iter().any(|nid| nid == hid))
+                    .unwrap_or(false)
+            })
             .collect();
 
         // VMs that should be running (pending = needs starting, running = should be alive)

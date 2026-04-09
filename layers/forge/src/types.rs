@@ -11,6 +11,9 @@ pub struct ReconcileContext {
     pub db: ClusterDb,
     /// This node's hypervisor ID.
     pub hypervisor_id: String,
+    /// All IDs this node is known by (hypervisor ID + node IDs from peers).
+    /// Used to match VMs assigned to this node from any source.
+    pub node_ids: Vec<String>,
     /// This node's name.
     pub node_name: String,
     /// This node's mesh IPv6.

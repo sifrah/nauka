@@ -39,8 +39,11 @@ pub fn schedule(region: &str, zone: &str) -> anyhow::Result<String> {
 
     for peer in &state.peers.peers {
         if peer.status == fabric::peer::PeerStatus::Active {
+            // Use peer name as the identifier — each node knows its own name
+            // and the Forge matches VMs by name. Node IDs (node-...) are not
+            // known by the remote node itself, only by this node's peer list.
             candidates.push(Candidate {
-                id: peer.id.as_str().to_string(),
+                id: peer.name.clone(),
                 name: peer.name.clone(),
                 region: peer.region.clone(),
                 zone: peer.zone.clone(),
