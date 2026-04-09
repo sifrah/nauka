@@ -30,8 +30,10 @@ pub fn schedule(region: &str, zone: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("cluster not initialized"))?;
 
     // Build candidate list: self + peers
+    // Use node NAME as the canonical identifier — it's the only ID
+    // that all nodes can resolve (peers know each other by name).
     let mut candidates = vec![Candidate {
-        id: state.hypervisor.id.as_str().to_string(),
+        id: state.hypervisor.name.clone(),
         name: state.hypervisor.name.clone(),
         region: state.hypervisor.region.clone(),
         zone: state.hypervisor.zone.clone(),
