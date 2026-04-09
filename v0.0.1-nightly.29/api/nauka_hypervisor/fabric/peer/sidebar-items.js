@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PeerStatus"],"fn":["default_wg_port"],"struct":["Peer","PeerList"]};
