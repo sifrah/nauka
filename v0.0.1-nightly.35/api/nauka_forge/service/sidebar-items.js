@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FORGE_SERVICE","FORGE_UNIT_PATH"],"fn":["generate_unit","install_service","is_active","start_service","stop_service","uninstall_service"]};

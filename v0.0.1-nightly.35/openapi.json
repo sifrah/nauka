@@ -1,0 +1,126 @@
+{
+  "info": {
+    "title": "Nauka API",
+    "version": "2.0.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/admin/v1/hypervisors": {
+      "get": {
+        "operationId": "hypervisor_list",
+        "summary": "List resources",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/announce-listen": {
+      "post": {
+        "operationId": "hypervisor_announce-listen",
+        "summary": "Run the announce listener (internal)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/doctor": {
+      "post": {
+        "operationId": "hypervisor_doctor",
+        "summary": "Diagnose hypervisor health",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/drain": {
+      "post": {
+        "operationId": "hypervisor_drain",
+        "summary": "Evacuate all VMs before maintenance",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/enable": {
+      "post": {
+        "operationId": "hypervisor_enable",
+        "summary": "Enable for VM scheduling",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/init": {
+      "post": {
+        "operationId": "hypervisor_init",
+        "summary": "Initialize a new cluster",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/join": {
+      "post": {
+        "operationId": "hypervisor_join",
+        "summary": "Join an existing cluster",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/leave": {
+      "post": {
+        "operationId": "hypervisor_leave",
+        "summary": "Leave the cluster and uninstall services",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/peering": {
+      "post": {
+        "operationId": "hypervisor_peering",
+        "summary": "Start peering listener to accept new nodes",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/start": {
+      "post": {
+        "operationId": "hypervisor_start",
+        "summary": "Start hypervisor services (fabric, storage, tikv)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/status": {
+      "post": {
+        "operationId": "hypervisor_status",
+        "summary": "Show hypervisor status",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/stop": {
+      "post": {
+        "operationId": "hypervisor_stop",
+        "summary": "Stop hypervisor services (fabric, storage, tikv)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/{id}": {
+      "get": {
+        "operationId": "hypervisor_get",
+        "summary": "Get resource details",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    }
+  }
+}
