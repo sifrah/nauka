@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["GITHUB_REPO","IMAGES_DIR"],"fn":["delete","dir_size","exists","list","pull"]};
+window.SIDEBAR_ITEMS = {"constant":["GITHUB_REPO","IMAGES_DIR"],"fn":["catalog","delete","dir_size","exists","format_size","list","pull"],"struct":["CatalogEntry"]};
