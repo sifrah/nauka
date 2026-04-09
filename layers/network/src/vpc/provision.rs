@@ -76,9 +76,9 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
     let br = bridge_name(vpc_id);
     let vx = vxlan_name(vpc_id);
 
-    // 1. Create VRF (isolated routing table for this VPC)
-    //    Optional: some kernels (Hetzner Cloud VPS) don't support VRF module.
-    //    If VRF fails, we continue without it — bridges still work for same-VPC traffic.
+    // 1. Create VRF or set up policy-based routing for L3 isolation.
+    //    VRF is preferred (cleaner), but requires the `vrf` kernel module.
+    //    Policy routing (ip rule + routing tables) works on ALL kernels.
     let vrf_supported = if !iface_exists(&vrf) {
         let status = Command::new("ip")
             .args([
@@ -101,10 +101,7 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
             tracing::info!(vpc_id, vrf = vrf.as_str(), "VRF created");
             true
         } else {
-            tracing::warn!(
-                vpc_id,
-                "VRF not supported on this kernel — continuing without L3 isolation"
-            );
+            tracing::info!(vpc_id, table = vni, "using policy routing (no VRF module)");
             false
         }
     } else {
@@ -150,9 +147,15 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
         }
     }
 
-    // 4. Attach bridge to VRF (isolation) — only if VRF was created
+    // 4. Attach bridge to VRF or set up policy routing
     if vrf_supported {
         run_ip(&["link", "set", &br, "master", &vrf])?;
+    } else {
+        // Policy-based routing: use ip rule to isolate this bridge's traffic
+        // into its own routing table (same effect as VRF, works on all kernels)
+        let table = vni.to_string();
+        run_ip(&["rule", "add", "iif", &br, "table", &table])?;
+        run_ip(&["rule", "add", "oif", &br, "table", &table])?;
     }
 
     // 5. Attach VXLAN to bridge
@@ -180,13 +183,17 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
 pub fn ensure_peering_routes(
     vpc_id: &str,
     vpc_cidr: &str,
+    vpc_vni: u32,
     peer_vpc_id: &str,
     peer_vpc_cidr: &str,
+    peer_vpc_vni: u32,
 ) -> anyhow::Result<()> {
     let vrf_a = vrf_name(vpc_id);
     let vrf_b = vrf_name(peer_vpc_id);
     let br_b = bridge_name(peer_vpc_id);
     let br_a = bridge_name(vpc_id);
+    let vni_a = vpc_vni.to_string();
+    let vni_b = peer_vpc_vni.to_string();
 
     // In VRF-A: route to peer VPC CIDR via peer bridge
     tracing::info!(
@@ -195,7 +202,7 @@ pub fn ensure_peering_routes(
         route = format!("{peer_vpc_cidr} via {br_b}").as_str(),
         "adding peering route"
     );
-    // Try VRF-aware routes first, fall back to global routes
+    // Add routes in the correct routing context (VRF or policy routing table)
     if iface_exists(&vrf_a) {
         run_ip(&[
             "route",
@@ -207,13 +214,23 @@ pub fn ensure_peering_routes(
             &vrf_a,
         ])?;
     } else {
-        run_ip(&["route", "replace", peer_vpc_cidr, "dev", &br_b])?;
+        // Policy routing: add to the VPC's routing table (VNI as table ID)
+        // The ip rules we set up in ensure_bridge direct traffic to this table
+        run_ip(&[
+            "route",
+            "replace",
+            peer_vpc_cidr,
+            "dev",
+            &br_b,
+            "table",
+            &vni_a,
+        ])?;
     }
 
     if iface_exists(&vrf_b) {
         run_ip(&["route", "replace", vpc_cidr, "dev", &br_a, "vrf", &vrf_b])?;
     } else {
-        run_ip(&["route", "replace", vpc_cidr, "dev", &br_a])?;
+        run_ip(&["route", "replace", vpc_cidr, "dev", &br_a, "table", &vni_b])?;
     }
 
     Ok(())
@@ -250,6 +267,9 @@ pub fn remove_bridge(vpc_id: &str) -> anyhow::Result<()> {
 
     if iface_exists(&br) {
         tracing::info!(vpc_id, iface = br.as_str(), "removing bridge");
+        // Clean up policy routing rules (safe to run even if they don't exist)
+        let _ = run_ip(&["rule", "del", "iif", &br]);
+        let _ = run_ip(&["rule", "del", "oif", &br]);
         run_ip(&["link", "del", &br])?;
     }
 

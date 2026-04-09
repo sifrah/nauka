@@ -139,7 +139,7 @@ impl super::Reconciler for VpcReconciler {
         }
 
         // 7. Set gateway IP on bridges so containers can reach the gateway
-        for (vpc_id, _) in &needed_vpcs {
+        for (vpc_id, vni) in &needed_vpcs {
             let br = provision::bridge_name(vpc_id);
             // Look up the subnet gateway from any local VM in this VPC
             if let Some(local_vm) = local_vms.iter().find(|vm| vm.vpc_id.as_str() == *vpc_id) {
@@ -152,6 +152,22 @@ impl super::Reconciler for VpcReconciler {
                     let gw_cidr = format!("{}/24", subnet.gateway);
                     let _ = std::process::Command::new("ip")
                         .args(["addr", "replace", &gw_cidr, "dev", &br])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+
+                    // Add subnet route in the VPC's routing table (for policy routing)
+                    let table = vni.to_string();
+                    let _ = std::process::Command::new("ip")
+                        .args([
+                            "route",
+                            "replace",
+                            &subnet.cidr,
+                            "dev",
+                            &br,
+                            "table",
+                            &table,
+                        ])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
@@ -188,8 +204,10 @@ impl super::Reconciler for VpcReconciler {
                         let _ = provision::ensure_peering_routes(
                             a.meta.id.as_str(),
                             &a.cidr,
+                            a.vni,
                             b.meta.id.as_str(),
                             &b.cidr,
+                            b.vni,
                         );
                     }
                 }
