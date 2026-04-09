@@ -421,9 +421,11 @@ fn generate_oci_config(config: &VmRunConfig, has_tini: bool) -> String {
                     "period": 100000
                 },
                 "memory": {
-                    "limit": (config.memory_mb as i64) * 1024 * 1024
+                    "limit": (config.memory_mb as i64) * 1024 * 1024,
+                    "reservation": (config.memory_mb as i64) * 1024 * 1024 * 9 / 10
                 }
-            }
+            },
+            "oomScoreAdj": 500
         }
     })
     .to_string()

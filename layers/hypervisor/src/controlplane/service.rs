@@ -233,6 +233,7 @@ Environment=TIUP_HOME={TIUP_HOME}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1000000
+OOMScoreAdjust=-999
 
 [Install]
 WantedBy=multi-user.target
@@ -256,6 +257,7 @@ ExecStart={TIUP_HOME}/bin/tiup tikv --config={TIKV_CONF_PATH}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1000000
+OOMScoreAdjust=-999
 
 [Install]
 WantedBy=multi-user.target
