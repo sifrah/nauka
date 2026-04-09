@@ -82,6 +82,18 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
         cycle,
     };
 
+    // Ensure replication is configured correctly.
+    // On every cycle, check if max-replicas matches the number of active stores (capped at 3).
+    let pd_url = format!(
+        "http://[{}]:{}",
+        state.hypervisor.mesh_ipv6,
+        controlplane::PD_CLIENT_PORT
+    );
+    let active_stores = controlplane::service::count_active_stores(&pd_url);
+    if active_stores >= 3 {
+        let _ = controlplane::service::adjust_max_replicas(&pd_url, 3);
+    }
+
     tracing::debug!(
         cycle,
         node = ctx.node_name.as_str(),
