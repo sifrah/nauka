@@ -31,8 +31,15 @@ pub async fn pull(name: &str) -> anyhow::Result<u64> {
         return Ok(size);
     }
 
+    // Determine image type from runtime (container if gVisor, vm if KVM)
+    let image_type = if Path::new("/dev/kvm").exists() {
+        "vm"
+    } else {
+        "container"
+    };
+
     // Download from GitHub Releases
-    let asset_name = format!("{name}-{arch_name}.tar.gz");
+    let asset_name = format!("{name}-{image_type}-{arch_name}.tar.gz");
     let url = format!("https://github.com/{GITHUB_REPO}/releases/download/latest/{asset_name}");
 
     let tmp_file = format!("/tmp/nauka-image-{name}.tar.gz");
@@ -120,7 +127,7 @@ pub fn list() -> Vec<(String, u64)> {
     .collect()
 }
 
-/// List images available in the remote registry (GitHub Releases).
+/// List images available in the remote registry (from manifest.json).
 pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
     let arch = std::env::consts::ARCH;
     let arch_name = match arch {
@@ -129,33 +136,48 @@ pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
         _ => arch,
     };
 
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest");
+    let url = format!("https://github.com/{GITHUB_REPO}/releases/download/latest/manifest.json");
 
-    let client = reqwest::Client::builder().user_agent("nauka").build()?;
+    let client = reqwest::Client::builder()
+        .user_agent("nauka")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()?;
 
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("failed to fetch image catalog from registry");
     }
 
-    let release: serde_json::Value = resp.json().await?;
-    let assets = release["assets"]
+    let manifest: serde_json::Value = resp.json().await?;
+    let images = manifest["images"]
         .as_array()
-        .ok_or_else(|| anyhow::anyhow!("invalid registry response"))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid manifest format"))?;
 
-    let suffix = format!("-{arch_name}.tar.gz");
     let mut entries = Vec::new();
 
-    for asset in assets {
-        let filename = asset["name"].as_str().unwrap_or_default();
-        if let Some(name) = filename.strip_suffix(&suffix) {
-            let size = asset["size"].as_u64().unwrap_or(0);
-            let local = exists(name);
+    for image in images {
+        let name = image["name"].as_str().unwrap_or_default();
+        let image_type = image["type"].as_str().unwrap_or("container");
+        let description = image["description"].as_str().unwrap_or_default();
+        let logo = image["logo"].as_str().unwrap_or_default();
+        let archs = image["arch"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        // Only show images available for this architecture
+        if archs.iter().any(|a| a == arch_name) {
             entries.push(CatalogEntry {
                 name: name.to_string(),
+                image_type: image_type.to_string(),
                 arch: arch_name.to_string(),
-                size,
-                local,
+                description: description.to_string(),
+                logo: logo.to_string(),
+                local: exists(name),
             });
         }
     }
@@ -166,8 +188,10 @@ pub async fn catalog() -> anyhow::Result<Vec<CatalogEntry>> {
 /// An image available in the remote registry.
 pub struct CatalogEntry {
     pub name: String,
+    pub image_type: String,
     pub arch: String,
-    pub size: u64,
+    pub description: String,
+    pub logo: String,
     pub local: bool,
 }
 

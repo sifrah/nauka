@@ -33,6 +33,7 @@ pub fn resource_def() -> ResourceDef {
             ))
         })
         .column("NAME", "name")
+        .column("TYPE", "type")
         .column("SIZE", "size")
         .column("ARCH", "arch")
         .column("LOCAL", "local")
@@ -74,12 +75,18 @@ pub fn handler() -> HandlerFn {
                             "aarch64" => "arm64",
                             other => other,
                         };
+                        let image_type = if std::path::Path::new("/dev/kvm").exists() {
+                            "vm"
+                        } else {
+                            "container"
+                        };
                         let images = registry::list();
                         let items: Vec<serde_json::Value> = images
                             .iter()
                             .map(|(name, size)| {
                                 serde_json::json!({
                                     "name": name,
+                                    "type": image_type,
                                     "size": format_size(*size),
                                     "arch": arch,
                                     "local": "✓",
@@ -95,8 +102,8 @@ pub fn handler() -> HandlerFn {
                             .map(|e| {
                                 serde_json::json!({
                                     "name": e.name,
+                                    "type": e.image_type,
                                     "arch": e.arch,
-                                    "size": format_size(e.size),
                                     "local": if e.local { "✓" } else { "✗" },
                                 })
                             })
