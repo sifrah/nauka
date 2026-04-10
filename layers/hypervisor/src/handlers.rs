@@ -201,6 +201,8 @@ pub fn resource_def() -> ResourceDef {
             op.with_output(OutputKind::Message)
                 .with_example("nauka hypervisor backup-list")
         })
+        .action("cp-status", "Show control plane (PD/TiKV) cluster status")
+        .op(|op| op.with_output(OutputKind::Message))
         .action("doctor", "Diagnose hypervisor health")
         .action("announce-listen", "Run the announce listener (internal)")
         .op(|op| {
@@ -257,6 +259,7 @@ pub fn handler() -> HandlerFn {
                 "peering" => handle_peering(req).await,
                 "backup" => handle_backup().await,
                 "backup-list" => handle_backup_list().await,
+                "cp-status" => handle_cp_status().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
                 "drain" => Ok(OperationResponse::Message("drain: not yet implemented".into())),
@@ -960,6 +963,131 @@ async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
     }
 
     Ok(OperationResponse::Message(lines.join("\n")))
+}
+
+async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+    let state = fabric::state::FabricState::load(&db)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
+        })?;
+
+    let mesh_ipv6 = state.hypervisor.mesh_ipv6;
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, controlplane::PD_CLIENT_PORT);
+
+    // --- PD Members ---
+    let members_json = cp_api_get(&pd_url, "/pd/api/v1/members");
+    let health_json = cp_api_get(&pd_url, "/pd/api/v1/health");
+
+    // Build a set of healthy member IDs from the health endpoint
+    let healthy_ids: std::collections::HashSet<u64> = health_json
+        .as_ref()
+        .ok()
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|h| h["member_id"].as_u64()).collect())
+        .unwrap_or_default();
+
+    let leader_id = members_json
+        .as_ref()
+        .ok()
+        .and_then(|v| v["leader"]["member_id"].as_u64())
+        .unwrap_or(0);
+
+    println!("\n  PD Members");
+    println!(
+        "  {:<16} {:<42} {:<10} ROLE",
+        "NAME", "CLIENT URL", "HEALTH"
+    );
+    println!("  {}", "-".repeat(78));
+
+    if let Ok(ref val) = members_json {
+        if let Some(members) = val["members"].as_array() {
+            for m in members {
+                let name = m["name"].as_str().unwrap_or("-");
+                let client_urls = m["client_urls"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("-");
+                let mid = m["member_id"].as_u64().unwrap_or(0);
+                let health = if healthy_ids.contains(&mid) {
+                    "healthy"
+                } else {
+                    "unhealthy"
+                };
+                let role = if mid == leader_id {
+                    "leader"
+                } else {
+                    "follower"
+                };
+                println!("  {:<16} {:<42} {:<10} {}", name, client_urls, health, role);
+            }
+        }
+    } else {
+        println!("  (PD API unreachable)");
+    }
+
+    // --- TiKV Stores ---
+    let stores_json = cp_api_get(&pd_url, "/pd/api/v1/stores");
+
+    println!("\n  TiKV Stores");
+    println!("  {:<8} {:<42} {:<12} CAPACITY", "ID", "ADDRESS", "STATE");
+    println!("  {}", "-".repeat(72));
+
+    if let Ok(ref val) = stores_json {
+        if let Some(stores) = val["stores"].as_array() {
+            for s in stores {
+                let id = s["store"]["id"].as_u64().unwrap_or(0);
+                let addr = s["store"]["address"].as_str().unwrap_or("-");
+                let state_name = s["store"]["state_name"].as_str().unwrap_or("-");
+                let capacity = s["status"]["capacity"].as_str().unwrap_or("-");
+                println!("  {:<8} {:<42} {:<12} {}", id, addr, state_name, capacity);
+            }
+        }
+    } else {
+        println!("  (PD API unreachable)");
+    }
+
+    // --- Region Stats ---
+    let regions_json = cp_api_get(&pd_url, "/pd/api/v1/stats/region");
+
+    println!("\n  Region Stats");
+    println!("  {}", "-".repeat(40));
+
+    if let Ok(ref val) = regions_json {
+        let count = val["count"].as_u64().unwrap_or(0);
+        let empty = val["empty_count"].as_u64().unwrap_or(0);
+        let miss_peer = val["miss_peer_region_count"].as_u64().unwrap_or(0);
+        let extra_peer = val["extra_peer_region_count"].as_u64().unwrap_or(0);
+        let healthy = count.saturating_sub(miss_peer).saturating_sub(extra_peer);
+
+        println!("  Total:      {count}");
+        println!("  Healthy:    {healthy}");
+        println!("  Empty:      {empty}");
+        println!("  Miss-peer:  {miss_peer}");
+        println!("  Extra-peer: {extra_peer}");
+    } else {
+        println!("  (PD API unreachable)");
+    }
+
+    println!();
+    Ok(OperationResponse::None)
+}
+
+/// Query PD HTTP API (used by cp-status handler).
+fn cp_api_get(pd_url: &str, path: &str) -> Result<serde_json::Value, anyhow::Error> {
+    let url = format!("{pd_url}{path}");
+    let output = std::process::Command::new("curl")
+        .args(["-sf", "--max-time", "5", &url])
+        .output()
+        .map_err(|e| anyhow::anyhow!("curl failed: {e}"))?;
+
+    if !output.status.success() {
+        anyhow::bail!("PD API request failed: {path}");
+    }
+
+    serde_json::from_slice(&output.stdout).map_err(|e| anyhow::anyhow!("PD API parse failed: {e}"))
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
