@@ -34,9 +34,7 @@ fn ensure_tini_cached() -> bool {
         .map(|s| s.success())
         .unwrap_or(false);
     if ok {
-        let _ = Command::new("chmod")
-            .args(["+x", TINI_CACHE])
-            .status();
+        let _ = Command::new("chmod").args(["+x", TINI_CACHE]).status();
     }
     ok
 }

@@ -208,12 +208,7 @@ pub fn flush_stale_nat_rules(active_natgws: &[&super::types::NatGw]) {
     flush_stale_rules_in_chain("ip6", "nauka_nat", "postrouting", &active_bridges);
 }
 
-fn flush_stale_rules_in_chain(
-    family: &str,
-    table: &str,
-    chain: &str,
-    active_bridges: &[String],
-) {
+fn flush_stale_rules_in_chain(family: &str, table: &str, chain: &str, active_bridges: &[String]) {
     let output = Command::new("nft")
         .args(["-a", "list", "chain", family, table, chain])
         .output();
@@ -228,13 +223,20 @@ fn flush_stale_rules_in_chain(
             continue;
         }
         // Check if this rule references a bridge NOT in the active set
-        let is_active = active_bridges.iter().any(|br| trimmed.contains(br.as_str()));
+        let is_active = active_bridges
+            .iter()
+            .any(|br| trimmed.contains(br.as_str()));
         if !is_active {
             if let Some(handle) = trimmed.rsplit("# handle ").next() {
                 if let Ok(_h) = handle.trim().parse::<u64>() {
                     let _ = Command::new("nft")
                         .args([
-                            "delete", "rule", family, table, chain, "handle",
+                            "delete",
+                            "rule",
+                            family,
+                            table,
+                            chain,
+                            "handle",
                             handle.trim(),
                         ])
                         .stdout(std::process::Stdio::null())
