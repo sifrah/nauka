@@ -1318,10 +1318,10 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     match registry {
         Ok(reg) => {
             if let Some(config) = reg.default_region() {
-                if let Err(e) = controlplane::backup::backup_pd(config) {
+                if let Err(e) = controlplane::backup::backup_pd(config, false) {
                     tracing::warn!("PD backup failed (non-fatal): {e}");
                 }
-                if let Err(e) = controlplane::backup::backup_tikv(config) {
+                if let Err(e) = controlplane::backup::backup_tikv(config, false) {
                     tracing::warn!("TiKV backup failed (non-fatal): {e}");
                 }
             } else {
