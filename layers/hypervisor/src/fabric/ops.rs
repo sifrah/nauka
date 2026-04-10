@@ -535,6 +535,15 @@ pub fn start(db: &LayerDb) -> Result<(), NaukaError> {
         })?;
 
     let backend = super::backend::create_backend(state.network_mode);
+
+    // If the interface is missing (e.g., `ip link del nauka0`), stop the
+    // service (which may think it's still active) and restart it from config.
+    if !backend.is_up() {
+        tracing::info!("interface missing — recreating from saved state");
+        let _ = backend.stop(); // clear stale "active (exited)" state
+        return backend.start();
+    }
+
     if backend.is_active() {
         return Ok(()); // already running, idempotent
     }
