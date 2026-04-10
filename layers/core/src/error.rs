@@ -44,6 +44,7 @@ pub enum ErrorCode {
     PreconditionFailed,
     AmbiguousName,
     RateLimited,
+    HasDependents,
 
     // ── Server errors (5xx) ──
     InternalError,
@@ -69,6 +70,7 @@ impl ErrorCode {
             Self::PreconditionFailed => 412,
             Self::AmbiguousName => 400,
             Self::RateLimited => 429,
+            Self::HasDependents => 422,
             Self::InternalError => 500,
             Self::NotImplemented => 501,
             Self::DaemonUnreachable => 503,
@@ -108,6 +110,7 @@ impl ErrorCode {
             Self::PreconditionFailed => "PRECONDITION_FAILED",
             Self::AmbiguousName => "AMBIGUOUS_NAME",
             Self::RateLimited => "RATE_LIMITED",
+            Self::HasDependents => "HAS_DEPENDENTS",
             Self::InternalError => "INTERNAL_ERROR",
             Self::NotImplemented => "NOT_IMPLEMENTED",
             Self::DaemonUnreachable => "DAEMON_UNREACHABLE",
@@ -257,6 +260,12 @@ impl NaukaError {
         Self::new(ErrorCode::PreconditionFailed, message)
     }
 
+    pub fn has_dependents(kind: &str, name: &str, message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::HasDependents, message)
+            .with_context("resource_kind", kind)
+            .with_context("resource_name", name)
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InternalError, message)
     }
@@ -373,6 +382,7 @@ mod tests {
         assert_eq!(ErrorCode::ValidationError.http_status(), 400);
         assert_eq!(ErrorCode::PermissionDenied.http_status(), 403);
         assert_eq!(ErrorCode::RateLimited.http_status(), 429);
+        assert_eq!(ErrorCode::HasDependents.http_status(), 422);
         assert_eq!(ErrorCode::InternalError.http_status(), 500);
         assert_eq!(ErrorCode::NotImplemented.http_status(), 501);
         assert_eq!(ErrorCode::DaemonUnreachable.http_status(), 503);
@@ -387,6 +397,7 @@ mod tests {
         assert!(ErrorCode::DaemonUnreachable.is_retryable());
         assert!(!ErrorCode::ResourceNotFound.is_retryable());
         assert!(!ErrorCode::ValidationError.is_retryable());
+        assert!(!ErrorCode::HasDependents.is_retryable());
         assert!(!ErrorCode::InternalError.is_retryable());
     }
 
@@ -479,6 +490,14 @@ mod tests {
         assert_eq!(err.code, ErrorCode::AmbiguousName);
         assert!(err.message.contains("vpc-01AAA"));
         assert!(err.message.contains("disambiguate"));
+    }
+
+    #[test]
+    fn has_dependents() {
+        let err = NaukaError::has_dependents("vpc", "web", "vpc 'web' has 2 subnet(s). Delete them first.");
+        assert_eq!(err.code, ErrorCode::HasDependents);
+        assert_eq!(err.http_status(), 422);
+        assert!(!err.is_retryable());
     }
 
     #[test]

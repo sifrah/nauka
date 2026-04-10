@@ -132,6 +132,17 @@ mod tests {
     }
 
     #[test]
+    fn api_error_has_dependents() {
+        let err = ApiError(NaukaError::has_dependents(
+            "vpc",
+            "web",
+            "vpc 'web' has 2 subnet(s). Delete them first.",
+        ));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
     fn api_error_internal() {
         let err = ApiError(NaukaError::internal("oops"));
         let response = err.into_response();

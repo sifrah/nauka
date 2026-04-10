@@ -260,6 +260,43 @@ fn build_base_path(prefix: &str, plural: &str, parents: &[crate::resource::Paren
     format!("{path}/{plural}")
 }
 
+/// Classify an anyhow::Error into a properly-typed NaukaError.
+///
+/// First tries to downcast to NaukaError (preserving the original code).
+/// Falls back to message-based classification so that handler errors
+/// produced via `anyhow::bail!` get the correct HTTP status.
+fn classify_anyhow(err: anyhow::Error) -> NaukaError {
+    // If the handler already returned a typed NaukaError, use it directly.
+    if let Some(nauka_err) = err.downcast_ref::<NaukaError>() {
+        return nauka_err.clone();
+    }
+
+    let msg = err.to_string();
+
+    // "already exists" → 409
+    if msg.contains("already exists") {
+        return NaukaError::new(crate::error::ErrorCode::ResourceAlreadyExists, msg);
+    }
+
+    // "not found" → 404
+    if msg.contains("not found") {
+        return NaukaError::new(crate::error::ErrorCode::ResourceNotFound, msg);
+    }
+
+    // "has N …. Delete them first" → 422
+    if msg.contains("Delete them first") {
+        return NaukaError::new(crate::error::ErrorCode::HasDependents, msg);
+    }
+
+    // CIDR / validation errors → 400
+    if msg.contains("CIDR ") || msg.contains("CIDRs ") || msg.contains("must be") {
+        return NaukaError::validation(msg);
+    }
+
+    // Default: 500
+    NaukaError::internal(msg)
+}
+
 /// Handle an operation with scope values pre-populated.
 async fn handle_scoped(
     reg: &ResourceRegistration,
@@ -286,7 +323,7 @@ async fn handle_scoped(
 
     let response = (reg.handler)(request)
         .await
-        .map_err(|e: anyhow::Error| ApiError(NaukaError::internal(e.to_string())))?;
+        .map_err(|e: anyhow::Error| ApiError(classify_anyhow(e)))?;
 
     match response {
         OperationResponse::Resource(v) => {
@@ -636,5 +673,72 @@ mod tests {
         };
         let json = serde_json::to_string(&ri).unwrap();
         assert!(json.contains("GET"));
+    }
+
+    // ── classify_anyhow tests ──
+
+    #[test]
+    fn classify_already_exists() {
+        let err = anyhow::anyhow!("org 'acme' already exists");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ResourceAlreadyExists);
+        assert_eq!(classified.http_status(), 409);
+    }
+
+    #[test]
+    fn classify_not_found() {
+        let err = anyhow::anyhow!("vpc 'web' not found");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ResourceNotFound);
+        assert_eq!(classified.http_status(), 404);
+    }
+
+    #[test]
+    fn classify_has_dependents() {
+        let err = anyhow::anyhow!("vpc 'web' has 2 subnet(s). Delete them first.");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::HasDependents);
+        assert_eq!(classified.http_status(), 422);
+    }
+
+    #[test]
+    fn classify_cidr_validation() {
+        let err = anyhow::anyhow!("CIDR must be a private range (10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_cidr_overlap() {
+        let err = anyhow::anyhow!("VPC CIDRs overlap: 10.0.0.0/16 and 10.0.0.0/24");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_must_be_validation() {
+        let err = anyhow::anyhow!("vm must be stopped or pending to delete (current state: running)");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_downcast_nauka_error() {
+        let nauka_err = NaukaError::not_found("vpc", "web");
+        let err = anyhow::Error::new(nauka_err);
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ResourceNotFound);
+        assert_eq!(classified.http_status(), 404);
+    }
+
+    #[test]
+    fn classify_unknown_defaults_to_500() {
+        let err = anyhow::anyhow!("something unexpected happened");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::InternalError);
+        assert_eq!(classified.http_status(), 500);
     }
 }
