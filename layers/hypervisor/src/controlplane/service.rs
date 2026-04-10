@@ -107,6 +107,102 @@ pub fn ensure_installed() -> Result<(), NaukaError> {
     Ok(())
 }
 
+/// Install specific versions of PD and TiKV via TiUP.
+///
+/// Runs `tiup install pd:VERSION tikv:VERSION` to fetch the requested
+/// component versions. TiUP keeps old versions around, so the upgrade
+/// is non-destructive — rolling back to the previous version only
+/// requires restarting with the old `tiup pd`/`tiup tikv` invocation.
+pub fn install_version(pd_version: &str, tikv_version: &str) -> Result<(), NaukaError> {
+    let output = Command::new(format!("{TIUP_HOME}/bin/tiup"))
+        .args([
+            "install",
+            &format!("pd:{pd_version}"),
+            &format!("tikv:{tikv_version}"),
+        ])
+        .env("TIUP_HOME", TIUP_HOME)
+        .output()
+        .map_err(|e| NaukaError::internal(format!("tiup install failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "tiup install pd:{pd_version} tikv:{tikv_version} failed: {stderr}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Regenerate and rewrite the systemd unit files so they launch
+/// the currently installed component versions.
+///
+/// TiUP selects the latest installed version by default, so we just
+/// rewrite the units and daemon-reload.
+pub fn regenerate_units(has_pd: bool) -> Result<(), NaukaError> {
+    if has_pd {
+        // Preserve join mode if the unit already exists in join mode
+        let existing = std::fs::read_to_string(PD_UNIT_PATH).unwrap_or_default();
+        let join_url = if existing.contains("--join=") {
+            existing
+                .lines()
+                .find(|l| l.contains("--join="))
+                .and_then(|l| l.split("--join=").nth(1))
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+        std::fs::write(
+            PD_UNIT_PATH,
+            generate_pd_unit(join_url.as_deref()),
+        )
+        .map_err(NaukaError::from)?;
+    }
+
+    std::fs::write(TIKV_UNIT_PATH, generate_tikv_unit()).map_err(NaukaError::from)?;
+    run_systemctl(&["daemon-reload"])?;
+
+    Ok(())
+}
+
+/// Check if this node runs PD (has a PD systemd unit installed).
+pub fn has_pd_unit() -> bool {
+    Path::new(PD_UNIT_PATH).exists()
+}
+
+/// Wait for this node's TiKV store to reach "Up" state in PD.
+/// Polls every 5s, up to `timeout_secs`.
+pub fn wait_store_up(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), NaukaError> {
+    let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let stores_url = format!("{pd_url}/pd/api/v1/stores");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    while std::time::Instant::now() < deadline {
+        if let Ok(output) = Command::new("curl")
+            .args(["-sf", "--max-time", "5", &stores_url])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(stores) = body["stores"].as_array() {
+                        let up = stores.iter().any(|s| {
+                            s["store"]["address"].as_str() == Some(our_addr.as_str())
+                                && s["store"]["state_name"].as_str() == Some("Up")
+                        });
+                        if up {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    Err(NaukaError::timeout("TiKV store Up", timeout_secs))
+}
+
 // ═══════════════════════════════════════════════════
 // Config generation
 // ═══════════════════════════════════════════════════

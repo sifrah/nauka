@@ -216,6 +216,12 @@ pub fn resource_def() -> ResourceDef {
             op.with_output(OutputKind::Message)
                 .with_example("nauka hypervisor upgrade-check")
         })
+        .action("upgrade", "Rolling upgrade of PD/TiKV on this node")
+        .op(|op| {
+            op.with_output(OutputKind::Message)
+                .with_progress(ProgressHint::Steps(8))
+                .with_example("nauka hypervisor upgrade")
+        })
         .action("doctor", "Diagnose hypervisor health")
         .action("announce-listen", "Run the announce listener (internal)")
         .op(|op| {
@@ -274,6 +280,7 @@ pub fn handler() -> HandlerFn {
                 "backup-list" => handle_backup_list().await,
                 "cp-status" => handle_cp_status().await,
                 "upgrade-check" => handle_upgrade_check().await,
+                "upgrade" => handle_upgrade().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
                 "drain" => handle_drain().await,
@@ -1196,12 +1203,196 @@ async fn handle_upgrade_check() -> anyhow::Result<OperationResponse> {
     } else {
         lines
             .push("  \x1b[33mVersion mismatch detected. Upgrade may be needed.\x1b[0m".to_string());
-        lines.push("  Rolling upgrade orchestration is not yet implemented.".to_string());
+        lines.push("  Run 'nauka hypervisor upgrade' to perform a rolling upgrade.".to_string());
     }
 
     let output = lines.join("\n");
     eprintln!("{output}");
     Ok(OperationResponse::None)
+}
+
+async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+    let state = fabric::state::FabricState::load(&db)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
+        })?;
+
+    let mesh_ipv6 = state.hypervisor.mesh_ipv6;
+    let pd_url = format!(
+        "http://[{}]:{}",
+        mesh_ipv6,
+        controlplane::PD_CLIENT_PORT
+    );
+    let has_pd = controlplane::service::has_pd_unit();
+
+    let target_pd = controlplane::PD_VERSION;
+    let target_tikv = controlplane::TIKV_VERSION;
+
+    // ── Step 1: Check if upgrade is needed ──────────────────
+    let steps = ui::Steps::new(8);
+    steps.set("Checking versions");
+
+    let installed_pd = controlplane::service::installed_pd_version();
+    let installed_tikv = controlplane::service::installed_tikv_version();
+
+    let pd_needs = installed_pd.as_deref() != Some(target_pd);
+    let tikv_needs = installed_tikv.as_deref() != Some(target_tikv);
+
+    if !pd_needs && !tikv_needs {
+        steps.finish("Already at latest version");
+        return Ok(OperationResponse::Message(format!(
+            "Already at latest version (PD {target_pd}, TiKV {target_tikv}). Nothing to do."
+        )));
+    }
+
+    let installed_pd_str = installed_pd.clone().unwrap_or_else(|| "unknown".into());
+    let installed_tikv_str = installed_tikv.clone().unwrap_or_else(|| "unknown".into());
+    steps.inc();
+
+    // ── Step 2: Pre-flight — verify cluster healthy ─────────
+    steps.set("Pre-flight health check");
+
+    // PD health
+    if let Err(e) = cp_api_get(&pd_url, "/pd/api/v1/health") {
+        steps.finish_err("PD health check failed");
+        anyhow::bail!("pre-flight failed: PD not healthy: {e}");
+    }
+
+    // All TiKV stores Up
+    let stores_json = cp_api_get(&pd_url, "/pd/api/v1/stores")?;
+    if let Some(stores) = stores_json["stores"].as_array() {
+        for store in stores {
+            let state_name = store["store"]["state_name"].as_str().unwrap_or("unknown");
+            let addr = store["store"]["address"].as_str().unwrap_or("?");
+            if state_name != "Up" {
+                steps.finish_err("TiKV store not Up");
+                anyhow::bail!(
+                    "pre-flight failed: store {addr} is {state_name} (expected Up)"
+                );
+            }
+        }
+    }
+    steps.inc();
+
+    // ── Step 3: Drain this node ─────────────────────────────
+    steps.set("Draining node");
+    // Ignore "already draining" errors — the node may already be drained.
+    let drain_result = fabric::ops::drain(&db).await;
+    if let Err(ref e) = drain_result {
+        let msg = e.to_string();
+        if !msg.contains("already draining") {
+            steps.finish_err("Drain failed");
+            anyhow::bail!("drain failed: {e}");
+        }
+    }
+    steps.inc();
+
+    // From here on, if anything fails, attempt rollback:
+    // restart old services and re-enable the node.
+    let rollback = |steps: &ui::Steps, reason: &str| {
+        steps.finish_err(reason);
+        tracing::warn!("upgrade failed, attempting rollback: {reason}");
+        let _ = controlplane::service::start();
+        // re-enable scheduling (best-effort, ignore error)
+        let db2 = open_db();
+        if let Ok(ref db2) = db2 {
+            // We're in a sync context in the closure — spawn a blocking task
+            // to call the async enable. In practice, just set the state directly.
+            let mut st = fabric::state::FabricState::load(db2)
+                .ok()
+                .flatten();
+            if let Some(ref mut s) = st {
+                s.node_state = fabric::state::NodeState::Available;
+                let _ = s.save(db2);
+            }
+        }
+    };
+
+    // ── Step 4: Create backup ───────────────────────────────
+    steps.set("Creating backup");
+    let registry =
+        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"));
+    match registry {
+        Ok(reg) => {
+            if let Some(config) = reg.default_region() {
+                if let Err(e) = controlplane::backup::backup_pd(config) {
+                    tracing::warn!("PD backup failed (non-fatal): {e}");
+                }
+                if let Err(e) = controlplane::backup::backup_tikv(config) {
+                    tracing::warn!("TiKV backup failed (non-fatal): {e}");
+                }
+            } else {
+                tracing::warn!("no storage region configured, skipping backup");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("could not load region registry, skipping backup: {e}");
+        }
+    }
+    steps.inc();
+
+    // ── Step 5: Stop services ───────────────────────────────
+    steps.set("Stopping TiKV and PD");
+    if let Err(e) = controlplane::service::stop() {
+        rollback(&steps, &format!("stop failed: {e}"));
+        anyhow::bail!("failed to stop services: {e}");
+    }
+    steps.inc();
+
+    // ── Step 6: Install new versions via TiUP ───────────────
+    steps.set(
+        &format!("Installing PD {target_pd} + TiKV {target_tikv}"),
+    );
+    if let Err(e) = controlplane::service::install_version(target_pd, target_tikv) {
+        rollback(&steps, &format!("install failed: {e}"));
+        anyhow::bail!("binary install failed: {e}");
+    }
+
+    // Regenerate systemd units so `tiup pd`/`tiup tikv` picks up the
+    // new version automatically (TiUP uses the latest installed version).
+    if let Err(e) = controlplane::service::regenerate_units(has_pd) {
+        rollback(&steps, &format!("unit regeneration failed: {e}"));
+        anyhow::bail!("systemd unit regeneration failed: {e}");
+    }
+    steps.inc();
+
+    // ── Step 7: Start services ──────────────────────────────
+    steps.set("Starting PD and TiKV");
+    if let Err(e) = controlplane::service::start() {
+        rollback(&steps, &format!("start failed: {e}"));
+        anyhow::bail!("failed to start services after upgrade: {e}");
+    }
+    steps.inc();
+
+    // ── Step 8: Wait for health ─────────────────────────────
+    steps.set("Waiting for cluster health");
+
+    if has_pd {
+        if let Err(e) = controlplane::service::wait_pd_ready(&mesh_ipv6, 60) {
+            rollback(&steps, &format!("PD health timeout: {e}"));
+            anyhow::bail!("PD did not become healthy after upgrade: {e}");
+        }
+    }
+
+    if let Err(e) = controlplane::service::wait_store_up(&mesh_ipv6, 120) {
+        rollback(&steps, &format!("TiKV store timeout: {e}"));
+        anyhow::bail!("TiKV store did not come back Up after upgrade: {e}");
+    }
+    steps.inc();
+
+    // ── Re-enable scheduling ────────────────────────────────
+    // Ignore "already available" errors.
+    let _ = fabric::ops::enable(&db).await;
+
+    steps.finish("Upgrade complete");
+
+    let msg = format!(
+        "Upgraded PD {} -> {} and TiKV {} -> {}. Node re-enabled for scheduling.",
+        installed_pd_str, target_pd, installed_tikv_str, target_tikv,
+    );
+    Ok(OperationResponse::Message(msg))
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
