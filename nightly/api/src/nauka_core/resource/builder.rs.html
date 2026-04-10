@@ -202,7 +202,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#200 id=200 data-nosnippet>200</a>            Box::leak(boxed)
 <a href=#201 id=201 data-nosnippet>201</a>        };
 <a href=#202 id=202 data-nosnippet>202</a>
-<a href=#203 id=203 data-nosnippet>203</a>        ResourceDef {
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>def = ResourceDef {
 <a href=#204 id=204 data-nosnippet>204</a>            identity: ResourceIdentity {
 <a href=#205 id=205 data-nosnippet>205</a>                kind: <span class="self">self</span>.kind,
 <a href=#206 id=206 data-nosnippet>206</a>                cli_name: <span class="self">self</span>.cli_name,
@@ -236,7 +236,22 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#234 id=234 data-nosnippet>234</a>                    })
 <a href=#235 id=235 data-nosnippet>235</a>                },
 <a href=#236 id=236 data-nosnippet>236</a>            },
-<a href=#237 id=237 data-nosnippet>237</a>        }
-<a href=#238 id=238 data-nosnippet>238</a>    }
-<a href=#239 id=239 data-nosnippet>239</a>}
+<a href=#237 id=237 data-nosnippet>237</a>        };
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="comment">// Lint: panic on errors (binary must not start with a broken def).
+<a href=#240 id=240 data-nosnippet>240</a>        </span><span class="kw">let </span>errors: Vec&lt;<span class="kw">_</span>&gt; = <span class="kw">super</span>::lint::lint_def(<span class="kw-2">&amp;</span>def)
+<a href=#241 id=241 data-nosnippet>241</a>            .into_iter()
+<a href=#242 id=242 data-nosnippet>242</a>            .filter(|v| <span class="macro">matches!</span>(v.severity, <span class="kw">super</span>::lint::Severity::Error))
+<a href=#243 id=243 data-nosnippet>243</a>            .collect();
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">if </span>!errors.is_empty() {
+<a href=#245 id=245 data-nosnippet>245</a>            <span class="macro">panic!</span>(
+<a href=#246 id=246 data-nosnippet>246</a>                <span class="string">"ResourceDef '{}' has lint errors:\n{}"</span>,
+<a href=#247 id=247 data-nosnippet>247</a>                def.identity.kind,
+<a href=#248 id=248 data-nosnippet>248</a>                <span class="kw">super</span>::lint::format_violations(<span class="kw-2">&amp;</span>errors)
+<a href=#249 id=249 data-nosnippet>249</a>            );
+<a href=#250 id=250 data-nosnippet>250</a>        }
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a>        def
+<a href=#253 id=253 data-nosnippet>253</a>    }
+<a href=#254 id=254 data-nosnippet>254</a>}
 </code></pre></div></section></main></body></html>

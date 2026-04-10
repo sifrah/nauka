@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["already_exists","invalid_field","invalid_state_transition","missing_field","missing_name","missing_scope","not_found","wrong_state"]};

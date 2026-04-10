@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["ArgSource","OperationSemantics","OutputKind"],"struct":["FilterDef","OperationArg","OperationDef","OutputDef"]};
+window.SIDEBAR_ITEMS = {"enum":["ArgSource","OperationSemantics","OutputKind","ProgressHint"],"struct":["FilterDef","OperationArg","OperationDef","OutputDef"]};
