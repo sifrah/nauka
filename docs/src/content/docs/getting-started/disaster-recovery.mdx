@@ -1,0 +1,593 @@
+---
+title: Disaster Recovery
+description: Runbooks for recovering from PD quorum loss, TiKV store failure, disk loss, network partitions, and full cluster restore from backup.
+sidebar:
+  order: 8
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+These runbooks cover recovery procedures for PD and TiKV failures on a Nauka mesh. Each runbook starts with symptoms, walks through diagnosis, and provides step-by-step recovery commands. Read the relevant runbook for your situation, then follow it in order.
+
+<Aside type="caution">
+Recovery operations can be destructive. Always verify the cluster state with `nauka hypervisor cp-status` and `nauka hypervisor doctor` before and after recovery. When in doubt, create a backup first with `nauka hypervisor backup`.
+</Aside>
+
+## Background: PD quorum and TiKV replication
+
+PD (Placement Driver) uses Raft consensus. It needs a **majority** of members (quorum) to operate:
+
+| PD members | Quorum required | Tolerates |
+|---|---|---|
+| 1 | 1 | 0 failures |
+| 3 | 2 | 1 failure |
+| 5 | 3 | 2 failures |
+
+TiKV stores data with 3 replicas by default. Nauka adjusts `max-replicas` automatically based on the number of active stores (capped at 3). Losing a single store is tolerable as long as a quorum of PD members is healthy and there are enough remaining stores to hold all replicas.
+
+---
+
+## Runbook 1: PD quorum loss
+
+### Symptoms
+
+- All TiKV read/write operations fail
+- `nauka hypervisor cp-status` shows fewer PD members than expected, or fails to connect
+- `nauka hypervisor doctor` reports `pd health` and `pd leader` as failed
+- PD health endpoint returns an error:
+  ```bash
+  curl -sf http://[<mesh_ipv6>]:2379/pd/api/v1/health
+  # Returns error or no response
+  ```
+
+### Diagnosis
+
+Check which PD members are alive:
+
+```bash
+nauka hypervisor cp-status
+```
+
+This queries the PD members API (`/pd/api/v1/members`) and health API (`/pd/api/v1/health`). In a quorum loss scenario, the members API itself may fail because PD cannot serve requests without quorum.
+
+SSH into each node and check:
+
+```bash
+sudo systemctl status nauka-pd.service
+sudo journalctl -u nauka-pd.service --no-pager -n 50
+```
+
+Identify which nodes are down and which are the **surviving** nodes (PD running, but unable to elect a leader).
+
+### Recovery
+
+Recovery is a two-phase process. Nauka implements this in `recover_pd_quorum()` (phase 1) and `recover_stale_pd_member()` (phase 2).
+
+**Phase 1: Restore quorum on the surviving node**
+
+On the surviving PD node, the recovery mechanism does the following:
+
+1. Stops the PD service
+2. Runs `pd-server --force-new-cluster` -- this rewrites PD's internal etcd state to declare itself as the sole member, restoring quorum with a single node
+3. Kills the temporary pd-server process
+4. Restarts PD normally via systemd
+
+If Nauka's reconciler is running, it performs this automatically. To trigger it manually, restart the node's services:
+
+```bash
+# On the surviving node
+nauka hypervisor stop
+nauka hypervisor start
+```
+
+Verify quorum is restored:
+
+```bash
+nauka hypervisor cp-status
+```
+
+You should see a single PD member with a healthy status and an elected leader.
+
+**Phase 2: Rejoin the failed nodes**
+
+Once quorum is restored on the surviving node, the failed nodes need to rejoin. On each failed node:
+
+1. The stale PD member is removed from the cluster via the PD API
+2. The local PD data directory (`/var/lib/nauka/pd`) is wiped
+3. The PD systemd unit is rewritten in `--join` mode (pointing to the surviving node)
+4. PD is restarted, and it rejoins the cluster as a new member
+
+Again, the reconciler handles this automatically. To trigger it manually:
+
+```bash
+# On each failed node
+nauka hypervisor stop
+nauka hypervisor start
+```
+
+If automatic recovery does not work (e.g., the reconciler is not running), you can perform the steps manually:
+
+```bash
+# On the failed node — stop PD
+sudo systemctl stop nauka-pd.service
+
+# Remove stale PD data
+sudo rm -rf /var/lib/nauka/pd
+sudo mkdir -p /var/lib/nauka/pd
+
+# Restart — PD will rejoin via the surviving node
+sudo systemctl start nauka-pd.service
+```
+
+<Aside type="tip">
+If `nauka hypervisor leave` works on the failed node, the cleanest path is to leave and rejoin:
+```bash
+nauka hypervisor leave
+nauka hypervisor join <surviving-node-ip>:51821 --pin <PIN> ...
+```
+</Aside>
+
+### Verify
+
+After all nodes have rejoined:
+
+```bash
+nauka hypervisor cp-status
+nauka hypervisor doctor
+```
+
+Confirm that PD members matches the expected count, a leader is elected, and all health checks pass.
+
+### Prevention
+
+- Maintain an **odd number** of PD members (1, 3, or 5)
+- Spread PD members across failure domains (different servers, zones)
+- Monitor PD health with `nauka hypervisor doctor` regularly
+- Create backups before planned maintenance: `nauka hypervisor backup`
+
+---
+
+## Runbook 2: TiKV store replacement
+
+### Symptoms
+
+- `nauka hypervisor cp-status` shows a store in `Down` or `Tombstone` state
+- `nauka hypervisor doctor` reports `tikv service` as failed on the affected node
+- TiKV logs show persistent errors on the affected node:
+  ```bash
+  sudo journalctl -u nauka-tikv.service --no-pager -n 50
+  ```
+
+### Diagnosis
+
+Check the store states across the cluster:
+
+```bash
+nauka hypervisor cp-status
+```
+
+The output shows each TiKV store with its address, state (`Up`, `Down`, `Offline`, `Tombstone`), and region count. Identify the problematic store by its address and state.
+
+You can also query PD directly:
+
+```bash
+curl -sf http://[<mesh_ipv6>]:2379/pd/api/v1/stores | python3 -m json.tool
+```
+
+### Recovery
+
+**Option A: Restart the store (if the data is intact)**
+
+If the TiKV process crashed but the data on disk is fine:
+
+```bash
+# On the affected node
+nauka hypervisor start
+```
+
+Check if TiKV comes back to `Up` state:
+
+```bash
+nauka hypervisor cp-status
+```
+
+**Option B: Replace the store (data lost or corrupted)**
+
+If the data is gone or corrupted, the node needs to leave and rejoin. Nauka's `recover_stale_store()` function handles the cleanup automatically -- it detects stale stores registered at the node's address, removes them via PD's unsafe recovery API, and restarts TiKV.
+
+To trigger this manually:
+
+```bash
+# On the affected node — leave the cluster
+nauka hypervisor leave
+
+# Rejoin — a new node in the peering flow
+nauka hypervisor join <peer-ip>:51821 --pin <PIN> \
+  --name <node-name> --region <region> --zone <zone>
+```
+
+The leave process:
+
+1. Deregisters the TiKV store from PD (marks as `Offline`)
+2. Adjusts `max-replicas` so Raft maintains quorum with fewer stores
+3. Waits for regions to drain off the departing store (up to 5 minutes)
+4. Removes the PD member
+5. Cleans up all local state
+
+After rejoining, PD will rebalance regions onto the new store. Monitor progress:
+
+```bash
+nauka hypervisor cp-status
+```
+
+Watch the region count on the new store increase as regions are transferred.
+
+### Verify
+
+```bash
+nauka hypervisor cp-status    # All stores Up, regions balanced
+nauka hypervisor doctor       # All checks pass
+```
+
+---
+
+## Runbook 3: Single node disk failure
+
+### Symptoms
+
+- TiKV and/or PD crash-loop on the affected node
+- `sudo journalctl -u nauka-tikv.service` shows I/O errors or corruption
+- `sudo journalctl -u nauka-pd.service` shows etcd/wal errors
+- `dmesg` or `journalctl -k` shows disk errors
+- `df -h /var/lib/nauka` may show the filesystem as read-only or missing
+
+### Diagnosis
+
+Check disk health:
+
+```bash
+# Filesystem status
+df -h /var/lib/nauka
+mount | grep /var/lib/nauka
+
+# Kernel disk errors
+dmesg | grep -i -E 'error|fail|i/o' | tail -20
+
+# Is TiKV data readable?
+ls -la /var/lib/nauka/tikv/
+ls -la /var/lib/nauka/pd/
+```
+
+Check the service states:
+
+```bash
+nauka hypervisor doctor
+```
+
+### Recovery
+
+<Aside type="caution">
+This procedure assumes the other nodes in the mesh still have a quorum (for a 3-node cluster, at least 2 of 3 nodes are healthy). If multiple nodes have failed, see [Runbook 4: Full cluster restore](#runbook-4-full-cluster-restore-from-backup).
+</Aside>
+
+**Step 1: Fix the underlying disk issue**
+
+Replace or repair the disk. Ensure `/var/lib/nauka` is writable:
+
+```bash
+# After disk replacement or fsck
+sudo mkdir -p /var/lib/nauka
+```
+
+**Step 2: Wipe corrupted data and rejoin**
+
+Leave the mesh (this cleans up all local state and deregisters from PD/TiKV):
+
+```bash
+nauka hypervisor leave
+```
+
+If `leave` fails because the state database is corrupted, clean up manually:
+
+```bash
+# Stop all services
+sudo systemctl stop nauka-wg nauka-announce nauka-tikv nauka-pd
+sudo systemctl disable nauka-wg nauka-announce nauka-tikv nauka-pd
+
+# Remove service files
+sudo rm -f /etc/systemd/system/nauka-*.service
+sudo systemctl daemon-reload
+
+# Remove all state and config
+sudo rm -rf ~/.nauka/
+sudo rm -f /etc/wireguard/nauka0.conf
+sudo rm -rf /var/lib/nauka/pd /var/lib/nauka/tikv
+```
+
+**Step 3: Rejoin the mesh**
+
+Start peering on a healthy node, then join from the repaired node:
+
+```bash
+# On a healthy node
+nauka hypervisor peering
+
+# On the repaired node
+nauka hypervisor join <healthy-node-ip>:51821 --pin <PIN> \
+  --name <node-name> --region <region> --zone <zone>
+```
+
+**Step 4: Verify data consistency**
+
+After rejoining, TiKV will receive region replicas from the surviving nodes:
+
+```bash
+# Wait for regions to rebalance (watch region count increase)
+nauka hypervisor cp-status
+
+# Full health check
+nauka hypervisor doctor
+```
+
+Region rebalancing may take several minutes depending on data volume. The new store starts with zero regions and gradually receives transfers from the other stores.
+
+---
+
+## Runbook 4: Full cluster restore from backup
+
+<Aside type="danger">
+Full cluster restore is a last-resort procedure for when all nodes have lost their data. This results in data loss for any writes not captured in the backup.
+</Aside>
+
+### Prerequisites
+
+- A backup exists in S3 (created by `nauka hypervisor backup`)
+- You know the mesh configuration (region, zone, node names)
+- All nodes are accessible via SSH
+
+### Diagnosis
+
+Check what backups are available:
+
+```bash
+nauka hypervisor backup-list
+```
+
+This lists all PD and TiKV snapshots in S3 with their timestamps and sizes:
+
+```
+KEY                                                                SIZE      MODIFIED
+backups/tikv/tikv-snapshot-2026-04-10T190000Z.tar.gz               50.0 MB   2026-04-10T19:00:00.000Z
+backups/pd/pd-snapshot-2026-04-10T190000Z.tar.gz                    1.0 MB   2026-04-10T19:00:00.000Z
+```
+
+If `backup-list` does not work (the cluster is fully down), query S3 directly:
+
+```bash
+aws s3 ls s3://<bucket>/backups/ --recursive --profile <profile>
+```
+
+### Recovery
+
+**Step 1: Stop all nodes**
+
+On every node in the mesh:
+
+```bash
+nauka hypervisor stop
+```
+
+Or, if Nauka is unresponsive:
+
+```bash
+sudo systemctl stop nauka-tikv nauka-pd nauka-wg nauka-announce
+```
+
+**Step 2: Download backups from S3**
+
+On the node that will be restored first (the PD leader):
+
+```bash
+# Create a temporary directory
+sudo mkdir -p /tmp/nauka-restore
+
+# Download the PD backup
+aws s3 cp s3://<bucket>/backups/pd/pd-snapshot-<timestamp>.tar.gz \
+  /tmp/nauka-restore/pd-snapshot.tar.gz --profile <profile>
+
+# Download the TiKV backup
+aws s3 cp s3://<bucket>/backups/tikv/tikv-snapshot-<timestamp>.tar.gz \
+  /tmp/nauka-restore/tikv-snapshot.tar.gz --profile <profile>
+```
+
+**Step 3: Restore PD data**
+
+```bash
+# Wipe old PD data
+sudo rm -rf /var/lib/nauka/pd
+sudo mkdir -p /var/lib/nauka/pd
+
+# Extract the backup
+sudo tar xzf /tmp/nauka-restore/pd-snapshot.tar.gz -C /var/lib/nauka/pd
+```
+
+**Step 4: Restore TiKV data**
+
+```bash
+# Wipe old TiKV data
+sudo rm -rf /var/lib/nauka/tikv
+sudo mkdir -p /var/lib/nauka/tikv
+
+# Extract the backup
+sudo tar xzf /tmp/nauka-restore/tikv-snapshot.tar.gz -C /var/lib/nauka/tikv
+```
+
+**Step 5: Start the first node**
+
+Start PD first, then TiKV. On the restored node:
+
+```bash
+nauka hypervisor start
+```
+
+If PD has stale member entries from the pre-failure cluster, it may need quorum recovery (see [Runbook 1](#runbook-1-pd-quorum-loss)).
+
+**Step 6: Rejoin other nodes**
+
+For each additional node, either restore from their own backups (repeat steps 2-5) or do a clean rejoin:
+
+```bash
+# On the first (restored) node — start peering
+nauka hypervisor peering
+
+# On each additional node — leave and rejoin
+nauka hypervisor leave   # or manual cleanup if state is corrupted
+nauka hypervisor join <restored-node-ip>:51821 --pin <PIN> \
+  --name <node-name> --region <region> --zone <zone>
+```
+
+**Step 7: Verify cluster health**
+
+```bash
+nauka hypervisor cp-status    # PD members, TiKV stores, region counts
+nauka hypervisor doctor       # All subsystems healthy
+```
+
+### Post-restore checklist
+
+- [ ] PD leader elected and all members healthy
+- [ ] All TiKV stores in `Up` state
+- [ ] Region count matches pre-failure expectations
+- [ ] Application-level data integrity verified
+- [ ] Create a fresh backup: `nauka hypervisor backup`
+
+---
+
+## Runbook 5: Network partition resolution
+
+### Symptoms
+
+- Some nodes appear as `unreachable` in `nauka hypervisor list`
+- TiKV regions are stuck (reads/writes hang or timeout)
+- PD may lose quorum if the partition splits the majority
+- `nauka hypervisor doctor` reports `peers`, `mesh ping`, or `pd health` as failed
+
+### Diagnosis
+
+**Step 1: Identify the partition**
+
+On each node, check connectivity:
+
+```bash
+nauka hypervisor status
+nauka hypervisor list
+```
+
+Check which peers are reachable from which nodes. A partition means some pairs of nodes cannot communicate.
+
+**Step 2: Check WireGuard**
+
+On each node:
+
+```bash
+sudo wg show nauka0
+```
+
+Look at the `latest handshake` field for each peer. A recent handshake (within 2-3 minutes) means the tunnel is active. A stale or missing handshake indicates the tunnel is down.
+
+**Step 3: Check the underlying network**
+
+Test connectivity outside the WireGuard tunnel:
+
+```bash
+# Can you reach the peer's public IP?
+ping <peer-public-ip>
+
+# Can you reach the WireGuard port?
+nc -zu <peer-public-ip> 51820
+```
+
+Common causes:
+- Firewall rule change blocking UDP 51820
+- Cloud provider network issue
+- Server NIC or networking stack problem
+- DNS resolution failure (if endpoints use hostnames)
+
+### Recovery
+
+**Fix the network issue first**
+
+The root cause is always at the network level. Fix the firewall, restore connectivity, or resolve the infrastructure issue.
+
+Once underlying connectivity is restored, WireGuard will re-establish handshakes automatically within a few seconds -- no restart needed.
+
+If WireGuard does not recover automatically:
+
+```bash
+# Restart WireGuard on the affected nodes
+nauka hypervisor stop
+nauka hypervisor start
+```
+
+**Check PD quorum**
+
+After connectivity is restored, verify PD quorum:
+
+```bash
+nauka hypervisor cp-status
+```
+
+If a PD member became unreachable during the partition and was removed, it may need to rejoin. See [Runbook 1](#runbook-1-pd-quorum-loss) phase 2.
+
+**Check TiKV store states**
+
+```bash
+nauka hypervisor cp-status
+```
+
+If any stores show as `Down`:
+- If the store's TiKV process is running, it should transition back to `Up` once it reconnects to PD. This typically takes 20-30 seconds.
+- If the store's TiKV process is not running, restart it:
+  ```bash
+  nauka hypervisor start
+  ```
+
+**Verify region health**
+
+After connectivity is restored and all stores are `Up`, check that regions have the expected number of replicas:
+
+```bash
+nauka hypervisor cp-status
+```
+
+PD automatically re-replicates under-replicated regions. If regions are stuck, restart PD to trigger a scheduling refresh:
+
+```bash
+# On the PD leader node
+sudo systemctl restart nauka-pd.service
+```
+
+### Verify
+
+```bash
+nauka hypervisor cp-status    # All members healthy, all stores Up
+nauka hypervisor doctor       # All checks pass
+nauka hypervisor list         # All peers available
+```
+
+### Prevention
+
+- Ensure UDP port 51820 is open on all nodes (WireGuard)
+- Use `nauka hypervisor doctor` as a periodic health check
+- Monitor WireGuard handshake timestamps for early detection
+- Spread nodes across availability zones to reduce blast radius
+
+---
+
+## General recovery tips
+
+- **Always check `cp-status` and `doctor` first.** These two commands give you the full picture of PD membership, TiKV store states, and subsystem health.
+- **Create backups before risky operations.** `nauka hypervisor backup` snapshots both PD and TiKV data to S3.
+- **The reconciler handles most failures automatically.** If the reconciler is running (via `nauka hypervisor start`), it periodically checks for stale stores and PD members and recovers them.
+- **Leave + rejoin is the cleanest recovery path.** When in doubt, `nauka hypervisor leave` followed by `nauka hypervisor join` gives you a fresh node with a clean state.
+- **PD data directories.** PD data lives at `/var/lib/nauka/pd`, TiKV data at `/var/lib/nauka/tikv`, and configs at `/etc/nauka/pd.toml` and `/etc/nauka/tikv.toml`.

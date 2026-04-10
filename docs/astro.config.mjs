@@ -94,6 +94,7 @@ export default defineConfig({
 						{ label: 'Adding Nodes', slug: 'getting-started/adding-nodes' },
 						{ label: 'Operations', slug: 'getting-started/operations' },
 						{ label: 'Troubleshooting', slug: 'getting-started/troubleshooting' },
+						{ label: 'Disaster Recovery', slug: 'getting-started/disaster-recovery' },
 					],
 				},
 				{
