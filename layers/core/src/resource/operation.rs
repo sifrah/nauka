@@ -20,6 +20,22 @@ pub struct OperationDef {
     pub output: OutputDef,
     /// Example invocations shown in --help
     pub examples: Vec<&'static str>,
+    /// Progress indicator hint — drives auto-spinner in dispatch.
+    pub progress: ProgressHint,
+}
+
+/// How to display progress during this operation.
+#[derive(Debug, Clone, Copy)]
+pub enum ProgressHint {
+    /// No progress indicator (instant reads: list, get).
+    None,
+    /// Auto-spinner — dispatch wraps the handler automatically.
+    /// Message should end with "..." (e.g. "Creating VM...").
+    Spinner(&'static str),
+    /// Handler manages its own multi-step progress (e.g. hypervisor init).
+    Steps(u64),
+    /// Handler manages its own download progress bar.
+    Download,
 }
 
 /// The semantic category of an operation.
@@ -113,6 +129,7 @@ impl OperationDef {
                 success_message: Some("{kind} '{name}' created."),
             },
             examples: Vec::new(),
+            progress: ProgressHint::None,
         }
     }
 
@@ -130,6 +147,7 @@ impl OperationDef {
                 success_message: None,
             },
             examples: Vec::new(),
+            progress: ProgressHint::None,
         }
     }
 
@@ -147,6 +165,7 @@ impl OperationDef {
                 success_message: None,
             },
             examples: Vec::new(),
+            progress: ProgressHint::None,
         }
     }
 
@@ -164,6 +183,7 @@ impl OperationDef {
                 success_message: Some("{kind} '{name}' deleted."),
             },
             examples: Vec::new(),
+            progress: ProgressHint::None,
         }
     }
 
@@ -181,6 +201,7 @@ impl OperationDef {
                 success_message: None,
             },
             examples: Vec::new(),
+            progress: ProgressHint::None,
         }
     }
 
@@ -213,6 +234,11 @@ impl OperationDef {
 
     pub fn with_success_message(mut self, msg: &'static str) -> Self {
         self.output.success_message = Some(msg);
+        self
+    }
+
+    pub fn with_progress(mut self, hint: ProgressHint) -> Self {
+        self.progress = hint;
         self
     }
 }

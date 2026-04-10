@@ -12,11 +12,20 @@ pub fn resource_def() -> ResourceDef {
         .alias("organization")
         .plural("orgs")
         .scope_global()
-        .crud()
+        .create()
+        .op(|op| {
+            op.with_progress(ProgressHint::Spinner("Creating organization..."))
+              .with_example("nauka org create acme")
+        })
+        .list()
+        .get()
+        .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting organization...")))
         .column("NAME", "name")
         .column("ID", "id")
         .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("No organizations found. Create one with: nauka org create <name>")
+        .sort_by("name")
         .detail_section(
             None,
             vec![

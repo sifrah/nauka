@@ -14,12 +14,9 @@ pub fn resource_def() -> ResourceDef {
         .plural("images")
         .action("pull", "Pull an image from the registry")
         .op(|op| {
-            op.with_arg(OperationArg::required(
-                "name",
-                FieldDef::string("name", "Image name (e.g., ubuntu-24.04)"),
-            ))
-            .with_output(OutputKind::Resource)
-            .with_example("nauka vm image pull ubuntu-24.04")
+            op.with_output(OutputKind::Resource)
+              .with_progress(ProgressHint::Download)
+              .with_example("nauka vm image pull ubuntu-24.04")
         })
         .action("list", "List locally available images")
         .op(|op| op.with_output(OutputKind::ResourceList))
@@ -27,22 +24,25 @@ pub fn resource_def() -> ResourceDef {
         .op(|op| op.with_output(OutputKind::ResourceList))
         .action("delete", "Delete a local image")
         .op(|op| {
-            op.with_arg(OperationArg::required(
-                "name",
-                FieldDef::string("name", "Image name to delete"),
-            ))
+            op.with_progress(ProgressHint::Spinner("Deleting image..."))
         })
         .column("NAME", "name")
-        .column("TYPE", "type")
+        .column("TYPE", "image_type")
         .column("SIZE", "size")
         .column("ARCH", "arch")
         .column("LOCAL", "local")
         .empty_message("No images found. Pull one with: nauka vm image pull ubuntu-24.04")
+        .sort_by("name")
         .detail_section(
             None,
             vec![
                 DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Type", "image_type"),
                 DetailField::new("Size", "size"),
+                DetailField::new("Arch", "arch"),
+                DetailField::new("Local", "local"),
+                DetailField::new("Pulled", "created_at").with_format(DisplayFormat::Timestamp),
             ],
         )
         .done()
@@ -57,10 +57,8 @@ pub fn handler() -> HandlerFn {
                 match req.operation.as_str() {
                     "pull" => {
                         let name = req
-                            .fields
-                            .get("name")
-                            .ok_or_else(|| anyhow::anyhow!("--name is required"))?
-                            .clone();
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         let size = registry::pull(&name).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
                             "name": name,
@@ -113,10 +111,8 @@ pub fn handler() -> HandlerFn {
                     }
                     "delete" => {
                         let name = req
-                            .fields
-                            .get("name")
-                            .ok_or_else(|| anyhow::anyhow!("--name is required"))?
-                            .clone();
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         registry::delete(&name)?;
                         Ok(OperationResponse::Message(format!(
                             "image '{name}' deleted."

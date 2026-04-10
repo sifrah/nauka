@@ -99,6 +99,7 @@ pub fn resource_def() -> ResourceDef {
                 ),
             ))
             .with_output(OutputKind::Resource)
+            .with_progress(ProgressHint::Steps(11))
             .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --s3-endpoint https://s3.eu.example.com --s3-bucket nauka-eu --s3-access-key AKID --s3-secret-key SECRET --peering")
         })
         .action("join", "Join an existing cluster")
@@ -145,6 +146,7 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("ipv4-public", "Public IPv4 address of this server"),
             ))
             .with_output(OutputKind::Resource)
+            .with_progress(ProgressHint::Steps(10))
             .with_example(
                 "nauka hypervisor join --target 46.224.166.60 --pin G7CCZX --region eu --zone nbg1",
             )
@@ -164,14 +166,17 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("name", "Node name"),
             ))
             .with_output(OutputKind::Resource)
+            .with_progress(ProgressHint::Spinner("Updating hypervisor..."))
             .with_example("nauka hypervisor update --ipv6-block 2a01:4f8:c012:abcd::/64")
         })
         .action("status", "Show hypervisor status")
         .op(|op| op.with_output(OutputKind::Resource))
         .action("start", "Start hypervisor services (fabric, storage, tikv)")
+        .op(|op| op.with_output(OutputKind::Resource).with_progress(ProgressHint::Spinner("Starting hypervisor services...")))
         .action("stop", "Stop hypervisor services (fabric, storage, tikv)")
+        .op(|op| op.with_output(OutputKind::Resource).with_progress(ProgressHint::Spinner("Stopping hypervisor services...")))
         .action("leave", "Leave the cluster and uninstall services")
-        .op(|op| op.with_confirm())
+        .op(|op| op.with_confirm().with_progress(ProgressHint::Steps(4)))
         // CRUD
         .list()
         .op(|op| op.with_example("nauka hypervisor list"))
@@ -206,6 +211,7 @@ pub fn resource_def() -> ResourceDef {
         .column("MEMORY", "memory")
         .column("VMs", "vms")
         .empty_message("No hypervisors found. Initialize with: nauka hypervisor init")
+        .sort_by("name")
         .detail_section(
             None,
             vec![
@@ -215,6 +221,10 @@ pub fn resource_def() -> ResourceDef {
                 DetailField::new("Zone", "zone"),
                 DetailField::new("Address", "mesh_ipv6"),
                 DetailField::new("State", "state").with_format(DisplayFormat::Status),
+                DetailField::new("CPU", "cpu"),
+                DetailField::new("Memory", "memory"),
+                DetailField::new("VMs", "vms"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
             ],
         )
         .done()

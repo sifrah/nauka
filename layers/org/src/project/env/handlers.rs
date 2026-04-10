@@ -13,7 +13,15 @@ pub fn resource_def() -> ResourceDef {
         .plural("environments")
         .parent("org", "--org", "Organization")
         .parent("project", "--project", "Project")
-        .crud()
+        .create()
+        .op(|op| {
+            op.with_progress(ProgressHint::Spinner("Creating environment..."))
+              .with_example("nauka org project env create production --project backend --org acme")
+        })
+        .list()
+        .get()
+        .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting environment...")))
         .column("NAME", "name")
         .column("PROJECT", "project_name")
         .column("ORG", "org_name")
@@ -22,6 +30,7 @@ pub fn resource_def() -> ResourceDef {
         .empty_message(
             "No environments found. Create one with: nauka org project env create <name> --project <project> --org <org>",
         )
+        .sort_by("name")
         .detail_section(
             None,
             vec![

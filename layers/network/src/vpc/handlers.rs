@@ -23,11 +23,13 @@ pub fn resource_def() -> ResourceDef {
                 "env",
                 FieldDef::string("env", "Scope to an environment"),
             ))
+            .with_progress(ProgressHint::Spinner("Creating VPC..."))
             .with_example("nauka vpc create prod-net --org acme --cidr 10.0.0.0/16")
         })
         .list()
         .get()
         .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting VPC...")))
         .column("NAME", "name")
         .column("CIDR", "cidr")
         .column("ORG", "org_name")
@@ -37,6 +39,7 @@ pub fn resource_def() -> ResourceDef {
         .empty_message(
             "No VPCs found. Create one with: nauka vpc create <name> --org <org> --cidr <cidr>",
         )
+        .sort_by("name")
         .detail_section(
             None,
             vec![

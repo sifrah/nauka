@@ -143,10 +143,57 @@ pub async fn dispatch(
         }
     }
 
-    // ── 4. Call handler with validated request ──
+    // ── 4. Call handler (with auto-spinner if declared) ──
 
     let _ = &validated; // available for future use
-    let response = (reg.handler)(raw_request).await?;
+    let response = match op.progress {
+        super::operation::ProgressHint::Spinner(msg) if !json => {
+            let pb = crate::ui::spinner(msg);
+            let result = (reg.handler)(raw_request).await;
+            match &result {
+                Ok(_) => {
+                    let done_msg = msg.trim_end_matches("...");
+                    crate::ui::finish_ok(&pb, done_msg);
+                }
+                Err(e) => {
+                    crate::ui::finish_fail(&pb, &e.to_string());
+                }
+            }
+            result?
+        }
+        _ => (reg.handler)(raw_request).await?,
+    };
+
+    // ── 4b. JSON contract validation (debug builds only) ──
+    #[cfg(debug_assertions)]
+    {
+        let kind = def.identity.kind;
+        match &response {
+            OperationResponse::Resource(v) => {
+                debug_assert!(
+                    v.get("id").is_some(),
+                    "[E080] {kind}: response JSON missing 'id'"
+                );
+                debug_assert!(
+                    v.get("name").is_some(),
+                    "[E081] {kind}: response JSON missing 'name'"
+                );
+            }
+            OperationResponse::ResourceList(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    debug_assert!(
+                        item.get("id").is_some(),
+                        "[E080] {kind}: list item [{i}] missing 'id'"
+                    );
+                    debug_assert!(
+                        item.get("name").is_some(),
+                        "[E081] {kind}: list item [{i}] missing 'name'"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 
     // ── 5. Render output ──
 

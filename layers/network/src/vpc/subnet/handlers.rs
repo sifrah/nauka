@@ -16,20 +16,24 @@ pub fn resource_def() -> ResourceDef {
                 "cidr",
                 FieldDef::cidr("cidr", "Subnet CIDR block (e.g. 10.0.1.0/24)"),
             ))
+            .with_progress(ProgressHint::Spinner("Creating subnet..."))
             .with_example("nauka vpc subnet create web --vpc prod-net --cidr 10.0.1.0/24")
         })
         .list()
         .get()
         .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting subnet...")))
         .column("NAME", "name")
         .column("CIDR", "cidr")
         .column("GATEWAY", "gateway")
         .column("VPC", "vpc_name")
+        .column("ORG", "org_name")
         .column("ID", "id")
         .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message(
             "No subnets found. Create one with: nauka vpc subnet create <name> --vpc <vpc> --cidr <cidr>",
         )
+        .sort_by("name")
         .detail_section(
             None,
             vec![
@@ -38,6 +42,7 @@ pub fn resource_def() -> ResourceDef {
                 DetailField::new("CIDR", "cidr"),
                 DetailField::new("Gateway", "gateway"),
                 DetailField::new("VPC", "vpc_name"),
+                DetailField::new("Organization", "org_name"),
                 DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
             ],
         )

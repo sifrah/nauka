@@ -101,7 +101,20 @@ impl ResourceRegistry {
     }
 
     /// Register a resource with its handler.
+    ///
+    /// Panics if a resource with the same kind is already registered
+    /// (prevents command collisions).
     pub fn register(&mut self, reg: ResourceRegistration) {
+        if let Some(existing) = self
+            .resources
+            .iter()
+            .find(|r| r.def.identity.kind == reg.def.identity.kind)
+        {
+            panic!(
+                "ResourceRegistry: duplicate kind '{}' (already registered as '{}')",
+                reg.def.identity.kind, existing.def.identity.cli_name
+            );
+        }
         self.resources.push(reg);
     }
 

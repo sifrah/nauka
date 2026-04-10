@@ -17,16 +17,21 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("peer-vpc", "VPC to peer with"),
             ))
             .with_output(OutputKind::Resource)
+            .with_progress(ProgressHint::Spinner("Creating peering..."))
         })
         .list()
         .get()
         .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting peering...")))
         .column("NAME", "name")
         .column("VPC", "vpc_name")
         .column("PEER", "peer_vpc_name")
-        .column("STATE", "state")
+        .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
+        .column("ORG", "org_name")
         .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("No peerings found.")
+        .sort_by("name")
         .detail_section(
             None,
             vec![
@@ -34,7 +39,8 @@ pub fn resource_def() -> ResourceDef {
                 DetailField::new("ID", "id"),
                 DetailField::new("VPC", "vpc_name"),
                 DetailField::new("Peer VPC", "peer_vpc_name"),
-                DetailField::new("State", "state"),
+                DetailField::new("Organization", "org_name"),
+                DetailField::new("State", "state").with_format(DisplayFormat::Status),
                 DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
             ],
         )

@@ -200,7 +200,7 @@ impl ResourceDefBuilder {
             Box::leak(boxed)
         };
 
-        ResourceDef {
+        let def = ResourceDef {
             identity: ResourceIdentity {
                 kind: self.kind,
                 cli_name: self.cli_name,
@@ -234,6 +234,21 @@ impl ResourceDefBuilder {
                     })
                 },
             },
+        };
+
+        // Lint: panic on errors (binary must not start with a broken def).
+        let errors: Vec<_> = super::lint::lint_def(&def)
+            .into_iter()
+            .filter(|v| matches!(v.severity, super::lint::Severity::Error))
+            .collect();
+        if !errors.is_empty() {
+            panic!(
+                "ResourceDef '{}' has lint errors:\n{}",
+                def.identity.kind,
+                super::lint::format_violations(&errors)
+            );
         }
+
+        def
     }
 }

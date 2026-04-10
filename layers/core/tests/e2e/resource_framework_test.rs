@@ -9,15 +9,24 @@ fn test_resource() -> ResourceRegistration {
         .action("create", "Create a widget")
         .op(|op| {
             op.with_arg(OperationArg::required(
-                "name",
-                FieldDef::string("name", "Widget name"),
+                "color",
+                FieldDef::string("color", "Widget color"),
             ))
+            .with_output(OutputKind::Resource)
         })
-        .action("list", "List widgets")
         .list()
         .get()
         .column("NAME", "name")
         .column("STATE", "state")
+        .column("ID", "id")
+        .empty_message("No widgets found.")
+        .sort_by("name")
+        .detail_section(None, vec![
+            DetailField::new("Name", "name"),
+            DetailField::new("ID", "id"),
+            DetailField::new("State", "state"),
+            DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+        ])
         .done();
 
     let handler: HandlerFn = Box::new(|req| {
