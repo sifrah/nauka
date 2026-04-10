@@ -35,4 +35,16 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#33 id=33 data-nosnippet>33</a>    }
 <a href=#34 id=34 data-nosnippet>34</a>    vms
 <a href=#35 id=35 data-nosnippet>35</a>}
+<a href=#36 id=36 data-nosnippet>36</a>
+<a href=#37 id=37 data-nosnippet>37</a><span class="doccomment">/// Get the PID of a running VM by its ID.
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="kw">pub fn </span>get_pid(vm_id: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;u32&gt; {
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="kw">let </span>pid_path = PathBuf::from(VM_RUN_DIR).join(vm_id).join(<span class="string">"pid"</span>);
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="kw">let </span>pid_str = std::fs::read_to_string(<span class="kw-2">&amp;</span>pid_path).ok()<span class="question-mark">?</span>;
+<a href=#41 id=41 data-nosnippet>41</a>    <span class="kw">let </span>pid: i32 = pid_str.trim().parse().ok()<span class="question-mark">?</span>;
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="kw">if unsafe </span>{ libc::kill(pid, <span class="number">0</span>) == <span class="number">0 </span>} {
+<a href=#43 id=43 data-nosnippet>43</a>        <span class="prelude-val">Some</span>(pid <span class="kw">as </span>u32)
+<a href=#44 id=44 data-nosnippet>44</a>    } <span class="kw">else </span>{
+<a href=#45 id=45 data-nosnippet>45</a>        <span class="prelude-val">None
+<a href=#46 id=46 data-nosnippet>46</a>    </span>}
+<a href=#47 id=47 data-nosnippet>47</a>}
 </code></pre></div></section></main></body></html>
