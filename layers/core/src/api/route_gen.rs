@@ -277,6 +277,10 @@ async fn handle_scoped(
         }
     }
 
+    // Extract pagination params before moving fields into the request
+    let pagination_page = fields.get("page").and_then(|v| v.parse::<usize>().ok());
+    let pagination_per_page = fields.get("per_page").and_then(|v| v.parse::<usize>().ok());
+
     let request = OperationRequest {
         operation: operation.to_string(),
         name,
@@ -299,15 +303,31 @@ async fn handle_scoped(
         }
         OperationResponse::ResourceList(items) => {
             let total = items.len();
+            let per_page = pagination_per_page.unwrap_or(25).clamp(1, 100);
+            let total_pages = if total == 0 {
+                1
+            } else {
+                total.div_ceil(per_page)
+            };
+            let page = pagination_page.unwrap_or(1).clamp(1, total_pages);
+            let start = (page - 1) * per_page;
+            let end = (start + per_page).min(total);
+            let page_items = &items[start..end];
+            let next_page = if page < total_pages {
+                Some(page + 1)
+            } else {
+                None
+            };
+            let previous_page = if page > 1 { Some(page - 1) } else { None };
             Ok(axum::Json(serde_json::json!({
-                "data": items,
+                "data": page_items,
                 "pagination": {
-                    "page": 1,
-                    "per_page": 25,
-                    "total_pages": 1,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": total_pages,
                     "total_entries": total,
-                    "next_page": null,
-                    "previous_page": null
+                    "next_page": next_page,
+                    "previous_page": previous_page
                 }
             }))
             .into_response())
@@ -623,6 +643,115 @@ mod tests {
         let spec = openapi_spec(&[], "/v1");
         assert_eq!(spec["openapi"], "3.0.0");
         assert!(spec["paths"].as_object().unwrap().is_empty());
+    }
+
+    // ── Pagination (#116) ──
+
+    fn paginated_resource(count: usize) -> ResourceRegistration {
+        let def = ResourceDef {
+            identity: ResourceIdentity {
+                kind: "widget",
+                cli_name: "widget",
+                plural: "widgets",
+                description: "Test widget",
+                aliases: &[],
+            },
+            scope: ScopeDef::global(),
+            schema: ResourceSchema::new(),
+            operations: vec![OperationDef::list()],
+            presentation: PresentationDef::none(),
+        };
+
+        let handler: HandlerFn = Box::new(move |_req| {
+            let items: Vec<serde_json::Value> = (0..count)
+                .map(|i| serde_json::json!({"name": format!("w{i}")}))
+                .collect();
+            Box::pin(async move { Ok(OperationResponse::ResourceList(items)) })
+        });
+
+        ResourceRegistration {
+            def,
+            handler,
+            children: vec![],
+        }
+    }
+
+    async fn list_with_params(
+        reg: &ResourceRegistration,
+        params: &[(&str, &str)],
+    ) -> serde_json::Value {
+        let fields: HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let resp = handle_scoped(reg, "list", None, fields, ScopeValues::default()).await;
+        let response = resp.into_response();
+        let (_, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pagination_defaults_page1_per25() {
+        let reg = paginated_resource(30);
+        let json = list_with_params(&reg, &[]).await;
+        let pag = &json["pagination"];
+        assert_eq!(pag["page"], 1);
+        assert_eq!(pag["per_page"], 25);
+        assert_eq!(pag["total_entries"], 30);
+        assert_eq!(pag["total_pages"], 2);
+        assert_eq!(pag["next_page"], 2);
+        assert!(pag["previous_page"].is_null());
+        assert_eq!(json["data"].as_array().unwrap().len(), 25);
+    }
+
+    #[tokio::test]
+    async fn pagination_page2() {
+        let reg = paginated_resource(30);
+        let json = list_with_params(&reg, &[("page", "2")]).await;
+        let pag = &json["pagination"];
+        assert_eq!(pag["page"], 2);
+        assert_eq!(pag["total_pages"], 2);
+        assert_eq!(pag["previous_page"], 1);
+        assert!(pag["next_page"].is_null());
+        assert_eq!(json["data"].as_array().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn pagination_custom_per_page() {
+        let reg = paginated_resource(30);
+        let json = list_with_params(&reg, &[("per_page", "10"), ("page", "1")]).await;
+        let pag = &json["pagination"];
+        assert_eq!(pag["page"], 1);
+        assert_eq!(pag["per_page"], 10);
+        assert_eq!(pag["total_pages"], 3);
+        assert_eq!(json["data"].as_array().unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn pagination_per_page_capped_at_100() {
+        let reg = paginated_resource(5);
+        let json = list_with_params(&reg, &[("per_page", "999")]).await;
+        assert_eq!(json["pagination"]["per_page"], 100);
+    }
+
+    #[tokio::test]
+    async fn pagination_empty_list() {
+        let reg = paginated_resource(0);
+        let json = list_with_params(&reg, &[]).await;
+        let pag = &json["pagination"];
+        assert_eq!(pag["total_entries"], 0);
+        assert_eq!(pag["total_pages"], 1);
+        assert_eq!(pag["page"], 1);
+        assert_eq!(json["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pagination_page_clamped_to_max() {
+        let reg = paginated_resource(10);
+        // Only 1 page with per_page=25, requesting page 5 should clamp to 1
+        let json = list_with_params(&reg, &[("page", "5")]).await;
+        assert_eq!(json["pagination"]["page"], 1);
     }
 
     #[test]
