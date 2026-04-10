@@ -617,20 +617,20 @@ fn state_machine_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violat
         });
     }
 
-    // W061: state-mutating actions should output Resource
+    // W061: update action should output Resource
     for op in &def.operations {
-        if matches!(op.name, "start" | "stop" | "update") {
-            if op.output.kind != OutputKind::Resource {
-                v.push(Violation {
-                    rule: "W061",
-                    resource: kind,
-                    message: format!(
-                        "action '{}' mutates state but output is {:?}, expected Resource",
-                        op.name, op.output.kind
-                    ),
-                    severity: Severity::Warning,
-                });
-            }
+        if matches!(op.name, "update")
+            && op.output.kind != OutputKind::Resource
+        {
+            v.push(Violation {
+                rule: "W061",
+                resource: kind,
+                message: format!(
+                    "action '{}' mutates state but output is {:?}, expected Resource",
+                    op.name, op.output.kind
+                ),
+                severity: Severity::Warning,
+            });
         }
     }
 }

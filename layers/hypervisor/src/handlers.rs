@@ -172,9 +172,9 @@ pub fn resource_def() -> ResourceDef {
         .action("status", "Show hypervisor status")
         .op(|op| op.with_output(OutputKind::Resource))
         .action("start", "Start hypervisor services (fabric, storage, tikv)")
-        .op(|op| op.with_output(OutputKind::Resource).with_progress(ProgressHint::Spinner("Starting hypervisor services...")))
+        .op(|op| op.with_output(OutputKind::Message).with_progress(ProgressHint::Spinner("Starting hypervisor services...")))
         .action("stop", "Stop hypervisor services (fabric, storage, tikv)")
-        .op(|op| op.with_output(OutputKind::Resource).with_progress(ProgressHint::Spinner("Stopping hypervisor services...")))
+        .op(|op| op.with_output(OutputKind::Message).with_progress(ProgressHint::Spinner("Stopping hypervisor services...")))
         .action("leave", "Leave the cluster and uninstall services")
         .op(|op| op.with_confirm().with_progress(ProgressHint::Steps(4)))
         // CRUD
