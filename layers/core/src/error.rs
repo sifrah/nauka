@@ -494,7 +494,11 @@ mod tests {
 
     #[test]
     fn has_dependents() {
-        let err = NaukaError::has_dependents("vpc", "web", "vpc 'web' has 2 subnet(s). Delete them first.");
+        let err = NaukaError::has_dependents(
+            "vpc",
+            "web",
+            "vpc 'web' has 2 subnet(s). Delete them first.",
+        );
         assert_eq!(err.code, ErrorCode::HasDependents);
         assert_eq!(err.http_status(), 422);
         assert!(!err.is_retryable());

@@ -681,7 +681,10 @@ mod tests {
     fn classify_already_exists() {
         let err = anyhow::anyhow!("org 'acme' already exists");
         let classified = classify_anyhow(err);
-        assert_eq!(classified.code, crate::error::ErrorCode::ResourceAlreadyExists);
+        assert_eq!(
+            classified.code,
+            crate::error::ErrorCode::ResourceAlreadyExists
+        );
         assert_eq!(classified.http_status(), 409);
     }
 
@@ -703,7 +706,9 @@ mod tests {
 
     #[test]
     fn classify_cidr_validation() {
-        let err = anyhow::anyhow!("CIDR must be a private range (10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)");
+        let err = anyhow::anyhow!(
+            "CIDR must be a private range (10.0.0.0/8, 172.16.0.0/12, or 192.168.0.0/16)"
+        );
         let classified = classify_anyhow(err);
         assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
         assert_eq!(classified.http_status(), 400);
@@ -719,7 +724,8 @@ mod tests {
 
     #[test]
     fn classify_must_be_validation() {
-        let err = anyhow::anyhow!("vm must be stopped or pending to delete (current state: running)");
+        let err =
+            anyhow::anyhow!("vm must be stopped or pending to delete (current state: running)");
         let classified = classify_anyhow(err);
         assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
         assert_eq!(classified.http_status(), 400);
