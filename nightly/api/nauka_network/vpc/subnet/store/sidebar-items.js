@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_SUB","NS_SUB_IDX","REG_SUBS"],"fn":["add_id","load_ids","remove_id"],"struct":["SubnetStore"]};
+window.SIDEBAR_ITEMS = {"constant":["NS_SUB","NS_SUB_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX"],"fn":["add_id","load_ids","remove_id"],"struct":["SubnetStore"]};

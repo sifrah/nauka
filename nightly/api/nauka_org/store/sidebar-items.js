@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_ORG","NS_ORG_IDX","REG_ORGS"],"fn":["add_id","load_ids","remove_id"],"struct":["OrgStore"]};
+window.SIDEBAR_ITEMS = {"constant":["NS_ORG","NS_ORG_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX"],"fn":["add_id","load_ids","remove_id"],"struct":["OrgStore"]};
