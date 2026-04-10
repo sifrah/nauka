@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["detect_ipv4_from_external","detect_ipv4_from_interface","detect_ipv4_public","detect_ipv6_block"]};

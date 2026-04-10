@@ -342,662 +342,686 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#340 id=340 data-nosnippet>340</a>        .map(|s| s == <span class="string">"true"</span>)
 <a href=#341 id=341 data-nosnippet>341</a>        .unwrap_or(<span class="bool-val">false</span>);
 <a href=#342 id=342 data-nosnippet>342</a>
-<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned();
-<a href=#344 id=344 data-nosnippet>344</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned();
-<a href=#345 id=345 data-nosnippet>345</a>
-<a href=#346 id=346 data-nosnippet>346</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#347 id=347 data-nosnippet>347</a>    <span class="kw">let </span>init_cfg = fabric::ops::InitConfig {
-<a href=#348 id=348 data-nosnippet>348</a>        node_name: <span class="kw-2">&amp;</span>node_name,
-<a href=#349 id=349 data-nosnippet>349</a>        region,
-<a href=#350 id=350 data-nosnippet>350</a>        zone,
-<a href=#351 id=351 data-nosnippet>351</a>        port,
-<a href=#352 id=352 data-nosnippet>352</a>        network_mode,
-<a href=#353 id=353 data-nosnippet>353</a>        fabric_interface,
-<a href=#354 id=354 data-nosnippet>354</a>        endpoint,
-<a href=#355 id=355 data-nosnippet>355</a>        ipv6_block,
-<a href=#356 id=356 data-nosnippet>356</a>        ipv4_public,
-<a href=#357 id=357 data-nosnippet>357</a>    };
-<a href=#358 id=358 data-nosnippet>358</a>
-<a href=#359 id=359 data-nosnippet>359</a>    <span class="comment">// Generate a deterministic encryption password from the S3 secret key + region.
-<a href=#360 id=360 data-nosnippet>360</a>    // All nodes in the same region will derive the same password.
-<a href=#361 id=361 data-nosnippet>361</a>    </span><span class="kw">let </span>encryption_password = {
-<a href=#362 id=362 data-nosnippet>362</a>        <span class="kw">use </span>sha2::{Digest, Sha256};
-<a href=#363 id=363 data-nosnippet>363</a>        <span class="kw">let </span><span class="kw-2">mut </span>hasher = Sha256::new();
-<a href=#364 id=364 data-nosnippet>364</a>        hasher.update(s3_secret_key.as_bytes());
-<a href=#365 id=365 data-nosnippet>365</a>        hasher.update(<span class="string">b":zerofs:"</span>);
-<a href=#366 id=366 data-nosnippet>366</a>        hasher.update(region.as_bytes());
-<a href=#367 id=367 data-nosnippet>367</a>        <span class="macro">format!</span>(<span class="string">"{:x}"</span>, hasher.finalize())
-<a href=#368 id=368 data-nosnippet>368</a>    };
-<a href=#369 id=369 data-nosnippet>369</a>
-<a href=#370 id=370 data-nosnippet>370</a>    <span class="kw">let </span>region_storage = storage::region::RegionStorage {
-<a href=#371 id=371 data-nosnippet>371</a>        region: region.to_string(),
-<a href=#372 id=372 data-nosnippet>372</a>        s3_endpoint,
-<a href=#373 id=373 data-nosnippet>373</a>        s3_bucket,
-<a href=#374 id=374 data-nosnippet>374</a>        s3_access_key,
-<a href=#375 id=375 data-nosnippet>375</a>        s3_secret_key,
-<a href=#376 id=376 data-nosnippet>376</a>        s3_region,
-<a href=#377 id=377 data-nosnippet>377</a>        encryption_password,
-<a href=#378 id=378 data-nosnippet>378</a>        is_default: <span class="bool-val">true</span>,
-<a href=#379 id=379 data-nosnippet>379</a>    };
-<a href=#380 id=380 data-nosnippet>380</a>
-<a href=#381 id=381 data-nosnippet>381</a>    <span class="comment">// Init: 2 (fabric) + 4 (control plane) + 2 (storage) + 3 (compute+forge) = 11
-<a href=#382 id=382 data-nosnippet>382</a>    </span><span class="kw">let </span>step_count = <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#383 id=383 data-nosnippet>383</a>        <span class="number">11
-<a href=#384 id=384 data-nosnippet>384</a>    </span>} <span class="kw">else </span>{
-<a href=#385 id=385 data-nosnippet>385</a>        <span class="number">5 </span><span class="comment">// fabric + compute + forge
-<a href=#386 id=386 data-nosnippet>386</a>    </span>};
-<a href=#387 id=387 data-nosnippet>387</a>    <span class="kw">let </span>steps = ui::Steps::new(step_count);
-<a href=#388 id=388 data-nosnippet>388</a>
-<a href=#389 id=389 data-nosnippet>389</a>    <span class="kw">let </span>result = fabric::ops::init(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>init_cfg, <span class="kw-2">&amp;</span>steps)<span class="question-mark">?</span>;
-<a href=#390 id=390 data-nosnippet>390</a>    <span class="comment">// Track how far we got for rollback on failure
-<a href=#391 id=391 data-nosnippet>391</a>    </span><span class="kw">let </span>fabric_initialized = <span class="bool-val">true</span>;
-<a href=#392 id=392 data-nosnippet>392</a>    <span class="kw">let </span><span class="kw-2">mut </span>controlplane_initialized = <span class="bool-val">false</span>;
-<a href=#393 id=393 data-nosnippet>393</a>    <span class="kw">let </span><span class="kw-2">mut </span>storage_initialized = <span class="bool-val">false</span>;
-<a href=#394 id=394 data-nosnippet>394</a>
-<a href=#395 id=395 data-nosnippet>395</a>    <span class="comment">// Rollback closure — undoes completed steps in reverse order
-<a href=#396 id=396 data-nosnippet>396</a>    </span><span class="kw">let </span>rollback = |fabric: bool, cp: bool, stor: bool| {
-<a href=#397 id=397 data-nosnippet>397</a>        <span class="macro">tracing::warn!</span>(<span class="string">"init failed — rolling back"</span>);
-<a href=#398 id=398 data-nosnippet>398</a>        <span class="kw">if </span>stor {
-<a href=#399 id=399 data-nosnippet>399</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: uninstalling storage"</span>);
-<a href=#400 id=400 data-nosnippet>400</a>            <span class="kw">let _ </span>= storage::ops::leave();
-<a href=#401 id=401 data-nosnippet>401</a>        }
-<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">if </span>cp {
-<a href=#403 id=403 data-nosnippet>403</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: uninstalling control plane"</span>);
-<a href=#404 id=404 data-nosnippet>404</a>            <span class="kw">let _ </span>= controlplane::service::uninstall();
-<a href=#405 id=405 data-nosnippet>405</a>        }
-<a href=#406 id=406 data-nosnippet>406</a>        <span class="kw">if </span>fabric {
-<a href=#407 id=407 data-nosnippet>407</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: removing fabric state and interface"</span>);
-<a href=#408 id=408 data-nosnippet>408</a>            <span class="kw">let </span>backend = fabric::backend::create_backend(network_mode);
-<a href=#409 id=409 data-nosnippet>409</a>            <span class="kw">let _ </span>= backend.teardown();
-<a href=#410 id=410 data-nosnippet>410</a>            <span class="kw">let _ </span>= fabric::state::FabricState::delete(<span class="kw-2">&amp;</span>db);
-<a href=#411 id=411 data-nosnippet>411</a>        }
-<a href=#412 id=412 data-nosnippet>412</a>    };
-<a href=#413 id=413 data-nosnippet>413</a>
-<a href=#414 id=414 data-nosnippet>414</a>    <span class="comment">// Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
-<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) =
-<a href=#417 id=417 data-nosnippet>417</a>            controlplane::ops::bootstrap(<span class="kw-2">&amp;</span>node_name, <span class="kw-2">&amp;</span>result.hypervisor.mesh_ipv6, <span class="kw-2">&amp;</span>steps)
-<a href=#418 id=418 data-nosnippet>418</a>        {
-<a href=#419 id=419 data-nosnippet>419</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Control plane failed: {e}"</span>));
-<a href=#420 id=420 data-nosnippet>420</a>            rollback(fabric_initialized, <span class="bool-val">false</span>, <span class="bool-val">false</span>);
-<a href=#421 id=421 data-nosnippet>421</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(e.into());
-<a href=#422 id=422 data-nosnippet>422</a>        }
-<a href=#423 id=423 data-nosnippet>423</a>        controlplane_initialized = <span class="bool-val">true</span>;
-<a href=#424 id=424 data-nosnippet>424</a>    }
+<a href=#343 id=343 data-nosnippet>343</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned().or_else(|| {
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">let </span>detected = <span class="kw">crate</span>::detect::detect_ipv6_block();
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>v) = detected {
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="macro">eprintln!</span>(<span class="string">"  Auto-detected IPv6 block: {v}"</span>);
+<a href=#347 id=347 data-nosnippet>347</a>        }
+<a href=#348 id=348 data-nosnippet>348</a>        detected
+<a href=#349 id=349 data-nosnippet>349</a>    });
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned().or_else(|| {
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span>detected = <span class="kw">crate</span>::detect::detect_ipv4_public();
+<a href=#352 id=352 data-nosnippet>352</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>v) = detected {
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="macro">eprintln!</span>(<span class="string">"  Auto-detected IPv4 address: {v}"</span>);
+<a href=#354 id=354 data-nosnippet>354</a>        }
+<a href=#355 id=355 data-nosnippet>355</a>        detected
+<a href=#356 id=356 data-nosnippet>356</a>    });
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#359 id=359 data-nosnippet>359</a>    <span class="kw">let </span>init_cfg = fabric::ops::InitConfig {
+<a href=#360 id=360 data-nosnippet>360</a>        node_name: <span class="kw-2">&amp;</span>node_name,
+<a href=#361 id=361 data-nosnippet>361</a>        region,
+<a href=#362 id=362 data-nosnippet>362</a>        zone,
+<a href=#363 id=363 data-nosnippet>363</a>        port,
+<a href=#364 id=364 data-nosnippet>364</a>        network_mode,
+<a href=#365 id=365 data-nosnippet>365</a>        fabric_interface,
+<a href=#366 id=366 data-nosnippet>366</a>        endpoint,
+<a href=#367 id=367 data-nosnippet>367</a>        ipv6_block,
+<a href=#368 id=368 data-nosnippet>368</a>        ipv4_public,
+<a href=#369 id=369 data-nosnippet>369</a>    };
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a>    <span class="comment">// Generate a deterministic encryption password from the S3 secret key + region.
+<a href=#372 id=372 data-nosnippet>372</a>    // All nodes in the same region will derive the same password.
+<a href=#373 id=373 data-nosnippet>373</a>    </span><span class="kw">let </span>encryption_password = {
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="kw">let </span><span class="kw-2">mut </span>hasher = Sha256::new();
+<a href=#376 id=376 data-nosnippet>376</a>        hasher.update(s3_secret_key.as_bytes());
+<a href=#377 id=377 data-nosnippet>377</a>        hasher.update(<span class="string">b":zerofs:"</span>);
+<a href=#378 id=378 data-nosnippet>378</a>        hasher.update(region.as_bytes());
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="macro">format!</span>(<span class="string">"{:x}"</span>, hasher.finalize())
+<a href=#380 id=380 data-nosnippet>380</a>    };
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">let </span>region_storage = storage::region::RegionStorage {
+<a href=#383 id=383 data-nosnippet>383</a>        region: region.to_string(),
+<a href=#384 id=384 data-nosnippet>384</a>        s3_endpoint,
+<a href=#385 id=385 data-nosnippet>385</a>        s3_bucket,
+<a href=#386 id=386 data-nosnippet>386</a>        s3_access_key,
+<a href=#387 id=387 data-nosnippet>387</a>        s3_secret_key,
+<a href=#388 id=388 data-nosnippet>388</a>        s3_region,
+<a href=#389 id=389 data-nosnippet>389</a>        encryption_password,
+<a href=#390 id=390 data-nosnippet>390</a>        is_default: <span class="bool-val">true</span>,
+<a href=#391 id=391 data-nosnippet>391</a>    };
+<a href=#392 id=392 data-nosnippet>392</a>
+<a href=#393 id=393 data-nosnippet>393</a>    <span class="comment">// Init: 2 (fabric) + 4 (control plane) + 2 (storage) + 3 (compute+forge) = 11
+<a href=#394 id=394 data-nosnippet>394</a>    </span><span class="kw">let </span>step_count = <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#395 id=395 data-nosnippet>395</a>        <span class="number">11
+<a href=#396 id=396 data-nosnippet>396</a>    </span>} <span class="kw">else </span>{
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="number">5 </span><span class="comment">// fabric + compute + forge
+<a href=#398 id=398 data-nosnippet>398</a>    </span>};
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">let </span>steps = ui::Steps::new(step_count);
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="kw">let </span>result = fabric::ops::init(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>init_cfg, <span class="kw-2">&amp;</span>steps)<span class="question-mark">?</span>;
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="comment">// Track how far we got for rollback on failure
+<a href=#403 id=403 data-nosnippet>403</a>    </span><span class="kw">let </span>fabric_initialized = <span class="bool-val">true</span>;
+<a href=#404 id=404 data-nosnippet>404</a>    <span class="kw">let </span><span class="kw-2">mut </span>controlplane_initialized = <span class="bool-val">false</span>;
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">let </span><span class="kw-2">mut </span>storage_initialized = <span class="bool-val">false</span>;
+<a href=#406 id=406 data-nosnippet>406</a>
+<a href=#407 id=407 data-nosnippet>407</a>    <span class="comment">// Rollback closure — undoes completed steps in reverse order
+<a href=#408 id=408 data-nosnippet>408</a>    </span><span class="kw">let </span>rollback = |fabric: bool, cp: bool, stor: bool| {
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="macro">tracing::warn!</span>(<span class="string">"init failed — rolling back"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="kw">if </span>stor {
+<a href=#411 id=411 data-nosnippet>411</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: uninstalling storage"</span>);
+<a href=#412 id=412 data-nosnippet>412</a>            <span class="kw">let _ </span>= storage::ops::leave();
+<a href=#413 id=413 data-nosnippet>413</a>        }
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">if </span>cp {
+<a href=#415 id=415 data-nosnippet>415</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: uninstalling control plane"</span>);
+<a href=#416 id=416 data-nosnippet>416</a>            <span class="kw">let _ </span>= controlplane::service::uninstall();
+<a href=#417 id=417 data-nosnippet>417</a>        }
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">if </span>fabric {
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="macro">tracing::info!</span>(<span class="string">"rollback: removing fabric state and interface"</span>);
+<a href=#420 id=420 data-nosnippet>420</a>            <span class="kw">let </span>backend = fabric::backend::create_backend(network_mode);
+<a href=#421 id=421 data-nosnippet>421</a>            <span class="kw">let _ </span>= backend.teardown();
+<a href=#422 id=422 data-nosnippet>422</a>            <span class="kw">let _ </span>= fabric::state::FabricState::delete(<span class="kw-2">&amp;</span>db);
+<a href=#423 id=423 data-nosnippet>423</a>        }
+<a href=#424 id=424 data-nosnippet>424</a>    };
 <a href=#425 id=425 data-nosnippet>425</a>
-<a href=#426 id=426 data-nosnippet>426</a>    <span class="comment">// Publish region storage config to distributed KV, then setup local storage
+<a href=#426 id=426 data-nosnippet>426</a>    <span class="comment">// Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
 <a href=#427 id=427 data-nosnippet>427</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#428 id=428 data-nosnippet>428</a>        steps.set(<span class="string">"Publishing storage config"</span>);
-<a href=#429 id=429 data-nosnippet>429</a>        <span class="kw">let </span>pd_endpoint = <span class="macro">format!</span>(
-<a href=#430 id=430 data-nosnippet>430</a>            <span class="string">"http://[{}]:{}"</span>,
-<a href=#431 id=431 data-nosnippet>431</a>            result.hypervisor.mesh_ipv6,
-<a href=#432 id=432 data-nosnippet>432</a>            controlplane::PD_CLIENT_PORT,
-<a href=#433 id=433 data-nosnippet>433</a>        );
-<a href=#434 id=434 data-nosnippet>434</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) =
-<a href=#435 id=435 data-nosnippet>435</a>            storage::ops::publish_region_config(<span class="kw-2">&amp;</span>[pd_endpoint.as_str()], <span class="kw-2">&amp;</span>region_storage).<span class="kw">await
-<a href=#436 id=436 data-nosnippet>436</a>        </span>{
-<a href=#437 id=437 data-nosnippet>437</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Storage config failed: {e}"</span>));
-<a href=#438 id=438 data-nosnippet>438</a>            rollback(fabric_initialized, controlplane_initialized, <span class="bool-val">false</span>);
-<a href=#439 id=439 data-nosnippet>439</a>            <span class="macro">anyhow::bail!</span>(<span class="string">"{e}"</span>);
-<a href=#440 id=440 data-nosnippet>440</a>        }
-<a href=#441 id=441 data-nosnippet>441</a>        steps.inc();
-<a href=#442 id=442 data-nosnippet>442</a>    }
-<a href=#443 id=443 data-nosnippet>443</a>
-<a href=#444 id=444 data-nosnippet>444</a>    <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#445 id=445 data-nosnippet>445</a>        steps.set(<span class="string">"Setting up storage"</span>);
-<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = storage::ops::setup_region(<span class="kw-2">&amp;</span>db, region_storage.clone()) {
-<a href=#447 id=447 data-nosnippet>447</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Storage setup failed: {e}"</span>));
-<a href=#448 id=448 data-nosnippet>448</a>            rollback(fabric_initialized, controlplane_initialized, <span class="bool-val">false</span>);
-<a href=#449 id=449 data-nosnippet>449</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(e.into());
-<a href=#450 id=450 data-nosnippet>450</a>        }
-<a href=#451 id=451 data-nosnippet>451</a>        storage_initialized = <span class="bool-val">true</span>;
-<a href=#452 id=452 data-nosnippet>452</a>        steps.inc();
-<a href=#453 id=453 data-nosnippet>453</a>    }
-<a href=#454 id=454 data-nosnippet>454</a>
-<a href=#455 id=455 data-nosnippet>455</a>    <span class="comment">// Non-critical steps — warn but don't rollback
-<a href=#456 id=456 data-nosnippet>456</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="kw">crate</span>::compute_setup::install(<span class="kw-2">&amp;</span>steps) {
-<a href=#457 id=457 data-nosnippet>457</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"compute setup failed (VMs won't work until fixed)"</span>);
-<a href=#458 id=458 data-nosnippet>458</a>    }
-<a href=#459 id=459 data-nosnippet>459</a>
-<a href=#460 id=460 data-nosnippet>460</a>    <span class="kw">if </span>!peering {
-<a href=#461 id=461 data-nosnippet>461</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
-<a href=#462 id=462 data-nosnippet>462</a>            <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
-<a href=#463 id=463 data-nosnippet>463</a>        }
-<a href=#464 id=464 data-nosnippet>464</a>    }
-<a href=#465 id=465 data-nosnippet>465</a>
-<a href=#466 id=466 data-nosnippet>466</a>    <span class="comment">// Suppress unused variable warnings
-<a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">let _ </span>= (fabric_initialized, storage_initialized);
-<a href=#468 id=468 data-nosnippet>468</a>
-<a href=#469 id=469 data-nosnippet>469</a>    steps.finish(<span class="string">"Hypervisor initialized"</span>);
-<a href=#470 id=470 data-nosnippet>470</a>    <span class="macro">eprintln!</span>();
-<a href=#471 id=471 data-nosnippet>471</a>    <span class="macro">eprintln!</span>(<span class="string">"  name     {}"</span>, result.hypervisor.name);
-<a href=#472 id=472 data-nosnippet>472</a>    <span class="macro">eprintln!</span>(<span class="string">"  id       {}"</span>, result.hypervisor.id.as_str());
-<a href=#473 id=473 data-nosnippet>473</a>    <span class="macro">eprintln!</span>(<span class="string">"  mesh     {}"</span>, result.mesh.id);
-<a href=#474 id=474 data-nosnippet>474</a>    <span class="macro">eprintln!</span>(<span class="string">"  region   {region}/{zone}"</span>);
-<a href=#475 id=475 data-nosnippet>475</a>    <span class="macro">eprintln!</span>(<span class="string">"  address  {}"</span>, result.hypervisor.mesh_ipv6);
-<a href=#476 id=476 data-nosnippet>476</a>    <span class="macro">eprintln!</span>(<span class="string">"  pin      {}"</span>, result.pin);
-<a href=#477 id=477 data-nosnippet>477</a>    <span class="macro">eprintln!</span>();
-<a href=#478 id=478 data-nosnippet>478</a>
-<a href=#479 id=479 data-nosnippet>479</a>    <span class="kw">if </span>peering {
-<a href=#480 id=480 data-nosnippet>480</a>        <span class="kw">let </span>peering_port = port + <span class="number">1</span>;
-<a href=#481 id=481 data-nosnippet>481</a>        <span class="macro">eprintln!</span>(<span class="string">"  Peering active on port {peering_port}"</span>);
-<a href=#482 id=482 data-nosnippet>482</a>        <span class="macro">eprintln!</span>(<span class="string">"  Nodes can join with:"</span>);
-<a href=#483 id=483 data-nosnippet>483</a>        <span class="macro">eprintln!</span>(
-<a href=#484 id=484 data-nosnippet>484</a>            <span class="string">"    nauka hypervisor join --target &lt;this-ip&gt;:{peering_port} --pin {}"</span>,
-<a href=#485 id=485 data-nosnippet>485</a>            result.pin
-<a href=#486 id=486 data-nosnippet>486</a>        );
-<a href=#487 id=487 data-nosnippet>487</a>        <span class="macro">eprintln!</span>();
-<a href=#488 id=488 data-nosnippet>488</a>        <span class="macro">eprintln!</span>(<span class="string">"  Waiting for joins... (Ctrl+C to stop)"</span>);
-<a href=#489 id=489 data-nosnippet>489</a>        <span class="macro">eprintln!</span>();
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) =
+<a href=#429 id=429 data-nosnippet>429</a>            controlplane::ops::bootstrap(<span class="kw-2">&amp;</span>node_name, <span class="kw-2">&amp;</span>result.hypervisor.mesh_ipv6, <span class="kw-2">&amp;</span>steps)
+<a href=#430 id=430 data-nosnippet>430</a>        {
+<a href=#431 id=431 data-nosnippet>431</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Control plane failed: {e}"</span>));
+<a href=#432 id=432 data-nosnippet>432</a>            rollback(fabric_initialized, <span class="bool-val">false</span>, <span class="bool-val">false</span>);
+<a href=#433 id=433 data-nosnippet>433</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(e.into());
+<a href=#434 id=434 data-nosnippet>434</a>        }
+<a href=#435 id=435 data-nosnippet>435</a>        controlplane_initialized = <span class="bool-val">true</span>;
+<a href=#436 id=436 data-nosnippet>436</a>    }
+<a href=#437 id=437 data-nosnippet>437</a>
+<a href=#438 id=438 data-nosnippet>438</a>    <span class="comment">// Publish region storage config to distributed KV, then setup local storage
+<a href=#439 id=439 data-nosnippet>439</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#440 id=440 data-nosnippet>440</a>        steps.set(<span class="string">"Publishing storage config"</span>);
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="kw">let </span>pd_endpoint = <span class="macro">format!</span>(
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="string">"http://[{}]:{}"</span>,
+<a href=#443 id=443 data-nosnippet>443</a>            result.hypervisor.mesh_ipv6,
+<a href=#444 id=444 data-nosnippet>444</a>            controlplane::PD_CLIENT_PORT,
+<a href=#445 id=445 data-nosnippet>445</a>        );
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) =
+<a href=#447 id=447 data-nosnippet>447</a>            storage::ops::publish_region_config(<span class="kw-2">&amp;</span>[pd_endpoint.as_str()], <span class="kw-2">&amp;</span>region_storage).<span class="kw">await
+<a href=#448 id=448 data-nosnippet>448</a>        </span>{
+<a href=#449 id=449 data-nosnippet>449</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Storage config failed: {e}"</span>));
+<a href=#450 id=450 data-nosnippet>450</a>            rollback(fabric_initialized, controlplane_initialized, <span class="bool-val">false</span>);
+<a href=#451 id=451 data-nosnippet>451</a>            <span class="macro">anyhow::bail!</span>(<span class="string">"{e}"</span>);
+<a href=#452 id=452 data-nosnippet>452</a>        }
+<a href=#453 id=453 data-nosnippet>453</a>        steps.inc();
+<a href=#454 id=454 data-nosnippet>454</a>    }
+<a href=#455 id=455 data-nosnippet>455</a>
+<a href=#456 id=456 data-nosnippet>456</a>    <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#457 id=457 data-nosnippet>457</a>        steps.set(<span class="string">"Setting up storage"</span>);
+<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = storage::ops::setup_region(<span class="kw-2">&amp;</span>db, region_storage.clone()) {
+<a href=#459 id=459 data-nosnippet>459</a>            steps.finish_err(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"Storage setup failed: {e}"</span>));
+<a href=#460 id=460 data-nosnippet>460</a>            rollback(fabric_initialized, controlplane_initialized, <span class="bool-val">false</span>);
+<a href=#461 id=461 data-nosnippet>461</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(e.into());
+<a href=#462 id=462 data-nosnippet>462</a>        }
+<a href=#463 id=463 data-nosnippet>463</a>        storage_initialized = <span class="bool-val">true</span>;
+<a href=#464 id=464 data-nosnippet>464</a>        steps.inc();
+<a href=#465 id=465 data-nosnippet>465</a>    }
+<a href=#466 id=466 data-nosnippet>466</a>
+<a href=#467 id=467 data-nosnippet>467</a>    <span class="comment">// Non-critical steps — warn but don't rollback
+<a href=#468 id=468 data-nosnippet>468</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="kw">crate</span>::compute_setup::install(<span class="kw-2">&amp;</span>steps) {
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"compute setup failed (VMs won't work until fixed)"</span>);
+<a href=#470 id=470 data-nosnippet>470</a>    }
+<a href=#471 id=471 data-nosnippet>471</a>
+<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw">if </span>!peering {
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
+<a href=#474 id=474 data-nosnippet>474</a>            <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
+<a href=#475 id=475 data-nosnippet>475</a>        }
+<a href=#476 id=476 data-nosnippet>476</a>    }
+<a href=#477 id=477 data-nosnippet>477</a>
+<a href=#478 id=478 data-nosnippet>478</a>    <span class="comment">// Suppress unused variable warnings
+<a href=#479 id=479 data-nosnippet>479</a>    </span><span class="kw">let _ </span>= (fabric_initialized, storage_initialized);
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>    steps.finish(<span class="string">"Hypervisor initialized"</span>);
+<a href=#482 id=482 data-nosnippet>482</a>    <span class="macro">eprintln!</span>();
+<a href=#483 id=483 data-nosnippet>483</a>    <span class="macro">eprintln!</span>(<span class="string">"  name     {}"</span>, result.hypervisor.name);
+<a href=#484 id=484 data-nosnippet>484</a>    <span class="macro">eprintln!</span>(<span class="string">"  id       {}"</span>, result.hypervisor.id.as_str());
+<a href=#485 id=485 data-nosnippet>485</a>    <span class="macro">eprintln!</span>(<span class="string">"  mesh     {}"</span>, result.mesh.id);
+<a href=#486 id=486 data-nosnippet>486</a>    <span class="macro">eprintln!</span>(<span class="string">"  region   {region}/{zone}"</span>);
+<a href=#487 id=487 data-nosnippet>487</a>    <span class="macro">eprintln!</span>(<span class="string">"  address  {}"</span>, result.hypervisor.mesh_ipv6);
+<a href=#488 id=488 data-nosnippet>488</a>    <span class="macro">eprintln!</span>(<span class="string">"  pin      {}"</span>, result.pin);
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="macro">eprintln!</span>();
 <a href=#490 id=490 data-nosnippet>490</a>
-<a href=#491 id=491 data-nosnippet>491</a>        <span class="comment">// Block here listening for joins (DB opened per-request, no lock held)
-<a href=#492 id=492 data-nosnippet>492</a>        </span><span class="kw">let </span>accepted = fabric::ops::listen_for_peers(
-<a href=#493 id=493 data-nosnippet>493</a>            <span class="kw-2">&amp;</span>result.pin,
-<a href=#494 id=494 data-nosnippet>494</a>            peering_port,
-<a href=#495 id=495 data-nosnippet>495</a>            <span class="number">3600</span>, <span class="comment">// 1 hour timeout
-<a href=#496 id=496 data-nosnippet>496</a>        </span>)
-<a href=#497 id=497 data-nosnippet>497</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#498 id=498 data-nosnippet>498</a>
-<a href=#499 id=499 data-nosnippet>499</a>        <span class="macro">eprintln!</span>(<span class="string">"  {} node(s) joined."</span>, accepted);
-<a href=#500 id=500 data-nosnippet>500</a>
-<a href=#501 id=501 data-nosnippet>501</a>        <span class="comment">// Peering session ended — install announce service for persistent listening
-<a href=#502 id=502 data-nosnippet>502</a>        </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
-<a href=#503 id=503 data-nosnippet>503</a>            <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
-<a href=#504 id=504 data-nosnippet>504</a>        }
-<a href=#505 id=505 data-nosnippet>505</a>    } <span class="kw">else </span>{
-<a href=#506 id=506 data-nosnippet>506</a>        <span class="macro">eprintln!</span>(<span class="string">"  To accept joins on this node:"</span>);
-<a href=#507 id=507 data-nosnippet>507</a>        <span class="macro">eprintln!</span>(<span class="string">"    nauka hypervisor peering"</span>);
-<a href=#508 id=508 data-nosnippet>508</a>        <span class="macro">eprintln!</span>();
-<a href=#509 id=509 data-nosnippet>509</a>        <span class="macro">eprintln!</span>(<span class="string">"  Or from another node:"</span>);
-<a href=#510 id=510 data-nosnippet>510</a>        <span class="macro">eprintln!</span>(
-<a href=#511 id=511 data-nosnippet>511</a>            <span class="string">"    nauka hypervisor join --target &lt;this-ip&gt; --pin {}"</span>,
-<a href=#512 id=512 data-nosnippet>512</a>            result.pin
-<a href=#513 id=513 data-nosnippet>513</a>        );
-<a href=#514 id=514 data-nosnippet>514</a>    }
-<a href=#515 id=515 data-nosnippet>515</a>
-<a href=#516 id=516 data-nosnippet>516</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#517 id=517 data-nosnippet>517</a>        <span class="string">"name"</span>: result.hypervisor.name,
-<a href=#518 id=518 data-nosnippet>518</a>        <span class="string">"id"</span>: result.hypervisor.id.as_str(),
-<a href=#519 id=519 data-nosnippet>519</a>        <span class="string">"region"</span>: region,
-<a href=#520 id=520 data-nosnippet>520</a>        <span class="string">"zone"</span>: zone,
-<a href=#521 id=521 data-nosnippet>521</a>        <span class="string">"mesh_ipv6"</span>: result.hypervisor.mesh_ipv6.to_string(),
-<a href=#522 id=522 data-nosnippet>522</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
-<a href=#523 id=523 data-nosnippet>523</a>        <span class="string">"pin"</span>: result.pin,
-<a href=#524 id=524 data-nosnippet>524</a>    })))
-<a href=#525 id=525 data-nosnippet>525</a>}
-<a href=#526 id=526 data-nosnippet>526</a>
-<a href=#527 id=527 data-nosnippet>527</a><span class="kw">async fn </span>handle_join(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#528 id=528 data-nosnippet>528</a>    <span class="kw">let </span>target = req
-<a href=#529 id=529 data-nosnippet>529</a>        .fields
-<a href=#530 id=530 data-nosnippet>530</a>        .get(<span class="string">"target"</span>)
-<a href=#531 id=531 data-nosnippet>531</a>        .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing required field: target"</span>))<span class="question-mark">?
-<a href=#532 id=532 data-nosnippet>532</a>        </span>.clone();
-<a href=#533 id=533 data-nosnippet>533</a>    <span class="kw">let </span>region = req
-<a href=#534 id=534 data-nosnippet>534</a>        .fields
-<a href=#535 id=535 data-nosnippet>535</a>        .get(<span class="string">"region"</span>)
-<a href=#536 id=536 data-nosnippet>536</a>        .map(|s| s.as_str())
-<a href=#537 id=537 data-nosnippet>537</a>        .unwrap_or(<span class="string">"default"</span>);
-<a href=#538 id=538 data-nosnippet>538</a>    <span class="kw">let </span>zone = req
-<a href=#539 id=539 data-nosnippet>539</a>        .fields
-<a href=#540 id=540 data-nosnippet>540</a>        .get(<span class="string">"zone"</span>)
-<a href=#541 id=541 data-nosnippet>541</a>        .map(|s| s.as_str())
-<a href=#542 id=542 data-nosnippet>542</a>        .unwrap_or(<span class="string">"default"</span>);
-<a href=#543 id=543 data-nosnippet>543</a>    <span class="kw">let </span>port: u16 = req
-<a href=#544 id=544 data-nosnippet>544</a>        .fields
-<a href=#545 id=545 data-nosnippet>545</a>        .get(<span class="string">"port"</span>)
-<a href=#546 id=546 data-nosnippet>546</a>        .and_then(|s| s.parse().ok())
-<a href=#547 id=547 data-nosnippet>547</a>        .unwrap_or(<span class="number">51820</span>);
-<a href=#548 id=548 data-nosnippet>548</a>    <span class="kw">let </span>pin = req.fields.get(<span class="string">"pin"</span>).map(|s| s.as_str());
-<a href=#549 id=549 data-nosnippet>549</a>
-<a href=#550 id=550 data-nosnippet>550</a>    <span class="kw">let </span>network_mode: fabric::NetworkMode = req
+<a href=#491 id=491 data-nosnippet>491</a>    <span class="kw">if </span>peering {
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="kw">let </span>peering_port = port + <span class="number">1</span>;
+<a href=#493 id=493 data-nosnippet>493</a>        <span class="macro">eprintln!</span>(<span class="string">"  Peering active on port {peering_port}"</span>);
+<a href=#494 id=494 data-nosnippet>494</a>        <span class="macro">eprintln!</span>(<span class="string">"  Nodes can join with:"</span>);
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="macro">eprintln!</span>(
+<a href=#496 id=496 data-nosnippet>496</a>            <span class="string">"    nauka hypervisor join --target &lt;this-ip&gt;:{peering_port} --pin {}"</span>,
+<a href=#497 id=497 data-nosnippet>497</a>            result.pin
+<a href=#498 id=498 data-nosnippet>498</a>        );
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="macro">eprintln!</span>();
+<a href=#500 id=500 data-nosnippet>500</a>        <span class="macro">eprintln!</span>(<span class="string">"  Waiting for joins... (Ctrl+C to stop)"</span>);
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="macro">eprintln!</span>();
+<a href=#502 id=502 data-nosnippet>502</a>
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="comment">// Block here listening for joins (DB opened per-request, no lock held)
+<a href=#504 id=504 data-nosnippet>504</a>        </span><span class="kw">let </span>accepted = fabric::ops::listen_for_peers(
+<a href=#505 id=505 data-nosnippet>505</a>            <span class="kw-2">&amp;</span>result.pin,
+<a href=#506 id=506 data-nosnippet>506</a>            peering_port,
+<a href=#507 id=507 data-nosnippet>507</a>            <span class="number">3600</span>, <span class="comment">// 1 hour timeout
+<a href=#508 id=508 data-nosnippet>508</a>        </span>)
+<a href=#509 id=509 data-nosnippet>509</a>        .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#510 id=510 data-nosnippet>510</a>
+<a href=#511 id=511 data-nosnippet>511</a>        <span class="macro">eprintln!</span>(<span class="string">"  {} node(s) joined."</span>, accepted);
+<a href=#512 id=512 data-nosnippet>512</a>
+<a href=#513 id=513 data-nosnippet>513</a>        <span class="comment">// Peering session ended — install announce service for persistent listening
+<a href=#514 id=514 data-nosnippet>514</a>        </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
+<a href=#515 id=515 data-nosnippet>515</a>            <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
+<a href=#516 id=516 data-nosnippet>516</a>        }
+<a href=#517 id=517 data-nosnippet>517</a>    } <span class="kw">else </span>{
+<a href=#518 id=518 data-nosnippet>518</a>        <span class="macro">eprintln!</span>(<span class="string">"  To accept joins on this node:"</span>);
+<a href=#519 id=519 data-nosnippet>519</a>        <span class="macro">eprintln!</span>(<span class="string">"    nauka hypervisor peering"</span>);
+<a href=#520 id=520 data-nosnippet>520</a>        <span class="macro">eprintln!</span>();
+<a href=#521 id=521 data-nosnippet>521</a>        <span class="macro">eprintln!</span>(<span class="string">"  Or from another node:"</span>);
+<a href=#522 id=522 data-nosnippet>522</a>        <span class="macro">eprintln!</span>(
+<a href=#523 id=523 data-nosnippet>523</a>            <span class="string">"    nauka hypervisor join --target &lt;this-ip&gt; --pin {}"</span>,
+<a href=#524 id=524 data-nosnippet>524</a>            result.pin
+<a href=#525 id=525 data-nosnippet>525</a>        );
+<a href=#526 id=526 data-nosnippet>526</a>    }
+<a href=#527 id=527 data-nosnippet>527</a>
+<a href=#528 id=528 data-nosnippet>528</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#529 id=529 data-nosnippet>529</a>        <span class="string">"name"</span>: result.hypervisor.name,
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="string">"id"</span>: result.hypervisor.id.as_str(),
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="string">"region"</span>: region,
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="string">"zone"</span>: zone,
+<a href=#533 id=533 data-nosnippet>533</a>        <span class="string">"mesh_ipv6"</span>: result.hypervisor.mesh_ipv6.to_string(),
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
+<a href=#535 id=535 data-nosnippet>535</a>        <span class="string">"pin"</span>: result.pin,
+<a href=#536 id=536 data-nosnippet>536</a>    })))
+<a href=#537 id=537 data-nosnippet>537</a>}
+<a href=#538 id=538 data-nosnippet>538</a>
+<a href=#539 id=539 data-nosnippet>539</a><span class="kw">async fn </span>handle_join(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#540 id=540 data-nosnippet>540</a>    <span class="kw">let </span>target = req
+<a href=#541 id=541 data-nosnippet>541</a>        .fields
+<a href=#542 id=542 data-nosnippet>542</a>        .get(<span class="string">"target"</span>)
+<a href=#543 id=543 data-nosnippet>543</a>        .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing required field: target"</span>))<span class="question-mark">?
+<a href=#544 id=544 data-nosnippet>544</a>        </span>.clone();
+<a href=#545 id=545 data-nosnippet>545</a>    <span class="kw">let </span>region = req
+<a href=#546 id=546 data-nosnippet>546</a>        .fields
+<a href=#547 id=547 data-nosnippet>547</a>        .get(<span class="string">"region"</span>)
+<a href=#548 id=548 data-nosnippet>548</a>        .map(|s| s.as_str())
+<a href=#549 id=549 data-nosnippet>549</a>        .unwrap_or(<span class="string">"default"</span>);
+<a href=#550 id=550 data-nosnippet>550</a>    <span class="kw">let </span>zone = req
 <a href=#551 id=551 data-nosnippet>551</a>        .fields
-<a href=#552 id=552 data-nosnippet>552</a>        .get(<span class="string">"mode"</span>)
+<a href=#552 id=552 data-nosnippet>552</a>        .get(<span class="string">"zone"</span>)
 <a href=#553 id=553 data-nosnippet>553</a>        .map(|s| s.as_str())
-<a href=#554 id=554 data-nosnippet>554</a>        .unwrap_or(<span class="string">"wireguard"</span>)
-<a href=#555 id=555 data-nosnippet>555</a>        .parse()
-<a href=#556 id=556 data-nosnippet>556</a>        .unwrap_or_default();
-<a href=#557 id=557 data-nosnippet>557</a>
-<a href=#558 id=558 data-nosnippet>558</a>    <span class="kw">let </span>node_name = req
-<a href=#559 id=559 data-nosnippet>559</a>        .fields
-<a href=#560 id=560 data-nosnippet>560</a>        .get(<span class="string">"name"</span>)
-<a href=#561 id=561 data-nosnippet>561</a>        .filter(|s| !s.is_empty())
-<a href=#562 id=562 data-nosnippet>562</a>        .cloned()
-<a href=#563 id=563 data-nosnippet>563</a>        .unwrap_or_else(|| {
-<a href=#564 id=564 data-nosnippet>564</a>            hostname::get()
-<a href=#565 id=565 data-nosnippet>565</a>                .ok()
-<a href=#566 id=566 data-nosnippet>566</a>                .and_then(|h| h.into_string().ok())
-<a href=#567 id=567 data-nosnippet>567</a>                .map(|h| h.to_lowercase())
-<a href=#568 id=568 data-nosnippet>568</a>                .unwrap_or_else(|| <span class="string">"node"</span>.to_string())
-<a href=#569 id=569 data-nosnippet>569</a>        });
-<a href=#570 id=570 data-nosnippet>570</a>
-<a href=#571 id=571 data-nosnippet>571</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned();
-<a href=#572 id=572 data-nosnippet>572</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned();
-<a href=#573 id=573 data-nosnippet>573</a>
-<a href=#574 id=574 data-nosnippet>574</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#575 id=575 data-nosnippet>575</a>    <span class="kw">let </span>join_cfg = fabric::ops::JoinConfig {
-<a href=#576 id=576 data-nosnippet>576</a>        target: <span class="kw-2">&amp;</span>target,
-<a href=#577 id=577 data-nosnippet>577</a>        node_name: <span class="kw-2">&amp;</span>node_name,
-<a href=#578 id=578 data-nosnippet>578</a>        region,
-<a href=#579 id=579 data-nosnippet>579</a>        zone,
-<a href=#580 id=580 data-nosnippet>580</a>        port,
-<a href=#581 id=581 data-nosnippet>581</a>        pin,
-<a href=#582 id=582 data-nosnippet>582</a>        network_mode,
-<a href=#583 id=583 data-nosnippet>583</a>        ipv6_block,
-<a href=#584 id=584 data-nosnippet>584</a>        ipv4_public,
-<a href=#585 id=585 data-nosnippet>585</a>    };
-<a href=#586 id=586 data-nosnippet>586</a>
-<a href=#587 id=587 data-nosnippet>587</a>    <span class="comment">// Join: 2 (fabric) + 3 (control plane) + 1 (storage) + 3 (compute+forge) + 1 (announce) = 10
-<a href=#588 id=588 data-nosnippet>588</a>    </span><span class="kw">let </span>step_count = <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#589 id=589 data-nosnippet>589</a>        <span class="number">10
-<a href=#590 id=590 data-nosnippet>590</a>    </span>} <span class="kw">else </span>{
-<a href=#591 id=591 data-nosnippet>591</a>        <span class="number">6
-<a href=#592 id=592 data-nosnippet>592</a>    </span>};
-<a href=#593 id=593 data-nosnippet>593</a>    <span class="kw">let </span>steps = ui::Steps::new(step_count);
-<a href=#594 id=594 data-nosnippet>594</a>
-<a href=#595 id=595 data-nosnippet>595</a>    <span class="kw">let </span>result = fabric::ops::join(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>join_cfg, <span class="kw-2">&amp;</span>steps).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#596 id=596 data-nosnippet>596</a>
-<a href=#597 id=597 data-nosnippet>597</a>    <span class="comment">// Join control plane — only in WireGuard mode
-<a href=#598 id=598 data-nosnippet>598</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#599 id=599 data-nosnippet>599</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#600 id=600 data-nosnippet>600</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#601 id=601 data-nosnippet>601</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
-<a href=#602 id=602 data-nosnippet>602</a>        <span class="kw">let </span>pd_endpoints: Vec&lt;String&gt; = state
-<a href=#603 id=603 data-nosnippet>603</a>            .peers
-<a href=#604 id=604 data-nosnippet>604</a>            .peers
-<a href=#605 id=605 data-nosnippet>605</a>            .iter()
-<a href=#606 id=606 data-nosnippet>606</a>            .map(|p| <span class="macro">format!</span>(<span class="string">"http://[{}]:{}"</span>, p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
-<a href=#607 id=607 data-nosnippet>607</a>            .collect();
-<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">let </span>peer_count = state.peers.len();
-<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">let </span>all_peer_infos: Vec&lt;(<span class="kw-2">&amp;</span>str, std::net::Ipv6Addr)&gt; = state
-<a href=#610 id=610 data-nosnippet>610</a>            .peers
-<a href=#611 id=611 data-nosnippet>611</a>            .peers
-<a href=#612 id=612 data-nosnippet>612</a>            .iter()
-<a href=#613 id=613 data-nosnippet>613</a>            .map(|p| (p.name.as_str(), p.mesh_ipv6))
-<a href=#614 id=614 data-nosnippet>614</a>            .collect();
-<a href=#615 id=615 data-nosnippet>615</a>        controlplane::ops::join(
-<a href=#616 id=616 data-nosnippet>616</a>            <span class="kw-2">&amp;</span>node_name,
-<a href=#617 id=617 data-nosnippet>617</a>            <span class="kw-2">&amp;</span>result.hypervisor.mesh_ipv6,
-<a href=#618 id=618 data-nosnippet>618</a>            <span class="kw-2">&amp;</span>pd_endpoints,
-<a href=#619 id=619 data-nosnippet>619</a>            peer_count,
-<a href=#620 id=620 data-nosnippet>620</a>            <span class="kw-2">&amp;</span>all_peer_infos,
-<a href=#621 id=621 data-nosnippet>621</a>            <span class="kw-2">&amp;</span>steps,
-<a href=#622 id=622 data-nosnippet>622</a>        )<span class="question-mark">?</span>;
-<a href=#623 id=623 data-nosnippet>623</a>    }
-<a href=#624 id=624 data-nosnippet>624</a>
-<a href=#625 id=625 data-nosnippet>625</a>    <span class="comment">// Fetch region storage config from distributed KV and setup locally
-<a href=#626 id=626 data-nosnippet>626</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
-<a href=#627 id=627 data-nosnippet>627</a>        steps.set(<span class="string">"Setting up storage"</span>);
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#629 id=629 data-nosnippet>629</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#630 id=630 data-nosnippet>630</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
-<a href=#631 id=631 data-nosnippet>631</a>        <span class="kw">let </span>pd_endpoints: Vec&lt;String&gt; = state
-<a href=#632 id=632 data-nosnippet>632</a>            .peers
-<a href=#633 id=633 data-nosnippet>633</a>            .peers
-<a href=#634 id=634 data-nosnippet>634</a>            .iter()
-<a href=#635 id=635 data-nosnippet>635</a>            .map(|p| <span class="macro">format!</span>(<span class="string">"http://[{}]:{}"</span>, p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
-<a href=#636 id=636 data-nosnippet>636</a>            .collect();
-<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">let </span>pd_refs: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = pd_endpoints.iter().map(|s| s.as_str()).collect();
-<a href=#638 id=638 data-nosnippet>638</a>
-<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">let </span>region_config = storage::ops::fetch_region_config(<span class="kw-2">&amp;</span>pd_refs, region)
-<a href=#640 id=640 data-nosnippet>640</a>            .<span class="kw">await</span><span class="question-mark">?
-<a href=#641 id=641 data-nosnippet>641</a>            </span>.ok_or_else(|| {
-<a href=#642 id=642 data-nosnippet>642</a>                <span class="macro">anyhow::anyhow!</span>(
-<a href=#643 id=643 data-nosnippet>643</a>                    <span class="string">"no storage backend configured for region '{region}'.\n\n\
-<a href=#644 id=644 data-nosnippet>644</a>                     An S3 backend must be registered before nodes can join this region.\n\
-<a href=#645 id=645 data-nosnippet>645</a>                     On the init node, re-initialize with storage flags:\n\n\
-<a href=#646 id=646 data-nosnippet>646</a>                     \x20 nauka hypervisor init --region {region} \\\n\
-<a href=#647 id=647 data-nosnippet>647</a>                     \x20   --s3-endpoint &lt;URL&gt; --s3-bucket &lt;BUCKET&gt; \\\n\
-<a href=#648 id=648 data-nosnippet>648</a>                     \x20   --s3-access-key &lt;KEY&gt; --s3-secret-key &lt;SECRET&gt;"
-<a href=#649 id=649 data-nosnippet>649</a>                </span>)
-<a href=#650 id=650 data-nosnippet>650</a>            })<span class="question-mark">?</span>;
-<a href=#651 id=651 data-nosnippet>651</a>
-<a href=#652 id=652 data-nosnippet>652</a>        storage::ops::setup_region(<span class="kw-2">&amp;</span>db, region_config)<span class="question-mark">?</span>;
-<a href=#653 id=653 data-nosnippet>653</a>        steps.inc();
-<a href=#654 id=654 data-nosnippet>654</a>    }
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>    <span class="comment">// Install compute runtime + base image
-<a href=#657 id=657 data-nosnippet>657</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="kw">crate</span>::compute_setup::install(<span class="kw-2">&amp;</span>steps) {
-<a href=#658 id=658 data-nosnippet>658</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"compute setup failed (VMs won't work until fixed)"</span>);
-<a href=#659 id=659 data-nosnippet>659</a>    }
-<a href=#660 id=660 data-nosnippet>660</a>
-<a href=#661 id=661 data-nosnippet>661</a>    <span class="comment">// Install persistent announce listener
-<a href=#662 id=662 data-nosnippet>662</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
-<a href=#663 id=663 data-nosnippet>663</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
-<a href=#664 id=664 data-nosnippet>664</a>    }
-<a href=#665 id=665 data-nosnippet>665</a>
-<a href=#666 id=666 data-nosnippet>666</a>    <span class="comment">// Self-announce to all peers (ensures they know about us even if the
-<a href=#667 id=667 data-nosnippet>667</a>    // peering server's announce arrived before their listener was ready).
-<a href=#668 id=668 data-nosnippet>668</a>    // Re-read state after a delay to include peers discovered via incoming announces.
-<a href=#669 id=669 data-nosnippet>669</a>    </span>steps.set(<span class="string">"Announcing to peers"</span>);
-<a href=#670 id=670 data-nosnippet>670</a>    {
-<a href=#671 id=671 data-nosnippet>671</a>        tokio::time::sleep(std::time::Duration::from_secs(<span class="number">3</span>)).<span class="kw">await</span>;
-<a href=#672 id=672 data-nosnippet>672</a>        <span class="comment">// Re-open DB to get latest state (may include peers from incoming announces)
-<a href=#673 id=673 data-nosnippet>673</a>        </span><span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#675 id=675 data-nosnippet>675</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#676 id=676 data-nosnippet>676</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
-<a href=#677 id=677 data-nosnippet>677</a>        <span class="kw">let </span>self_info = fabric::peering::PeerInfo {
-<a href=#678 id=678 data-nosnippet>678</a>            name: state.hypervisor.name.clone(),
-<a href=#679 id=679 data-nosnippet>679</a>            region: state.hypervisor.region.clone(),
-<a href=#680 id=680 data-nosnippet>680</a>            zone: state.hypervisor.zone.clone(),
-<a href=#681 id=681 data-nosnippet>681</a>            wg_public_key: state.hypervisor.wg_public_key.clone(),
-<a href=#682 id=682 data-nosnippet>682</a>            wg_port: state.hypervisor.wg_port,
-<a href=#683 id=683 data-nosnippet>683</a>            endpoint: state.hypervisor.endpoint.clone(),
-<a href=#684 id=684 data-nosnippet>684</a>            mesh_ipv6: state.hypervisor.mesh_ipv6,
-<a href=#685 id=685 data-nosnippet>685</a>        };
-<a href=#686 id=686 data-nosnippet>686</a>        <span class="kw">let </span>peers: Vec&lt;<span class="kw">_</span>&gt; = state.peers.peers.clone();
-<a href=#687 id=687 data-nosnippet>687</a>        <span class="kw">let </span>(ok, fail) = fabric::announce::broadcast_new_peer(
-<a href=#688 id=688 data-nosnippet>688</a>            <span class="kw-2">&amp;</span>self_info,
-<a href=#689 id=689 data-nosnippet>689</a>            <span class="kw-2">&amp;</span>state.hypervisor.name,
-<a href=#690 id=690 data-nosnippet>690</a>            <span class="kw-2">&amp;</span>peers,
-<a href=#691 id=691 data-nosnippet>691</a>            state.hypervisor.wg_port,
-<a href=#692 id=692 data-nosnippet>692</a>        )
-<a href=#693 id=693 data-nosnippet>693</a>        .<span class="kw">await</span>;
-<a href=#694 id=694 data-nosnippet>694</a>        <span class="kw">if </span>ok &gt; <span class="number">0 </span>|| fail &gt; <span class="number">0 </span>{
-<a href=#695 id=695 data-nosnippet>695</a>            <span class="macro">tracing::info!</span>(successes = ok, failures = fail, <span class="string">"self-announce to peers"</span>);
-<a href=#696 id=696 data-nosnippet>696</a>        }
-<a href=#697 id=697 data-nosnippet>697</a>    }
-<a href=#698 id=698 data-nosnippet>698</a>    steps.inc();
-<a href=#699 id=699 data-nosnippet>699</a>
-<a href=#700 id=700 data-nosnippet>700</a>    steps.finish(<span class="string">"Joined cluster"</span>);
-<a href=#701 id=701 data-nosnippet>701</a>    <span class="macro">eprintln!</span>();
-<a href=#702 id=702 data-nosnippet>702</a>    <span class="macro">eprintln!</span>(<span class="string">"  name     {}"</span>, result.hypervisor.name);
-<a href=#703 id=703 data-nosnippet>703</a>    <span class="macro">eprintln!</span>(<span class="string">"  id       {}"</span>, result.hypervisor.id.as_str());
-<a href=#704 id=704 data-nosnippet>704</a>    <span class="macro">eprintln!</span>(<span class="string">"  region   {region}/{zone}"</span>);
-<a href=#705 id=705 data-nosnippet>705</a>    <span class="macro">eprintln!</span>(<span class="string">"  address  {}"</span>, result.hypervisor.mesh_ipv6);
-<a href=#706 id=706 data-nosnippet>706</a>    <span class="macro">eprintln!</span>(<span class="string">"  peers    {}"</span>, result.peer_count);
-<a href=#707 id=707 data-nosnippet>707</a>    <span class="macro">eprintln!</span>();
-<a href=#708 id=708 data-nosnippet>708</a>
-<a href=#709 id=709 data-nosnippet>709</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#710 id=710 data-nosnippet>710</a>        <span class="string">"name"</span>: result.hypervisor.name,
-<a href=#711 id=711 data-nosnippet>711</a>        <span class="string">"id"</span>: result.hypervisor.id.as_str(),
-<a href=#712 id=712 data-nosnippet>712</a>        <span class="string">"region"</span>: region,
-<a href=#713 id=713 data-nosnippet>713</a>        <span class="string">"zone"</span>: zone,
-<a href=#714 id=714 data-nosnippet>714</a>        <span class="string">"mesh_ipv6"</span>: result.hypervisor.mesh_ipv6.to_string(),
-<a href=#715 id=715 data-nosnippet>715</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
-<a href=#716 id=716 data-nosnippet>716</a>        <span class="string">"peers"</span>: result.peer_count,
-<a href=#717 id=717 data-nosnippet>717</a>    })))
-<a href=#718 id=718 data-nosnippet>718</a>}
-<a href=#719 id=719 data-nosnippet>719</a>
-<a href=#720 id=720 data-nosnippet>720</a><span class="kw">async fn </span>handle_peering(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#721 id=721 data-nosnippet>721</a>    <span class="kw">let </span>timeout_secs: u64 = req
-<a href=#722 id=722 data-nosnippet>722</a>        .fields
-<a href=#723 id=723 data-nosnippet>723</a>        .get(<span class="string">"timeout"</span>)
-<a href=#724 id=724 data-nosnippet>724</a>        .and_then(|s| s.parse().ok())
-<a href=#725 id=725 data-nosnippet>725</a>        .unwrap_or(<span class="number">3600</span>);
-<a href=#726 id=726 data-nosnippet>726</a>
-<a href=#727 id=727 data-nosnippet>727</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#728 id=728 data-nosnippet>728</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#729 id=729 data-nosnippet>729</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#730 id=730 data-nosnippet>730</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized. Run 'nauka hypervisor init' first."</span>))<span class="question-mark">?</span>;
-<a href=#731 id=731 data-nosnippet>731</a>
-<a href=#732 id=732 data-nosnippet>732</a>    <span class="comment">// Derive PIN from secret
-<a href=#733 id=733 data-nosnippet>733</a>    </span><span class="kw">let </span>secret: nauka_core::crypto::MeshSecret = state.secret.parse()<span class="question-mark">?</span>;
-<a href=#734 id=734 data-nosnippet>734</a>    <span class="kw">let </span>pin = secret.derive_pin();
-<a href=#735 id=735 data-nosnippet>735</a>    <span class="kw">let </span>peering_port = state.hypervisor.wg_port + <span class="number">1</span>;
-<a href=#736 id=736 data-nosnippet>736</a>
-<a href=#737 id=737 data-nosnippet>737</a>    <span class="comment">// Drop DB before starting listener (release lock!)
-<a href=#738 id=738 data-nosnippet>738</a>    </span>drop(db);
-<a href=#739 id=739 data-nosnippet>739</a>
-<a href=#740 id=740 data-nosnippet>740</a>    <span class="macro">eprintln!</span>();
-<a href=#741 id=741 data-nosnippet>741</a>    <span class="macro">eprintln!</span>(<span class="string">"  Peering active on port {peering_port}"</span>);
-<a href=#742 id=742 data-nosnippet>742</a>    <span class="macro">eprintln!</span>(<span class="string">"  PIN: {pin}"</span>);
-<a href=#743 id=743 data-nosnippet>743</a>    <span class="macro">eprintln!</span>();
-<a href=#744 id=744 data-nosnippet>744</a>    <span class="macro">eprintln!</span>(<span class="string">"  Nodes can join with:"</span>);
-<a href=#745 id=745 data-nosnippet>745</a>    <span class="macro">eprintln!</span>(<span class="string">"    nauka hypervisor join --target &lt;this-ip&gt;:{peering_port} --pin {pin}"</span>);
-<a href=#746 id=746 data-nosnippet>746</a>    <span class="macro">eprintln!</span>();
-<a href=#747 id=747 data-nosnippet>747</a>    <span class="macro">eprintln!</span>(<span class="string">"  Waiting for joins... (Ctrl+C to stop)"</span>);
-<a href=#748 id=748 data-nosnippet>748</a>    <span class="macro">eprintln!</span>();
-<a href=#749 id=749 data-nosnippet>749</a>
-<a href=#750 id=750 data-nosnippet>750</a>    <span class="kw">let </span>accepted = fabric::ops::listen_for_peers(<span class="kw-2">&amp;</span>pin, peering_port, timeout_secs).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#751 id=751 data-nosnippet>751</a>
-<a href=#752 id=752 data-nosnippet>752</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(
-<a href=#753 id=753 data-nosnippet>753</a>        <span class="string">"{accepted} node(s) joined."
-<a href=#754 id=754 data-nosnippet>754</a>    </span>)))
-<a href=#755 id=755 data-nosnippet>755</a>}
-<a href=#756 id=756 data-nosnippet>756</a>
-<a href=#757 id=757 data-nosnippet>757</a><span class="kw">async fn </span>handle_update(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#758 id=758 data-nosnippet>758</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#759 id=759 data-nosnippet>759</a>
-<a href=#760 id=760 data-nosnippet>760</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned();
-<a href=#761 id=761 data-nosnippet>761</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned();
-<a href=#762 id=762 data-nosnippet>762</a>    <span class="kw">let </span>name = req.fields.get(<span class="string">"name"</span>).cloned();
+<a href=#554 id=554 data-nosnippet>554</a>        .unwrap_or(<span class="string">"default"</span>);
+<a href=#555 id=555 data-nosnippet>555</a>    <span class="kw">let </span>port: u16 = req
+<a href=#556 id=556 data-nosnippet>556</a>        .fields
+<a href=#557 id=557 data-nosnippet>557</a>        .get(<span class="string">"port"</span>)
+<a href=#558 id=558 data-nosnippet>558</a>        .and_then(|s| s.parse().ok())
+<a href=#559 id=559 data-nosnippet>559</a>        .unwrap_or(<span class="number">51820</span>);
+<a href=#560 id=560 data-nosnippet>560</a>    <span class="kw">let </span>pin = req.fields.get(<span class="string">"pin"</span>).map(|s| s.as_str());
+<a href=#561 id=561 data-nosnippet>561</a>
+<a href=#562 id=562 data-nosnippet>562</a>    <span class="kw">let </span>network_mode: fabric::NetworkMode = req
+<a href=#563 id=563 data-nosnippet>563</a>        .fields
+<a href=#564 id=564 data-nosnippet>564</a>        .get(<span class="string">"mode"</span>)
+<a href=#565 id=565 data-nosnippet>565</a>        .map(|s| s.as_str())
+<a href=#566 id=566 data-nosnippet>566</a>        .unwrap_or(<span class="string">"wireguard"</span>)
+<a href=#567 id=567 data-nosnippet>567</a>        .parse()
+<a href=#568 id=568 data-nosnippet>568</a>        .unwrap_or_default();
+<a href=#569 id=569 data-nosnippet>569</a>
+<a href=#570 id=570 data-nosnippet>570</a>    <span class="kw">let </span>node_name = req
+<a href=#571 id=571 data-nosnippet>571</a>        .fields
+<a href=#572 id=572 data-nosnippet>572</a>        .get(<span class="string">"name"</span>)
+<a href=#573 id=573 data-nosnippet>573</a>        .filter(|s| !s.is_empty())
+<a href=#574 id=574 data-nosnippet>574</a>        .cloned()
+<a href=#575 id=575 data-nosnippet>575</a>        .unwrap_or_else(|| {
+<a href=#576 id=576 data-nosnippet>576</a>            hostname::get()
+<a href=#577 id=577 data-nosnippet>577</a>                .ok()
+<a href=#578 id=578 data-nosnippet>578</a>                .and_then(|h| h.into_string().ok())
+<a href=#579 id=579 data-nosnippet>579</a>                .map(|h| h.to_lowercase())
+<a href=#580 id=580 data-nosnippet>580</a>                .unwrap_or_else(|| <span class="string">"node"</span>.to_string())
+<a href=#581 id=581 data-nosnippet>581</a>        });
+<a href=#582 id=582 data-nosnippet>582</a>
+<a href=#583 id=583 data-nosnippet>583</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned().or_else(|| {
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="kw">let </span>detected = <span class="kw">crate</span>::detect::detect_ipv6_block();
+<a href=#585 id=585 data-nosnippet>585</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>v) = detected {
+<a href=#586 id=586 data-nosnippet>586</a>            <span class="macro">eprintln!</span>(<span class="string">"  Auto-detected IPv6 block: {v}"</span>);
+<a href=#587 id=587 data-nosnippet>587</a>        }
+<a href=#588 id=588 data-nosnippet>588</a>        detected
+<a href=#589 id=589 data-nosnippet>589</a>    });
+<a href=#590 id=590 data-nosnippet>590</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned().or_else(|| {
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="kw">let </span>detected = <span class="kw">crate</span>::detect::detect_ipv4_public();
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">ref </span>v) = detected {
+<a href=#593 id=593 data-nosnippet>593</a>            <span class="macro">eprintln!</span>(<span class="string">"  Auto-detected IPv4 address: {v}"</span>);
+<a href=#594 id=594 data-nosnippet>594</a>        }
+<a href=#595 id=595 data-nosnippet>595</a>        detected
+<a href=#596 id=596 data-nosnippet>596</a>    });
+<a href=#597 id=597 data-nosnippet>597</a>
+<a href=#598 id=598 data-nosnippet>598</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#599 id=599 data-nosnippet>599</a>    <span class="kw">let </span>join_cfg = fabric::ops::JoinConfig {
+<a href=#600 id=600 data-nosnippet>600</a>        target: <span class="kw-2">&amp;</span>target,
+<a href=#601 id=601 data-nosnippet>601</a>        node_name: <span class="kw-2">&amp;</span>node_name,
+<a href=#602 id=602 data-nosnippet>602</a>        region,
+<a href=#603 id=603 data-nosnippet>603</a>        zone,
+<a href=#604 id=604 data-nosnippet>604</a>        port,
+<a href=#605 id=605 data-nosnippet>605</a>        pin,
+<a href=#606 id=606 data-nosnippet>606</a>        network_mode,
+<a href=#607 id=607 data-nosnippet>607</a>        ipv6_block,
+<a href=#608 id=608 data-nosnippet>608</a>        ipv4_public,
+<a href=#609 id=609 data-nosnippet>609</a>    };
+<a href=#610 id=610 data-nosnippet>610</a>
+<a href=#611 id=611 data-nosnippet>611</a>    <span class="comment">// Join: 2 (fabric) + 3 (control plane) + 1 (storage) + 3 (compute+forge) + 1 (announce) = 10
+<a href=#612 id=612 data-nosnippet>612</a>    </span><span class="kw">let </span>step_count = <span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#613 id=613 data-nosnippet>613</a>        <span class="number">10
+<a href=#614 id=614 data-nosnippet>614</a>    </span>} <span class="kw">else </span>{
+<a href=#615 id=615 data-nosnippet>615</a>        <span class="number">6
+<a href=#616 id=616 data-nosnippet>616</a>    </span>};
+<a href=#617 id=617 data-nosnippet>617</a>    <span class="kw">let </span>steps = ui::Steps::new(step_count);
+<a href=#618 id=618 data-nosnippet>618</a>
+<a href=#619 id=619 data-nosnippet>619</a>    <span class="kw">let </span>result = fabric::ops::join(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>join_cfg, <span class="kw-2">&amp;</span>steps).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#620 id=620 data-nosnippet>620</a>
+<a href=#621 id=621 data-nosnippet>621</a>    <span class="comment">// Join control plane — only in WireGuard mode
+<a href=#622 id=622 data-nosnippet>622</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#624 id=624 data-nosnippet>624</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#625 id=625 data-nosnippet>625</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">let </span>pd_endpoints: Vec&lt;String&gt; = state
+<a href=#627 id=627 data-nosnippet>627</a>            .peers
+<a href=#628 id=628 data-nosnippet>628</a>            .peers
+<a href=#629 id=629 data-nosnippet>629</a>            .iter()
+<a href=#630 id=630 data-nosnippet>630</a>            .map(|p| <span class="macro">format!</span>(<span class="string">"http://[{}]:{}"</span>, p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
+<a href=#631 id=631 data-nosnippet>631</a>            .collect();
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="kw">let </span>peer_count = state.peers.len();
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">let </span>all_peer_infos: Vec&lt;(<span class="kw-2">&amp;</span>str, std::net::Ipv6Addr)&gt; = state
+<a href=#634 id=634 data-nosnippet>634</a>            .peers
+<a href=#635 id=635 data-nosnippet>635</a>            .peers
+<a href=#636 id=636 data-nosnippet>636</a>            .iter()
+<a href=#637 id=637 data-nosnippet>637</a>            .map(|p| (p.name.as_str(), p.mesh_ipv6))
+<a href=#638 id=638 data-nosnippet>638</a>            .collect();
+<a href=#639 id=639 data-nosnippet>639</a>        controlplane::ops::join(
+<a href=#640 id=640 data-nosnippet>640</a>            <span class="kw-2">&amp;</span>node_name,
+<a href=#641 id=641 data-nosnippet>641</a>            <span class="kw-2">&amp;</span>result.hypervisor.mesh_ipv6,
+<a href=#642 id=642 data-nosnippet>642</a>            <span class="kw-2">&amp;</span>pd_endpoints,
+<a href=#643 id=643 data-nosnippet>643</a>            peer_count,
+<a href=#644 id=644 data-nosnippet>644</a>            <span class="kw-2">&amp;</span>all_peer_infos,
+<a href=#645 id=645 data-nosnippet>645</a>            <span class="kw-2">&amp;</span>steps,
+<a href=#646 id=646 data-nosnippet>646</a>        )<span class="question-mark">?</span>;
+<a href=#647 id=647 data-nosnippet>647</a>    }
+<a href=#648 id=648 data-nosnippet>648</a>
+<a href=#649 id=649 data-nosnippet>649</a>    <span class="comment">// Fetch region storage config from distributed KV and setup locally
+<a href=#650 id=650 data-nosnippet>650</a>    </span><span class="kw">if </span>network_mode == fabric::NetworkMode::WireGuard {
+<a href=#651 id=651 data-nosnippet>651</a>        steps.set(<span class="string">"Setting up storage"</span>);
+<a href=#652 id=652 data-nosnippet>652</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#653 id=653 data-nosnippet>653</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#654 id=654 data-nosnippet>654</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="kw">let </span>pd_endpoints: Vec&lt;String&gt; = state
+<a href=#656 id=656 data-nosnippet>656</a>            .peers
+<a href=#657 id=657 data-nosnippet>657</a>            .peers
+<a href=#658 id=658 data-nosnippet>658</a>            .iter()
+<a href=#659 id=659 data-nosnippet>659</a>            .map(|p| <span class="macro">format!</span>(<span class="string">"http://[{}]:{}"</span>, p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
+<a href=#660 id=660 data-nosnippet>660</a>            .collect();
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="kw">let </span>pd_refs: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = pd_endpoints.iter().map(|s| s.as_str()).collect();
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">let </span>region_config = storage::ops::fetch_region_config(<span class="kw-2">&amp;</span>pd_refs, region)
+<a href=#664 id=664 data-nosnippet>664</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#665 id=665 data-nosnippet>665</a>            </span>.ok_or_else(|| {
+<a href=#666 id=666 data-nosnippet>666</a>                <span class="macro">anyhow::anyhow!</span>(
+<a href=#667 id=667 data-nosnippet>667</a>                    <span class="string">"no storage backend configured for region '{region}'.\n\n\
+<a href=#668 id=668 data-nosnippet>668</a>                     An S3 backend must be registered before nodes can join this region.\n\
+<a href=#669 id=669 data-nosnippet>669</a>                     On the init node, re-initialize with storage flags:\n\n\
+<a href=#670 id=670 data-nosnippet>670</a>                     \x20 nauka hypervisor init --region {region} \\\n\
+<a href=#671 id=671 data-nosnippet>671</a>                     \x20   --s3-endpoint &lt;URL&gt; --s3-bucket &lt;BUCKET&gt; \\\n\
+<a href=#672 id=672 data-nosnippet>672</a>                     \x20   --s3-access-key &lt;KEY&gt; --s3-secret-key &lt;SECRET&gt;"
+<a href=#673 id=673 data-nosnippet>673</a>                </span>)
+<a href=#674 id=674 data-nosnippet>674</a>            })<span class="question-mark">?</span>;
+<a href=#675 id=675 data-nosnippet>675</a>
+<a href=#676 id=676 data-nosnippet>676</a>        storage::ops::setup_region(<span class="kw-2">&amp;</span>db, region_config)<span class="question-mark">?</span>;
+<a href=#677 id=677 data-nosnippet>677</a>        steps.inc();
+<a href=#678 id=678 data-nosnippet>678</a>    }
+<a href=#679 id=679 data-nosnippet>679</a>
+<a href=#680 id=680 data-nosnippet>680</a>    <span class="comment">// Install compute runtime + base image
+<a href=#681 id=681 data-nosnippet>681</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = <span class="kw">crate</span>::compute_setup::install(<span class="kw-2">&amp;</span>steps) {
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"compute setup failed (VMs won't work until fixed)"</span>);
+<a href=#683 id=683 data-nosnippet>683</a>    }
+<a href=#684 id=684 data-nosnippet>684</a>
+<a href=#685 id=685 data-nosnippet>685</a>    <span class="comment">// Install persistent announce listener
+<a href=#686 id=686 data-nosnippet>686</a>    </span><span class="kw">if let </span><span class="prelude-val">Err</span>(e) = fabric::announce::install_service(port) {
+<a href=#687 id=687 data-nosnippet>687</a>        <span class="macro">tracing::warn!</span>(error = %e, <span class="string">"announce service install failed"</span>);
+<a href=#688 id=688 data-nosnippet>688</a>    }
+<a href=#689 id=689 data-nosnippet>689</a>
+<a href=#690 id=690 data-nosnippet>690</a>    <span class="comment">// Self-announce to all peers (ensures they know about us even if the
+<a href=#691 id=691 data-nosnippet>691</a>    // peering server's announce arrived before their listener was ready).
+<a href=#692 id=692 data-nosnippet>692</a>    // Re-read state after a delay to include peers discovered via incoming announces.
+<a href=#693 id=693 data-nosnippet>693</a>    </span>steps.set(<span class="string">"Announcing to peers"</span>);
+<a href=#694 id=694 data-nosnippet>694</a>    {
+<a href=#695 id=695 data-nosnippet>695</a>        tokio::time::sleep(std::time::Duration::from_secs(<span class="number">3</span>)).<span class="kw">await</span>;
+<a href=#696 id=696 data-nosnippet>696</a>        <span class="comment">// Re-open DB to get latest state (may include peers from incoming announces)
+<a href=#697 id=697 data-nosnippet>697</a>        </span><span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#699 id=699 data-nosnippet>699</a>            .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#700 id=700 data-nosnippet>700</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"state missing after join"</span>))<span class="question-mark">?</span>;
+<a href=#701 id=701 data-nosnippet>701</a>        <span class="kw">let </span>self_info = fabric::peering::PeerInfo {
+<a href=#702 id=702 data-nosnippet>702</a>            name: state.hypervisor.name.clone(),
+<a href=#703 id=703 data-nosnippet>703</a>            region: state.hypervisor.region.clone(),
+<a href=#704 id=704 data-nosnippet>704</a>            zone: state.hypervisor.zone.clone(),
+<a href=#705 id=705 data-nosnippet>705</a>            wg_public_key: state.hypervisor.wg_public_key.clone(),
+<a href=#706 id=706 data-nosnippet>706</a>            wg_port: state.hypervisor.wg_port,
+<a href=#707 id=707 data-nosnippet>707</a>            endpoint: state.hypervisor.endpoint.clone(),
+<a href=#708 id=708 data-nosnippet>708</a>            mesh_ipv6: state.hypervisor.mesh_ipv6,
+<a href=#709 id=709 data-nosnippet>709</a>        };
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="kw">let </span>peers: Vec&lt;<span class="kw">_</span>&gt; = state.peers.peers.clone();
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>(ok, fail) = fabric::announce::broadcast_new_peer(
+<a href=#712 id=712 data-nosnippet>712</a>            <span class="kw-2">&amp;</span>self_info,
+<a href=#713 id=713 data-nosnippet>713</a>            <span class="kw-2">&amp;</span>state.hypervisor.name,
+<a href=#714 id=714 data-nosnippet>714</a>            <span class="kw-2">&amp;</span>peers,
+<a href=#715 id=715 data-nosnippet>715</a>            state.hypervisor.wg_port,
+<a href=#716 id=716 data-nosnippet>716</a>        )
+<a href=#717 id=717 data-nosnippet>717</a>        .<span class="kw">await</span>;
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">if </span>ok &gt; <span class="number">0 </span>|| fail &gt; <span class="number">0 </span>{
+<a href=#719 id=719 data-nosnippet>719</a>            <span class="macro">tracing::info!</span>(successes = ok, failures = fail, <span class="string">"self-announce to peers"</span>);
+<a href=#720 id=720 data-nosnippet>720</a>        }
+<a href=#721 id=721 data-nosnippet>721</a>    }
+<a href=#722 id=722 data-nosnippet>722</a>    steps.inc();
+<a href=#723 id=723 data-nosnippet>723</a>
+<a href=#724 id=724 data-nosnippet>724</a>    steps.finish(<span class="string">"Joined cluster"</span>);
+<a href=#725 id=725 data-nosnippet>725</a>    <span class="macro">eprintln!</span>();
+<a href=#726 id=726 data-nosnippet>726</a>    <span class="macro">eprintln!</span>(<span class="string">"  name     {}"</span>, result.hypervisor.name);
+<a href=#727 id=727 data-nosnippet>727</a>    <span class="macro">eprintln!</span>(<span class="string">"  id       {}"</span>, result.hypervisor.id.as_str());
+<a href=#728 id=728 data-nosnippet>728</a>    <span class="macro">eprintln!</span>(<span class="string">"  region   {region}/{zone}"</span>);
+<a href=#729 id=729 data-nosnippet>729</a>    <span class="macro">eprintln!</span>(<span class="string">"  address  {}"</span>, result.hypervisor.mesh_ipv6);
+<a href=#730 id=730 data-nosnippet>730</a>    <span class="macro">eprintln!</span>(<span class="string">"  peers    {}"</span>, result.peer_count);
+<a href=#731 id=731 data-nosnippet>731</a>    <span class="macro">eprintln!</span>();
+<a href=#732 id=732 data-nosnippet>732</a>
+<a href=#733 id=733 data-nosnippet>733</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="string">"name"</span>: result.hypervisor.name,
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="string">"id"</span>: result.hypervisor.id.as_str(),
+<a href=#736 id=736 data-nosnippet>736</a>        <span class="string">"region"</span>: region,
+<a href=#737 id=737 data-nosnippet>737</a>        <span class="string">"zone"</span>: zone,
+<a href=#738 id=738 data-nosnippet>738</a>        <span class="string">"mesh_ipv6"</span>: result.hypervisor.mesh_ipv6.to_string(),
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="string">"peers"</span>: result.peer_count,
+<a href=#741 id=741 data-nosnippet>741</a>    })))
+<a href=#742 id=742 data-nosnippet>742</a>}
+<a href=#743 id=743 data-nosnippet>743</a>
+<a href=#744 id=744 data-nosnippet>744</a><span class="kw">async fn </span>handle_peering(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#745 id=745 data-nosnippet>745</a>    <span class="kw">let </span>timeout_secs: u64 = req
+<a href=#746 id=746 data-nosnippet>746</a>        .fields
+<a href=#747 id=747 data-nosnippet>747</a>        .get(<span class="string">"timeout"</span>)
+<a href=#748 id=748 data-nosnippet>748</a>        .and_then(|s| s.parse().ok())
+<a href=#749 id=749 data-nosnippet>749</a>        .unwrap_or(<span class="number">3600</span>);
+<a href=#750 id=750 data-nosnippet>750</a>
+<a href=#751 id=751 data-nosnippet>751</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#752 id=752 data-nosnippet>752</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#753 id=753 data-nosnippet>753</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#754 id=754 data-nosnippet>754</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized. Run 'nauka hypervisor init' first."</span>))<span class="question-mark">?</span>;
+<a href=#755 id=755 data-nosnippet>755</a>
+<a href=#756 id=756 data-nosnippet>756</a>    <span class="comment">// Derive PIN from secret
+<a href=#757 id=757 data-nosnippet>757</a>    </span><span class="kw">let </span>secret: nauka_core::crypto::MeshSecret = state.secret.parse()<span class="question-mark">?</span>;
+<a href=#758 id=758 data-nosnippet>758</a>    <span class="kw">let </span>pin = secret.derive_pin();
+<a href=#759 id=759 data-nosnippet>759</a>    <span class="kw">let </span>peering_port = state.hypervisor.wg_port + <span class="number">1</span>;
+<a href=#760 id=760 data-nosnippet>760</a>
+<a href=#761 id=761 data-nosnippet>761</a>    <span class="comment">// Drop DB before starting listener (release lock!)
+<a href=#762 id=762 data-nosnippet>762</a>    </span>drop(db);
 <a href=#763 id=763 data-nosnippet>763</a>
-<a href=#764 id=764 data-nosnippet>764</a>    <span class="kw">let </span>cfg = fabric::ops::UpdateConfig {
-<a href=#765 id=765 data-nosnippet>765</a>        ipv6_block,
-<a href=#766 id=766 data-nosnippet>766</a>        ipv4_public,
-<a href=#767 id=767 data-nosnippet>767</a>        name,
-<a href=#768 id=768 data-nosnippet>768</a>    };
-<a href=#769 id=769 data-nosnippet>769</a>
-<a href=#770 id=770 data-nosnippet>770</a>    <span class="kw">let </span>hv = fabric::ops::update(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>cfg)<span class="question-mark">?</span>;
-<a href=#771 id=771 data-nosnippet>771</a>
-<a href=#772 id=772 data-nosnippet>772</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#773 id=773 data-nosnippet>773</a>        <span class="string">"name"</span>: hv.name,
-<a href=#774 id=774 data-nosnippet>774</a>        <span class="string">"id"</span>: hv.id.as_str(),
-<a href=#775 id=775 data-nosnippet>775</a>        <span class="string">"region"</span>: hv.region,
-<a href=#776 id=776 data-nosnippet>776</a>        <span class="string">"zone"</span>: hv.zone,
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="string">"mesh_ipv6"</span>: hv.mesh_ipv6.to_string(),
-<a href=#778 id=778 data-nosnippet>778</a>        <span class="string">"ipv6_block"</span>: hv.ipv6_block,
-<a href=#779 id=779 data-nosnippet>779</a>        <span class="string">"ipv4_public"</span>: hv.ipv4_public,
-<a href=#780 id=780 data-nosnippet>780</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
-<a href=#781 id=781 data-nosnippet>781</a>    })))
-<a href=#782 id=782 data-nosnippet>782</a>}
+<a href=#764 id=764 data-nosnippet>764</a>    <span class="macro">eprintln!</span>();
+<a href=#765 id=765 data-nosnippet>765</a>    <span class="macro">eprintln!</span>(<span class="string">"  Peering active on port {peering_port}"</span>);
+<a href=#766 id=766 data-nosnippet>766</a>    <span class="macro">eprintln!</span>(<span class="string">"  PIN: {pin}"</span>);
+<a href=#767 id=767 data-nosnippet>767</a>    <span class="macro">eprintln!</span>();
+<a href=#768 id=768 data-nosnippet>768</a>    <span class="macro">eprintln!</span>(<span class="string">"  Nodes can join with:"</span>);
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="macro">eprintln!</span>(<span class="string">"    nauka hypervisor join --target &lt;this-ip&gt;:{peering_port} --pin {pin}"</span>);
+<a href=#770 id=770 data-nosnippet>770</a>    <span class="macro">eprintln!</span>();
+<a href=#771 id=771 data-nosnippet>771</a>    <span class="macro">eprintln!</span>(<span class="string">"  Waiting for joins... (Ctrl+C to stop)"</span>);
+<a href=#772 id=772 data-nosnippet>772</a>    <span class="macro">eprintln!</span>();
+<a href=#773 id=773 data-nosnippet>773</a>
+<a href=#774 id=774 data-nosnippet>774</a>    <span class="kw">let </span>accepted = fabric::ops::listen_for_peers(<span class="kw-2">&amp;</span>pin, peering_port, timeout_secs).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#775 id=775 data-nosnippet>775</a>
+<a href=#776 id=776 data-nosnippet>776</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="string">"{accepted} node(s) joined."
+<a href=#778 id=778 data-nosnippet>778</a>    </span>)))
+<a href=#779 id=779 data-nosnippet>779</a>}
+<a href=#780 id=780 data-nosnippet>780</a>
+<a href=#781 id=781 data-nosnippet>781</a><span class="kw">async fn </span>handle_update(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#782 id=782 data-nosnippet>782</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
 <a href=#783 id=783 data-nosnippet>783</a>
-<a href=#784 id=784 data-nosnippet>784</a><span class="kw">async fn </span>handle_status() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#785 id=785 data-nosnippet>785</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#786 id=786 data-nosnippet>786</a>    <span class="kw">let </span>s = fabric::ops::status(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
+<a href=#784 id=784 data-nosnippet>784</a>    <span class="kw">let </span>ipv6_block = req.fields.get(<span class="string">"ipv6-block"</span>).cloned();
+<a href=#785 id=785 data-nosnippet>785</a>    <span class="kw">let </span>ipv4_public = req.fields.get(<span class="string">"ipv4-public"</span>).cloned();
+<a href=#786 id=786 data-nosnippet>786</a>    <span class="kw">let </span>name = req.fields.get(<span class="string">"name"</span>).cloned();
 <a href=#787 id=787 data-nosnippet>787</a>
-<a href=#788 id=788 data-nosnippet>788</a>    <span class="comment">// Control plane status (best-effort — may not be installed yet)
-<a href=#789 id=789 data-nosnippet>789</a>    </span><span class="kw">let </span>mesh_ip: std::net::Ipv6Addr = s
-<a href=#790 id=790 data-nosnippet>790</a>        .mesh_ipv6
-<a href=#791 id=791 data-nosnippet>791</a>        .parse()
-<a href=#792 id=792 data-nosnippet>792</a>        .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"corrupt state: invalid mesh_ipv6 '{}'"</span>, s.mesh_ipv6))<span class="question-mark">?</span>;
-<a href=#793 id=793 data-nosnippet>793</a>    <span class="kw">let </span>cp = controlplane::ops::status(<span class="kw-2">&amp;</span>mesh_ip);
-<a href=#794 id=794 data-nosnippet>794</a>    <span class="kw">let </span>(pd_active, tikv_active, pd_members, tikv_stores, leader) = <span class="kw">match </span>cp {
-<a href=#795 id=795 data-nosnippet>795</a>        <span class="prelude-val">Ok</span>(cs) =&gt; (
-<a href=#796 id=796 data-nosnippet>796</a>            cs.pd_active,
-<a href=#797 id=797 data-nosnippet>797</a>            cs.tikv_active,
-<a href=#798 id=798 data-nosnippet>798</a>            cs.pd_members,
-<a href=#799 id=799 data-nosnippet>799</a>            cs.tikv_stores,
-<a href=#800 id=800 data-nosnippet>800</a>            cs.leader,
-<a href=#801 id=801 data-nosnippet>801</a>        ),
-<a href=#802 id=802 data-nosnippet>802</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; (<span class="bool-val">false</span>, <span class="bool-val">false</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="prelude-val">None</span>),
-<a href=#803 id=803 data-nosnippet>803</a>    };
-<a href=#804 id=804 data-nosnippet>804</a>
-<a href=#805 id=805 data-nosnippet>805</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#806 id=806 data-nosnippet>806</a>        <span class="string">"name"</span>: s.hypervisor_name,
-<a href=#807 id=807 data-nosnippet>807</a>        <span class="string">"id"</span>: s.hypervisor_id,
-<a href=#808 id=808 data-nosnippet>808</a>        <span class="string">"region"</span>: s.region,
-<a href=#809 id=809 data-nosnippet>809</a>        <span class="string">"zone"</span>: s.zone,
-<a href=#810 id=810 data-nosnippet>810</a>        <span class="string">"mesh_ipv6"</span>: s.mesh_ipv6,
-<a href=#811 id=811 data-nosnippet>811</a>        <span class="string">"state"</span>: <span class="kw">if </span>s.service_active &amp;&amp; tikv_active { <span class="kw-2">&amp;</span>s.state } <span class="kw">else if </span>s.service_active { <span class="string">"degraded" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>},
-<a href=#812 id=812 data-nosnippet>812</a>        <span class="string">"wg"</span>: <span class="kw">if </span>s.service_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
-<a href=#813 id=813 data-nosnippet>813</a>        <span class="string">"wg_interface"</span>: s.wg_interface_up,
-<a href=#814 id=814 data-nosnippet>814</a>        <span class="string">"peers"</span>: s.peer_count,
-<a href=#815 id=815 data-nosnippet>815</a>        <span class="string">"wg_port"</span>: s.wg_port,
-<a href=#816 id=816 data-nosnippet>816</a>        <span class="string">"rx_bytes"</span>: s.rx_bytes,
-<a href=#817 id=817 data-nosnippet>817</a>        <span class="string">"tx_bytes"</span>: s.tx_bytes,
-<a href=#818 id=818 data-nosnippet>818</a>        <span class="string">"pd"</span>: <span class="kw">if </span>pd_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
-<a href=#819 id=819 data-nosnippet>819</a>        <span class="string">"tikv"</span>: <span class="kw">if </span>tikv_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
-<a href=#820 id=820 data-nosnippet>820</a>        <span class="string">"pd_members"</span>: pd_members,
-<a href=#821 id=821 data-nosnippet>821</a>        <span class="string">"tikv_stores"</span>: tikv_stores,
-<a href=#822 id=822 data-nosnippet>822</a>        <span class="string">"leader"</span>: leader,
-<a href=#823 id=823 data-nosnippet>823</a>    })))
-<a href=#824 id=824 data-nosnippet>824</a>}
-<a href=#825 id=825 data-nosnippet>825</a>
-<a href=#826 id=826 data-nosnippet>826</a><span class="kw">async fn </span>handle_start() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#827 id=827 data-nosnippet>827</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#828 id=828 data-nosnippet>828</a>    fabric::ops::start(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
-<a href=#829 id=829 data-nosnippet>829</a>    <span class="kw">let _ </span>= fabric::announce::start_service();
-<a href=#830 id=830 data-nosnippet>830</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = controlplane::ops::start() {
-<a href=#831 id=831 data-nosnippet>831</a>        <span class="macro">eprintln!</span>(<span class="string">"  Warning: control plane: {e}"</span>);
-<a href=#832 id=832 data-nosnippet>832</a>    }
-<a href=#833 id=833 data-nosnippet>833</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = storage::ops::start_all(<span class="kw-2">&amp;</span>db) {
-<a href=#834 id=834 data-nosnippet>834</a>        <span class="macro">eprintln!</span>(<span class="string">"  Warning: storage: {e}"</span>);
-<a href=#835 id=835 data-nosnippet>835</a>    }
-<a href=#836 id=836 data-nosnippet>836</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="string">"all services started."</span>.into()))
-<a href=#837 id=837 data-nosnippet>837</a>}
-<a href=#838 id=838 data-nosnippet>838</a>
-<a href=#839 id=839 data-nosnippet>839</a><span class="kw">async fn </span>handle_announce_listen(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#840 id=840 data-nosnippet>840</a>    <span class="kw">let </span>port: u16 = req
-<a href=#841 id=841 data-nosnippet>841</a>        .fields
-<a href=#842 id=842 data-nosnippet>842</a>        .get(<span class="string">"port"</span>)
-<a href=#843 id=843 data-nosnippet>843</a>        .and_then(|s| s.parse().ok())
-<a href=#844 id=844 data-nosnippet>844</a>        .unwrap_or(<span class="number">51822</span>);
-<a href=#845 id=845 data-nosnippet>845</a>
-<a href=#846 id=846 data-nosnippet>846</a>    <span class="kw">let </span>bind_addr: std::net::SocketAddr = <span class="macro">format!</span>(<span class="string">"[::]:{port}"</span>)
-<a href=#847 id=847 data-nosnippet>847</a>        .parse()
-<a href=#848 id=848 data-nosnippet>848</a>        .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"invalid port"</span>))<span class="question-mark">?</span>;
+<a href=#788 id=788 data-nosnippet>788</a>    <span class="kw">let </span>cfg = fabric::ops::UpdateConfig {
+<a href=#789 id=789 data-nosnippet>789</a>        ipv6_block,
+<a href=#790 id=790 data-nosnippet>790</a>        ipv4_public,
+<a href=#791 id=791 data-nosnippet>791</a>        name,
+<a href=#792 id=792 data-nosnippet>792</a>    };
+<a href=#793 id=793 data-nosnippet>793</a>
+<a href=#794 id=794 data-nosnippet>794</a>    <span class="kw">let </span>hv = fabric::ops::update(<span class="kw-2">&amp;</span>db, <span class="kw-2">&amp;</span>cfg)<span class="question-mark">?</span>;
+<a href=#795 id=795 data-nosnippet>795</a>
+<a href=#796 id=796 data-nosnippet>796</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="string">"name"</span>: hv.name,
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="string">"id"</span>: hv.id.as_str(),
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="string">"region"</span>: hv.region,
+<a href=#800 id=800 data-nosnippet>800</a>        <span class="string">"zone"</span>: hv.zone,
+<a href=#801 id=801 data-nosnippet>801</a>        <span class="string">"mesh_ipv6"</span>: hv.mesh_ipv6.to_string(),
+<a href=#802 id=802 data-nosnippet>802</a>        <span class="string">"ipv6_block"</span>: hv.ipv6_block,
+<a href=#803 id=803 data-nosnippet>803</a>        <span class="string">"ipv4_public"</span>: hv.ipv4_public,
+<a href=#804 id=804 data-nosnippet>804</a>        <span class="string">"state"</span>: <span class="string">"available"</span>,
+<a href=#805 id=805 data-nosnippet>805</a>    })))
+<a href=#806 id=806 data-nosnippet>806</a>}
+<a href=#807 id=807 data-nosnippet>807</a>
+<a href=#808 id=808 data-nosnippet>808</a><span class="kw">async fn </span>handle_status() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#809 id=809 data-nosnippet>809</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#810 id=810 data-nosnippet>810</a>    <span class="kw">let </span>s = fabric::ops::status(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
+<a href=#811 id=811 data-nosnippet>811</a>
+<a href=#812 id=812 data-nosnippet>812</a>    <span class="comment">// Control plane status (best-effort — may not be installed yet)
+<a href=#813 id=813 data-nosnippet>813</a>    </span><span class="kw">let </span>mesh_ip: std::net::Ipv6Addr = s
+<a href=#814 id=814 data-nosnippet>814</a>        .mesh_ipv6
+<a href=#815 id=815 data-nosnippet>815</a>        .parse()
+<a href=#816 id=816 data-nosnippet>816</a>        .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"corrupt state: invalid mesh_ipv6 '{}'"</span>, s.mesh_ipv6))<span class="question-mark">?</span>;
+<a href=#817 id=817 data-nosnippet>817</a>    <span class="kw">let </span>cp = controlplane::ops::status(<span class="kw-2">&amp;</span>mesh_ip);
+<a href=#818 id=818 data-nosnippet>818</a>    <span class="kw">let </span>(pd_active, tikv_active, pd_members, tikv_stores, leader) = <span class="kw">match </span>cp {
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="prelude-val">Ok</span>(cs) =&gt; (
+<a href=#820 id=820 data-nosnippet>820</a>            cs.pd_active,
+<a href=#821 id=821 data-nosnippet>821</a>            cs.tikv_active,
+<a href=#822 id=822 data-nosnippet>822</a>            cs.pd_members,
+<a href=#823 id=823 data-nosnippet>823</a>            cs.tikv_stores,
+<a href=#824 id=824 data-nosnippet>824</a>            cs.leader,
+<a href=#825 id=825 data-nosnippet>825</a>        ),
+<a href=#826 id=826 data-nosnippet>826</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; (<span class="bool-val">false</span>, <span class="bool-val">false</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="prelude-val">None</span>),
+<a href=#827 id=827 data-nosnippet>827</a>    };
+<a href=#828 id=828 data-nosnippet>828</a>
+<a href=#829 id=829 data-nosnippet>829</a>    <span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#830 id=830 data-nosnippet>830</a>        <span class="string">"name"</span>: s.hypervisor_name,
+<a href=#831 id=831 data-nosnippet>831</a>        <span class="string">"id"</span>: s.hypervisor_id,
+<a href=#832 id=832 data-nosnippet>832</a>        <span class="string">"region"</span>: s.region,
+<a href=#833 id=833 data-nosnippet>833</a>        <span class="string">"zone"</span>: s.zone,
+<a href=#834 id=834 data-nosnippet>834</a>        <span class="string">"mesh_ipv6"</span>: s.mesh_ipv6,
+<a href=#835 id=835 data-nosnippet>835</a>        <span class="string">"state"</span>: <span class="kw">if </span>s.service_active &amp;&amp; tikv_active { <span class="kw-2">&amp;</span>s.state } <span class="kw">else if </span>s.service_active { <span class="string">"degraded" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>},
+<a href=#836 id=836 data-nosnippet>836</a>        <span class="string">"wg"</span>: <span class="kw">if </span>s.service_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
+<a href=#837 id=837 data-nosnippet>837</a>        <span class="string">"wg_interface"</span>: s.wg_interface_up,
+<a href=#838 id=838 data-nosnippet>838</a>        <span class="string">"peers"</span>: s.peer_count,
+<a href=#839 id=839 data-nosnippet>839</a>        <span class="string">"wg_port"</span>: s.wg_port,
+<a href=#840 id=840 data-nosnippet>840</a>        <span class="string">"rx_bytes"</span>: s.rx_bytes,
+<a href=#841 id=841 data-nosnippet>841</a>        <span class="string">"tx_bytes"</span>: s.tx_bytes,
+<a href=#842 id=842 data-nosnippet>842</a>        <span class="string">"pd"</span>: <span class="kw">if </span>pd_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
+<a href=#843 id=843 data-nosnippet>843</a>        <span class="string">"tikv"</span>: <span class="kw">if </span>tikv_active { <span class="string">"running" </span>} <span class="kw">else </span>{ <span class="string">"stopped" </span>},
+<a href=#844 id=844 data-nosnippet>844</a>        <span class="string">"pd_members"</span>: pd_members,
+<a href=#845 id=845 data-nosnippet>845</a>        <span class="string">"tikv_stores"</span>: tikv_stores,
+<a href=#846 id=846 data-nosnippet>846</a>        <span class="string">"leader"</span>: leader,
+<a href=#847 id=847 data-nosnippet>847</a>    })))
+<a href=#848 id=848 data-nosnippet>848</a>}
 <a href=#849 id=849 data-nosnippet>849</a>
-<a href=#850 id=850 data-nosnippet>850</a>    <span class="kw">let </span>db_opener = || {
-<a href=#851 id=851 data-nosnippet>851</a>        <span class="kw">let </span>dir = nauka_core::process::nauka_dir();
-<a href=#852 id=852 data-nosnippet>852</a>        <span class="kw">let _ </span>= std::fs::create_dir_all(<span class="kw-2">&amp;</span>dir);
-<a href=#853 id=853 data-nosnippet>853</a>        nauka_state::LayerDb::open(<span class="string">"hypervisor"</span>)
-<a href=#854 id=854 data-nosnippet>854</a>            .map_err(|e| nauka_core::error::NaukaError::internal(e.to_string()))
-<a href=#855 id=855 data-nosnippet>855</a>    };
-<a href=#856 id=856 data-nosnippet>856</a>
-<a href=#857 id=857 data-nosnippet>857</a>    <span class="comment">// This blocks forever (until killed by systemd)
-<a href=#858 id=858 data-nosnippet>858</a>    </span>fabric::announce::listen(db_opener, bind_addr).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#859 id=859 data-nosnippet>859</a>
-<a href=#860 id=860 data-nosnippet>860</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
+<a href=#850 id=850 data-nosnippet>850</a><span class="kw">async fn </span>handle_start() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#851 id=851 data-nosnippet>851</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#852 id=852 data-nosnippet>852</a>    fabric::ops::start(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
+<a href=#853 id=853 data-nosnippet>853</a>    <span class="kw">let _ </span>= fabric::announce::start_service();
+<a href=#854 id=854 data-nosnippet>854</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = controlplane::ops::start() {
+<a href=#855 id=855 data-nosnippet>855</a>        <span class="macro">eprintln!</span>(<span class="string">"  Warning: control plane: {e}"</span>);
+<a href=#856 id=856 data-nosnippet>856</a>    }
+<a href=#857 id=857 data-nosnippet>857</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = storage::ops::start_all(<span class="kw-2">&amp;</span>db) {
+<a href=#858 id=858 data-nosnippet>858</a>        <span class="macro">eprintln!</span>(<span class="string">"  Warning: storage: {e}"</span>);
+<a href=#859 id=859 data-nosnippet>859</a>    }
+<a href=#860 id=860 data-nosnippet>860</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="string">"all services started."</span>.into()))
 <a href=#861 id=861 data-nosnippet>861</a>}
 <a href=#862 id=862 data-nosnippet>862</a>
-<a href=#863 id=863 data-nosnippet>863</a><span class="kw">async fn </span>handle_doctor() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#864 id=864 data-nosnippet>864</a>    <span class="kw">let </span>report = <span class="kw">crate</span>::doctor::run();
-<a href=#865 id=865 data-nosnippet>865</a>    report.print();
-<a href=#866 id=866 data-nosnippet>866</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
-<a href=#867 id=867 data-nosnippet>867</a>}
-<a href=#868 id=868 data-nosnippet>868</a>
-<a href=#869 id=869 data-nosnippet>869</a><span class="kw">async fn </span>handle_stop() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#870 id=870 data-nosnippet>870</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#871 id=871 data-nosnippet>871</a>    <span class="kw">let _ </span>= storage::ops::stop_all(<span class="kw-2">&amp;</span>db);
-<a href=#872 id=872 data-nosnippet>872</a>    <span class="kw">let _ </span>= controlplane::ops::stop();
-<a href=#873 id=873 data-nosnippet>873</a>    <span class="kw">let _ </span>= fabric::announce::stop_service();
-<a href=#874 id=874 data-nosnippet>874</a>    fabric::ops::stop(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
-<a href=#875 id=875 data-nosnippet>875</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="string">"all services stopped."</span>.into()))
-<a href=#876 id=876 data-nosnippet>876</a>}
-<a href=#877 id=877 data-nosnippet>877</a>
-<a href=#878 id=878 data-nosnippet>878</a><span class="kw">async fn </span>handle_leave() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#879 id=879 data-nosnippet>879</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#880 id=880 data-nosnippet>880</a>    <span class="comment">// Get mesh IPv6 for TiKV deregistration before leaving
-<a href=#881 id=881 data-nosnippet>881</a>    </span><span class="kw">let </span>mesh_ipv6 = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#882 id=882 data-nosnippet>882</a>        .ok()
-<a href=#883 id=883 data-nosnippet>883</a>        .flatten()
-<a href=#884 id=884 data-nosnippet>884</a>        .map(|s| s.hypervisor.mesh_ipv6);
-<a href=#885 id=885 data-nosnippet>885</a>
-<a href=#886 id=886 data-nosnippet>886</a>    <span class="kw">let </span>steps = ui::Steps::new(<span class="number">4</span>);
-<a href=#887 id=887 data-nosnippet>887</a>
-<a href=#888 id=888 data-nosnippet>888</a>    <span class="comment">// Storage first (stop ZeroFS instances)
-<a href=#889 id=889 data-nosnippet>889</a>    </span>steps.set(<span class="string">"Stopping storage"</span>);
-<a href=#890 id=890 data-nosnippet>890</a>    <span class="kw">let _ </span>= storage::ops::leave();
-<a href=#891 id=891 data-nosnippet>891</a>    steps.inc();
+<a href=#863 id=863 data-nosnippet>863</a><span class="kw">async fn </span>handle_announce_listen(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#864 id=864 data-nosnippet>864</a>    <span class="kw">let </span>port: u16 = req
+<a href=#865 id=865 data-nosnippet>865</a>        .fields
+<a href=#866 id=866 data-nosnippet>866</a>        .get(<span class="string">"port"</span>)
+<a href=#867 id=867 data-nosnippet>867</a>        .and_then(|s| s.parse().ok())
+<a href=#868 id=868 data-nosnippet>868</a>        .unwrap_or(<span class="number">51822</span>);
+<a href=#869 id=869 data-nosnippet>869</a>
+<a href=#870 id=870 data-nosnippet>870</a>    <span class="kw">let </span>bind_addr: std::net::SocketAddr = <span class="macro">format!</span>(<span class="string">"[::]:{port}"</span>)
+<a href=#871 id=871 data-nosnippet>871</a>        .parse()
+<a href=#872 id=872 data-nosnippet>872</a>        .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"invalid port"</span>))<span class="question-mark">?</span>;
+<a href=#873 id=873 data-nosnippet>873</a>
+<a href=#874 id=874 data-nosnippet>874</a>    <span class="kw">let </span>db_opener = || {
+<a href=#875 id=875 data-nosnippet>875</a>        <span class="kw">let </span>dir = nauka_core::process::nauka_dir();
+<a href=#876 id=876 data-nosnippet>876</a>        <span class="kw">let _ </span>= std::fs::create_dir_all(<span class="kw-2">&amp;</span>dir);
+<a href=#877 id=877 data-nosnippet>877</a>        nauka_state::LayerDb::open(<span class="string">"hypervisor"</span>)
+<a href=#878 id=878 data-nosnippet>878</a>            .map_err(|e| nauka_core::error::NaukaError::internal(e.to_string()))
+<a href=#879 id=879 data-nosnippet>879</a>    };
+<a href=#880 id=880 data-nosnippet>880</a>
+<a href=#881 id=881 data-nosnippet>881</a>    <span class="comment">// This blocks forever (until killed by systemd)
+<a href=#882 id=882 data-nosnippet>882</a>    </span>fabric::announce::listen(db_opener, bind_addr).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#883 id=883 data-nosnippet>883</a>
+<a href=#884 id=884 data-nosnippet>884</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
+<a href=#885 id=885 data-nosnippet>885</a>}
+<a href=#886 id=886 data-nosnippet>886</a>
+<a href=#887 id=887 data-nosnippet>887</a><span class="kw">async fn </span>handle_doctor() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#888 id=888 data-nosnippet>888</a>    <span class="kw">let </span>report = <span class="kw">crate</span>::doctor::run();
+<a href=#889 id=889 data-nosnippet>889</a>    report.print();
+<a href=#890 id=890 data-nosnippet>890</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
+<a href=#891 id=891 data-nosnippet>891</a>}
 <a href=#892 id=892 data-nosnippet>892</a>
-<a href=#893 id=893 data-nosnippet>893</a>    <span class="comment">// Controlplane (deregister TiKV store, then uninstall)
-<a href=#894 id=894 data-nosnippet>894</a>    </span>steps.set(<span class="string">"Leaving control plane"</span>);
-<a href=#895 id=895 data-nosnippet>895</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(ipv6) = mesh_ipv6 {
-<a href=#896 id=896 data-nosnippet>896</a>        <span class="kw">let _ </span>= controlplane::ops::leave_with_mesh(<span class="kw-2">&amp;</span>ipv6);
-<a href=#897 id=897 data-nosnippet>897</a>    } <span class="kw">else </span>{
-<a href=#898 id=898 data-nosnippet>898</a>        <span class="kw">let _ </span>= controlplane::ops::leave();
-<a href=#899 id=899 data-nosnippet>899</a>    }
-<a href=#900 id=900 data-nosnippet>900</a>    steps.inc();
+<a href=#893 id=893 data-nosnippet>893</a><span class="kw">async fn </span>handle_stop() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#894 id=894 data-nosnippet>894</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#895 id=895 data-nosnippet>895</a>    <span class="kw">let _ </span>= storage::ops::stop_all(<span class="kw-2">&amp;</span>db);
+<a href=#896 id=896 data-nosnippet>896</a>    <span class="kw">let _ </span>= controlplane::ops::stop();
+<a href=#897 id=897 data-nosnippet>897</a>    <span class="kw">let _ </span>= fabric::announce::stop_service();
+<a href=#898 id=898 data-nosnippet>898</a>    fabric::ops::stop(<span class="kw-2">&amp;</span>db)<span class="question-mark">?</span>;
+<a href=#899 id=899 data-nosnippet>899</a>    <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="string">"all services stopped."</span>.into()))
+<a href=#900 id=900 data-nosnippet>900</a>}
 <a href=#901 id=901 data-nosnippet>901</a>
-<a href=#902 id=902 data-nosnippet>902</a>    <span class="comment">// Notify peers + tear down mesh
-<a href=#903 id=903 data-nosnippet>903</a>    </span>steps.set(<span class="string">"Notifying peers"</span>);
-<a href=#904 id=904 data-nosnippet>904</a>    <span class="kw">let _ </span>= fabric::announce::uninstall_service();
-<a href=#905 id=905 data-nosnippet>905</a>    fabric::ops::leave(<span class="kw-2">&amp;</span>db).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#906 id=906 data-nosnippet>906</a>    steps.inc();
-<a href=#907 id=907 data-nosnippet>907</a>
-<a href=#908 id=908 data-nosnippet>908</a>    <span class="comment">// Final cleanup
-<a href=#909 id=909 data-nosnippet>909</a>    </span>steps.set(<span class="string">"Removing services"</span>);
-<a href=#910 id=910 data-nosnippet>910</a>    steps.inc();
+<a href=#902 id=902 data-nosnippet>902</a><span class="kw">async fn </span>handle_leave() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#903 id=903 data-nosnippet>903</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#904 id=904 data-nosnippet>904</a>    <span class="comment">// Get mesh IPv6 for TiKV deregistration before leaving
+<a href=#905 id=905 data-nosnippet>905</a>    </span><span class="kw">let </span>mesh_ipv6 = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#906 id=906 data-nosnippet>906</a>        .ok()
+<a href=#907 id=907 data-nosnippet>907</a>        .flatten()
+<a href=#908 id=908 data-nosnippet>908</a>        .map(|s| s.hypervisor.mesh_ipv6);
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a>    <span class="kw">let </span>steps = ui::Steps::new(<span class="number">4</span>);
 <a href=#911 id=911 data-nosnippet>911</a>
-<a href=#912 id=912 data-nosnippet>912</a>    steps.finish(<span class="string">"Left the cluster"</span>);
-<a href=#913 id=913 data-nosnippet>913</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
-<a href=#914 id=914 data-nosnippet>914</a>}
-<a href=#915 id=915 data-nosnippet>915</a>
-<a href=#916 id=916 data-nosnippet>916</a><span class="kw">async fn </span>handle_list() -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#917 id=917 data-nosnippet>917</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#918 id=918 data-nosnippet>918</a>    <span class="kw">let </span>state = <span class="kw">match </span>fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">? </span>{
-<a href=#919 id=919 data-nosnippet>919</a>        <span class="prelude-val">Some</span>(s) =&gt; s,
-<a href=#920 id=920 data-nosnippet>920</a>        <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::ResourceList(<span class="macro">vec!</span>[])),
-<a href=#921 id=921 data-nosnippet>921</a>    };
-<a href=#922 id=922 data-nosnippet>922</a>
-<a href=#923 id=923 data-nosnippet>923</a>    <span class="kw">let </span>backend = fabric::backend::create_backend(state.network_mode);
-<a href=#924 id=924 data-nosnippet>924</a>    <span class="kw">let </span>self_state = <span class="kw">if </span>backend.is_up() { <span class="string">"available" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>};
+<a href=#912 id=912 data-nosnippet>912</a>    <span class="comment">// Storage first (stop ZeroFS instances)
+<a href=#913 id=913 data-nosnippet>913</a>    </span>steps.set(<span class="string">"Stopping storage"</span>);
+<a href=#914 id=914 data-nosnippet>914</a>    <span class="kw">let _ </span>= storage::ops::leave();
+<a href=#915 id=915 data-nosnippet>915</a>    steps.inc();
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>    <span class="comment">// Controlplane (deregister TiKV store, then uninstall)
+<a href=#918 id=918 data-nosnippet>918</a>    </span>steps.set(<span class="string">"Leaving control plane"</span>);
+<a href=#919 id=919 data-nosnippet>919</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(ipv6) = mesh_ipv6 {
+<a href=#920 id=920 data-nosnippet>920</a>        <span class="kw">let _ </span>= controlplane::ops::leave_with_mesh(<span class="kw-2">&amp;</span>ipv6);
+<a href=#921 id=921 data-nosnippet>921</a>    } <span class="kw">else </span>{
+<a href=#922 id=922 data-nosnippet>922</a>        <span class="kw">let _ </span>= controlplane::ops::leave();
+<a href=#923 id=923 data-nosnippet>923</a>    }
+<a href=#924 id=924 data-nosnippet>924</a>    steps.inc();
 <a href=#925 id=925 data-nosnippet>925</a>
-<a href=#926 id=926 data-nosnippet>926</a>    <span class="kw">let </span><span class="kw-2">mut </span>items = <span class="macro">vec!</span>[<span class="macro">serde_json::json!</span>({
-<a href=#927 id=927 data-nosnippet>927</a>        <span class="string">"name"</span>: state.hypervisor.name,
-<a href=#928 id=928 data-nosnippet>928</a>        <span class="string">"region"</span>: state.hypervisor.region,
-<a href=#929 id=929 data-nosnippet>929</a>        <span class="string">"zone"</span>: state.hypervisor.zone,
-<a href=#930 id=930 data-nosnippet>930</a>        <span class="string">"state"</span>: self_state,
-<a href=#931 id=931 data-nosnippet>931</a>        <span class="string">"cpu"</span>: <span class="string">"0/0"</span>,
-<a href=#932 id=932 data-nosnippet>932</a>        <span class="string">"memory"</span>: <span class="string">"0/0"</span>,
-<a href=#933 id=933 data-nosnippet>933</a>        <span class="string">"vms"</span>: <span class="number">0</span>,
-<a href=#934 id=934 data-nosnippet>934</a>    })];
+<a href=#926 id=926 data-nosnippet>926</a>    <span class="comment">// Notify peers + tear down mesh
+<a href=#927 id=927 data-nosnippet>927</a>    </span>steps.set(<span class="string">"Notifying peers"</span>);
+<a href=#928 id=928 data-nosnippet>928</a>    <span class="kw">let _ </span>= fabric::announce::uninstall_service();
+<a href=#929 id=929 data-nosnippet>929</a>    fabric::ops::leave(<span class="kw-2">&amp;</span>db).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#930 id=930 data-nosnippet>930</a>    steps.inc();
+<a href=#931 id=931 data-nosnippet>931</a>
+<a href=#932 id=932 data-nosnippet>932</a>    <span class="comment">// Final cleanup
+<a href=#933 id=933 data-nosnippet>933</a>    </span>steps.set(<span class="string">"Removing services"</span>);
+<a href=#934 id=934 data-nosnippet>934</a>    steps.inc();
 <a href=#935 id=935 data-nosnippet>935</a>
-<a href=#936 id=936 data-nosnippet>936</a>    <span class="kw">for </span>peer <span class="kw">in </span><span class="kw-2">&amp;</span>state.peers.peers {
-<a href=#937 id=937 data-nosnippet>937</a>        items.push(<span class="macro">serde_json::json!</span>({
-<a href=#938 id=938 data-nosnippet>938</a>            <span class="string">"name"</span>: peer.name,
-<a href=#939 id=939 data-nosnippet>939</a>            <span class="string">"region"</span>: peer.region,
-<a href=#940 id=940 data-nosnippet>940</a>            <span class="string">"zone"</span>: peer.zone,
-<a href=#941 id=941 data-nosnippet>941</a>            <span class="string">"state"</span>: peer_state_label(peer),
-<a href=#942 id=942 data-nosnippet>942</a>            <span class="string">"cpu"</span>: <span class="string">"0/0"</span>,
-<a href=#943 id=943 data-nosnippet>943</a>            <span class="string">"memory"</span>: <span class="string">"0/0"</span>,
-<a href=#944 id=944 data-nosnippet>944</a>            <span class="string">"vms"</span>: <span class="number">0</span>,
-<a href=#945 id=945 data-nosnippet>945</a>        }));
-<a href=#946 id=946 data-nosnippet>946</a>    }
-<a href=#947 id=947 data-nosnippet>947</a>
-<a href=#948 id=948 data-nosnippet>948</a>    <span class="prelude-val">Ok</span>(OperationResponse::ResourceList(items))
-<a href=#949 id=949 data-nosnippet>949</a>}
-<a href=#950 id=950 data-nosnippet>950</a>
-<a href=#951 id=951 data-nosnippet>951</a><span class="kw">async fn </span>handle_get(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
-<a href=#952 id=952 data-nosnippet>952</a>    <span class="kw">let </span>name = req
-<a href=#953 id=953 data-nosnippet>953</a>        .name
-<a href=#954 id=954 data-nosnippet>954</a>        .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing hypervisor name"</span>))<span class="question-mark">?</span>;
-<a href=#955 id=955 data-nosnippet>955</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
-<a href=#956 id=956 data-nosnippet>956</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
-<a href=#957 id=957 data-nosnippet>957</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#958 id=958 data-nosnippet>958</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized"</span>))<span class="question-mark">?</span>;
+<a href=#936 id=936 data-nosnippet>936</a>    steps.finish(<span class="string">"Left the cluster"</span>);
+<a href=#937 id=937 data-nosnippet>937</a>    <span class="prelude-val">Ok</span>(OperationResponse::None)
+<a href=#938 id=938 data-nosnippet>938</a>}
+<a href=#939 id=939 data-nosnippet>939</a>
+<a href=#940 id=940 data-nosnippet>940</a><span class="kw">async fn </span>handle_list() -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#941 id=941 data-nosnippet>941</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#942 id=942 data-nosnippet>942</a>    <span class="kw">let </span>state = <span class="kw">match </span>fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">? </span>{
+<a href=#943 id=943 data-nosnippet>943</a>        <span class="prelude-val">Some</span>(s) =&gt; s,
+<a href=#944 id=944 data-nosnippet>944</a>        <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::ResourceList(<span class="macro">vec!</span>[])),
+<a href=#945 id=945 data-nosnippet>945</a>    };
+<a href=#946 id=946 data-nosnippet>946</a>
+<a href=#947 id=947 data-nosnippet>947</a>    <span class="kw">let </span>backend = fabric::backend::create_backend(state.network_mode);
+<a href=#948 id=948 data-nosnippet>948</a>    <span class="kw">let </span>self_state = <span class="kw">if </span>backend.is_up() { <span class="string">"available" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>};
+<a href=#949 id=949 data-nosnippet>949</a>
+<a href=#950 id=950 data-nosnippet>950</a>    <span class="kw">let </span><span class="kw-2">mut </span>items = <span class="macro">vec!</span>[<span class="macro">serde_json::json!</span>({
+<a href=#951 id=951 data-nosnippet>951</a>        <span class="string">"name"</span>: state.hypervisor.name,
+<a href=#952 id=952 data-nosnippet>952</a>        <span class="string">"region"</span>: state.hypervisor.region,
+<a href=#953 id=953 data-nosnippet>953</a>        <span class="string">"zone"</span>: state.hypervisor.zone,
+<a href=#954 id=954 data-nosnippet>954</a>        <span class="string">"state"</span>: self_state,
+<a href=#955 id=955 data-nosnippet>955</a>        <span class="string">"cpu"</span>: <span class="string">"0/0"</span>,
+<a href=#956 id=956 data-nosnippet>956</a>        <span class="string">"memory"</span>: <span class="string">"0/0"</span>,
+<a href=#957 id=957 data-nosnippet>957</a>        <span class="string">"vms"</span>: <span class="number">0</span>,
+<a href=#958 id=958 data-nosnippet>958</a>    })];
 <a href=#959 id=959 data-nosnippet>959</a>
-<a href=#960 id=960 data-nosnippet>960</a>    <span class="kw">let </span>backend = fabric::backend::create_backend(state.network_mode);
-<a href=#961 id=961 data-nosnippet>961</a>
-<a href=#962 id=962 data-nosnippet>962</a>    <span class="kw">if </span>state.hypervisor.name == name {
-<a href=#963 id=963 data-nosnippet>963</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#964 id=964 data-nosnippet>964</a>            <span class="string">"name"</span>: state.hypervisor.name,
-<a href=#965 id=965 data-nosnippet>965</a>            <span class="string">"id"</span>: state.hypervisor.id.as_str(),
-<a href=#966 id=966 data-nosnippet>966</a>            <span class="string">"region"</span>: state.hypervisor.region,
-<a href=#967 id=967 data-nosnippet>967</a>            <span class="string">"zone"</span>: state.hypervisor.zone,
-<a href=#968 id=968 data-nosnippet>968</a>            <span class="string">"mesh_ipv6"</span>: state.hypervisor.mesh_ipv6.to_string(),
-<a href=#969 id=969 data-nosnippet>969</a>            <span class="string">"state"</span>: <span class="kw">if </span>backend.is_up() { <span class="string">"available" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>},
-<a href=#970 id=970 data-nosnippet>970</a>        })));
-<a href=#971 id=971 data-nosnippet>971</a>    }
-<a href=#972 id=972 data-nosnippet>972</a>
-<a href=#973 id=973 data-nosnippet>973</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(peer) = state.peers.find_by_name(<span class="kw-2">&amp;</span>name) {
-<a href=#974 id=974 data-nosnippet>974</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
-<a href=#975 id=975 data-nosnippet>975</a>            <span class="string">"name"</span>: peer.name,
-<a href=#976 id=976 data-nosnippet>976</a>            <span class="string">"id"</span>: peer.id.as_str(),
-<a href=#977 id=977 data-nosnippet>977</a>            <span class="string">"region"</span>: peer.region,
-<a href=#978 id=978 data-nosnippet>978</a>            <span class="string">"zone"</span>: peer.zone,
-<a href=#979 id=979 data-nosnippet>979</a>            <span class="string">"mesh_ipv6"</span>: peer.mesh_ipv6.to_string(),
-<a href=#980 id=980 data-nosnippet>980</a>            <span class="string">"state"</span>: peer_state_label(peer),
-<a href=#981 id=981 data-nosnippet>981</a>        })));
-<a href=#982 id=982 data-nosnippet>982</a>    }
+<a href=#960 id=960 data-nosnippet>960</a>    <span class="kw">for </span>peer <span class="kw">in </span><span class="kw-2">&amp;</span>state.peers.peers {
+<a href=#961 id=961 data-nosnippet>961</a>        items.push(<span class="macro">serde_json::json!</span>({
+<a href=#962 id=962 data-nosnippet>962</a>            <span class="string">"name"</span>: peer.name,
+<a href=#963 id=963 data-nosnippet>963</a>            <span class="string">"region"</span>: peer.region,
+<a href=#964 id=964 data-nosnippet>964</a>            <span class="string">"zone"</span>: peer.zone,
+<a href=#965 id=965 data-nosnippet>965</a>            <span class="string">"state"</span>: peer_state_label(peer),
+<a href=#966 id=966 data-nosnippet>966</a>            <span class="string">"cpu"</span>: <span class="string">"0/0"</span>,
+<a href=#967 id=967 data-nosnippet>967</a>            <span class="string">"memory"</span>: <span class="string">"0/0"</span>,
+<a href=#968 id=968 data-nosnippet>968</a>            <span class="string">"vms"</span>: <span class="number">0</span>,
+<a href=#969 id=969 data-nosnippet>969</a>        }));
+<a href=#970 id=970 data-nosnippet>970</a>    }
+<a href=#971 id=971 data-nosnippet>971</a>
+<a href=#972 id=972 data-nosnippet>972</a>    <span class="prelude-val">Ok</span>(OperationResponse::ResourceList(items))
+<a href=#973 id=973 data-nosnippet>973</a>}
+<a href=#974 id=974 data-nosnippet>974</a>
+<a href=#975 id=975 data-nosnippet>975</a><span class="kw">async fn </span>handle_get(req: OperationRequest) -&gt; anyhow::Result&lt;OperationResponse&gt; {
+<a href=#976 id=976 data-nosnippet>976</a>    <span class="kw">let </span>name = req
+<a href=#977 id=977 data-nosnippet>977</a>        .name
+<a href=#978 id=978 data-nosnippet>978</a>        .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing hypervisor name"</span>))<span class="question-mark">?</span>;
+<a href=#979 id=979 data-nosnippet>979</a>    <span class="kw">let </span>db = open_db()<span class="question-mark">?</span>;
+<a href=#980 id=980 data-nosnippet>980</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>db)
+<a href=#981 id=981 data-nosnippet>981</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#982 id=982 data-nosnippet>982</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized"</span>))<span class="question-mark">?</span>;
 <a href=#983 id=983 data-nosnippet>983</a>
-<a href=#984 id=984 data-nosnippet>984</a>    <span class="macro">anyhow::bail!</span>(<span class="string">"hypervisor '{name}' not found"</span>)
-<a href=#985 id=985 data-nosnippet>985</a>}
-<a href=#986 id=986 data-nosnippet>986</a>
-<a href=#987 id=987 data-nosnippet>987</a><span class="doccomment">/// Map peer status to user-facing label.
-<a href=#988 id=988 data-nosnippet>988</a></span><span class="kw">fn </span>peer_state_label(peer: <span class="kw-2">&amp;</span>fabric::peer::Peer) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
-<a href=#989 id=989 data-nosnippet>989</a>    <span class="kw">match </span>peer.status {
-<a href=#990 id=990 data-nosnippet>990</a>        fabric::peer::PeerStatus::Active =&gt; <span class="string">"available"</span>,
-<a href=#991 id=991 data-nosnippet>991</a>        fabric::peer::PeerStatus::Unreachable =&gt; <span class="string">"unreachable"</span>,
-<a href=#992 id=992 data-nosnippet>992</a>        fabric::peer::PeerStatus::Removed =&gt; <span class="string">"removed"</span>,
-<a href=#993 id=993 data-nosnippet>993</a>    }
-<a href=#994 id=994 data-nosnippet>994</a>}
-<a href=#995 id=995 data-nosnippet>995</a>
-<a href=#996 id=996 data-nosnippet>996</a><span class="kw">fn </span>open_db() -&gt; anyhow::Result&lt;LayerDb&gt; {
-<a href=#997 id=997 data-nosnippet>997</a>    <span class="kw">let </span>dir = nauka_core::process::nauka_dir();
-<a href=#998 id=998 data-nosnippet>998</a>    std::fs::create_dir_all(<span class="kw-2">&amp;</span>dir)<span class="question-mark">?</span>;
-<a href=#999 id=999 data-nosnippet>999</a>    LayerDb::open(<span class="string">"hypervisor"</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))
-<a href=#1000 id=1000 data-nosnippet>1000</a>}
+<a href=#984 id=984 data-nosnippet>984</a>    <span class="kw">let </span>backend = fabric::backend::create_backend(state.network_mode);
+<a href=#985 id=985 data-nosnippet>985</a>
+<a href=#986 id=986 data-nosnippet>986</a>    <span class="kw">if </span>state.hypervisor.name == name {
+<a href=#987 id=987 data-nosnippet>987</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#988 id=988 data-nosnippet>988</a>            <span class="string">"name"</span>: state.hypervisor.name,
+<a href=#989 id=989 data-nosnippet>989</a>            <span class="string">"id"</span>: state.hypervisor.id.as_str(),
+<a href=#990 id=990 data-nosnippet>990</a>            <span class="string">"region"</span>: state.hypervisor.region,
+<a href=#991 id=991 data-nosnippet>991</a>            <span class="string">"zone"</span>: state.hypervisor.zone,
+<a href=#992 id=992 data-nosnippet>992</a>            <span class="string">"mesh_ipv6"</span>: state.hypervisor.mesh_ipv6.to_string(),
+<a href=#993 id=993 data-nosnippet>993</a>            <span class="string">"state"</span>: <span class="kw">if </span>backend.is_up() { <span class="string">"available" </span>} <span class="kw">else </span>{ <span class="string">"down" </span>},
+<a href=#994 id=994 data-nosnippet>994</a>        })));
+<a href=#995 id=995 data-nosnippet>995</a>    }
+<a href=#996 id=996 data-nosnippet>996</a>
+<a href=#997 id=997 data-nosnippet>997</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(peer) = state.peers.find_by_name(<span class="kw-2">&amp;</span>name) {
+<a href=#998 id=998 data-nosnippet>998</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(OperationResponse::Resource(<span class="macro">serde_json::json!</span>({
+<a href=#999 id=999 data-nosnippet>999</a>            <span class="string">"name"</span>: peer.name,
+<a href=#1000 id=1000 data-nosnippet>1000</a>            <span class="string">"id"</span>: peer.id.as_str(),
+<a href=#1001 id=1001 data-nosnippet>1001</a>            <span class="string">"region"</span>: peer.region,
+<a href=#1002 id=1002 data-nosnippet>1002</a>            <span class="string">"zone"</span>: peer.zone,
+<a href=#1003 id=1003 data-nosnippet>1003</a>            <span class="string">"mesh_ipv6"</span>: peer.mesh_ipv6.to_string(),
+<a href=#1004 id=1004 data-nosnippet>1004</a>            <span class="string">"state"</span>: peer_state_label(peer),
+<a href=#1005 id=1005 data-nosnippet>1005</a>        })));
+<a href=#1006 id=1006 data-nosnippet>1006</a>    }
+<a href=#1007 id=1007 data-nosnippet>1007</a>
+<a href=#1008 id=1008 data-nosnippet>1008</a>    <span class="macro">anyhow::bail!</span>(<span class="string">"hypervisor '{name}' not found"</span>)
+<a href=#1009 id=1009 data-nosnippet>1009</a>}
+<a href=#1010 id=1010 data-nosnippet>1010</a>
+<a href=#1011 id=1011 data-nosnippet>1011</a><span class="doccomment">/// Map peer status to user-facing label.
+<a href=#1012 id=1012 data-nosnippet>1012</a></span><span class="kw">fn </span>peer_state_label(peer: <span class="kw-2">&amp;</span>fabric::peer::Peer) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#1013 id=1013 data-nosnippet>1013</a>    <span class="kw">match </span>peer.status {
+<a href=#1014 id=1014 data-nosnippet>1014</a>        fabric::peer::PeerStatus::Active =&gt; <span class="string">"available"</span>,
+<a href=#1015 id=1015 data-nosnippet>1015</a>        fabric::peer::PeerStatus::Unreachable =&gt; <span class="string">"unreachable"</span>,
+<a href=#1016 id=1016 data-nosnippet>1016</a>        fabric::peer::PeerStatus::Removed =&gt; <span class="string">"removed"</span>,
+<a href=#1017 id=1017 data-nosnippet>1017</a>    }
+<a href=#1018 id=1018 data-nosnippet>1018</a>}
+<a href=#1019 id=1019 data-nosnippet>1019</a>
+<a href=#1020 id=1020 data-nosnippet>1020</a><span class="kw">fn </span>open_db() -&gt; anyhow::Result&lt;LayerDb&gt; {
+<a href=#1021 id=1021 data-nosnippet>1021</a>    <span class="kw">let </span>dir = nauka_core::process::nauka_dir();
+<a href=#1022 id=1022 data-nosnippet>1022</a>    std::fs::create_dir_all(<span class="kw-2">&amp;</span>dir)<span class="question-mark">?</span>;
+<a href=#1023 id=1023 data-nosnippet>1023</a>    LayerDb::open(<span class="string">"hypervisor"</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))
+<a href=#1024 id=1024 data-nosnippet>1024</a>}
 </code></pre></div></section></main></body></html>
