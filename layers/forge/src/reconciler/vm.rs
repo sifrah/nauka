@@ -45,11 +45,24 @@ impl super::Reconciler for VmReconciler {
             })
             .collect();
 
-        // VMs that should be running (pending = needs starting, running = should be alive)
-        let should_exist: Vec<_> = local_vms
-            .iter()
-            .filter(|vm| vm.state == VmState::Pending || vm.state == VmState::Running)
-            .collect();
+        // VMs that should be running (pending = needs starting, running = should be alive).
+        // Skip orphaned VMs whose org no longer exists (cascading orphan).
+        let org_store = nauka_org::store::OrgStore::new(ctx.db.clone());
+        let mut should_exist: Vec<_> = Vec::new();
+        for vm in &local_vms {
+            if vm.state != VmState::Pending && vm.state != VmState::Running {
+                continue;
+            }
+            if org_store.get(vm.org_id.as_str()).await?.is_none() {
+                tracing::warn!(
+                    vm_id = vm.meta.id.as_str(),
+                    org_id = vm.org_id.as_str(),
+                    "skipping orphaned VM (org deleted)"
+                );
+                continue;
+            }
+            should_exist.push(vm);
+        }
 
         result.desired = should_exist.len();
 

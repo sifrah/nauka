@@ -12,6 +12,7 @@ nauka-state = { path = "../state" }
 nauka-hypervisor = { path = "../hypervisor" }
 nauka-compute = { path = "../compute" }
 nauka-network = { path = "../network" }
+nauka-org = { path = "../org" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

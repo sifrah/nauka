@@ -1544,6 +1544,7 @@ dependencies = [
  "nauka-core",
  "nauka-hypervisor",
  "nauka-network",
+ "nauka-org",
  "nauka-state",
  "serde",
  "serde_json",
