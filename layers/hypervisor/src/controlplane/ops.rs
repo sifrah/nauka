@@ -138,9 +138,9 @@ pub fn join(
 /// Called when the 3rd node joins. At this point node 2 is running TiKV-only.
 /// We need to:
 /// 1. Start PD on node 2 (via SSH/announce — but we can't SSH into peers)
-///    → Instead, install PD config on THIS node (node 3) and let node 2's
+///    - Instead, install PD config on THIS node (node 3) and let node 2's
 ///      forge daemon detect it needs PD and self-heal.
-///    → Actually, simpler: node 3 just starts its own PD in --join mode.
+///    - Actually, simpler: node 3 just starts its own PD in --join mode.
 ///      Node 2 will get PD later via forge reconciliation or a future join.
 ///
 /// For now: start PD on node 3 only. This gives us 2 PD members (1+3),
