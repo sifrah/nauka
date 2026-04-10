@@ -183,6 +183,8 @@ pub fn generate_tikv_conf(cfg: &TikvConfig) -> String {
 addr = "[{ip}]:{tikv_port}"
 advertise-addr = "[{ip}]:{tikv_port}"
 status-addr = "[{ip}]:{status_port}"
+grpc-keepalive-time = "15s"
+grpc-keepalive-timeout = "30s"
 
 [storage]
 data-dir = "{TIKV_DATA_DIR}"
