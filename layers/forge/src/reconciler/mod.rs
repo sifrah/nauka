@@ -3,6 +3,7 @@
 //! Each resource type (VPC, VM) implements `Reconciler`.
 //! The `run_all` function executes them in dependency order.
 
+pub mod health;
 pub mod natgw;
 pub mod pd;
 pub mod store;
