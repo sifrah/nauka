@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["RECONCILE_INTERVAL_SECS"],"fn":["run","run_cycle","run_once"]};
+window.SIDEBAR_ITEMS = {"constant":["RECONCILE_INTERVAL_SECS"],"fn":["run","run_cycle","run_health_if_due","run_once"]};

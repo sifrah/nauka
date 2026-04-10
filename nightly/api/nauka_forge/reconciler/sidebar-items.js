@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["run_all"],"mod":["natgw","pd","store","tikv_endpoints","vm","vpc"],"trait":["Reconciler"]};
+window.SIDEBAR_ITEMS = {"fn":["run_all"],"mod":["health","natgw","pd","store","tikv_endpoints","vm","vpc"],"trait":["Reconciler"]};
