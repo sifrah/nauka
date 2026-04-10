@@ -1025,6 +1025,126 @@ fn installed_component_version(component: &str) -> Option<String> {
     None
 }
 
+/// Find the store ID for this node's TiKV store in PD.
+/// Returns `None` if the store is not found or already tombstoned.
+pub fn find_store_id(mesh_ipv6: &std::net::Ipv6Addr) -> Option<u64> {
+    let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    find_store_id_via_pd(&our_addr, &pd_url)
+}
+
+/// Find the store ID for a given address via a PD endpoint.
+/// Only returns stores in Up or Disconnected state (not Tombstone).
+pub fn find_store_id_via_pd(our_addr: &str, pd_url: &str) -> Option<u64> {
+    // Query stores in all states: 0=Up, 1=Disconnected, 2=Offline
+    let stores_url = format!("{pd_url}/pd/api/v1/stores?state=0&state=1&state=2");
+    let output = Command::new("curl")
+        .args(["-sf", "--max-time", "5", &stores_url])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    body["stores"].as_array().and_then(|stores| {
+        stores.iter().find_map(|s| {
+            let addr = s["store"]["address"].as_str().unwrap_or("");
+            let id = s["store"]["id"].as_u64().unwrap_or(0);
+            if addr == our_addr && id > 0 {
+                Some(id)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// Wait for all regions to drain off a specific store.
+/// Polls PD every 5s with progress logging. Returns Ok(()) when the store
+/// has 0 regions or is no longer visible (already tombstoned).
+pub fn wait_store_regions_drained(
+    pd_url: &str,
+    store_id: u64,
+    timeout_secs: u64,
+) -> Result<(), NaukaError> {
+    let url = format!("{pd_url}/pd/api/v1/regions/store/{store_id}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last_count: Option<usize> = None;
+
+    while std::time::Instant::now() < deadline {
+        let region_count = match Command::new("curl")
+            .args(["-sf", "--max-time", "5", &url])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    Ok(body) => body["regions"].as_array().map(|r| r.len()).unwrap_or(0),
+                    Err(_) => 0,
+                }
+            }
+            // Store not found (404) means already gone — success
+            _ => 0,
+        };
+
+        if region_count == 0 {
+            tracing::info!(store_id, "all regions drained from store");
+            return Ok(());
+        }
+
+        // Log progress when count changes
+        if last_count != Some(region_count) {
+            tracing::info!(
+                store_id,
+                region_count,
+                "draining regions: {} remaining...",
+                region_count
+            );
+            last_count = Some(region_count);
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    tracing::warn!(
+        store_id,
+        "timed out waiting for region drain, proceeding anyway"
+    );
+    Ok(())
+}
+
+/// Check if a PD member with our IP exists in the cluster.
+pub fn pd_member_exists(mesh_ipv6: &std::net::Ipv6Addr, pd_url: &str) -> bool {
+    let members_url = format!("{pd_url}/pd/api/v1/members");
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &members_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let our_ip = mesh_ipv6.to_string();
+    body["members"]
+        .as_array()
+        .map(|members| {
+            members.iter().any(|m| {
+                m["peer_urls"]
+                    .as_array()
+                    .map(|urls| {
+                        urls.iter()
+                            .any(|u| u.as_str().unwrap_or("").contains(&our_ip))
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Uninstall everything — stop services, remove configs, data.
 pub fn uninstall() -> Result<(), NaukaError> {
     let _ = run_systemctl(&["disable", "--now", TIKV_SERVICE]);

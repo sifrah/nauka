@@ -307,30 +307,61 @@ pub fn restart() -> Result<(), NaukaError> {
 }
 
 /// Uninstall the control plane. Deregisters TiKV store, adjusts replicas,
-/// waits for region migration, then removes PD member.
+/// waits for region drain, then removes PD member.
+///
+/// **Idempotent**: each step checks whether it has already been completed
+/// (e.g., store already tombstoned, PD member already removed) and skips
+/// accordingly. Safe to call again after a crash mid-leave.
 pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
     let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
 
-    // 1. Deregister TiKV store (marks it as Tombstone in PD)
-    let _ = service::deregister_store(mesh_ipv6);
+    // 1. Find our store ID (if still registered). If already gone, skip drain.
+    let store_id = service::find_store_id_via_pd(&our_addr, &pd_url);
 
-    // 2. Count remaining active stores (excluding the one we just deregistered)
-    //    and adjust max-replicas so Raft can still form quorums
-    let active = service::count_active_stores(&pd_url);
-    let remaining = if active > 0 { active - 1 } else { 0 };
-    if remaining > 0 {
-        let target = remaining.min(MAX_PD_MEMBERS);
-        let _ = service::adjust_max_replicas(&pd_url, target);
-        // 3. Wait for PD to migrate region peers off the dead store
-        let _ = service::wait_regions_healthy(&pd_url, 30);
+    if let Some(sid) = store_id {
+        // 2. Deregister TiKV store (marks it as Offline → PD starts draining)
+        tracing::info!(store_id = sid, "deregistering TiKV store");
+        let _ = service::deregister_store(mesh_ipv6);
+
+        // 3. Adjust max-replicas so Raft can still form quorums after we leave
+        let active = service::count_active_stores(&pd_url);
+        let remaining = if active > 0 { active - 1 } else { 0 };
+        if remaining > 0 {
+            let target = remaining.min(MAX_PD_MEMBERS);
+            let _ = service::adjust_max_replicas(&pd_url, target);
+        }
+
+        // 4. Wait for regions to drain off this store (5 min, poll every 5s)
+        let _ = service::wait_store_regions_drained(&pd_url, sid, 300);
+    } else {
+        tracing::info!("store already deregistered or not found, skipping drain");
     }
 
-    // 4. Deregister PD member — try local first, then remote peers
+    // 5. Deregister PD member — idempotent: skip if already removed
+    deregister_pd_member_idempotent(mesh_ipv6, &pd_url);
+
+    service::uninstall()
+}
+
+/// Deregister PD member with idempotent handling.
+/// Tries local PD first, then falls back to remote peers.
+/// If the member is already gone, treats as success.
+fn deregister_pd_member_idempotent(mesh_ipv6: &Ipv6Addr, pd_url: &str) {
+    // Check if our PD member even exists before trying to remove it
+    if !service::pd_member_exists(mesh_ipv6, pd_url) {
+        // Try remote PDs — maybe local PD is already down
+        let found_remotely = try_remote_pd_member_check(mesh_ipv6);
+        if !found_remotely {
+            tracing::info!("PD member already removed, skipping deregistration");
+            return;
+        }
+    }
+
     let local_ok = service::deregister_pd_member(mesh_ipv6).is_ok() && service::pd_is_active();
 
     if !local_ok {
         // Local PD is down — try to deregister via a remote PD.
-        // Load peer list from fabric state to find other PD endpoints.
         if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
             if let Some(state) = crate::fabric::state::FabricState::load(&db).ok().flatten() {
                 for peer in &state.peers.peers {
@@ -342,8 +373,21 @@ pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
             }
         }
     }
+}
 
-    service::uninstall()
+/// Check if our PD member exists via any remote peer's PD.
+fn try_remote_pd_member_check(mesh_ipv6: &Ipv6Addr) -> bool {
+    if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
+        if let Some(state) = crate::fabric::state::FabricState::load(&db).ok().flatten() {
+            for peer in &state.peers.peers {
+                let remote_url = format!("http://[{}]:{}", peer.mesh_ipv6, super::PD_CLIENT_PORT);
+                if service::pd_member_exists(mesh_ipv6, &remote_url) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Uninstall without deregistration (fallback).
