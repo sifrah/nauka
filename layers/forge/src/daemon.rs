@@ -40,6 +40,18 @@ pub async fn run_once() -> anyhow::Result<String> {
 
 /// Execute one reconciliation cycle.
 async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResult>> {
+    // Pre-flight: recover TiKV if it crashed after a data wipe.
+    // This must run before connect() since TiKV being down would fail the connection.
+    {
+        let local_db = LocalDb::open("hypervisor")?;
+        if let Ok(Some(state)) = fabric::state::FabricState::load(&local_db) {
+            if controlplane::service::recover_stale_store(&state.hypervisor.mesh_ipv6) {
+                // Give TiKV time to start and register with PD
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        }
+    }
+
     // Connect to TiKV
     let db = controlplane::connect().await?;
 

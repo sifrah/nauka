@@ -416,6 +416,152 @@ pub fn deregister_store(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError
     Ok(())
 }
 
+/// Recover from a TiKV data wipe: if TiKV is not running and PD has a stale
+/// store registered at our address, remove it via unsafe recovery API so TiKV
+/// can re-register.
+///
+/// Returns `true` if recovery was performed (TiKV was restarted).
+pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
+    // Only act when TiKV is installed but not running
+    if !Path::new(TIKV_UNIT_PATH).exists() || tikv_is_active() {
+        return false;
+    }
+
+    // PD must be reachable
+    if !pd_is_active() {
+        return false;
+    }
+
+    let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+
+    // Find stale stores at our address (any state)
+    let stores_url = format!("{pd_url}/pd/api/v1/stores?state=0&state=1&state=2");
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &stores_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let stale_ids: Vec<u64> = body["stores"]
+        .as_array()
+        .map(|stores| {
+            stores
+                .iter()
+                .filter(|s| s["store"]["address"].as_str() == Some(our_addr.as_str()))
+                .filter_map(|s| s["store"]["id"].as_u64())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if stale_ids.is_empty() {
+        return false;
+    }
+
+    // Stop TiKV to prevent crash-loop during cleanup
+    let _ = run_systemctl(&["stop", TIKV_SERVICE]);
+
+    tracing::warn!(
+        stores = ?stale_ids,
+        addr = our_addr.as_str(),
+        "removing stale TiKV stores via unsafe recovery"
+    );
+
+    // Step 1: Force-delete each store to move it from Up → Offline.
+    // PD's unsafe API requires stores to be in a non-Up state.
+    for store_id in &stale_ids {
+        let delete_url = format!("{pd_url}/pd/api/v1/store/{store_id}?force=true");
+        let _ = Command::new("curl")
+            .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
+            .output();
+    }
+
+    // Brief pause for PD to process the state transitions
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Step 2: Use PD's unsafe/remove-failed-stores API — this forcefully
+    // evicts dead stores and reassigns their region peers to alive stores.
+    let stores_json = stale_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let unsafe_url = format!("{pd_url}/pd/api/v1/admin/unsafe/remove-failed-stores");
+    let body = format!("{{\"stores\": [{stores_json}]}}");
+    let _ = Command::new("curl")
+        .args([
+            "-sf",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            "--max-time",
+            "10",
+            &unsafe_url,
+        ])
+        .output();
+
+    // Wait for the unsafe recovery to complete (typically 10-30s)
+    let mut cleared = false;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        // Check if all stale stores are now Tombstone or gone
+        let output = match Command::new("curl")
+            .args(["-sf", "--max-time", "5", &stores_url])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => continue,
+        };
+        let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let still_blocking: Vec<u64> = body["stores"]
+            .as_array()
+            .map(|stores| {
+                stores
+                    .iter()
+                    .filter(|s| s["store"]["address"].as_str() == Some(our_addr.as_str()))
+                    .filter(|s| {
+                        let state = s["store"]["state_name"].as_str().unwrap_or("");
+                        state != "Tombstone"
+                    })
+                    .filter_map(|s| s["store"]["id"].as_u64())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if still_blocking.is_empty() {
+            // Purge tombstones to fully free the address
+            let tombstone_url = format!("{pd_url}/pd/api/v1/stores/remove-tombstone");
+            let _ = Command::new("curl")
+                .args(["-sf", "-X", "DELETE", "--max-time", "5", &tombstone_url])
+                .output();
+            cleared = true;
+            break;
+        }
+    }
+
+    if cleared {
+        tracing::info!("restarting TiKV after stale store removal");
+    } else {
+        tracing::warn!("stale stores not fully cleared, restarting TiKV anyway");
+    }
+    let _ = run_systemctl(&["restart", TIKV_SERVICE]);
+    true
+}
+
 /// Deregister this node's PD member from the cluster before leaving.
 /// Finds our member ID via the PD API, then removes it.
 pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError> {
