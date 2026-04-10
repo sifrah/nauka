@@ -14,6 +14,7 @@ use crate::storage::region::RegionStorage;
 const PD_DATA_DIR: &str = "/var/lib/nauka/pd";
 const TIKV_DATA_DIR: &str = "/var/lib/nauka/tikv";
 const BACKUP_TMP_DIR: &str = "/tmp/nauka-backup";
+const TIKV_MASTER_KEY_PATH: &str = "/etc/nauka/tikv-master-key";
 
 /// Info about a backup stored in S3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +87,83 @@ fn create_archive(data_dir: &str, archive_path: &str) -> Result<(), NaukaError> 
     } else if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NaukaError::internal(format!("tar failed: {stderr}")));
+    }
+
+    Ok(())
+}
+
+/// Encrypt a tar.gz archive with AES-256-CBC using the TiKV master key.
+///
+/// Produces `{archive_path}.enc` and removes the unencrypted original.
+fn encrypt_archive(archive_path: &str) -> Result<String, NaukaError> {
+    if !std::path::Path::new(TIKV_MASTER_KEY_PATH).exists() {
+        return Err(NaukaError::internal(format!(
+            "master key not found at {TIKV_MASTER_KEY_PATH} — cannot encrypt backup"
+        )));
+    }
+
+    let enc_path = format!("{archive_path}.enc");
+
+    let output = Command::new("openssl")
+        .args([
+            "enc",
+            "-aes-256-cbc",
+            "-salt",
+            "-pbkdf2",
+            "-in",
+            archive_path,
+            "-out",
+            &enc_path,
+            "-pass",
+            &format!("file:{TIKV_MASTER_KEY_PATH}"),
+        ])
+        .output()
+        .map_err(|e| NaukaError::internal(format!("openssl encrypt failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "openssl encrypt failed: {stderr}"
+        )));
+    }
+
+    // Remove unencrypted archive
+    let _ = std::fs::remove_file(archive_path);
+
+    Ok(enc_path)
+}
+
+/// Decrypt an AES-256-CBC encrypted archive using the TiKV master key.
+///
+/// Produces the decrypted file at `output_path`.
+fn decrypt_archive(enc_path: &str, output_path: &str) -> Result<(), NaukaError> {
+    if !std::path::Path::new(TIKV_MASTER_KEY_PATH).exists() {
+        return Err(NaukaError::internal(format!(
+            "master key not found at {TIKV_MASTER_KEY_PATH} — cannot decrypt backup"
+        )));
+    }
+
+    let output = Command::new("openssl")
+        .args([
+            "enc",
+            "-d",
+            "-aes-256-cbc",
+            "-pbkdf2",
+            "-in",
+            enc_path,
+            "-out",
+            output_path,
+            "-pass",
+            &format!("file:{TIKV_MASTER_KEY_PATH}"),
+        ])
+        .output()
+        .map_err(|e| NaukaError::internal(format!("openssl decrypt failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "openssl decrypt failed: {stderr}"
+        )));
     }
 
     Ok(())
@@ -232,43 +310,86 @@ fn s3_delete(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
     Ok(())
 }
 
-/// Create a snapshot of the PD data directory and upload to S3.
+/// Download an object from S3 to a local file using curl with AWS Signature V4.
+fn s3_download(config: &RegionStorage, s3_key: &str, local_path: &str) -> Result<(), NaukaError> {
+    let bucket = &config.s3_bucket;
+    let endpoint = config.s3_endpoint.trim_end_matches('/');
+
+    let region = if config.s3_region.is_empty() {
+        "us-east-1"
+    } else {
+        &config.s3_region
+    };
+
+    let url = format!("{endpoint}/{bucket}/{s3_key}");
+
+    let output = Command::new("curl")
+        .args([
+            "-sf",
+            "--max-time",
+            "600",
+            "-o",
+            local_path,
+            "--aws-sigv4",
+            &format!("aws:amz:{region}:s3"),
+            "-u",
+            &format!("{}:{}", config.s3_access_key, config.s3_secret_key),
+            &url,
+        ])
+        .output()
+        .map_err(|e| NaukaError::internal(format!("S3 download failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "S3 download failed ({}): {}",
+            url,
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Create a snapshot of the PD data directory, encrypt, and upload to S3.
 ///
 /// Returns the S3 key of the uploaded backup.
 pub fn backup_pd(config: &RegionStorage) -> Result<String, NaukaError> {
     let ts = timestamp_label();
     let archive_name = format!("pd-snapshot-{ts}.tar.gz");
     let archive_path = format!("{BACKUP_TMP_DIR}/{archive_name}");
-    let s3_key = format!("backups/pd/{archive_name}");
+    let s3_key = format!("backups/pd/{archive_name}.enc");
 
     tracing::info!("creating PD backup: {s3_key}");
 
     create_archive(PD_DATA_DIR, &archive_path)?;
-    s3_upload(config, &archive_path, &s3_key)?;
+    let enc_path = encrypt_archive(&archive_path)?;
+    s3_upload(config, &enc_path, &s3_key)?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&archive_path);
+    // Clean up encrypted temp file
+    let _ = std::fs::remove_file(&enc_path);
 
     tracing::info!("PD backup uploaded: {s3_key}");
     Ok(s3_key)
 }
 
-/// Create a snapshot of the TiKV data directory and upload to S3.
+/// Create a snapshot of the TiKV data directory, encrypt, and upload to S3.
 ///
 /// Returns the S3 key of the uploaded backup.
 pub fn backup_tikv(config: &RegionStorage) -> Result<String, NaukaError> {
     let ts = timestamp_label();
     let archive_name = format!("tikv-snapshot-{ts}.tar.gz");
     let archive_path = format!("{BACKUP_TMP_DIR}/{archive_name}");
-    let s3_key = format!("backups/tikv/{archive_name}");
+    let s3_key = format!("backups/tikv/{archive_name}.enc");
 
     tracing::info!("creating TiKV backup: {s3_key}");
 
     create_archive(TIKV_DATA_DIR, &archive_path)?;
-    s3_upload(config, &archive_path, &s3_key)?;
+    let enc_path = encrypt_archive(&archive_path)?;
+    s3_upload(config, &enc_path, &s3_key)?;
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&archive_path);
+    // Clean up encrypted temp file
+    let _ = std::fs::remove_file(&enc_path);
 
     tracing::info!("TiKV backup uploaded: {s3_key}");
     Ok(s3_key)
@@ -277,9 +398,15 @@ pub fn backup_tikv(config: &RegionStorage) -> Result<String, NaukaError> {
 /// List available backups from S3.
 ///
 /// Parses the S3 ListObjectsV2 XML response to extract backup info.
+/// Handles both legacy `.tar.gz` and encrypted `.tar.gz.enc` keys.
 pub fn list_backups(config: &RegionStorage) -> Result<Vec<BackupInfo>, NaukaError> {
     let xml = s3_list(config, "backups/")?;
     parse_s3_list_xml(&xml)
+}
+
+/// Returns `true` if the backup key is an encrypted archive.
+pub fn is_encrypted_backup(key: &str) -> bool {
+    key.ends_with(".tar.gz.enc")
 }
 
 /// Parse S3 ListObjectsV2 XML response into BackupInfo entries.
@@ -348,6 +475,58 @@ pub fn cleanup_old_backups(config: &RegionStorage, retention_days: u32) -> Resul
     Ok(deleted)
 }
 
+/// Download and decrypt a backup from S3, then extract it to the target directory.
+///
+/// `s3_key` should be the full key (e.g. `backups/pd/pd-snapshot-...tar.gz.enc`).
+/// `target_dir` is where the tar.gz contents will be extracted.
+pub fn restore_backup(
+    config: &RegionStorage,
+    s3_key: &str,
+    target_dir: &str,
+) -> Result<(), NaukaError> {
+    std::fs::create_dir_all(BACKUP_TMP_DIR)
+        .map_err(|e| NaukaError::internal(format!("failed to create tmp dir: {e}")))?;
+
+    let is_encrypted = s3_key.ends_with(".enc");
+
+    // Determine local file names
+    let local_enc = format!("{BACKUP_TMP_DIR}/restore-download.tar.gz.enc");
+    let local_tar = format!("{BACKUP_TMP_DIR}/restore-download.tar.gz");
+
+    let download_path = if is_encrypted { &local_enc } else { &local_tar };
+
+    tracing::info!("downloading backup: {s3_key}");
+    s3_download(config, s3_key, download_path)?;
+
+    if is_encrypted {
+        tracing::info!("decrypting backup");
+        decrypt_archive(&local_enc, &local_tar)?;
+        let _ = std::fs::remove_file(&local_enc);
+    }
+
+    // Extract
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| NaukaError::internal(format!("failed to create target dir: {e}")))?;
+
+    let output = Command::new("tar")
+        .args(["xzf", &local_tar, "-C", target_dir])
+        .output()
+        .map_err(|e| NaukaError::internal(format!("tar extract failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "tar extract failed: {stderr}"
+        )));
+    }
+
+    // Clean up
+    let _ = std::fs::remove_file(&local_tar);
+
+    tracing::info!("backup restored to {target_dir}");
+    Ok(())
+}
+
 /// Parse an ISO-8601 timestamp string into Unix seconds.
 /// Handles format: 2026-04-10T19:00:00.000Z or 2026-04-10T19:00:00Z
 fn parse_backup_timestamp(ts: &str) -> Option<u64> {
@@ -387,12 +566,12 @@ mod tests {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
   <Contents>
-    <Key>backups/pd/pd-snapshot-2026-04-10T190000Z.tar.gz</Key>
+    <Key>backups/pd/pd-snapshot-2026-04-10T190000Z.tar.gz.enc</Key>
     <Size>1048576</Size>
     <LastModified>2026-04-10T19:00:00.000Z</LastModified>
   </Contents>
   <Contents>
-    <Key>backups/tikv/tikv-snapshot-2026-04-10T190000Z.tar.gz</Key>
+    <Key>backups/tikv/tikv-snapshot-2026-04-10T190000Z.tar.gz.enc</Key>
     <Size>52428800</Size>
     <LastModified>2026-04-10T19:00:00.000Z</LastModified>
   </Contents>
@@ -402,6 +581,29 @@ mod tests {
         assert_eq!(backups.len(), 2);
         assert!(backups[0].key.contains("tikv")); // sorted descending
         assert_eq!(backups[1].size, 1048576);
+    }
+
+    #[test]
+    fn parse_xml_list_mixed_extensions() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents>
+    <Key>backups/pd/pd-snapshot-2026-04-09T120000Z.tar.gz</Key>
+    <Size>500000</Size>
+    <LastModified>2026-04-09T12:00:00.000Z</LastModified>
+  </Contents>
+  <Contents>
+    <Key>backups/pd/pd-snapshot-2026-04-10T190000Z.tar.gz.enc</Key>
+    <Size>1048576</Size>
+    <LastModified>2026-04-10T19:00:00.000Z</LastModified>
+  </Contents>
+</ListBucketResult>"#;
+
+        let backups = parse_s3_list_xml(xml).unwrap();
+        assert_eq!(backups.len(), 2);
+        // Encrypted one sorts after legacy (descending)
+        assert!(is_encrypted_backup(&backups[0].key));
+        assert!(!is_encrypted_backup(&backups[1].key));
     }
 
     #[test]
