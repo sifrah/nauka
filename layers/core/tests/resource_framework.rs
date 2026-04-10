@@ -549,11 +549,14 @@ fn builder_crud_adds_all_four() {
         .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("none")
         .sort_by("name")
-        .detail_section(None, vec![
-            DetailField::new("Name", "name"),
-            DetailField::new("ID", "id"),
-            DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
-        ])
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
         .done();
 
     let op_names: Vec<&str> = def.operations.iter().map(|o| o.name).collect();
@@ -575,11 +578,14 @@ fn builder_generated_command_has_all_subcommands() {
         .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("none")
         .sort_by("name")
-        .detail_section(None, vec![
-            DetailField::new("Name", "name"),
-            DetailField::new("ID", "id"),
-            DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
-        ])
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
         .done();
 
     let cmd = generate_command(&def);

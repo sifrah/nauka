@@ -48,5 +48,7 @@ pub fn invalid_state_transition(kind: &str, from: &str, to: &str) -> anyhow::Err
 /// Resource is in wrong state for the requested operation.
 /// Produces: `vm 'web-1' must be Stopped before delete (current state: Running)`
 pub fn wrong_state(kind: &str, name: &str, required: &str, actual: &str) -> anyhow::Error {
-    anyhow::anyhow!("{kind} '{name}' must be {required} before this operation (current state: {actual})")
+    anyhow::anyhow!(
+        "{kind} '{name}' must be {required} before this operation (current state: {actual})"
+    )
 }

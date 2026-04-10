@@ -14,7 +14,7 @@ pub fn resource_def() -> ResourceDef {
         .create()
         .op(|op| {
             op.with_progress(ProgressHint::Spinner("Creating project..."))
-              .with_example("nauka org project create backend --org acme")
+                .with_example("nauka org project create backend --org acme")
         })
         .list()
         .get()

@@ -21,12 +21,15 @@ fn test_resource() -> ResourceRegistration {
         .column("ID", "id")
         .empty_message("No widgets found.")
         .sort_by("name")
-        .detail_section(None, vec![
-            DetailField::new("Name", "name"),
-            DetailField::new("ID", "id"),
-            DetailField::new("State", "state"),
-            DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
-        ])
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("State", "state"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
         .done();
 
     let handler: HandlerFn = Box::new(|req| {

@@ -237,8 +237,7 @@ mod tests {
         }
 
         // 3. Run cross-resource lints
-        let def_refs: Vec<&nauka_core::resource::ResourceDef> =
-            all_defs.iter().copied().collect();
+        let def_refs: Vec<&nauka_core::resource::ResourceDef> = all_defs.iter().copied().collect();
         violations.extend(lint::lint_registry(&def_refs));
 
         // 4. All violations fail the test (warnings are errors in CI)

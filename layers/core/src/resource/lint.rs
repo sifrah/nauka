@@ -37,7 +37,11 @@ impl std::fmt::Display for Violation {
             Severity::Error => "ERROR",
             Severity::Warning => "WARN",
         };
-        write!(f, "[{}] {} ({}): {}", self.rule, self.resource, level, self.message)
+        write!(
+            f,
+            "[{}] {} ({}): {}",
+            self.rule, self.resource, level, self.message
+        )
     }
 }
 
@@ -111,7 +115,11 @@ fn has_detail_field(def: &ResourceDef, field: &str) -> bool {
     def.presentation
         .detail
         .as_ref()
-        .map(|d| d.sections.iter().any(|s| s.fields.iter().any(|f| f.field == field)))
+        .map(|d| {
+            d.sections
+                .iter()
+                .any(|s| s.fields.iter().any(|f| f.field == field))
+        })
         .unwrap_or(false)
 }
 
@@ -291,9 +299,7 @@ fn ux_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
     }
 
     // W002: CRUD resource should have created_at column with Timestamp
-    if is_crud(def)
-        && !has_column_with_format(def, "created_at", &DisplayFormat::Timestamp)
-    {
+    if is_crud(def) && !has_column_with_format(def, "created_at", &DisplayFormat::Timestamp) {
         v.push(Violation {
             rule: "W002",
             resource: kind,
@@ -348,7 +354,8 @@ fn ux_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
     for parent in &def.scope.parents {
         let parent_field = format!("{}_name", parent.kind);
         let has_in_table = has_column(def, &parent_field) || has_column(def, parent.kind);
-        let has_in_detail = has_detail_field(def, &parent_field) || has_detail_field(def, parent.kind);
+        let has_in_detail =
+            has_detail_field(def, &parent_field) || has_detail_field(def, parent.kind);
         if !has_in_table && !has_in_detail {
             v.push(Violation {
                 rule: "W006",
@@ -407,9 +414,7 @@ fn output_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
         }
 
         // W022: create output should be Resource
-        if op.semantics == OperationSemantics::Create
-            && op.output.kind != OutputKind::Resource
-        {
+        if op.semantics == OperationSemantics::Create && op.output.kind != OutputKind::Resource {
             v.push(Violation {
                 rule: "W022",
                 resource: kind,
@@ -422,9 +427,7 @@ fn output_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
         }
 
         // W023: delete output should be Message
-        if op.semantics == OperationSemantics::Delete
-            && op.output.kind != OutputKind::Message
-        {
+        if op.semantics == OperationSemantics::Delete && op.output.kind != OutputKind::Message {
             v.push(Violation {
                 rule: "W023",
                 resource: kind,
@@ -444,10 +447,7 @@ fn output_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
                 v.push(Violation {
                     rule: "W024",
                     resource: kind,
-                    message: format!(
-                        "first column is '{}', expected 'NAME'",
-                        first.header
-                    ),
+                    message: format!("first column is '{}', expected 'NAME'", first.header),
                     severity: Severity::Warning,
                 });
             }
@@ -463,10 +463,7 @@ fn output_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
                 v.push(Violation {
                     rule: "W025",
                     resource: kind,
-                    message: format!(
-                        "column '{}' should use DisplayFormat::Status",
-                        col.header
-                    ),
+                    message: format!("column '{}' should use DisplayFormat::Status", col.header),
                     severity: Severity::Warning,
                 });
             }
@@ -546,10 +543,7 @@ fn description_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violatio
             v.push(Violation {
                 rule: "W040",
                 resource: kind,
-                message: format!(
-                    "description '{}' should start with uppercase",
-                    desc
-                ),
+                message: format!("description '{}' should start with uppercase", desc),
                 severity: Severity::Warning,
             });
         }
@@ -560,10 +554,7 @@ fn description_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violatio
         v.push(Violation {
             rule: "W041",
             resource: kind,
-            message: format!(
-                "description '{}' should not end with period",
-                desc
-            ),
+            message: format!("description '{}' should not end with period", desc),
             severity: Severity::Warning,
         });
     }
@@ -593,8 +584,7 @@ fn presentation_alignment_rules(def: &ResourceDef, kind: &'static str, v: &mut V
     if let Some(detail) = &def.presentation.detail {
         for section in &detail.sections {
             for field in &section.fields {
-                if field.field.ends_with("_at")
-                    && !matches!(field.format, DisplayFormat::Timestamp)
+                if field.field.ends_with("_at") && !matches!(field.format, DisplayFormat::Timestamp)
                 {
                     v.push(Violation {
                         rule: "W051",
@@ -677,16 +667,16 @@ fn progress_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>)
 
         // W072: state-mutating actions should have progress
         if matches!(op.semantics, OperationSemantics::Action)
-            && matches!(op.name, "start" | "stop" | "update" | "init" | "join" | "leave")
+            && matches!(
+                op.name,
+                "start" | "stop" | "update" | "init" | "join" | "leave"
+            )
             && matches!(op.progress, ProgressHint::None)
         {
             v.push(Violation {
                 rule: "W072",
                 resource: kind,
-                message: format!(
-                    "action '{}' mutates state but has no ProgressHint",
-                    op.name
-                ),
+                message: format!("action '{}' mutates state but has no ProgressHint", op.name),
                 severity: Severity::Warning,
             });
         }
@@ -700,10 +690,7 @@ fn progress_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>)
             v.push(Violation {
                 rule: "W073",
                 resource: kind,
-                message: format!(
-                    "operation '{}' is a read but has ProgressHint set",
-                    op.name
-                ),
+                message: format!("operation '{}' is a read but has ProgressHint set", op.name),
                 severity: Severity::Warning,
             });
         }
@@ -749,18 +736,14 @@ fn registry_rules(defs: &[&ResourceDef], v: &mut Vec<Violation>) {
     }
 
     // E011: every parent kind must exist in registry
-    let all_kinds: std::collections::HashSet<&str> =
-        defs.iter().map(|d| d.identity.kind).collect();
+    let all_kinds: std::collections::HashSet<&str> = defs.iter().map(|d| d.identity.kind).collect();
     for def in defs {
         for parent in &def.scope.parents {
             if !all_kinds.contains(parent.kind) {
                 v.push(Violation {
                     rule: "E011",
                     resource: def.identity.kind,
-                    message: format!(
-                        "parent kind '{}' not found in registry",
-                        parent.kind
-                    ),
+                    message: format!("parent kind '{}' not found in registry", parent.kind),
                     severity: Severity::Error,
                 });
             }
@@ -818,7 +801,11 @@ mod tests {
             .iter()
             .filter(|v| v.severity == Severity::Error)
             .collect();
-        assert!(errors.is_empty(), "unexpected errors: {}", format_violations(&violations));
+        assert!(
+            errors.is_empty(),
+            "unexpected errors: {}",
+            format_violations(&violations)
+        );
     }
 
     #[test]
