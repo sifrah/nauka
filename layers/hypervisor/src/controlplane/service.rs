@@ -562,6 +562,222 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
     true
 }
 
+/// Phase 1 of PD recovery (runs on the SURVIVING node): if our local PD is
+/// healthy but has an unhealthy peer, force the cluster to single-member mode
+/// to restore quorum, then remove the dead member.
+///
+/// Returns `true` if recovery was performed.
+pub fn recover_pd_quorum(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
+    if !pd_is_active() {
+        return false;
+    }
+
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let health_url = format!("{pd_url}/pd/api/v1/health");
+
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &health_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let health: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    // Check if any member is unhealthy
+    let unhealthy: Vec<String> = health
+        .as_array()
+        .map(|members| {
+            members
+                .iter()
+                .filter(|m| m["health"].as_bool() != Some(true))
+                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if unhealthy.is_empty() {
+        return false;
+    }
+
+    // Check if the PD members API works (needs quorum)
+    let members_url = format!("{pd_url}/pd/api/v1/members");
+    let members_ok = Command::new("curl")
+        .args(["-sf", "--max-time", "5", &members_url])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if members_ok {
+        // Quorum is fine — just remove unhealthy members normally
+        for name in &unhealthy {
+            tracing::warn!(member = name.as_str(), "removing unhealthy PD member");
+            let delete_url = format!("{pd_url}/pd/api/v1/members/name/{name}");
+            let _ = Command::new("curl")
+                .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
+                .output();
+        }
+        return true;
+    }
+
+    // Quorum is lost — force single-member cluster to restore it.
+    tracing::warn!(
+        unhealthy = ?unhealthy,
+        "PD quorum lost — forcing single-member recovery"
+    );
+
+    let _ = run_systemctl(&["stop", PD_SERVICE]);
+
+    // Run pd-server --force-new-cluster briefly to rewrite etcd state
+    const PD_BINARY: &str = "/opt/nauka/tiup/components/pd/v8.5.5/pd-server";
+    let child = Command::new(PD_BINARY)
+        .args(["--config", PD_CONF_PATH, "--force-new-cluster"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match child {
+        Ok(mut child) => {
+            // Wait for PD to start and rewrite cluster state
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to run pd-server --force-new-cluster");
+            let _ = run_systemctl(&["start", PD_SERVICE]);
+            return false;
+        }
+    }
+
+    // Restart PD normally (now single-member, quorum restored)
+    tracing::info!("restarting PD after force-new-cluster recovery");
+    let _ = run_systemctl(&["start", PD_SERVICE]);
+
+    true
+}
+
+/// Phase 2 of PD recovery (runs on the WIPED node): if local PD is not
+/// running, find a healthy remote PD, remove our stale member, and rejoin.
+///
+/// `peer_ipv6s` are mesh IPv6 addresses of other nodes that may run PD.
+/// Returns `true` if recovery was performed (PD was restarted).
+pub fn recover_stale_pd_member(
+    mesh_ipv6: &std::net::Ipv6Addr,
+    node_name: &str,
+    peer_ipv6s: &[std::net::Ipv6Addr],
+) -> bool {
+    // Only act when PD is installed but not running
+    if !Path::new(PD_UNIT_PATH).exists() || pd_is_active() {
+        return false;
+    }
+
+    // Find a reachable remote PD that can serve the members API (has quorum)
+    let remote_pd_url = peer_ipv6s.iter().find_map(|ip| {
+        let url = format!("http://[{}]:{}", ip, super::PD_CLIENT_PORT);
+        let members_url = format!("{url}/pd/api/v1/members");
+        let ok = Command::new("curl")
+            .args(["-sf", "--max-time", "5", &members_url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            Some(url)
+        } else {
+            None
+        }
+    });
+
+    let remote_pd_url = match remote_pd_url {
+        Some(url) => url,
+        None => return false, // No PD with quorum reachable (phase 1 needed first)
+    };
+
+    // Remove our stale member from the cluster
+    let members_url = format!("{remote_pd_url}/pd/api/v1/members");
+    let output = match Command::new("curl")
+        .args(["-sf", "--max-time", "5", &members_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let our_ip = mesh_ipv6.to_string();
+    let mut found_stale = false;
+    if let Some(members) = body["members"].as_array() {
+        for member in members {
+            let peer_urls = member["peer_urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let member_name = member["name"].as_str().unwrap_or("");
+            let member_id = member["member_id"].as_u64().unwrap_or(0);
+
+            if (peer_urls.contains(&our_ip) || member_name == node_name) && member_id > 0 {
+                tracing::warn!(
+                    member_id,
+                    member_name,
+                    "removing stale PD member for recovery"
+                );
+                let delete_url = format!("{remote_pd_url}/pd/api/v1/members/name/{member_name}");
+                let _ = Command::new("curl")
+                    .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
+                    .output();
+                found_stale = true;
+            }
+        }
+    }
+
+    if !found_stale {
+        // No stale member — we can still try to join
+        tracing::info!("no stale PD member found, attempting join");
+    }
+
+    // Wipe PD data directory (stale etcd state prevents rejoin)
+    let _ = std::fs::remove_dir_all(PD_DATA_DIR);
+    let _ = std::fs::create_dir_all(PD_DATA_DIR);
+
+    // Rewrite systemd unit in --join mode so PD rejoins the cluster
+    std::fs::write(PD_UNIT_PATH, generate_pd_unit(Some(&remote_pd_url))).ok();
+
+    // Rewrite pd.toml in join mode (no initial-cluster)
+    if let Ok(conf) = std::fs::read_to_string(PD_CONF_PATH) {
+        let new_conf = conf
+            .lines()
+            .filter(|l| {
+                !l.starts_with("initial-cluster") && !l.starts_with("initial-cluster-state")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(PD_CONF_PATH, new_conf);
+    }
+
+    let _ = run_systemctl(&["daemon-reload"]);
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    tracing::info!("restarting PD in join mode after stale member removal");
+    let _ = run_systemctl(&["restart", PD_SERVICE]);
+
+    true
+}
+
 /// Deregister this node's PD member from the cluster before leaving.
 /// Finds our member ID via the PD API, then removes it.
 pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError> {
