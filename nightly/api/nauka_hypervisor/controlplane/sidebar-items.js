@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["PD_CLIENT_PORT","PD_PEER_PORT","TIKV_PORT"],"fn":["connect"],"mod":["ops","service","store"]};
+window.SIDEBAR_ITEMS = {"constant":["PD_CLIENT_PORT","PD_PEER_PORT","TIKV_PORT","TIKV_STATUS_PORT"],"fn":["connect"],"mod":["ops","service","store"]};
