@@ -152,6 +152,14 @@ impl super::Reconciler for VpcReconciler {
             }
         }
 
+        // 6b. Ensure policy routing rules exist for each VPC bridge
+        for (vpc_id, vni) in &needed_vpcs {
+            let br = provision::bridge_name(vpc_id);
+            let table = vni.to_string();
+            ensure_ip_rule("iif", &br, &table);
+            ensure_ip_rule("oif", &br, &table);
+        }
+
         // 7. Set gateway IP on bridges so containers can reach the gateway
         for (vpc_id, vni) in &needed_vpcs {
             let br = provision::bridge_name(vpc_id);
@@ -330,6 +338,33 @@ fn ensure_forward_rules(peered_pairs: &[(String, String)]) {
             .status();
         let _ = Command::new("nft")
             .args(["add", "rule", "inet", "nauka", "forward", &rule_ba])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Ensure an ip rule exists (e.g., `ip rule add iif nkb-xxx table 100`).
+/// Checks first to avoid duplicates.
+fn ensure_ip_rule(direction: &str, bridge: &str, table: &str) {
+    use std::process::Command;
+
+    // Check if rule already exists
+    let output = Command::new("ip").args(["rule", "show"]).output().ok();
+
+    let exists = output
+        .as_ref()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains(&format!("{direction} {bridge}"))
+                && stdout.contains(&format!("lookup {table}"))
+        })
+        .unwrap_or(false);
+
+    if !exists {
+        tracing::info!(direction, bridge, table, "restoring policy routing rule");
+        let _ = Command::new("ip")
+            .args(["rule", "add", direction, bridge, "table", table])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
