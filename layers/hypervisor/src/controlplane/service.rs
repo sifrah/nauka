@@ -20,7 +20,7 @@ const TIUP_HOME: &str = "/opt/nauka/tiup";
 const PD_DATA_DIR: &str = "/var/lib/nauka/pd";
 const TIKV_DATA_DIR: &str = "/var/lib/nauka/tikv";
 const PD_CONF_PATH: &str = "/etc/nauka/pd.toml";
-const TIKV_CONF_PATH: &str = "/etc/nauka/tikv.toml";
+pub const TIKV_CONF_PATH: &str = "/etc/nauka/tikv.toml";
 const PD_UNIT_PATH: &str = "/etc/systemd/system/nauka-pd.service";
 const TIKV_UNIT_PATH: &str = "/etc/systemd/system/nauka-tikv.service";
 

@@ -6,6 +6,7 @@
 pub mod natgw;
 pub mod pd;
 pub mod store;
+pub mod tikv_endpoints;
 pub mod vm;
 pub mod vpc;
 
