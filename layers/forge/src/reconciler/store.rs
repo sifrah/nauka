@@ -116,9 +116,7 @@ impl super::Reconciler for StoreReconciler {
         result.desired = stores
             .iter()
             .filter(|s| {
-                is_store_eligible_for_deregister(
-                    s["store"]["state_name"].as_str().unwrap_or(""),
-                )
+                is_store_eligible_for_deregister(s["store"]["state_name"].as_str().unwrap_or(""))
             })
             .count();
 
@@ -182,20 +180,30 @@ mod tests {
             "[fd12:3456:789a::2]:20160".to_string(),
         ];
 
-        assert!(match_store_to_peer("[fd12:3456:789a::1]:20160", &peer_addrs));
-        assert!(match_store_to_peer("[fd12:3456:789a::2]:20160", &peer_addrs));
+        assert!(match_store_to_peer(
+            "[fd12:3456:789a::1]:20160",
+            &peer_addrs
+        ));
+        assert!(match_store_to_peer(
+            "[fd12:3456:789a::2]:20160",
+            &peer_addrs
+        ));
     }
 
     #[test]
     fn store_address_no_match() {
-        let peer_addrs = vec![
-            "[fd12:3456:789a::1]:20160".to_string(),
-        ];
+        let peer_addrs = vec!["[fd12:3456:789a::1]:20160".to_string()];
 
         // Different address
-        assert!(!match_store_to_peer("[fd12:3456:789a::99]:20160", &peer_addrs));
+        assert!(!match_store_to_peer(
+            "[fd12:3456:789a::99]:20160",
+            &peer_addrs
+        ));
         // Different port
-        assert!(!match_store_to_peer("[fd12:3456:789a::1]:20161", &peer_addrs));
+        assert!(!match_store_to_peer(
+            "[fd12:3456:789a::1]:20161",
+            &peer_addrs
+        ));
         // Empty peer list
         assert!(!match_store_to_peer("[fd12:3456:789a::1]:20160", &[]));
     }

@@ -125,7 +125,8 @@ pub fn cleanup_zombie_members(mesh_ipv6: &Ipv6Addr) -> usize {
     };
     let tracker = guard.get_or_insert_with(HashMap::new);
 
-    let zombies = update_tracker_and_find_zombies(tracker, &current_unhealthy, now, ZOMBIE_THRESHOLD);
+    let zombies =
+        update_tracker_and_find_zombies(tracker, &current_unhealthy, now, ZOMBIE_THRESHOLD);
 
     // Log members still waiting
     for (&id, name) in &current_unhealthy {
@@ -196,7 +197,10 @@ mod tests {
         // Simulate 1 minute later — still below 5-min threshold
         let later = now + Duration::from_secs(60);
         let zombies = update_tracker_and_find_zombies(&mut tracker, &unhealthy, later, threshold);
-        assert!(zombies.is_empty(), "member unhealthy for 1 min should not be cleaned");
+        assert!(
+            zombies.is_empty(),
+            "member unhealthy for 1 min should not be cleaned"
+        );
     }
 
     #[test]
@@ -239,7 +243,10 @@ mod tests {
         // Member recovers — remove from unhealthy set
         let healthy: HashMap<u64, String> = HashMap::new();
         let _ = update_tracker_and_find_zombies(&mut tracker, &healthy, t1, threshold);
-        assert!(!tracker.contains_key(&7), "recovered member should be removed from tracker");
+        assert!(
+            !tracker.contains_key(&7),
+            "recovered member should be removed from tracker"
+        );
 
         // Member becomes unhealthy again at t=3min
         let t2 = now + Duration::from_secs(3 * 60 + 1);
@@ -248,7 +255,10 @@ mod tests {
         // 3 more minutes (total 6 min from start, but only 3 from re-appearance)
         let t3 = now + Duration::from_secs(6 * 60 + 1);
         let zombies = update_tracker_and_find_zombies(&mut tracker, &unhealthy, t3, threshold);
-        assert!(zombies.is_empty(), "timer should have reset; only 3 min since re-appearance");
+        assert!(
+            zombies.is_empty(),
+            "timer should have reset; only 3 min since re-appearance"
+        );
 
         // 5 more minutes from re-appearance — now exceeds threshold
         let t4 = t2 + Duration::from_secs(5 * 60);
@@ -261,12 +271,24 @@ mod tests {
         let start = Instant::now();
 
         // Exactly at threshold — should cleanup
-        assert!(should_cleanup_member(start, start + Duration::from_secs(300), Duration::from_secs(300)));
+        assert!(should_cleanup_member(
+            start,
+            start + Duration::from_secs(300),
+            Duration::from_secs(300)
+        ));
 
         // 1 second before threshold — should not
-        assert!(!should_cleanup_member(start, start + Duration::from_secs(299), Duration::from_secs(300)));
+        assert!(!should_cleanup_member(
+            start,
+            start + Duration::from_secs(299),
+            Duration::from_secs(300)
+        ));
 
         // Well past threshold — should cleanup
-        assert!(should_cleanup_member(start, start + Duration::from_secs(600), Duration::from_secs(300)));
+        assert!(should_cleanup_member(
+            start,
+            start + Duration::from_secs(600),
+            Duration::from_secs(300)
+        ));
     }
 }
