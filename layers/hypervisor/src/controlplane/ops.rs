@@ -231,44 +231,25 @@ fn rollback_pd_member(mesh_ipv6: &Ipv6Addr, remote_pd_url: &str) {
 
     // Ask the remote PD (which should still have quorum with the other
     // existing members) to remove our member.
-    let members_url = format!("{remote_pd_url}/pd/api/v1/members");
-    let output = match std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "10", &members_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => {
+    let client = super::pd_client::PdClient::new(vec![remote_pd_url.to_string()]);
+
+    let members = match client.get_members() {
+        Ok(m) => m,
+        Err(_) => {
             tracing::warn!("rollback: cannot reach remote PD to deregister member");
             return;
         }
     };
 
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
     let our_ip = mesh_ipv6.to_string();
-    if let Some(members) = body["members"].as_array() {
-        for member in members {
-            let peer_urls = member["peer_urls"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
-            let member_id = member["member_id"].as_u64().unwrap_or(0);
-
-            if peer_urls.contains(&our_ip) && member_id > 0 {
-                tracing::warn!(member_id, "rollback: removing our PD member from cluster");
-                let delete_url = format!("{remote_pd_url}/pd/api/v1/members/id/{member_id}");
-                let _ = std::process::Command::new("curl")
-                    .args(["-sf", "-X", "DELETE", "--max-time", "10", &delete_url])
-                    .output();
-            }
+    for member in &members {
+        let peer_urls_joined = member.peer_urls.join(",");
+        if peer_urls_joined.contains(&our_ip) && member.member_id > 0 {
+            tracing::warn!(
+                member_id = member.member_id,
+                "rollback: removing our PD member from cluster"
+            );
+            let _ = client.delete_member_by_id(member.member_id);
         }
     }
 }
@@ -428,18 +409,11 @@ pub fn leave() -> Result<(), NaukaError> {
 
 /// Wait for mesh connectivity to a PD endpoint (HTTP health check).
 fn wait_mesh_connectivity(pd_url: &str, timeout_secs: u64) -> Result<(), NaukaError> {
-    let url = format!("{pd_url}/pd/api/v1/health");
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
-        if std::process::Command::new("curl")
-            .args(["-sf", "--max-time", "3", &url])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
+        if client.ping() {
             // Also clean up any zombie PD members before joining
             cleanup_zombie_members(pd_url);
             return Ok(());
@@ -452,34 +426,18 @@ fn wait_mesh_connectivity(pd_url: &str, timeout_secs: u64) -> Result<(), NaukaEr
 
 /// Remove unhealthy PD members (zombies from failed joins).
 fn cleanup_zombie_members(pd_url: &str) {
-    let url = format!("{pd_url}/pd/api/v1/health");
-    let output = match std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "5", &url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return,
-    };
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
 
-    let health: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
+    let health = match client.get_health() {
+        Ok(h) => h,
         Err(_) => return,
     };
 
-    if let Some(members) = health.as_array() {
-        for member in members {
-            let healthy = member["health"].as_bool().unwrap_or(true);
-            let name = member["name"].as_str().unwrap_or("");
-            let member_id = member["member_id"].as_u64().unwrap_or(0);
-
-            // Remove unhealthy members with no name (zombie from failed join)
-            if !healthy && name.is_empty() && member_id > 0 {
-                tracing::info!(member_id, "removing zombie PD member");
-                let delete_url = format!("{pd_url}/pd/api/v1/members/id/{member_id}");
-                let _ = std::process::Command::new("curl")
-                    .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-                    .output();
-            }
+    for entry in &health {
+        // Remove unhealthy members with no name (zombie from failed join)
+        if !entry.healthy && entry.name.is_empty() && entry.member_id > 0 {
+            tracing::info!(member_id = entry.member_id, "removing zombie PD member");
+            let _ = client.delete_member_by_id(entry.member_id);
         }
     }
 }

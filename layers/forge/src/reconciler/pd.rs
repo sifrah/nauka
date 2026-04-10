@@ -12,6 +12,8 @@ use std::net::Ipv6Addr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use nauka_hypervisor::controlplane::pd_client::PdClient;
+
 /// How long a member must be continuously unhealthy before removal.
 const ZOMBIE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
@@ -63,30 +65,12 @@ static UNHEALTHY_SINCE: Mutex<Option<HashMap<u64, Instant>>> = Mutex::new(None);
 /// Called every reconcile cycle, before TiKV connect. Returns the number
 /// of members removed.
 pub fn cleanup_zombie_members(mesh_ipv6: &Ipv6Addr) -> usize {
-    let pd_url = format!(
-        "http://[{}]:{}",
-        mesh_ipv6,
-        nauka_hypervisor::controlplane::PD_CLIENT_PORT,
-    );
+    let client = PdClient::from_mesh(mesh_ipv6);
 
     // Query PD health endpoint
-    let health_url = format!("{pd_url}/pd/api/v1/health");
-    let output = match std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "5", &health_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return 0, // PD unreachable — nothing to do
-    };
-
-    let health: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
-
-    let members = match health.as_array() {
-        Some(m) => m,
-        None => return 0,
+    let health = match client.get_health() {
+        Ok(h) => h,
+        Err(_) => return 0, // PD unreachable — nothing to do
     };
 
     let now = Instant::now();
@@ -94,17 +78,13 @@ pub fn cleanup_zombie_members(mesh_ipv6: &Ipv6Addr) -> usize {
     // Collect current unhealthy member IDs
     let mut current_unhealthy: HashMap<u64, String> = HashMap::new();
 
-    for member in members {
-        let healthy = member["health"].as_bool().unwrap_or(true);
-        let member_id = member["member_id"].as_u64().unwrap_or(0);
-        let name = member["name"].as_str().unwrap_or("").to_string();
-
-        if member_id == 0 {
+    for entry in &health {
+        if entry.member_id == 0 {
             continue;
         }
 
-        if !healthy {
-            current_unhealthy.insert(member_id, name);
+        if !entry.healthy {
+            current_unhealthy.insert(entry.member_id, entry.name.clone());
         }
     }
 
@@ -154,17 +134,13 @@ pub fn cleanup_zombie_members(mesh_ipv6: &Ipv6Addr) -> usize {
             "removing zombie PD member (unhealthy >5 min)"
         );
 
-        let delete_url = format!("{pd_url}/pd/api/v1/members/id/{member_id}");
-        match std::process::Command::new("curl")
-            .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-            .output()
-        {
-            Ok(o) if o.status.success() => {
+        match client.delete_member_by_id(*member_id) {
+            Ok(()) => {
                 tracing::warn!(member_id, name = name.as_str(), "zombie PD member removed");
                 tracker.remove(member_id);
                 removed += 1;
             }
-            _ => {
+            Err(_) => {
                 tracing::error!(
                     member_id,
                     name = name.as_str(),

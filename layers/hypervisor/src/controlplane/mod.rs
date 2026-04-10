@@ -12,6 +12,7 @@
 
 pub mod backup;
 pub mod ops;
+pub mod pd_client;
 pub mod service;
 pub mod store;
 
