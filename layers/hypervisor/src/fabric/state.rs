@@ -3,12 +3,34 @@
 //! The fabric state is the complete snapshot of a node's mesh membership:
 //! mesh identity, node identity, secret, and list of peers.
 
+use std::fmt;
+
 use nauka_state::LayerDb;
 use serde::{Deserialize, Serialize};
 
 use super::backend::NetworkMode;
 use super::mesh::{HypervisorIdentity, MeshIdentity};
 use super::peer::PeerList;
+
+/// Scheduling state of a node (maintenance mode).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeState {
+    /// Normal operation — accepts new VM placements.
+    #[default]
+    Available,
+    /// Draining — no new VMs; existing VMs continue until migrated.
+    Draining,
+}
+
+impl fmt::Display for NodeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Available => write!(f, "available"),
+            Self::Draining => write!(f, "draining"),
+        }
+    }
+}
 
 /// Complete fabric state for a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +46,9 @@ pub struct FabricState {
     /// Network backend mode.
     #[serde(default)]
     pub network_mode: NetworkMode,
+    /// Scheduling state (available or draining).
+    #[serde(default)]
+    pub node_state: NodeState,
 }
 
 const STATE_TABLE: &str = "fabric";
@@ -85,6 +110,7 @@ mod tests {
             secret: secret.to_string(),
             peers: PeerList::new(),
             network_mode: super::super::backend::NetworkMode::default(),
+            node_state: NodeState::default(),
         }
     }
 

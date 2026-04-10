@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nauka_core::id::NodeId;
 use serde::{Deserialize, Serialize};
 
+use super::state::NodeState;
+
 fn default_wg_port() -> u16 {
     51820
 }
@@ -36,6 +38,9 @@ pub struct Peer {
     pub last_handshake: u64,
     /// When this peer was added.
     pub added_at: u64,
+    /// Scheduling state (available or draining).
+    #[serde(default)]
+    pub node_state: NodeState,
 }
 
 /// Peer connection status.
@@ -75,6 +80,7 @@ impl Peer {
             status: PeerStatus::Active,
             last_handshake: 0,
             added_at: now,
+            node_state: NodeState::default(),
         }
     }
 

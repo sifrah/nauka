@@ -14,7 +14,7 @@ use std::time::Duration;
 use nauka_core::error::NaukaError;
 
 use super::peer::Peer;
-use super::peering::{PeerAnnounce, PeerInfo, PeerRemove};
+use super::peering::{PeerAnnounce, PeerInfo, PeerRemove, StateChange};
 use super::peering_server::{read_json, write_json};
 use super::service;
 
@@ -26,6 +26,8 @@ pub enum AnnounceMessage {
     Announce(PeerAnnounce),
     #[serde(rename = "remove")]
     Remove(PeerRemove),
+    #[serde(rename = "state_change")]
+    StateChange(StateChange),
 }
 
 /// Default announce port offset from WireGuard port.
@@ -177,6 +179,65 @@ pub async fn broadcast_peer_remove(
     (successes, failures)
 }
 
+/// Broadcast a state change (drain/enable) to all peers in parallel (best-effort).
+/// Returns (successes, failures).
+pub async fn broadcast_state_change(
+    change: &StateChange,
+    existing_peers: &[Peer],
+) -> (usize, usize) {
+    let msg = AnnounceMessage::StateChange(change.clone());
+
+    let reachable: Vec<_> = existing_peers
+        .iter()
+        .filter(|p| p.status != super::peer::PeerStatus::Unreachable)
+        .collect();
+
+    let mut handles = Vec::with_capacity(reachable.len());
+    for peer in &reachable {
+        let addr = format!(
+            "[{}]:{}",
+            peer.mesh_ipv6,
+            peer.wg_port + ANNOUNCE_PORT_OFFSET
+        );
+        let peer_name = peer.name.clone();
+        let node_name = change.name.clone();
+        let new_state = change.node_state;
+        let msg = msg.clone();
+        handles.push(tokio::spawn(async move {
+            match send_message(&addr, &msg).await {
+                Ok(()) => {
+                    tracing::info!(
+                        peer = %peer_name,
+                        node = %node_name,
+                        state = %new_state,
+                        "sent state change"
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %peer_name,
+                        error = %e,
+                        "failed to send state change"
+                    );
+                    false
+                }
+            }
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for handle in handles {
+        match handle.await {
+            Ok(true) => successes += 1,
+            _ => failures += 1,
+        }
+    }
+
+    (successes, failures)
+}
+
 /// Listen for peer announcements and apply them (over TLS).
 ///
 /// Runs on wg_port + 2. When an announcement arrives:
@@ -244,6 +305,7 @@ async fn handle_message(
     match msg {
         AnnounceMessage::Announce(announce) => handle_peer_announce(announce, db).await,
         AnnounceMessage::Remove(remove) => handle_peer_remove(remove, db),
+        AnnounceMessage::StateChange(change) => handle_state_change(change, db),
     }
 }
 
@@ -287,6 +349,42 @@ fn handle_peer_remove(remove: PeerRemove, db: &nauka_state::LayerDb) -> Result<S
         Ok(format!("removed {}", removed.name))
     } else {
         Ok(format!("{} not found, skipped", remove.name))
+    }
+}
+
+/// Handle a StateChange — update a peer's scheduling state.
+fn handle_state_change(
+    change: StateChange,
+    db: &nauka_state::LayerDb,
+) -> Result<String, NaukaError> {
+    super::peering_server::validate_peer_field(&change.name, "name")?;
+
+    let mut state = super::state::FabricState::load(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| NaukaError::precondition("not initialized"))?;
+
+    // Find the peer by name or public key and update its node_state
+    let found = state
+        .peers
+        .peers
+        .iter_mut()
+        .find(|p| p.name == change.name || p.wg_public_key == change.wg_public_key);
+
+    if let Some(peer) = found {
+        peer.node_state = change.node_state;
+        tracing::info!(
+            peer = %change.name,
+            state = %change.node_state,
+            "updated peer scheduling state"
+        );
+
+        state
+            .save(db)
+            .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+        Ok(format!("{} → {}", change.name, change.node_state))
+    } else {
+        Ok(format!("{} not found, skipped", change.name))
     }
 }
 

@@ -47,6 +47,7 @@ fn init_node(db: &LocalDb, name: &str) -> (FabricState, String) {
         secret: secret_str,
         peers: PeerList::new(),
         network_mode: NetworkMode::Mock,
+        node_state: nauka_hypervisor::fabric::NodeState::default(),
     };
     state.save(db).unwrap();
 
