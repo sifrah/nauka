@@ -1,7 +1,10 @@
 //! Process observer — scan for running VM processes.
 //!
-//! Scans /run/nauka/vms/ for VM directories with PID files.
-//! Checks process liveness with kill(pid, 0).
+//! Checks both PID liveness and container runtime state. A VM is only
+//! considered running if the PID file exists, the process is alive, AND
+//! the container runtime reports it as running. This prevents orphaned
+//! processes (e.g. `sleep infinity` surviving after container stop) from
+//! being mistaken for healthy VMs.
 
 use std::path::PathBuf;
 
@@ -23,15 +26,64 @@ pub fn list_vms() -> Vec<String> {
             let pid_path = path.join("pid");
             if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    // kill(pid, 0) checks if process exists without sending a signal
-                    if unsafe { libc::kill(pid, 0) == 0 } {
-                        vms.push(vm_id);
+                    let pid_alive = unsafe { libc::kill(pid, 0) == 0 };
+                    if !pid_alive {
+                        continue;
+                    }
+
+                    // PID is alive — check container runtime state.
+                    // If crun says "stopped" the container is dead but the
+                    // process survived as an orphan. Kill it so the
+                    // reconciler can recreate the container cleanly.
+                    match container_status(&vm_id) {
+                        ContainerState::Running => vms.push(vm_id),
+                        ContainerState::Stopped => {
+                            tracing::warn!(
+                                vm_id,
+                                pid,
+                                "container stopped but PID alive — killing orphan"
+                            );
+                            unsafe { libc::kill(pid, libc::SIGKILL) };
+                        }
+                        ContainerState::Unknown => {
+                            // crun state not available (runtime dir cleaned up).
+                            // Trust PID liveness — container may still be fine.
+                            vms.push(vm_id);
+                        }
                     }
                 }
             }
         }
     }
     vms
+}
+
+enum ContainerState {
+    Running,
+    Stopped,
+    Unknown,
+}
+
+fn container_status(vm_id: &str) -> ContainerState {
+    let output = std::process::Command::new("crun")
+        .args(["state", vm_id])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let state: serde_json::Value = match serde_json::from_slice(&o.stdout) {
+                Ok(v) => v,
+                Err(_) => return ContainerState::Unknown,
+            };
+            match state["status"].as_str() {
+                Some("running") => ContainerState::Running,
+                Some("stopped") | Some("created") => ContainerState::Stopped,
+                _ => ContainerState::Unknown,
+            }
+        }
+        _ => ContainerState::Unknown,
+    }
 }
 
 /// Get the PID of a running VM by its ID.

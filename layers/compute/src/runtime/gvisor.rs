@@ -13,8 +13,33 @@ use super::{RunningVm, Runtime, VmRunConfig};
 
 const VM_RUN_DIR: &str = "/run/nauka/vms";
 const IMAGES_DIR: &str = "/opt/nauka/images";
+const TINI_CACHE: &str = "/opt/nauka/bin/tini";
+const TINI_URL: &str =
+    "https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64";
 
 pub struct GVisorRuntime;
+
+/// Download tini static binary to host cache if not already present.
+fn ensure_tini_cached() -> bool {
+    let cache = PathBuf::from(TINI_CACHE);
+    if cache.exists() {
+        return true;
+    }
+    let _ = std::fs::create_dir_all(cache.parent().unwrap());
+    let ok = Command::new("curl")
+        .args(["-fsSL", "-o", TINI_CACHE, TINI_URL])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        let _ = Command::new("chmod")
+            .args(["+x", TINI_CACHE])
+            .status();
+    }
+    ok
+}
 
 /// Detect which OCI runtime binary to use.
 fn runtime_binary() -> &'static str {
@@ -141,6 +166,23 @@ impl Runtime for GVisorRuntime {
         // Ensure /run/sshd exists (required by sshd)
         let _ = std::fs::create_dir_all(rootfs_dir.join("run/sshd"));
 
+        // Install tini as PID 1 (reaps zombies, forwards signals).
+        // Download once to host cache, then copy into every rootfs.
+        let tini_dest = rootfs_dir.join("usr/bin/tini");
+        if !tini_dest.exists() && ensure_tini_cached() {
+            let _ = std::fs::copy(TINI_CACHE, &tini_dest);
+            let _ = Command::new("chmod")
+                .args(["+x", tini_dest.to_str().unwrap()])
+                .status();
+        }
+        let has_tini = tini_dest.exists();
+        if !has_tini {
+            tracing::warn!(
+                vm_id = config.vm_id.as_str(),
+                "tini not available — falling back to /bin/sh as PID 1"
+            );
+        }
+
         // Write init script that starts sshd + stays alive.
         // tini runs as PID 1 (set in OCI args) and reaps zombies.
         std::fs::write(
@@ -155,10 +197,6 @@ impl Runtime for GVisorRuntime {
         let _ = Command::new("chmod")
             .args(["+x", rootfs_dir.join("nauka-init.sh").to_str().unwrap()])
             .status();
-
-        // 3. Generate OCI config.json
-        // Use tini as PID 1 if available in the image (reaps zombies)
-        let has_tini = rootfs_dir.join("usr/bin/tini").exists();
         let oci_config = generate_oci_config(config, has_tini);
         std::fs::write(bundle_dir.join("config.json"), oci_config)?;
 
@@ -230,22 +268,9 @@ impl Runtime for GVisorRuntime {
             }
         }
 
-        // 6b. Start sshd inside the container via nsenter
-        if pid > 0 {
-            let pid_str = pid.to_string();
-            let _ = Command::new("nsenter")
-                .args([
-                    "--pid",
-                    "--mount",
-                    "--net",
-                    &format!("--target={pid_str}"),
-                    "/usr/sbin/sshd",
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            tracing::info!(vm_id = config.vm_id.as_str(), "sshd started");
-        }
+        // sshd is started by the init script inside the container.
+        // No need for nsenter — that would create sshd outside the
+        // container's cgroup, making health checks unreliable.
 
         // 7. Write PID + runtime marker
         std::fs::write(vm_dir.join("pid"), pid.to_string())?;
@@ -363,7 +388,27 @@ pub fn generate_oci_config(config: &VmRunConfig, has_tini: bool) -> String {
             "env": [
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 format!("HOSTNAME={}", config.vm_name),
-            ]
+            ],
+            "capabilities": {
+                "bounding": [
+                    "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID",
+                    "CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                    "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+                ],
+                "effective": [
+                    "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID",
+                    "CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                    "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+                ],
+                "permitted": [
+                    "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID",
+                    "CAP_KILL", "CAP_MKNOD", "CAP_NET_BIND_SERVICE", "CAP_NET_RAW",
+                    "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+                ]
+            }
         },
         "root": {
             "path": "rootfs",
