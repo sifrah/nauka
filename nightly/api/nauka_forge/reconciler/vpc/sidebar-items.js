@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["add_arp_in_container","ensure_forward_rules","get_container_pid","resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
+window.SIDEBAR_ITEMS = {"fn":["add_arp_in_container","ensure_forward_rules","ensure_ip_rule","get_container_pid","resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
