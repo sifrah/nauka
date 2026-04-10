@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["VM_RUN_DIR"],"fn":["get_pid","list_vms"]};
+window.SIDEBAR_ITEMS = {"constant":["VM_RUN_DIR"],"enum":["ContainerState"],"fn":["container_status","get_pid","list_vms"]};

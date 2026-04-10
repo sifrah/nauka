@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["IMAGES_DIR","VM_RUN_DIR"],"fn":["generate_oci_config","runtime_binary"],"struct":["GVisorRuntime"]};
+window.SIDEBAR_ITEMS = {"constant":["IMAGES_DIR","TINI_CACHE","TINI_URL","VM_RUN_DIR"],"fn":["ensure_tini_cached","generate_oci_config","runtime_binary"],"struct":["GVisorRuntime"]};
