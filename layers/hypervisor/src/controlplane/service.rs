@@ -444,29 +444,12 @@ pub fn deregister_store(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaError
         None => return Ok(()), // No PD endpoint found, nothing to deregister
     };
 
-    // Get store list and find our store ID
-    let stores_url = format!("{pd_url}/pd/api/v1/stores");
-    let output = Command::new("curl")
-        .args(["-sf", "--max-time", "5", &stores_url])
-        .output()
-        .ok();
-
-    if let Some(output) = output {
-        if output.status.success() {
-            if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(stores) = body["stores"].as_array() {
-                    for store in stores {
-                        let addr = store["store"]["address"].as_str().unwrap_or("");
-                        let store_id = store["store"]["id"].as_u64().unwrap_or(0);
-                        if addr == our_addr && store_id > 0 {
-                            tracing::info!(store_id, "deregistering TiKV store");
-                            let delete_url = format!("{pd_url}/pd/api/v1/store/{store_id}");
-                            let _ = Command::new("curl")
-                                .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-                                .output();
-                        }
-                    }
-                }
+    let client = super::pd_client::PdClient::new(vec![pd_url]);
+    if let Ok(stores) = client.get_stores() {
+        for store in &stores {
+            if store.address == our_addr && store.id > 0 {
+                tracing::info!(store_id = store.id, "deregistering TiKV store");
+                let _ = client.delete_store(store.id);
             }
         }
     }
@@ -491,29 +474,17 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
     }
 
     let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
-    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6);
 
     // Find stale stores at our address (any state)
-    let stores_url = format!("{pd_url}/pd/api/v1/stores?state=0&state=1&state=2");
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &stores_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return false,
-    };
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let stale_ids: Vec<u64> = body["stores"]
-        .as_array()
+    let stale_ids: Vec<u64> = client
+        .get_stores_with_states(&[0, 1, 2])
+        .ok()
         .map(|stores| {
             stores
                 .iter()
-                .filter(|s| s["store"]["address"].as_str() == Some(our_addr.as_str()))
-                .filter_map(|s| s["store"]["id"].as_u64())
+                .filter(|s| s.address == our_addr)
+                .map(|s| s.id)
                 .collect()
         })
         .unwrap_or_default();
@@ -531,13 +502,10 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
         "removing stale TiKV stores via unsafe recovery"
     );
 
-    // Step 1: Force-delete each store to move it from Up → Offline.
+    // Step 1: Force-delete each store to move it from Up -> Offline.
     // PD's unsafe API requires stores to be in a non-Up state.
     for store_id in &stale_ids {
-        let delete_url = format!("{pd_url}/pd/api/v1/store/{store_id}?force=true");
-        let _ = Command::new("curl")
-            .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-            .output();
+        let _ = client.force_delete_store(*store_id);
     }
 
     // Brief pause for PD to process the state transitions
@@ -545,27 +513,7 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
 
     // Step 2: Use PD's unsafe/remove-failed-stores API — this forcefully
     // evicts dead stores and reassigns their region peers to alive stores.
-    let stores_json = stale_ids
-        .iter()
-        .map(|id| id.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let unsafe_url = format!("{pd_url}/pd/api/v1/admin/unsafe/remove-failed-stores");
-    let body = format!("{{\"stores\": [{stores_json}]}}");
-    let _ = Command::new("curl")
-        .args([
-            "-sf",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body,
-            "--max-time",
-            "10",
-            &unsafe_url,
-        ])
-        .output();
+    let _ = client.unsafe_remove_failed_stores(&stale_ids);
 
     // Wait for the unsafe recovery to complete (typically 10-30s)
     let mut cleared = false;
@@ -573,39 +521,21 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
         std::thread::sleep(std::time::Duration::from_secs(5));
 
         // Check if all stale stores are now Tombstone or gone
-        let output = match Command::new("curl")
-            .args(["-sf", "--max-time", "5", &stores_url])
-            .output()
-        {
-            Ok(o) if o.status.success() => o,
-            _ => continue,
-        };
-        let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let still_blocking: Vec<u64> = body["stores"]
-            .as_array()
+        let still_blocking: Vec<u64> = client
+            .get_stores_with_states(&[0, 1, 2])
+            .ok()
             .map(|stores| {
                 stores
                     .iter()
-                    .filter(|s| s["store"]["address"].as_str() == Some(our_addr.as_str()))
-                    .filter(|s| {
-                        let state = s["store"]["state_name"].as_str().unwrap_or("");
-                        state != "Tombstone"
-                    })
-                    .filter_map(|s| s["store"]["id"].as_u64())
+                    .filter(|s| s.address == our_addr && s.state_name != "Tombstone")
+                    .map(|s| s.id)
                     .collect()
             })
             .unwrap_or_default();
 
         if still_blocking.is_empty() {
             // Purge tombstones to fully free the address
-            let tombstone_url = format!("{pd_url}/pd/api/v1/stores/remove-tombstone");
-            let _ = Command::new("curl")
-                .args(["-sf", "-X", "DELETE", "--max-time", "5", &tombstone_url])
-                .output();
+            let _ = client.remove_tombstone();
             cleared = true;
             break;
         }
@@ -630,55 +560,33 @@ pub fn recover_pd_quorum(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
         return false;
     }
 
-    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
-    let health_url = format!("{pd_url}/pd/api/v1/health");
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6);
 
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &health_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return false,
-    };
-    let health: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
+    // Check health — if PD unreachable, nothing to do
+    let health = match client.get_health() {
+        Ok(h) => h,
         Err(_) => return false,
     };
 
     // Check if any member is unhealthy
     let unhealthy: Vec<String> = health
-        .as_array()
-        .map(|members| {
-            members
-                .iter()
-                .filter(|m| m["health"].as_bool() != Some(true))
-                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+        .iter()
+        .filter(|m| !m.healthy)
+        .map(|m| m.name.clone())
+        .collect();
 
     if unhealthy.is_empty() {
         return false;
     }
 
     // Check if the PD members API works (needs quorum)
-    let members_url = format!("{pd_url}/pd/api/v1/members");
-    let members_ok = Command::new("curl")
-        .args(["-sf", "--max-time", "5", &members_url])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let members_ok = client.get_members().is_ok();
 
     if members_ok {
         // Quorum is fine — just remove unhealthy members normally
         for name in &unhealthy {
             tracing::warn!(member = name.as_str(), "removing unhealthy PD member");
-            let delete_url = format!("{pd_url}/pd/api/v1/members/name/{name}");
-            let _ = Command::new("curl")
-                .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-                .output();
+            let _ = client.delete_member_by_name(name);
         }
         return true;
     }
@@ -736,68 +644,36 @@ pub fn recover_stale_pd_member(
     }
 
     // Find a reachable remote PD that can serve the members API (has quorum)
-    let remote_pd_url = peer_ipv6s.iter().find_map(|ip| {
-        let url = format!("http://[{}]:{}", ip, super::PD_CLIENT_PORT);
-        let members_url = format!("{url}/pd/api/v1/members");
-        let ok = Command::new("curl")
-            .args(["-sf", "--max-time", "5", &members_url])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            Some(url)
+    let remote_client = peer_ipv6s.iter().find_map(|ip| {
+        let client = super::pd_client::PdClient::from_mesh(ip);
+        if client.get_members().is_ok() {
+            Some(client)
         } else {
             None
         }
     });
 
-    let remote_pd_url = match remote_pd_url {
-        Some(url) => url,
+    let remote_client = match remote_client {
+        Some(c) => c,
         None => return false, // No PD with quorum reachable (phase 1 needed first)
     };
 
     // Remove our stale member from the cluster
-    let members_url = format!("{remote_pd_url}/pd/api/v1/members");
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &members_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return false,
-    };
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
     let our_ip = mesh_ipv6.to_string();
     let mut found_stale = false;
-    if let Some(members) = body["members"].as_array() {
-        for member in members {
-            let peer_urls = member["peer_urls"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
-            let member_name = member["name"].as_str().unwrap_or("");
-            let member_id = member["member_id"].as_u64().unwrap_or(0);
 
-            if (peer_urls.contains(&our_ip) || member_name == node_name) && member_id > 0 {
+    if let Ok(members) = remote_client.get_members() {
+        for member in &members {
+            let peer_urls_joined = member.peer_urls.join(",");
+            if (peer_urls_joined.contains(&our_ip) || member.name == node_name)
+                && member.member_id > 0
+            {
                 tracing::warn!(
-                    member_id,
-                    member_name,
+                    member_id = member.member_id,
+                    member_name = member.name.as_str(),
                     "removing stale PD member for recovery"
                 );
-                let delete_url = format!("{remote_pd_url}/pd/api/v1/members/name/{member_name}");
-                let _ = Command::new("curl")
-                    .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-                    .output();
+                let _ = remote_client.delete_member_by_name(&member.name);
                 found_stale = true;
             }
         }
@@ -811,6 +687,13 @@ pub fn recover_stale_pd_member(
     // Wipe PD data directory (stale etcd state prevents rejoin)
     let _ = std::fs::remove_dir_all(PD_DATA_DIR);
     let _ = std::fs::create_dir_all(PD_DATA_DIR);
+
+    // Reconstruct the remote PD URL for the systemd --join flag
+    let remote_pd_url = peer_ipv6s
+        .iter()
+        .map(|ip| format!("http://[{}]:{}", ip, super::PD_CLIENT_PORT))
+        .next()
+        .unwrap_or_default();
 
     // Rewrite systemd unit in --join mode so PD rejoins the cluster
     std::fs::write(PD_UNIT_PATH, generate_pd_unit(Some(&remote_pd_url))).ok();
@@ -843,45 +726,11 @@ pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaE
         return Ok(());
     }
 
-    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
-    let members_url = format!("{pd_url}/pd/api/v1/members");
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6);
 
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &members_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Ok(()),
-    };
-
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-
-    // Find our member by matching peer_urls containing our mesh IPv6
-    let our_ip = mesh_ipv6.to_string();
-    if let Some(members) = body["members"].as_array() {
-        for member in members {
-            let peer_urls = member["peer_urls"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                })
-                .unwrap_or_default();
-            let member_id = member["member_id"].as_u64().unwrap_or(0);
-
-            if peer_urls.contains(&our_ip) && member_id > 0 {
-                tracing::info!(member_id, "deregistering PD member");
-                let delete_url = format!("{pd_url}/pd/api/v1/members/id/{member_id}");
-                let _ = Command::new("curl")
-                    .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
-                    .output();
-            }
-        }
+    if let Some(member_id) = client.find_member_id(mesh_ipv6) {
+        tracing::info!(member_id, "deregistering PD member");
+        let _ = client.delete_member_by_id(member_id);
     }
 
     Ok(())
@@ -889,29 +738,8 @@ pub fn deregister_pd_member(mesh_ipv6: &std::net::Ipv6Addr) -> Result<(), NaukaE
 
 /// Count active (Up) TiKV stores via PD API.
 pub fn count_active_stores(pd_url: &str) -> usize {
-    let stores_url = format!("{pd_url}/pd/api/v1/stores");
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &stores_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return 0,
-    };
-
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
-
-    body["stores"]
-        .as_array()
-        .map(|stores| {
-            stores
-                .iter()
-                .filter(|s| s["store"]["state_name"].as_str() == Some("Up"))
-                .count()
-        })
-        .unwrap_or(0)
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
+    client.count_active_stores()
 }
 
 /// Set max-replicas to the given target if it differs from current.
@@ -920,76 +748,32 @@ pub fn count_active_stores(pd_url: &str) -> usize {
 /// (scale up to improve durability). Target should be
 /// `min(active_stores, max_pd_members)`.
 pub fn adjust_max_replicas(pd_url: &str, target: usize) -> Result<(), NaukaError> {
-    if target == 0 {
-        return Ok(());
-    }
-
-    // Get current max-replicas
-    let config_url = format!("{pd_url}/pd/api/v1/config/replicate");
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &config_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Ok(()),
-    };
-
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-
-    let current = body["max-replicas"].as_u64().unwrap_or(3) as usize;
-
-    if target != current {
-        tracing::info!(current, target, "adjusting max-replicas");
-        let payload = format!("{{\"max-replicas\": {target}}}");
-        let _ = Command::new("curl")
-            .args([
-                "-sf",
-                "-X",
-                "POST",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &payload,
-                "--max-time",
-                "5",
-                &config_url,
-            ])
-            .output();
-    }
-
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
+    // set_max_replicas handles the 0 check and current-vs-target comparison
+    let _ = client.set_max_replicas(target);
     Ok(())
 }
 
 /// Wait for all regions to have a leader (post-rebalance).
 /// Polls every 5s, up to timeout_secs.
 pub fn wait_regions_healthy(pd_url: &str, timeout_secs: u64) -> Result<(), NaukaError> {
-    let url = format!("{pd_url}/pd/api/v1/regions");
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]).with_timeout(5);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
-        if let Ok(output) = Command::new("curl")
-            .args(["-sf", "--max-time", "5", &url])
-            .output()
-        {
-            if output.status.success() {
-                if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    if let Some(regions) = body["regions"].as_array() {
-                        let total = regions.len();
-                        let with_leader = regions
-                            .iter()
-                            .filter(|r| r["leader"]["store_id"].as_u64().unwrap_or(0) > 0)
-                            .count();
+        if let Ok(body) = client.get_regions() {
+            if let Some(regions) = body["regions"].as_array() {
+                let total = regions.len();
+                let with_leader = regions
+                    .iter()
+                    .filter(|r| r["leader"]["store_id"].as_u64().unwrap_or(0) > 0)
+                    .count();
 
-                        if total > 0 && with_leader == total {
-                            tracing::info!(total, "all regions have leaders");
-                            return Ok(());
-                        }
-                        tracing::debug!(with_leader, total, "waiting for region leaders");
-                    }
+                if total > 0 && with_leader == total {
+                    tracing::info!(total, "all regions have leaders");
+                    return Ok(());
                 }
+                tracing::debug!(with_leader, total, "waiting for region leaders");
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(5));
@@ -1036,27 +820,8 @@ pub fn find_store_id(mesh_ipv6: &std::net::Ipv6Addr) -> Option<u64> {
 /// Find the store ID for a given address via a PD endpoint.
 /// Only returns stores in Up or Disconnected state (not Tombstone).
 pub fn find_store_id_via_pd(our_addr: &str, pd_url: &str) -> Option<u64> {
-    // Query stores in all states: 0=Up, 1=Disconnected, 2=Offline
-    let stores_url = format!("{pd_url}/pd/api/v1/stores?state=0&state=1&state=2");
-    let output = Command::new("curl")
-        .args(["-sf", "--max-time", "5", &stores_url])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    body["stores"].as_array().and_then(|stores| {
-        stores.iter().find_map(|s| {
-            let addr = s["store"]["address"].as_str().unwrap_or("");
-            let id = s["store"]["id"].as_u64().unwrap_or(0);
-            if addr == our_addr && id > 0 {
-                Some(id)
-            } else {
-                None
-            }
-        })
-    })
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
+    client.find_store_id(our_addr)
 }
 
 /// Wait for all regions to drain off a specific store.
@@ -1067,24 +832,12 @@ pub fn wait_store_regions_drained(
     store_id: u64,
     timeout_secs: u64,
 ) -> Result<(), NaukaError> {
-    let url = format!("{pd_url}/pd/api/v1/regions/store/{store_id}");
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]).with_timeout(5);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut last_count: Option<usize> = None;
 
     while std::time::Instant::now() < deadline {
-        let region_count = match Command::new("curl")
-            .args(["-sf", "--max-time", "5", &url])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    Ok(body) => body["regions"].as_array().map(|r| r.len()).unwrap_or(0),
-                    Err(_) => 0,
-                }
-            }
-            // Store not found (404) means already gone — success
-            _ => 0,
-        };
+        let region_count = client.count_store_regions(store_id);
 
         if region_count == 0 {
             tracing::info!(store_id, "all regions drained from store");
@@ -1114,35 +867,8 @@ pub fn wait_store_regions_drained(
 
 /// Check if a PD member with our IP exists in the cluster.
 pub fn pd_member_exists(mesh_ipv6: &std::net::Ipv6Addr, pd_url: &str) -> bool {
-    let members_url = format!("{pd_url}/pd/api/v1/members");
-    let output = match Command::new("curl")
-        .args(["-sf", "--max-time", "5", &members_url])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return false,
-    };
-
-    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let our_ip = mesh_ipv6.to_string();
-    body["members"]
-        .as_array()
-        .map(|members| {
-            members.iter().any(|m| {
-                m["peer_urls"]
-                    .as_array()
-                    .map(|urls| {
-                        urls.iter()
-                            .any(|u| u.as_str().unwrap_or("").contains(&our_ip))
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
+    client.member_exists(mesh_ipv6)
 }
 
 /// Uninstall everything — stop services, remove configs, data.
@@ -1192,21 +918,11 @@ pub fn restart() -> Result<(), NaukaError> {
 
 /// Wait for PD to be healthy (responds on client URL).
 pub fn wait_pd_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), NaukaError> {
-    let url = format!(
-        "http://[{}]:{}/pd/api/v1/health",
-        mesh_ipv6,
-        super::PD_CLIENT_PORT
-    );
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6).with_timeout(2);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
-        let result = Command::new("curl")
-            .args(["-sf", "--max-time", "2", &url])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        if result.map(|s| s.success()).unwrap_or(false) {
+        if client.ping() {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1217,25 +933,12 @@ pub fn wait_pd_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), Nauk
 
 /// Wait for TiKV to register with PD (at least 1 store).
 pub fn wait_tikv_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), NaukaError> {
-    let url = format!(
-        "http://[{}]:{}/pd/api/v1/stores",
-        mesh_ipv6,
-        super::PD_CLIENT_PORT
-    );
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6).with_timeout(2);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     while std::time::Instant::now() < deadline {
-        if let Ok(output) = Command::new("curl")
-            .args(["-sf", "--max-time", "2", &url])
-            .output()
-        {
-            if output.status.success() {
-                let body = String::from_utf8_lossy(&output.stdout);
-                // PD returns {"count": N, "stores": [...]}
-                if body.contains("\"count\"") && !body.contains("\"count\":0") {
-                    return Ok(());
-                }
-            }
+        if client.count_active_stores() > 0 {
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
@@ -1245,34 +948,16 @@ pub fn wait_tikv_ready(mesh_ipv6: &Ipv6Addr, timeout_secs: u64) -> Result<(), Na
 
 /// Get cluster status from PD API.
 pub fn cluster_status(mesh_ipv6: &Ipv6Addr) -> Result<ClusterStatus, NaukaError> {
-    let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
+    let client = super::pd_client::PdClient::from_mesh(mesh_ipv6);
 
-    let members = pd_api_get(&pd_url, "/pd/api/v1/members");
-    let stores = pd_api_get(&pd_url, "/pd/api/v1/stores");
-
-    let member_count = members
-        .as_ref()
-        .ok()
-        .and_then(|v| v["members"].as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-
-    let store_count = stores
-        .as_ref()
-        .ok()
-        .and_then(|v| v["count"].as_u64())
-        .unwrap_or(0) as usize;
-
-    let leader = members
-        .as_ref()
-        .ok()
-        .and_then(|v| v["leader"]["name"].as_str())
-        .map(|s| s.to_string());
+    let members = client.get_members().unwrap_or_default();
+    let store_count = client.count_active_stores();
+    let leader = members.iter().find(|m| m.is_leader).map(|m| m.name.clone());
 
     Ok(ClusterStatus {
         pd_active: pd_is_active(),
         tikv_active: tikv_is_active(),
-        pd_members: member_count,
+        pd_members: members.len(),
         tikv_stores: store_count,
         leader,
     })
@@ -1286,22 +971,6 @@ pub struct ClusterStatus {
     pub pd_members: usize,
     pub tikv_stores: usize,
     pub leader: Option<String>,
-}
-
-/// Query PD HTTP API.
-fn pd_api_get(pd_url: &str, path: &str) -> Result<serde_json::Value, NaukaError> {
-    let url = format!("{pd_url}{path}");
-    let output = Command::new("curl")
-        .args(["-sf", "--max-time", "5", &url])
-        .output()
-        .map_err(|e| NaukaError::internal(format!("curl failed: {e}")))?;
-
-    if !output.status.success() {
-        return Err(NaukaError::internal("PD API request failed"));
-    }
-
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| NaukaError::internal(format!("PD API parse failed: {e}")))
 }
 
 fn run_systemctl(args: &[&str]) -> Result<(), NaukaError> {

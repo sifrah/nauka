@@ -299,95 +299,77 @@ fn check_controlplane(report: &mut DoctorReport, mesh_ipv6: Option<&Ipv6Addr>) {
 
     // PD health + leader
     if let Some(ip) = mesh_ipv6 {
-        let pd_url = format!("http://[{}]:{}", ip, controlplane::PD_CLIENT_PORT);
-        let health_url = format!("{pd_url}/pd/api/v1/health");
+        let client = controlplane::pd_client::PdClient::from_mesh(ip);
 
-        if let Some(body) = curl_json(&health_url) {
-            if let Some(members) = body.as_array() {
-                let healthy: Vec<_> = members
-                    .iter()
-                    .filter(|m| m["health"].as_bool().unwrap_or(false))
-                    .collect();
-                let total = members.len();
-                if healthy.len() == total {
-                    checks.push(ok("pd health", &format!("{total}/{total} healthy")));
-                } else {
-                    checks.push(warn(
-                        "pd health",
-                        &format!("{}/{total} healthy", healthy.len()),
-                    ));
-                }
+        if let Ok(health) = client.get_health() {
+            let total = health.len();
+            let healthy_count = health.iter().filter(|h| h.healthy).count();
+            if healthy_count == total {
+                checks.push(ok("pd health", &format!("{total}/{total} healthy")));
+            } else {
+                checks.push(warn(
+                    "pd health",
+                    &format!("{healthy_count}/{total} healthy"),
+                ));
+            }
 
-                // Leader
-                let leader = members
-                    .iter()
-                    .find(|m| m["health"].as_bool().unwrap_or(false))
-                    .and_then(|m| m["name"].as_str());
-                if let Some(name) = leader {
-                    checks.push(ok("pd leader", name));
-                } else {
-                    checks.push(fail("pd leader", "no leader elected"));
-                }
+            // Leader
+            let leader = health.iter().find(|h| h.healthy).map(|h| h.name.as_str());
+            if let Some(name) = leader {
+                checks.push(ok("pd leader", name));
+            } else {
+                checks.push(fail("pd leader", "no leader elected"));
             }
         } else {
             checks.push(warn("pd health", "could not reach PD API"));
         }
 
         // PD quorum health — are all members healthy?
-        let members_url = format!("{pd_url}/pd/api/v1/members");
-        if let Some(body) = curl_json(&members_url) {
-            if let Some(members) = body["members"].as_array() {
-                let total = members.len();
-                if total < 3 {
-                    checks.push(warn(
-                        "pd quorum",
-                        &format!("only {total} member(s) — need 3 for fault tolerance"),
-                    ));
-                } else {
-                    checks.push(ok("pd quorum", &format!("{total} members — quorum intact")));
-                }
+        if let Ok(members) = client.get_members() {
+            let total = members.len();
+            if total < 3 {
+                checks.push(warn(
+                    "pd quorum",
+                    &format!("only {total} member(s) — need 3 for fault tolerance"),
+                ));
+            } else {
+                checks.push(ok("pd quorum", &format!("{total} members — quorum intact")));
             }
         }
 
         // TiKV store registration + health
-        let stores_url = format!("{pd_url}/pd/api/v1/stores");
-        if let Some(body) = curl_json(&stores_url) {
-            let count = body["count"].as_u64().unwrap_or(0);
-            checks.push(ok("tikv stores", &format!("{count} registered")));
+        // Use get_stores_with_states to see all stores including offline/tombstoned
+        if let Ok(stores) = client.get_stores_with_states(&[0, 1, 2, 3]) {
+            checks.push(ok("tikv stores", &format!("{} registered", stores.len())));
 
-            // Check for tombstoned or offline stores
-            if let Some(stores) = body["stores"].as_array() {
-                let mut tombstoned = 0u64;
-                let mut offline = 0u64;
-                let mut down = 0u64;
-                for store in stores {
-                    if let Some(state) = store["store"]["state_name"].as_str() {
-                        match state {
-                            "Tombstone" => tombstoned += 1,
-                            "Offline" => offline += 1,
-                            "Down" => down += 1,
-                            _ => {}
-                        }
-                    }
+            let mut tombstoned = 0u64;
+            let mut offline = 0u64;
+            let mut down = 0u64;
+            for store in &stores {
+                match store.state_name.as_str() {
+                    "Tombstone" => tombstoned += 1,
+                    "Offline" => offline += 1,
+                    "Down" => down += 1,
+                    _ => {}
                 }
-                if tombstoned > 0 {
-                    checks.push(fail(
-                        "tikv tombstoned",
-                        &format!("{tombstoned} store(s) tombstoned — data may be under-replicated"),
-                    ));
-                }
-                if down > 0 {
-                    checks.push(fail("tikv down", &format!("{down} store(s) down")));
-                }
-                if offline > 0 {
-                    checks.push(warn(
-                        "tikv offline",
-                        &format!("{offline} store(s) offline — regions migrating"),
-                    ));
-                }
-                if tombstoned == 0 && offline == 0 && down == 0 {
-                    checks.push(ok("tikv store health", "all stores Up"));
-                }
+            }
+            if tombstoned > 0 {
+                checks.push(fail(
+                    "tikv tombstoned",
+                    &format!("{tombstoned} store(s) tombstoned — data may be under-replicated"),
+                ));
+            }
+            if down > 0 {
+                checks.push(fail("tikv down", &format!("{down} store(s) down")));
+            }
+            if offline > 0 {
+                checks.push(warn(
+                    "tikv offline",
+                    &format!("{offline} store(s) offline — regions migrating"),
+                ));
+            }
+            if tombstoned == 0 && offline == 0 && down == 0 {
+                checks.push(ok("tikv store health", "all stores Up"));
             }
         }
     }
@@ -503,18 +485,6 @@ fn ping6(addr: &Ipv6Addr) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn curl_json(url: &str) -> Option<serde_json::Value> {
-    let output = Command::new("curl")
-        .args(["-sf", "--max-time", "5", url])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        serde_json::from_slice(&output.stdout).ok()
-    } else {
-        None
-    }
 }
 
 fn disk_free_mb(path: &str) -> Option<u64> {

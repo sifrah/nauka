@@ -1017,25 +1017,10 @@ async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
         })?;
 
     let mesh_ipv6 = state.hypervisor.mesh_ipv6;
-    let pd_url = format!("http://[{}]:{}", mesh_ipv6, controlplane::PD_CLIENT_PORT);
+    let client = controlplane::pd_client::PdClient::from_mesh(&mesh_ipv6);
 
     // --- PD Members ---
-    let members_json = cp_api_get(&pd_url, "/pd/api/v1/members");
-    let health_json = cp_api_get(&pd_url, "/pd/api/v1/health");
-
-    // Build a set of healthy member IDs from the health endpoint
-    let healthy_ids: std::collections::HashSet<u64> = health_json
-        .as_ref()
-        .ok()
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|h| h["member_id"].as_u64()).collect())
-        .unwrap_or_default();
-
-    let leader_id = members_json
-        .as_ref()
-        .ok()
-        .and_then(|v| v["leader"]["member_id"].as_u64())
-        .unwrap_or(0);
+    let members_result = client.get_members();
 
     println!("\n  PD Members");
     println!(
@@ -1044,93 +1029,71 @@ async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
     );
     println!("  {}", "-".repeat(78));
 
-    if let Ok(ref val) = members_json {
-        if let Some(members) = val["members"].as_array() {
-            for m in members {
-                let name = m["name"].as_str().unwrap_or("-");
-                let client_urls = m["client_urls"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|u| u.as_str())
-                    .unwrap_or("-");
-                let mid = m["member_id"].as_u64().unwrap_or(0);
-                let health = if healthy_ids.contains(&mid) {
-                    "healthy"
-                } else {
-                    "unhealthy"
-                };
-                let role = if mid == leader_id {
-                    "leader"
-                } else {
-                    "follower"
-                };
-                println!("  {:<16} {:<42} {:<10} {}", name, client_urls, health, role);
-            }
+    if let Ok(ref members) = members_result {
+        for m in members {
+            let client_url = m.client_urls.first().map(|s| s.as_str()).unwrap_or("-");
+            let health = if m.is_healthy { "healthy" } else { "unhealthy" };
+            let role = if m.is_leader { "leader" } else { "follower" };
+            let name = if m.name.is_empty() { "-" } else { &m.name };
+            println!("  {:<16} {:<42} {:<10} {}", name, client_url, health, role);
         }
     } else {
         println!("  (PD API unreachable)");
     }
 
     // --- TiKV Stores ---
-    let stores_json = cp_api_get(&pd_url, "/pd/api/v1/stores");
+    let stores_result = client.get_stores();
 
     println!("\n  TiKV Stores");
     println!("  {:<8} {:<42} {:<12} CAPACITY", "ID", "ADDRESS", "STATE");
     println!("  {}", "-".repeat(72));
 
-    if let Ok(ref val) = stores_json {
-        if let Some(stores) = val["stores"].as_array() {
-            for s in stores {
-                let id = s["store"]["id"].as_u64().unwrap_or(0);
-                let addr = s["store"]["address"].as_str().unwrap_or("-");
-                let state_name = s["store"]["state_name"].as_str().unwrap_or("-");
-                let capacity = s["status"]["capacity"].as_str().unwrap_or("-");
-                println!("  {:<8} {:<42} {:<12} {}", id, addr, state_name, capacity);
-            }
+    if let Ok(ref stores) = stores_result {
+        for s in stores {
+            let addr = if s.address.is_empty() {
+                "-"
+            } else {
+                &s.address
+            };
+            let state_name = if s.state_name.is_empty() {
+                "-"
+            } else {
+                &s.state_name
+            };
+            let capacity = if s.capacity.is_empty() {
+                "-"
+            } else {
+                &s.capacity
+            };
+            println!("  {:<8} {:<42} {:<12} {}", s.id, addr, state_name, capacity);
         }
     } else {
         println!("  (PD API unreachable)");
     }
 
     // --- Region Stats ---
-    let regions_json = cp_api_get(&pd_url, "/pd/api/v1/stats/region");
+    let stats_result = client.get_region_stats();
 
     println!("\n  Region Stats");
     println!("  {}", "-".repeat(40));
 
-    if let Ok(ref val) = regions_json {
-        let count = val["count"].as_u64().unwrap_or(0);
-        let empty = val["empty_count"].as_u64().unwrap_or(0);
-        let miss_peer = val["miss_peer_region_count"].as_u64().unwrap_or(0);
-        let extra_peer = val["extra_peer_region_count"].as_u64().unwrap_or(0);
-        let healthy = count.saturating_sub(miss_peer).saturating_sub(extra_peer);
+    if let Ok(ref stats) = stats_result {
+        let healthy = stats
+            .count
+            .saturating_sub(stats.miss_peer)
+            .saturating_sub(stats.extra_peer);
 
-        println!("  Total:      {count}");
+        println!("  Total:      {}", stats.count);
         println!("  Healthy:    {healthy}");
-        println!("  Empty:      {empty}");
-        println!("  Miss-peer:  {miss_peer}");
-        println!("  Extra-peer: {extra_peer}");
+        println!("  Empty:      {}", stats.empty_count);
+        println!("  Miss-peer:  {}", stats.miss_peer);
+        println!("  Extra-peer: {}", stats.extra_peer);
     } else {
         println!("  (PD API unreachable)");
     }
 
     println!();
     Ok(OperationResponse::None)
-}
-
-/// Query PD HTTP API (used by cp-status handler).
-fn cp_api_get(pd_url: &str, path: &str) -> Result<serde_json::Value, anyhow::Error> {
-    let url = format!("{pd_url}{path}");
-    let output = std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "5", &url])
-        .output()
-        .map_err(|e| anyhow::anyhow!("curl failed: {e}"))?;
-
-    if !output.status.success() {
-        anyhow::bail!("PD API request failed: {path}");
-    }
-
-    serde_json::from_slice(&output.stdout).map_err(|e| anyhow::anyhow!("PD API parse failed: {e}"))
 }
 
 async fn handle_upgrade_check() -> anyhow::Result<OperationResponse> {
