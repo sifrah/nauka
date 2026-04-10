@@ -197,6 +197,8 @@ filename = "/var/log/nauka/tikv.log"
 max-size = 50
 
 [raftstore]
+# Fsync WAL on every write — prevents data loss on crash
+sync-log = true
 # Reduce resource usage for small clusters
 capacity = "0"
 "#,
