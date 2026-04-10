@@ -201,6 +201,11 @@ pub fn resource_def() -> ResourceDef {
             op.with_output(OutputKind::Message)
                 .with_example("nauka hypervisor backup-list")
         })
+        .action("upgrade-check", "Check TiKV/PD versions and upgrade readiness")
+        .op(|op| {
+            op.with_output(OutputKind::Message)
+                .with_example("nauka hypervisor upgrade-check")
+        })
         .action("doctor", "Diagnose hypervisor health")
         .action("announce-listen", "Run the announce listener (internal)")
         .op(|op| {
@@ -257,6 +262,7 @@ pub fn handler() -> HandlerFn {
                 "peering" => handle_peering(req).await,
                 "backup" => handle_backup().await,
                 "backup-list" => handle_backup_list().await,
+                "upgrade-check" => handle_upgrade_check().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
                 "drain" => Ok(OperationResponse::Message("drain: not yet implemented".into())),
@@ -960,6 +966,77 @@ async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
     }
 
     Ok(OperationResponse::Message(lines.join("\n")))
+}
+
+async fn handle_upgrade_check() -> anyhow::Result<OperationResponse> {
+    let mut lines = Vec::new();
+
+    lines.push("  Component versions:".to_string());
+    lines.push(String::new());
+
+    // Expected versions
+    let expected_pd = controlplane::PD_VERSION;
+    let expected_tikv = controlplane::TIKV_VERSION;
+
+    // Installed versions
+    let installed_pd = controlplane::service::installed_pd_version();
+    let installed_tikv = controlplane::service::installed_tikv_version();
+
+    let pd_match = installed_pd.as_deref() == Some(expected_pd);
+    let tikv_match = installed_tikv.as_deref() == Some(expected_tikv);
+
+    let pd_installed = installed_pd.as_deref().unwrap_or("not installed");
+    let tikv_installed = installed_tikv.as_deref().unwrap_or("not installed");
+
+    let pd_icon = if pd_match {
+        "\x1b[32m✓\x1b[0m"
+    } else {
+        "\x1b[33m!\x1b[0m"
+    };
+    let tikv_icon = if tikv_match {
+        "\x1b[32m✓\x1b[0m"
+    } else {
+        "\x1b[33m!\x1b[0m"
+    };
+
+    lines.push(format!(
+        "    {pd_icon} PD     installed: {pd_installed:<12} expected: {expected_pd}"
+    ));
+    lines.push(format!(
+        "    {tikv_icon} TiKV   installed: {tikv_installed:<12} expected: {expected_tikv}"
+    ));
+
+    // Service status
+    lines.push(String::new());
+    lines.push("  Service status:".to_string());
+    lines.push(String::new());
+
+    let pd_active = controlplane::service::pd_is_active();
+    let tikv_active = controlplane::service::tikv_is_active();
+    lines.push(format!(
+        "    PD:   {}",
+        if pd_active { "running" } else { "stopped" }
+    ));
+    lines.push(format!(
+        "    TiKV: {}",
+        if tikv_active { "running" } else { "stopped" }
+    ));
+
+    // Verdict
+    lines.push(String::new());
+    if pd_match && tikv_match {
+        lines.push(
+            "  \x1b[32mAll components at expected versions. No upgrade needed.\x1b[0m".to_string(),
+        );
+    } else {
+        lines
+            .push("  \x1b[33mVersion mismatch detected. Upgrade may be needed.\x1b[0m".to_string());
+        lines.push("  Rolling upgrade orchestration is not yet implemented.".to_string());
+    }
+
+    let output = lines.join("\n");
+    eprintln!("{output}");
+    Ok(OperationResponse::None)
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
