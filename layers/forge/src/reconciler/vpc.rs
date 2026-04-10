@@ -46,14 +46,25 @@ impl super::Reconciler for VpcReconciler {
         let actual_bridges = crate::observer::network::list_bridges();
         result.actual = actual_bridges.len();
 
-        // 4. Create missing bridges
+        // 4. Create missing bridges + verify VXLAN interfaces
         for (vpc_id, vni) in &needed_vpcs {
             let expected_bridge = provision::bridge_name(vpc_id);
-            if !actual_bridges.iter().any(|b| b == &expected_bridge) {
+            let expected_vxlan = provision::vxlan_name(vpc_id);
+            let bridge_missing = !actual_bridges.iter().any(|b| b == &expected_bridge);
+            let vxlan_missing = !crate::observer::network::iface_exists(&expected_vxlan);
+
+            if bridge_missing || vxlan_missing {
+                if vxlan_missing && !bridge_missing {
+                    tracing::info!(
+                        vpc_id,
+                        vxlan = expected_vxlan.as_str(),
+                        "VXLAN interface missing — recreating"
+                    );
+                }
                 match provision::ensure_bridge(vpc_id, *vni, &ctx.mesh_ipv6) {
                     Ok(()) => result.created += 1,
                     Err(e) => {
-                        tracing::error!(vpc_id, error = %e, "failed to create bridge");
+                        tracing::error!(vpc_id, error = %e, "failed to create bridge/vxlan");
                         result.failed += 1;
                         result.errors.push(format!("vpc {vpc_id}: {e}"));
                     }
