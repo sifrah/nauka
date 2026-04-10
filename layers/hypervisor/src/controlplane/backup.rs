@@ -110,7 +110,10 @@ fn s3_upload(config: &RegionStorage, local_path: &str, s3_key: &str) -> Result<(
     // -s suppresses progress, --fail-with-body returns non-zero on HTTP errors
     // while still capturing the response body for diagnostics.
     // UNSIGNED-PAYLOAD avoids content-hash mismatch on large files.
+    // Credentials are passed via env vars so they don't appear in `ps aux`.
     let output = Command::new("curl")
+        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
+        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
         .args([
             "-s",
             "--fail-with-body",
@@ -125,7 +128,7 @@ fn s3_upload(config: &RegionStorage, local_path: &str, s3_key: &str) -> Result<(
             "--aws-sigv4",
             &format!("aws:amz:{region}:s3"),
             "-u",
-            &format!("{}:{}", config.s3_access_key, config.s3_secret_key),
+            ":",
             &url,
         ])
         .output()
@@ -158,7 +161,10 @@ fn s3_list(config: &RegionStorage, prefix: &str) -> Result<String, NaukaError> {
 
     let url = format!("{endpoint}/{bucket}?prefix={prefix}&list-type=2");
 
+    // Credentials are passed via env vars so they don't appear in `ps aux`.
     let output = Command::new("curl")
+        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
+        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
         .args([
             "-sf",
             "--max-time",
@@ -166,7 +172,7 @@ fn s3_list(config: &RegionStorage, prefix: &str) -> Result<String, NaukaError> {
             "--aws-sigv4",
             &format!("aws:amz:{region}:s3"),
             "-u",
-            &format!("{}:{}", config.s3_access_key, config.s3_secret_key),
+            ":",
             &url,
         ])
         .output()
@@ -196,7 +202,10 @@ fn s3_delete(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
 
     let url = format!("{endpoint}/{bucket}/{s3_key}");
 
+    // Credentials are passed via env vars so they don't appear in `ps aux`.
     let output = Command::new("curl")
+        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
+        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
         .args([
             "-sf",
             "--max-time",
@@ -206,7 +215,7 @@ fn s3_delete(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
             "--aws-sigv4",
             &format!("aws:amz:{region}:s3"),
             "-u",
-            &format!("{}:{}", config.s3_access_key, config.s3_secret_key),
+            ":",
             &url,
         ])
         .output()
