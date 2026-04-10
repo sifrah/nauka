@@ -18,30 +18,31 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#16 id=16 data-nosnippet>16</a>    stdout
 <a href=#17 id=17 data-nosnippet>17</a>        .lines()
 <a href=#18 id=18 data-nosnippet>18</a>        .filter_map(|line| {
-<a href=#19 id=19 data-nosnippet>19</a>            <span class="comment">// Format: "N: nkb-abc123: &lt;...&gt;"
-<a href=#20 id=20 data-nosnippet>20</a>            </span><span class="kw">let </span>name = line.split(<span class="string">':'</span>).nth(<span class="number">1</span>)<span class="question-mark">?</span>.trim();
-<a href=#21 id=21 data-nosnippet>21</a>            <span class="kw">if </span>name.starts_with(<span class="string">"nkb-"</span>) {
-<a href=#22 id=22 data-nosnippet>22</a>                <span class="prelude-val">Some</span>(name.to_string())
-<a href=#23 id=23 data-nosnippet>23</a>            } <span class="kw">else </span>{
-<a href=#24 id=24 data-nosnippet>24</a>                <span class="prelude-val">None
-<a href=#25 id=25 data-nosnippet>25</a>            </span>}
-<a href=#26 id=26 data-nosnippet>26</a>        })
-<a href=#27 id=27 data-nosnippet>27</a>        .collect()
-<a href=#28 id=28 data-nosnippet>28</a>}
-<a href=#29 id=29 data-nosnippet>29</a>
-<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// Check if any network interface exists by name.
-<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub fn </span>iface_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#32 id=32 data-nosnippet>32</a>    bridge_exists(name)
-<a href=#33 id=33 data-nosnippet>33</a>}
-<a href=#34 id=34 data-nosnippet>34</a>
-<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// Check if a specific bridge interface exists.
-<a href=#36 id=36 data-nosnippet>36</a></span><span class="kw">pub fn </span>bridge_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#37 id=37 data-nosnippet>37</a>    Command::new(<span class="string">"ip"</span>)
-<a href=#38 id=38 data-nosnippet>38</a>        .args([<span class="string">"link"</span>, <span class="string">"show"</span>, name])
-<a href=#39 id=39 data-nosnippet>39</a>        .stdout(std::process::Stdio::null())
-<a href=#40 id=40 data-nosnippet>40</a>        .stderr(std::process::Stdio::null())
-<a href=#41 id=41 data-nosnippet>41</a>        .status()
-<a href=#42 id=42 data-nosnippet>42</a>        .map(|s| s.success())
-<a href=#43 id=43 data-nosnippet>43</a>        .unwrap_or(<span class="bool-val">false</span>)
-<a href=#44 id=44 data-nosnippet>44</a>}
+<a href=#19 id=19 data-nosnippet>19</a>            <span class="comment">// Format: "N: nkb-abc123: &lt;...&gt;" or "N: nkb-abc123@if1: &lt;...&gt;"
+<a href=#20 id=20 data-nosnippet>20</a>            </span><span class="kw">let </span>raw = line.split(<span class="string">':'</span>).nth(<span class="number">1</span>)<span class="question-mark">?</span>.trim();
+<a href=#21 id=21 data-nosnippet>21</a>            <span class="kw">let </span>name = raw.split(<span class="string">'@'</span>).next().unwrap_or(raw);
+<a href=#22 id=22 data-nosnippet>22</a>            <span class="kw">if </span>name.starts_with(<span class="string">"nkb-"</span>) {
+<a href=#23 id=23 data-nosnippet>23</a>                <span class="prelude-val">Some</span>(name.to_string())
+<a href=#24 id=24 data-nosnippet>24</a>            } <span class="kw">else </span>{
+<a href=#25 id=25 data-nosnippet>25</a>                <span class="prelude-val">None
+<a href=#26 id=26 data-nosnippet>26</a>            </span>}
+<a href=#27 id=27 data-nosnippet>27</a>        })
+<a href=#28 id=28 data-nosnippet>28</a>        .collect()
+<a href=#29 id=29 data-nosnippet>29</a>}
+<a href=#30 id=30 data-nosnippet>30</a>
+<a href=#31 id=31 data-nosnippet>31</a><span class="doccomment">/// Check if any network interface exists by name.
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="kw">pub fn </span>iface_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#33 id=33 data-nosnippet>33</a>    bridge_exists(name)
+<a href=#34 id=34 data-nosnippet>34</a>}
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="doccomment">/// Check if a specific bridge interface exists.
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">pub fn </span>bridge_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#38 id=38 data-nosnippet>38</a>    Command::new(<span class="string">"ip"</span>)
+<a href=#39 id=39 data-nosnippet>39</a>        .args([<span class="string">"link"</span>, <span class="string">"show"</span>, name])
+<a href=#40 id=40 data-nosnippet>40</a>        .stdout(std::process::Stdio::null())
+<a href=#41 id=41 data-nosnippet>41</a>        .stderr(std::process::Stdio::null())
+<a href=#42 id=42 data-nosnippet>42</a>        .status()
+<a href=#43 id=43 data-nosnippet>43</a>        .map(|s| s.success())
+<a href=#44 id=44 data-nosnippet>44</a>        .unwrap_or(<span class="bool-val">false</span>)
+<a href=#45 id=45 data-nosnippet>45</a>}
 </code></pre></div></section></main></body></html>
