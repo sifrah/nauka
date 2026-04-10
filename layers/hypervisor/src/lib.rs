@@ -11,6 +11,7 @@
 
 pub mod compute_setup;
 pub mod controlplane;
+pub mod detect;
 pub mod doctor;
 pub mod fabric;
 pub mod handlers;
