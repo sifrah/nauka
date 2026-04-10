@@ -67,6 +67,9 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
                 // Give TiKV time to start and register with PD
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
+
+            // Phase 4: remove zombie PD members (unhealthy >5 min)
+            reconciler::pd::cleanup_zombie_members(&state.hypervisor.mesh_ipv6);
         }
     }
 

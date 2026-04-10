@@ -4,6 +4,7 @@
 //! The `run_all` function executes them in dependency order.
 
 pub mod natgw;
+pub mod pd;
 pub mod vm;
 pub mod vpc;
 
