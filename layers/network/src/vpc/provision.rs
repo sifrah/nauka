@@ -187,9 +187,24 @@ pub fn ensure_bridge(vpc_id: &str, vni: u32, local_ipv6: &Ipv6Addr) -> anyhow::R
 /// originating from the host itself. This prevents the hypervisor
 /// from accessing tenant networks.
 fn ensure_host_isolation(bridge: &str) {
+    ensure_host_isolation_all(&[bridge.to_string()]);
+}
+
+/// Rebuild the nftables output chain with host isolation rules for all bridges.
+///
+/// Idempotent: flushes and recreates the chain with the correct rules.
+/// Called by the forge reconciler on every cycle to ensure isolation is always active.
+pub fn ensure_host_isolation_all(bridges: &[String]) {
     // Create the nauka table if it doesn't exist
     let _ = Command::new("nft")
         .args(["add", "table", "inet", "nauka"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Delete and recreate output chain to avoid duplicate rules
+    let _ = Command::new("nft")
+        .args(["delete", "chain", "inet", "nauka", "output"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
@@ -207,13 +222,49 @@ fn ensure_host_isolation(bridge: &str) {
         .stderr(std::process::Stdio::null())
         .status();
 
-    // Block host → VPC bridge traffic (but allow bridge forwarding for VM-to-VM)
-    let rule = format!("oifname {bridge} drop");
+    // Allow established/related (for DNS responses, etc.)
     let _ = Command::new("nft")
-        .args(["add", "rule", "inet", "nauka", "output", &rule])
+        .args([
+            "add",
+            "rule",
+            "inet",
+            "nauka",
+            "output",
+            "oifname \"nkb-*\" ct state established,related accept",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+
+    // Allow DNS responses from host (bridge acts as DNS resolver for VMs)
+    for proto in &["udp", "tcp"] {
+        let rule = format!("oifname \"nkb-*\" {proto} sport 53 accept");
+        let _ = Command::new("nft")
+            .args(["add", "rule", "inet", "nauka", "output", &rule])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    // Allow ICMPv6 neighbor discovery (needed for IPv6 peering)
+    let _ = Command::new("nft")
+        .args([
+            "add", "rule", "inet", "nauka", "output",
+            "oifname \"nkb-*\" icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Drop all other host → bridge traffic per bridge
+    for bridge in bridges {
+        let rule = format!("oifname {bridge} drop");
+        let _ = Command::new("nft")
+            .args(["add", "rule", "inet", "nauka", "output", &rule])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// Ensure VPC peering route leak between two VRFs.
