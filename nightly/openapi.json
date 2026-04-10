@@ -149,6 +149,15 @@
         ]
       }
     },
+    "/admin/v1/hypervisors/upgrade": {
+      "post": {
+        "operationId": "hypervisor_upgrade",
+        "summary": "Rolling upgrade of PD/TiKV on this node",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
     "/admin/v1/hypervisors/upgrade-check": {
       "post": {
         "operationId": "hypervisor_upgrade-check",
