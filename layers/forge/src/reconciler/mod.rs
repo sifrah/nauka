@@ -5,6 +5,7 @@
 
 pub mod natgw;
 pub mod pd;
+pub mod store;
 pub mod vm;
 pub mod vpc;
 
@@ -26,6 +27,7 @@ pub trait Reconciler: Send + Sync {
 /// then VMs.
 pub async fn run_all(ctx: &ReconcileContext) -> Vec<ReconcileResult> {
     let reconcilers: Vec<Box<dyn Reconciler>> = vec![
+        Box::new(store::StoreReconciler),
         Box::new(vpc::VpcReconciler),
         Box::new(natgw::NatGwReconciler),
         Box::new(vm::VmReconciler),
