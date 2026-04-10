@@ -1,10 +1,13 @@
 //! Controlplane backup — tar.gz snapshots of PD/TiKV data to S3.
 //!
-//! Creates compressed archives of PD and TiKV data directories
-//! and uploads them to the configured S3 bucket with timestamped keys.
+//! Two modes:
+//! - **Cold** (default): stop the service, tar quiescent data, restart.
+//!   Guarantees a consistent snapshot at the cost of brief downtime.
+//! - **Hot** (`--hot`): tar while the service is running.
+//!   The archive may contain torn writes but avoids any downtime.
 
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nauka_core::error::NaukaError;
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,76 @@ const PD_DATA_DIR: &str = "/var/lib/nauka/pd";
 const TIKV_DATA_DIR: &str = "/var/lib/nauka/tikv";
 const BACKUP_TMP_DIR: &str = "/tmp/nauka-backup";
 const TIKV_MASTER_KEY_PATH: &str = "/etc/nauka/tikv-master-key";
+
+const PD_SERVICE: &str = "nauka-pd";
+const TIKV_SERVICE: &str = "nauka-tikv";
+
+// ═══════════════════════════════════════════════════
+// systemctl helpers
+// ═══════════════════════════════════════════════════
+
+fn run_systemctl(args: &[&str]) -> Result<(), NaukaError> {
+    let output = Command::new("systemctl")
+        .args(args)
+        .output()
+        .map_err(|e| NaukaError::internal(format!("systemctl failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NaukaError::internal(format!(
+            "systemctl {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Drop guard that restarts a systemd service when dropped.
+///
+/// Guarantees the service comes back up even if archiving or upload panics/fails.
+struct ServiceGuard {
+    service: &'static str,
+    stopped_at: Instant,
+}
+
+impl ServiceGuard {
+    /// Stop `service` and return a guard that will restart it on drop.
+    fn stop(service: &'static str) -> Result<Self, NaukaError> {
+        tracing::info!("stopping {service} for consistent backup");
+        run_systemctl(&["stop", service])?;
+        Ok(Self {
+            service,
+            stopped_at: Instant::now(),
+        })
+    }
+
+    /// Explicitly restart the service and log the downtime.
+    /// Returns the downtime duration.
+    fn restart(self) -> Result<std::time::Duration, NaukaError> {
+        let dt = self.stopped_at.elapsed();
+        tracing::info!("restarting {} (downtime: {:.1}s)", self.service, dt.as_secs_f64());
+        run_systemctl(&["start", self.service])?;
+        // Prevent the Drop impl from running a second start.
+        std::mem::forget(self);
+        Ok(dt)
+    }
+}
+
+impl Drop for ServiceGuard {
+    fn drop(&mut self) {
+        let dt = self.stopped_at.elapsed();
+        tracing::warn!(
+            "ServiceGuard dropped — force-restarting {} (downtime: {:.1}s)",
+            self.service,
+            dt.as_secs_f64()
+        );
+        let _ = Command::new("systemctl")
+            .args(["start", self.service])
+            .status();
+    }
+}
 
 /// Info about a backup stored in S3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +128,11 @@ fn timestamp_label() -> String {
 }
 
 /// Create a tar.gz archive of a directory.
-fn create_archive(data_dir: &str, archive_path: &str) -> Result<(), NaukaError> {
+///
+/// When `hot` is true, tolerate tar exit-code 1 ("files changed during read")
+/// and suppress the corresponding warning. When false (cold backup), the
+/// service is already stopped so any failure is a real error.
+fn create_archive(data_dir: &str, archive_path: &str, hot: bool) -> Result<(), NaukaError> {
     std::fs::create_dir_all(BACKUP_TMP_DIR)
         .map_err(|e| NaukaError::internal(format!("failed to create tmp dir: {e}")))?;
 
@@ -65,22 +142,26 @@ fn create_archive(data_dir: &str, archive_path: &str) -> Result<(), NaukaError> 
         )));
     }
 
+    let mut args = vec!["czf", archive_path];
+    if hot {
+        args.push("--warning=no-file-changed");
+    }
+    args.extend_from_slice(&["-C", data_dir, "."]);
+
     let output = Command::new("tar")
-        .args([
-            "czf",
-            archive_path,
-            "--warning=no-file-changed",
-            "-C",
-            data_dir,
-            ".",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| NaukaError::internal(format!("tar failed: {e}")))?;
 
-    // tar exit code 1 means "some files changed during archiving" which is
-    // expected for live PD/TiKV data. Only fail on exit code 2+ (real errors).
-    if let Some(code) = output.status.code() {
-        if code >= 2 {
+    if hot {
+        // tar exit code 1 means "some files changed during archiving" which is
+        // expected for live PD/TiKV data. Only fail on exit code 2+ (real errors).
+        if let Some(code) = output.status.code() {
+            if code >= 2 {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(NaukaError::internal(format!("tar failed: {stderr}")));
+            }
+        } else if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NaukaError::internal(format!("tar failed: {stderr}")));
         }
@@ -353,16 +434,35 @@ fn s3_download(config: &RegionStorage, s3_key: &str, local_path: &str) -> Result
 
 /// Create a snapshot of the PD data directory, encrypt, and upload to S3.
 ///
+/// When `hot` is false (default), PD is stopped before archiving and restarted
+/// afterwards. The `ServiceGuard` guarantees restart even on error/panic.
+///
 /// Returns the S3 key of the uploaded backup.
-pub fn backup_pd(config: &RegionStorage) -> Result<String, NaukaError> {
+pub fn backup_pd(config: &RegionStorage, hot: bool) -> Result<String, NaukaError> {
     let ts = timestamp_label();
     let archive_name = format!("pd-snapshot-{ts}.tar.gz");
     let archive_path = format!("{BACKUP_TMP_DIR}/{archive_name}");
     let s3_key = format!("backups/pd/{archive_name}.enc");
 
-    tracing::info!("creating PD backup: {s3_key}");
+    let mode = if hot { "hot" } else { "cold" };
+    tracing::info!("creating PD backup ({mode}): {s3_key}");
 
-    create_archive(PD_DATA_DIR, &archive_path)?;
+    // Stop PD for a consistent snapshot (guard restarts on drop).
+    let guard = if hot {
+        None
+    } else {
+        Some(ServiceGuard::stop(PD_SERVICE)?)
+    };
+
+    create_archive(PD_DATA_DIR, &archive_path, hot)?;
+
+    // Restart PD immediately — upload can happen while it recovers.
+    if let Some(g) = guard {
+        let dt = g.restart()?;
+        tracing::info!("PD downtime for backup: {:.1}s", dt.as_secs_f64());
+    }
+
+    create_archive(PD_DATA_DIR, &archive_path, hot)?;
     let enc_path = encrypt_archive(&archive_path)?;
     s3_upload(config, &enc_path, &s3_key)?;
 
@@ -375,16 +475,36 @@ pub fn backup_pd(config: &RegionStorage) -> Result<String, NaukaError> {
 
 /// Create a snapshot of the TiKV data directory, encrypt, and upload to S3.
 ///
+/// When `hot` is false (default), TiKV is stopped before archiving and
+/// restarted afterwards. The `ServiceGuard` guarantees restart even on
+/// error/panic.
+///
 /// Returns the S3 key of the uploaded backup.
-pub fn backup_tikv(config: &RegionStorage) -> Result<String, NaukaError> {
+pub fn backup_tikv(config: &RegionStorage, hot: bool) -> Result<String, NaukaError> {
     let ts = timestamp_label();
     let archive_name = format!("tikv-snapshot-{ts}.tar.gz");
     let archive_path = format!("{BACKUP_TMP_DIR}/{archive_name}");
     let s3_key = format!("backups/tikv/{archive_name}.enc");
 
-    tracing::info!("creating TiKV backup: {s3_key}");
+    let mode = if hot { "hot" } else { "cold" };
+    tracing::info!("creating TiKV backup ({mode}): {s3_key}");
 
-    create_archive(TIKV_DATA_DIR, &archive_path)?;
+    // Stop TiKV for a consistent snapshot (guard restarts on drop).
+    let guard = if hot {
+        None
+    } else {
+        Some(ServiceGuard::stop(TIKV_SERVICE)?)
+    };
+
+    create_archive(TIKV_DATA_DIR, &archive_path, hot)?;
+
+    // Restart TiKV immediately — upload can happen while it recovers.
+    if let Some(g) = guard {
+        let dt = g.restart()?;
+        tracing::info!("TiKV downtime for backup: {:.1}s", dt.as_secs_f64());
+    }
+
+    create_archive(TIKV_DATA_DIR, &archive_path, hot)?;
     let enc_path = encrypt_archive(&archive_path)?;
     s3_upload(config, &enc_path, &s3_key)?;
 
