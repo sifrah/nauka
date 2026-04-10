@@ -22,7 +22,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#20 id=20 data-nosnippet>20</a><span class="kw">const </span>PD_DATA_DIR: <span class="kw-2">&amp;</span>str = <span class="string">"/var/lib/nauka/pd"</span>;
 <a href=#21 id=21 data-nosnippet>21</a><span class="kw">const </span>TIKV_DATA_DIR: <span class="kw-2">&amp;</span>str = <span class="string">"/var/lib/nauka/tikv"</span>;
 <a href=#22 id=22 data-nosnippet>22</a><span class="kw">const </span>PD_CONF_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/etc/nauka/pd.toml"</span>;
-<a href=#23 id=23 data-nosnippet>23</a><span class="kw">const </span>TIKV_CONF_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/etc/nauka/tikv.toml"</span>;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">pub const </span>TIKV_CONF_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/etc/nauka/tikv.toml"</span>;
 <a href=#24 id=24 data-nosnippet>24</a><span class="kw">const </span>PD_UNIT_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/etc/systemd/system/nauka-pd.service"</span>;
 <a href=#25 id=25 data-nosnippet>25</a><span class="kw">const </span>TIKV_UNIT_PATH: <span class="kw-2">&amp;</span>str = <span class="string">"/etc/systemd/system/nauka-tikv.service"</span>;
 <a href=#26 id=26 data-nosnippet>26</a>
@@ -920,7 +920,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#918 id=918 data-nosnippet>918</a>///
 <a href=#919 id=919 data-nosnippet>919</a>/// Called on leave (scale down to prevent quorum loss) and on join
 <a href=#920 id=920 data-nosnippet>920</a>/// (scale up to improve durability). Target should be
-<a href=#921 id=921 data-nosnippet>921</a>/// `min(active_stores, MAX_PD_MEMBERS)`.
+<a href=#921 id=921 data-nosnippet>921</a>/// `min(active_stores, max_pd_members)`.
 <a href=#922 id=922 data-nosnippet>922</a></span><span class="kw">pub fn </span>adjust_max_replicas(pd_url: <span class="kw-2">&amp;</span>str, target: usize) -&gt; <span class="prelude-ty">Result</span>&lt;(), NaukaError&gt; {
 <a href=#923 id=923 data-nosnippet>923</a>    <span class="kw">if </span>target == <span class="number">0 </span>{
 <a href=#924 id=924 data-nosnippet>924</a>        <span class="kw">return </span><span class="prelude-val">Ok</span>(());

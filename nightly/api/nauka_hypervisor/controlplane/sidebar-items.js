@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["PD_CLIENT_PORT","PD_PEER_PORT","PD_VERSION","TIKV_PORT","TIKV_STATUS_PORT","TIKV_VERSION"],"fn":["connect"],"mod":["backup","ops","service","store"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_PD_MEMBERS","PD_CLIENT_PORT","PD_PEER_PORT","PD_VERSION","TIKV_PORT","TIKV_STATUS_PORT","TIKV_VERSION","VALID_PD_MEMBER_COUNTS"],"fn":["connect"],"mod":["backup","ops","service","store"]};

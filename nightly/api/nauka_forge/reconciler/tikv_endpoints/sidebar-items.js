@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse_pd_endpoints","sync_pd_endpoints"]};

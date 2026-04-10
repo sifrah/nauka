@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PEERING_PORT"],"fn":["validate_pin"],"struct":["JoinRequest","JoinResponse","PeerAnnounce","PeerInfo","PeerRemove","StateChange"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PEERING_PORT"],"fn":["default_max_pd_members","validate_pin"],"struct":["JoinRequest","JoinResponse","PeerAnnounce","PeerInfo","PeerRemove","StateChange"]};
