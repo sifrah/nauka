@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["UNREACHABLE_THRESHOLD_SECS"],"struct":["StoreReconciler"]};
+window.SIDEBAR_ITEMS = {"constant":["UNREACHABLE_THRESHOLD_SECS"],"fn":["is_peer_unreachable_past_threshold","is_store_eligible_for_deregister","match_store_to_peer"],"struct":["StoreReconciler"]};

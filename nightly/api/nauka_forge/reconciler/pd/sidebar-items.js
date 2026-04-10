@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ZOMBIE_THRESHOLD"],"fn":["cleanup_zombie_members"],"static":["UNHEALTHY_SINCE"]};
+window.SIDEBAR_ITEMS = {"constant":["ZOMBIE_THRESHOLD"],"fn":["cleanup_zombie_members","should_cleanup_member","update_tracker_and_find_zombies"],"static":["UNHEALTHY_SINCE"]};
