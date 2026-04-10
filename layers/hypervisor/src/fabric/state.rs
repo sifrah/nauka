@@ -49,6 +49,14 @@ pub struct FabricState {
     /// Scheduling state (available or draining).
     #[serde(default)]
     pub node_state: NodeState,
+    /// Maximum PD (Placement Driver) members in the cluster.
+    /// Must be odd (1, 3, 5, 7). Defaults to 3.
+    #[serde(default = "default_max_pd_members")]
+    pub max_pd_members: usize,
+}
+
+fn default_max_pd_members() -> usize {
+    3
 }
 
 const STATE_TABLE: &str = "fabric";
@@ -111,6 +119,7 @@ mod tests {
             peers: PeerList::new(),
             network_mode: super::super::backend::NetworkMode::default(),
             node_state: NodeState::default(),
+            max_pd_members: 3,
         }
     }
 

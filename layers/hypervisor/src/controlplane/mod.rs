@@ -19,6 +19,12 @@ pub mod store;
 pub const PD_VERSION: &str = "v8.5.5";
 pub const TIKV_VERSION: &str = "v8.5.5";
 
+/// Default maximum PD members. Raft works best with odd numbers (3, 5, 7).
+pub const DEFAULT_MAX_PD_MEMBERS: usize = 3;
+
+/// Valid values for max PD members.
+pub const VALID_PD_MEMBER_COUNTS: &[usize] = &[1, 3, 5, 7];
+
 /// Default ports (on mesh IPv6).
 pub const PD_CLIENT_PORT: u16 = 2379;
 pub const PD_PEER_PORT: u16 = 2380;

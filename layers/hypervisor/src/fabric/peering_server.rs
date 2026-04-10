@@ -225,6 +225,7 @@ async fn handle_join(
         state.mesh.id.as_str(),
         existing_peers,
         self_info,
+        state.max_pd_members,
     );
     write_json(stream, &resp).await?;
 

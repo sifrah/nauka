@@ -48,6 +48,7 @@ fn init_node(db: &LocalDb, name: &str) -> (FabricState, String) {
         peers: PeerList::new(),
         network_mode: NetworkMode::Mock,
         node_state: nauka_hypervisor::fabric::NodeState::default(),
+        max_pd_members: 3,
     };
     state.save(db).unwrap();
 
@@ -98,6 +99,7 @@ async fn peering_join_flow() {
                 endpoint: None,
                 mesh_ipv6: state.hypervisor.mesh_ipv6,
             },
+            state.max_pd_members,
         );
         peering_server::write_json(&mut stream, &resp)
             .await

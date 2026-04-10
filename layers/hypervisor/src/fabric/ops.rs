@@ -32,6 +32,7 @@ pub struct InitConfig<'a> {
     pub endpoint: Option<String>,
     pub ipv6_block: Option<String>,
     pub ipv4_public: Option<String>,
+    pub max_pd_members: usize,
 }
 
 /// Initialize a new mesh.
@@ -90,6 +91,7 @@ pub fn init(
         peers: PeerList::new(),
         network_mode: cfg.network_mode,
         node_state: super::state::NodeState::default(),
+        max_pd_members: cfg.max_pd_members,
     };
     state
         .save(db)
@@ -449,6 +451,7 @@ pub async fn join(
         peers,
         network_mode: cfg.network_mode,
         node_state: super::state::NodeState::default(),
+        max_pd_members: response.max_pd_members,
     };
     state
         .save(db)

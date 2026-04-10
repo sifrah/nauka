@@ -247,6 +247,7 @@ mod tests {
             peers: super::super::peer::PeerList::new(),
             network_mode: super::super::backend::NetworkMode::default(),
             node_state: super::super::state::NodeState::default(),
+            max_pd_members: 3,
         };
         state.save(&db).unwrap();
 
@@ -295,6 +296,7 @@ mod tests {
             peers,
             network_mode: super::super::backend::NetworkMode::default(),
             node_state: super::super::state::NodeState::default(),
+            max_pd_members: 3,
         };
         state.save(&db).unwrap();
 

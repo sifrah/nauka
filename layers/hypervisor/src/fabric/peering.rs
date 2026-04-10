@@ -53,6 +53,13 @@ pub struct JoinResponse {
     pub peers: Vec<PeerInfo>,
     /// The accepting node's info.
     pub acceptor: Option<PeerInfo>,
+    /// Maximum PD members configured for this mesh (1, 3, 5, 7).
+    #[serde(default = "default_max_pd_members")]
+    pub max_pd_members: usize,
+}
+
+fn default_max_pd_members() -> usize {
+    3
 }
 
 /// Minimal peer information exchanged during join.
@@ -103,6 +110,7 @@ impl JoinResponse {
         mesh_id: &str,
         peers: Vec<PeerInfo>,
         acceptor: PeerInfo,
+        max_pd_members: usize,
     ) -> Self {
         Self {
             accepted: true,
@@ -112,6 +120,7 @@ impl JoinResponse {
             mesh_id: Some(mesh_id.to_string()),
             peers,
             acceptor: Some(acceptor),
+            max_pd_members,
         }
     }
 
@@ -125,6 +134,7 @@ impl JoinResponse {
             mesh_id: None,
             peers: Vec::new(),
             acceptor: None,
+            max_pd_members: 3,
         }
     }
 }
@@ -174,6 +184,7 @@ mod tests {
                 endpoint: Some("1.2.3.4:51820".into()),
                 mesh_ipv6: "fd01::1".parse().unwrap(),
             },
+            3,
         );
         assert!(resp.accepted);
         assert!(resp.secret.is_some());
@@ -213,6 +224,7 @@ mod tests {
                 endpoint: Some("5.6.7.8:51820".into()),
                 mesh_ipv6: "fd01::0".parse().unwrap(),
             },
+            5,
         );
         let json = serde_json::to_string(&resp).unwrap();
         let back: JoinResponse = serde_json::from_str(&json).unwrap();
