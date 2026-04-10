@@ -1,0 +1,99 @@
+# Nauka controlplane alert rules — Prometheus-compatible.
+#
+# PD and TiKV expose metrics on /metrics by default.
+# These rules cover quorum loss, store health, region health, and disk usage.
+#
+# PD metrics port: 2379 (same as client port)
+# TiKV metrics port: 20180
+
+groups:
+  - name: nauka_controlplane
+    rules:
+      # ── PD quorum ──────────────────────────────────────
+
+      - alert: PDLeaderMissing
+        expr: pd_cluster_status{type="leader_health"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PD leader missing for 5 minutes"
+          description: "The PD cluster has no healthy leader. Quorum may be lost."
+
+      - alert: PDMembersDegraded
+        expr: pd_cluster_status{type="member_count"} < 3
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PD member count below quorum threshold"
+          description: "PD has fewer than 3 members. The cluster cannot tolerate another failure."
+
+      # ── TiKV store health ──────────────────────────────
+
+      - alert: TiKVStoreTombstoned
+        expr: pd_cluster_status{type="store_tombstone_count"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TiKV store is tombstoned"
+          description: "One or more TiKV stores are in Tombstone state and no longer serving data."
+
+      - alert: TiKVStoreOffline
+        expr: pd_cluster_status{type="store_disconnected_count"} > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TiKV store offline for over 1 hour"
+          description: "A TiKV store has been disconnected. PD will begin migrating regions if this persists."
+
+      - alert: TiKVStoreDown
+        expr: pd_cluster_status{type="store_down_count"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TiKV store is down"
+          description: "One or more TiKV stores are marked as Down by PD."
+
+      # ── Region health ──────────────────────────────────
+
+      - alert: TiKVRegionNoLeader
+        expr: pd_regions_status{type="miss-peer-region-count"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Regions missing peers"
+          description: "Some regions have fewer replicas than expected. Data durability is at risk."
+
+      - alert: RegionReplicaCountLow
+        expr: pd_regions_status{type="extra-peer-region-count"} > 0 or pd_regions_status{type="miss-peer-region-count"} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Region replica count is abnormal"
+          description: "Regions have extra or missing peers. The scheduler may be rebalancing."
+
+      # ── Disk usage ─────────────────────────────────────
+
+      - alert: DiskUsageHigh
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.15
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage above 85%"
+          description: "Root filesystem has less than 15% free space."
+
+      - alert: DiskUsageCritical
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk usage above 95%"
+          description: "Root filesystem has less than 5% free space. TiKV may crash or refuse writes."

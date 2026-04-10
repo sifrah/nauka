@@ -302,11 +302,62 @@ fn check_controlplane(report: &mut DoctorReport, mesh_ipv6: Option<&Ipv6Addr>) {
             checks.push(warn("pd health", "could not reach PD API"));
         }
 
-        // TiKV store registration
+        // PD quorum health — are all members healthy?
+        let members_url = format!("{pd_url}/pd/api/v1/members");
+        if let Some(body) = curl_json(&members_url) {
+            if let Some(members) = body["members"].as_array() {
+                let total = members.len();
+                if total < 3 {
+                    checks.push(warn(
+                        "pd quorum",
+                        &format!("only {total} member(s) — need 3 for fault tolerance"),
+                    ));
+                } else {
+                    checks.push(ok("pd quorum", &format!("{total} members — quorum intact")));
+                }
+            }
+        }
+
+        // TiKV store registration + health
         let stores_url = format!("{pd_url}/pd/api/v1/stores");
         if let Some(body) = curl_json(&stores_url) {
             let count = body["count"].as_u64().unwrap_or(0);
             checks.push(ok("tikv stores", &format!("{count} registered")));
+
+            // Check for tombstoned or offline stores
+            if let Some(stores) = body["stores"].as_array() {
+                let mut tombstoned = 0u64;
+                let mut offline = 0u64;
+                let mut down = 0u64;
+                for store in stores {
+                    if let Some(state) = store["store"]["state_name"].as_str() {
+                        match state {
+                            "Tombstone" => tombstoned += 1,
+                            "Offline" => offline += 1,
+                            "Down" => down += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                if tombstoned > 0 {
+                    checks.push(fail(
+                        "tikv tombstoned",
+                        &format!("{tombstoned} store(s) tombstoned — data may be under-replicated"),
+                    ));
+                }
+                if down > 0 {
+                    checks.push(fail("tikv down", &format!("{down} store(s) down")));
+                }
+                if offline > 0 {
+                    checks.push(warn(
+                        "tikv offline",
+                        &format!("{offline} store(s) offline — regions migrating"),
+                    ));
+                }
+                if tombstoned == 0 && offline == 0 && down == 0 {
+                    checks.push(ok("tikv store health", "all stores Up"));
+                }
+            }
         }
     }
 }
