@@ -62,7 +62,9 @@ pub fn run_if_due(cycle: u64, mesh_ipv6: &Ipv6Addr) -> bool {
 
     // Update consecutive failure tracker
     let consecutive = {
-        let mut guard = CONSECUTIVE_FAILURES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = CONSECUTIVE_FAILURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if status == HealthStatus::Healthy {
             *guard = 0;
         } else {
