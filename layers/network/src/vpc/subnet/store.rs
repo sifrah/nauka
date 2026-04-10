@@ -34,7 +34,7 @@ impl SubnetStore {
         let subnet_net = crate::validate::subnet_within_vpc(cidr, &vpc.cidr)?;
 
         // Check overlap with existing subnets
-        let existing_subs = self.list(Some(&vpc.meta.name), None).await?;
+        let existing_subs = self.list(Some(&vpc.meta.id), None).await?;
         let existing_cidrs: Vec<String> = existing_subs.iter().map(|s| s.cidr.clone()).collect();
         crate::validate::no_overlap(&subnet_net, &existing_cidrs)?;
 
