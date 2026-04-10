@@ -348,7 +348,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#346 id=346 data-nosnippet>346</a>}
 <a href=#347 id=347 data-nosnippet>347</a>
 <a href=#348 id=348 data-nosnippet>348</a><span class="doccomment">/// Generate an OCI runtime spec (config.json) for the container.
-<a href=#349 id=349 data-nosnippet>349</a></span><span class="kw">fn </span>generate_oci_config(config: <span class="kw-2">&amp;</span>VmRunConfig, has_tini: bool) -&gt; String {
+<a href=#349 id=349 data-nosnippet>349</a></span><span class="kw">pub fn </span>generate_oci_config(config: <span class="kw-2">&amp;</span>VmRunConfig, has_tini: bool) -&gt; String {
 <a href=#350 id=350 data-nosnippet>350</a>    <span class="kw">let </span>args: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = <span class="kw">if </span>has_tini {
 <a href=#351 id=351 data-nosnippet>351</a>        <span class="macro">vec!</span>[<span class="string">"/usr/bin/tini"</span>, <span class="string">"--"</span>, <span class="string">"/bin/sh"</span>, <span class="string">"/nauka-init.sh"</span>]
 <a href=#352 id=352 data-nosnippet>352</a>    } <span class="kw">else </span>{
