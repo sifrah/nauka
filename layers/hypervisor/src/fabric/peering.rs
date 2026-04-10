@@ -31,6 +31,9 @@ pub struct JoinRequest {
     pub endpoint: Option<String>,
     /// PIN for auto-accept (if provided).
     pub pin: Option<String>,
+    /// Trace ID for distributed log correlation.
+    #[serde(default)]
+    pub trace_id: Option<String>,
 }
 
 /// A join response sent by the target node.
@@ -151,11 +154,13 @@ mod tests {
             wg_port: 51820,
             endpoint: Some("1.2.3.4:51820".into()),
             pin: Some("4829".into()),
+            trace_id: Some("abcdef0123456789".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: JoinRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "node-2");
         assert_eq!(back.pin, Some("4829".into()));
+        assert_eq!(back.trace_id, Some("abcdef0123456789".into()));
     }
 
     #[test]
@@ -269,5 +274,14 @@ mod tests {
         };
         assert_eq!(p.name, "n1");
         assert!(p.endpoint.is_none());
+    }
+
+    #[test]
+    fn join_request_backward_compat_no_trace_id() {
+        // Old clients won't send trace_id — serde(default) should handle it
+        let json = r#"{"name":"old-node","region":"eu","zone":"fsn1","wg_public_key":"k","wg_port":51820,"endpoint":null,"pin":null}"#;
+        let req: JoinRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "old-node");
+        assert!(req.trace_id.is_none());
     }
 }

@@ -13,16 +13,28 @@ use super::ResourceDef;
 /// Dispatch a parsed CLI invocation to the appropriate resource handler.
 ///
 /// Pipeline:
-/// 1. Extract raw values from clap matches
-/// 2. Validate constraints → produce ValidatedRequest
-/// 3. Handle confirmation prompt
-/// 4. Call handler
-/// 5. Render output
+/// 1. Generate trace ID and open a tracing span
+/// 2. Extract raw values from clap matches
+/// 3. Validate constraints → produce ValidatedRequest
+/// 4. Handle confirmation prompt
+/// 5. Call handler
+/// 6. Render output
 pub async fn dispatch(
     reg: &ResourceRegistration,
     op_name: &str,
     matches: &ArgMatches,
 ) -> anyhow::Result<()> {
+    let trace_id = crate::logging::generate_trace_id();
+    let _span = tracing::info_span!(
+        "dispatch",
+        trace_id = %trace_id,
+        resource = reg.def.identity.kind,
+        op = op_name,
+    )
+    .entered();
+
+    tracing::info!("operation started");
+
     // Check if op_name is a child resource (e.g., "project" under "org")
     if let Some(child) = reg
         .children

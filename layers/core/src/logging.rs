@@ -27,11 +27,34 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rand::RngCore;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::config::LoggingConfig;
+
+// ═══════════════════════════════════════════════════
+// Trace ID generation
+// ═══════════════════════════════════════════════════
+
+/// Generate a random 16-character hex trace ID for correlating log lines
+/// across a single CLI operation or across nodes via the peering protocol.
+///
+/// ```
+/// let id = nauka_core::logging::generate_trace_id();
+/// assert_eq!(id.len(), 16);
+/// assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+/// ```
+pub fn generate_trace_id() -> String {
+    let mut buf = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf.iter().fold(String::with_capacity(16), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
 
 // ═══════════════════════════════════════════════════
 // 7. Log metrics — atomic counters
@@ -453,5 +476,20 @@ mod tests {
         install_panic_hook();
         // Restore default to not affect other tests
         let _ = std::panic::take_hook();
+    }
+
+    // Trace ID generation
+    #[test]
+    fn trace_id_is_16_hex_chars() {
+        let id = generate_trace_id();
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn trace_id_is_unique() {
+        let a = generate_trace_id();
+        let b = generate_trace_id();
+        assert_ne!(a, b);
     }
 }

@@ -318,6 +318,9 @@ pub async fn join(
     // We need a temporary keypair to send in the request
     let (wg_private, wg_public) = nauka_core::crypto::generate_wg_keypair();
 
+    let trace_id = nauka_core::logging::generate_trace_id();
+    tracing::info!(trace_id = %trace_id, target = cfg.target, "sending join request");
+
     let request = super::peering::JoinRequest {
         name: cfg.node_name.to_string(),
         region: cfg.region.to_string(),
@@ -326,6 +329,7 @@ pub async fn join(
         wg_port: cfg.port,
         endpoint: None, // will be discovered by the target
         pin: cfg.pin.map(|s| s.to_string()),
+        trace_id: Some(trace_id),
     };
 
     // TCP peering exchange
