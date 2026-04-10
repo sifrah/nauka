@@ -346,7 +346,7 @@ impl Runtime for GVisorRuntime {
 }
 
 /// Generate an OCI runtime spec (config.json) for the container.
-fn generate_oci_config(config: &VmRunConfig, has_tini: bool) -> String {
+pub fn generate_oci_config(config: &VmRunConfig, has_tini: bool) -> String {
     let args: Vec<&str> = if has_tini {
         vec!["/usr/bin/tini", "--", "/bin/sh", "/nauka-init.sh"]
     } else {
