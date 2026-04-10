@@ -39,6 +39,15 @@ fn test_resource() -> ResourceDef {
                     ColumnDef::new("NAME", "name"),
                     ColumnDef::new("COLOR", "color"),
                     ColumnDef::new("SHINY", "shiny"),
+                    ColumnDef::new("ORG", "org_name"),
+                    ColumnDef::new("ID", "id"),
+                    ColumnDef {
+                        header: "CREATED",
+                        field: "created_at",
+                        width: ColumnWidth::Auto,
+                        align: Align::Left,
+                        format: DisplayFormat::Timestamp,
+                    },
                 ],
                 default_sort: Some("name"),
                 empty_message: Some("No widgets found."),
@@ -48,7 +57,9 @@ fn test_resource() -> ResourceDef {
                     title: Some("Widget Details"),
                     fields: vec![
                         DetailField::new("Name", "name"),
+                        DetailField::new("ID", "id"),
                         DetailField::new("Color", "color"),
+                        DetailField::new("Organization", "org_name"),
                         DetailField::new("Shiny", "shiny").with_format(DisplayFormat::YesNo),
                         DetailField::new("Created", "created_at")
                             .with_format(DisplayFormat::Timestamp),
@@ -466,7 +477,7 @@ fn field_builder_chain() {
 
 #[test]
 fn builder_creates_full_resource() {
-    let def = ResourceDef::build("lb", "Load Balancer")
+    let def = ResourceDef::build("lb", "Load balancer")
         .plural("load-balancers")
         .alias("loadbalancer")
         .parent("org", "--org", "Organization")
@@ -486,13 +497,21 @@ fn builder_creates_full_resource() {
         })
         .column("NAME", "name")
         .column("ALGORITHM", "algorithm")
-        .column("STATUS", "status")
+        .column("ORG", "org_name")
+        .column_def(ColumnDef::new("STATUS", "status").with_format(DisplayFormat::Status))
+        .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("No load balancers found.")
+        .sort_by("name")
         .detail_section(
             None,
             vec![
                 DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
                 DetailField::new("Algorithm", "algorithm"),
+                DetailField::new("Organization", "org_name"),
+                DetailField::new("Status", "status").with_format(DisplayFormat::Status),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
             ],
         )
         .done();
@@ -505,20 +524,40 @@ fn builder_creates_full_resource() {
     assert_eq!(def.schema.fields.len(), 2);
     assert_eq!(def.operations.len(), 5); // create + list + get + delete + add-target
     assert!(def.presentation.table.is_some());
-    assert_eq!(def.presentation.table.as_ref().unwrap().columns.len(), 3);
+    assert_eq!(def.presentation.table.as_ref().unwrap().columns.len(), 6);
     assert!(def.presentation.detail.is_some());
 }
 
 #[test]
 fn builder_auto_pluralizes() {
-    let def = ResourceDef::build("widget", "A widget").list().done();
+    let def = ResourceDef::build("widget", "A widget")
+        .list()
+        .column("NAME", "name")
+        .empty_message("none")
+        .done();
 
     assert_eq!(def.identity.plural, "widgets");
 }
 
 #[test]
 fn builder_crud_adds_all_four() {
-    let def = ResourceDef::build("thing", "A thing").crud().done();
+    let def = ResourceDef::build("thing", "A thing")
+        .plural("things")
+        .crud()
+        .column("NAME", "name")
+        .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
+        .empty_message("none")
+        .sort_by("name")
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
+        .done();
 
     let op_names: Vec<&str> = def.operations.iter().map(|o| o.name).collect();
     assert!(op_names.contains(&"create"));
@@ -529,10 +568,24 @@ fn builder_crud_adds_all_four() {
 
 #[test]
 fn builder_generated_command_has_all_subcommands() {
-    let def = ResourceDef::build("lb", "Load Balancer")
+    let def = ResourceDef::build("lb", "Load balancer")
+        .plural("load-balancers")
         .crud()
         .action("drain", "Drain all connections")
         .op(|op| op.with_confirm())
+        .column("NAME", "name")
+        .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
+        .empty_message("none")
+        .sort_by("name")
+        .detail_section(
+            None,
+            vec![
+                DetailField::new("Name", "name"),
+                DetailField::new("ID", "id"),
+                DetailField::new("Created", "created_at").with_format(DisplayFormat::Timestamp),
+            ],
+        )
         .done();
 
     let cmd = generate_command(&def);

@@ -52,6 +52,7 @@ pub fn resource_def() -> ResourceDef {
                 "zone",
                 FieldDef::string("zone", "Zone").with_default("default"),
             ))
+            .with_progress(ProgressHint::Spinner("Creating VM..."))
             .with_example(
                 "nauka vm create web-1 --org acme --project backend --env production --vpc prod-net --subnet web --cpu 2 --memory 4096 --disk 40 --image ubuntu-24.04",
             )
@@ -69,21 +70,16 @@ pub fn resource_def() -> ResourceDef {
         })
         .get()
         .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting VM...")))
         .action("start", "Start a stopped VM")
         .op(|op| {
-            op.with_arg(OperationArg::required(
-                "name",
-                FieldDef::string("name", "VM name or ID"),
-            ))
-            .with_output(OutputKind::Resource)
+            op.with_output(OutputKind::Resource)
+              .with_progress(ProgressHint::Spinner("Starting VM..."))
         })
         .action("stop", "Stop a running VM")
         .op(|op| {
-            op.with_arg(OperationArg::required(
-                "name",
-                FieldDef::string("name", "VM name or ID"),
-            ))
-            .with_output(OutputKind::Resource)
+            op.with_output(OutputKind::Resource)
+              .with_progress(ProgressHint::Spinner("Stopping VM..."))
         })
         .column("NAME", "name")
         .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
@@ -92,7 +88,9 @@ pub fn resource_def() -> ResourceDef {
         .column("IMAGE", "image")
         .column("ENV", "env_name")
         .column("ID", "id")
+        .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
         .empty_message("No VMs found. Create one with: nauka vm create <name> --org <org> --project <project> --env <env> --vpc <vpc> --subnet <subnet> --cpu <n> --memory <mb> --disk <gb> --image <image>")
+        .sort_by("name")
         .detail_section(None, vec![
             DetailField::new("Name", "name"),
             DetailField::new("ID", "id"),
@@ -225,10 +223,8 @@ pub fn handler() -> HandlerFn {
                     }
                     "start" => {
                         let name = req
-                            .fields
-                            .get("name")
-                            .ok_or_else(|| anyhow::anyhow!("missing VM name or ID"))?
-                            .clone();
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         let org = req.scope.get("org").map(|s| s.to_string());
                         let vm = store
                             .update_state(&name, VmState::Running, org.as_deref(), None, None)
@@ -237,10 +233,8 @@ pub fn handler() -> HandlerFn {
                     }
                     "stop" => {
                         let name = req
-                            .fields
-                            .get("name")
-                            .ok_or_else(|| anyhow::anyhow!("missing VM name or ID"))?
-                            .clone();
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         let org = req.scope.get("org").map(|s| s.to_string());
                         let vm = store
                             .update_state(&name, VmState::Stopped, org.as_deref(), None, None)

@@ -11,7 +11,15 @@ pub fn resource_def() -> ResourceDef {
     ResourceDef::build("project", "Manage projects within an organization")
         .plural("projects")
         .parent("org", "--org", "Organization")
-        .crud()
+        .create()
+        .op(|op| {
+            op.with_progress(ProgressHint::Spinner("Creating project..."))
+                .with_example("nauka org project create backend --org acme")
+        })
+        .list()
+        .get()
+        .delete()
+        .op(|op| op.with_progress(ProgressHint::Spinner("Deleting project...")))
         .column("NAME", "name")
         .column("ORG", "org_name")
         .column("ID", "id")
@@ -19,6 +27,7 @@ pub fn resource_def() -> ResourceDef {
         .empty_message(
             "No projects found. Create one with: nauka org project create <name> --org <org>",
         )
+        .sort_by("name")
         .detail_section(
             None,
             vec![

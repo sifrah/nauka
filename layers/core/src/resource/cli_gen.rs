@@ -1,6 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 
-use super::operation::OperationSemantics;
+use super::operation::{OperationSemantics, OutputKind};
 use super::presentation::{Align, ColumnWidth, DisplayFormat};
 use super::schema::{CliVisibility, FieldDef, FieldType, Mutability};
 use super::ResourceDef;
@@ -121,6 +121,10 @@ fn generate_operation(def: &ResourceDef, op: &super::operation::OperationDef) ->
         }
 
         OperationSemantics::Action => {
+            // Actions that return a Resource take a positional <name>.
+            if matches!(op.output.kind, OutputKind::Resource) {
+                cmd = cmd.arg(Arg::new("name").help("Resource name or ID").required(false));
+            }
             cmd = add_scope_args(cmd, def, false);
             for arg in &op.args {
                 match &arg.source {

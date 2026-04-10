@@ -181,6 +181,7 @@ async fn serve(matches: &clap::ArgMatches) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use nauka_core::api::{list_routes, openapi_spec};
+    use nauka_core::resource::lint;
     use nauka_hypervisor::handlers;
 
     #[test]
@@ -205,6 +206,48 @@ mod tests {
         let spec = openapi_spec(&[reg], "/admin/v1");
         assert_eq!(spec["openapi"], "3.0.0");
         assert!(spec["paths"]["/admin/v1/hypervisors"].is_object());
+    }
+
+    /// Collect all ResourceDefs from a registration tree (recursive).
+    fn collect_defs<'a>(
+        reg: &'a nauka_core::resource::ResourceRegistration,
+        out: &mut Vec<&'a nauka_core::resource::ResourceDef>,
+    ) {
+        out.push(&reg.def);
+        for child in &reg.children {
+            collect_defs(child, out);
+        }
+    }
+
+    /// CI gate: every resource definition must pass all lint rules (errors + warnings).
+    #[test]
+    fn lint_all_resources_pass() {
+        let registry = super::build_registry();
+
+        // 1. Collect all defs (flatten tree)
+        let mut all_defs = Vec::new();
+        for reg in registry.iter() {
+            collect_defs(reg, &mut all_defs);
+        }
+
+        // 2. Run per-def lints (warnings — errors already caught by .done())
+        let mut violations = Vec::new();
+        for def in &all_defs {
+            violations.extend(lint::lint_def(def));
+        }
+
+        // 3. Run cross-resource lints
+        let def_refs: Vec<&nauka_core::resource::ResourceDef> = all_defs.to_vec();
+        violations.extend(lint::lint_registry(&def_refs));
+
+        // 4. All violations fail the test (warnings are errors in CI)
+        if !violations.is_empty() {
+            panic!(
+                "ResourceDef lint found {} violation(s):\n{}",
+                violations.len(),
+                lint::format_violations(&violations)
+            );
+        }
     }
 
     #[tokio::test]

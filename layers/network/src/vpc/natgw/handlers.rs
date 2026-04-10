@@ -22,24 +22,29 @@ pub fn resource_def() -> ResourceDef {
                 "Hypervisor to provision on (auto-selected if omitted)",
             ),
         ))
+        .with_progress(ProgressHint::Spinner("Creating NAT gateway..."))
         .with_example("nauka vpc nat-gateway create egress --vpc prod-net --org acme")
     })
     .list()
     .get()
     .delete()
+    .op(|op| op.with_progress(ProgressHint::Spinner("Deleting NAT gateway...")))
     .column("NAME", "name")
     .column("VPC", "vpc_name")
+    .column("ORG", "org_name")
     .column("PUBLIC IPv6", "public_ipv6")
     .column_def(ColumnDef::new("STATE", "state").with_format(DisplayFormat::Status))
     .column("ID", "id")
     .column_def(ColumnDef::new("CREATED", "created_at").with_format(DisplayFormat::Timestamp))
     .empty_message("No NAT gateways found.")
+    .sort_by("name")
     .detail_section(
         None,
         vec![
             DetailField::new("Name", "name"),
             DetailField::new("ID", "id"),
             DetailField::new("VPC", "vpc_name"),
+            DetailField::new("Organization", "org_name"),
             DetailField::new("Public IPv6", "public_ipv6"),
             DetailField::new("Hypervisor", "hypervisor_id"),
             DetailField::new("State", "state").with_format(DisplayFormat::Status),
