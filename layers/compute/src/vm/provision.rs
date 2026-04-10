@@ -254,7 +254,9 @@ pub fn list_veths() -> Vec<String> {
     stdout
         .lines()
         .filter_map(|line| {
-            let name = line.split(':').nth(1)?.trim();
+            let raw = line.split(':').nth(1)?.trim();
+            // Strip the @ifN suffix that appears when the peer is in another netns
+            let name = raw.split('@').next().unwrap_or(raw);
             if name.starts_with("nkh-") {
                 Some(name.to_string())
             } else {
@@ -275,7 +277,8 @@ pub fn list_taps() -> Vec<String> {
     stdout
         .lines()
         .filter_map(|line| {
-            let name = line.split(':').nth(1)?.trim();
+            let raw = line.split(':').nth(1)?.trim();
+            let name = raw.split('@').next().unwrap_or(raw);
             if name.starts_with("nkt-") {
                 Some(name.to_string())
             } else {
