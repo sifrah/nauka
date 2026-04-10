@@ -104,6 +104,61 @@ impl super::Reconciler for VmReconciler {
                     }
                 }
 
+                // Validate OCI config.json — regenerate if corrupted
+                if use_veth {
+                    let config_path = format!("/run/nauka/vms/{}/bundle/config.json", vm.meta.id);
+                    let config_valid = std::fs::read_to_string(&config_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .and_then(|v| v["process"]["args"].as_array().cloned())
+                        .is_some();
+
+                    if !config_valid {
+                        let rootfs_dir = format!("/run/nauka/vms/{}/bundle/rootfs", vm.meta.id);
+                        let has_tini = std::path::Path::new(&rootfs_dir)
+                            .join("usr/bin/tini")
+                            .exists();
+                        let subnet_store =
+                            nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                        let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
+                        let (gateway, cidr) = match &subnet {
+                            Some(s) => (s.gateway.clone(), s.cidr.clone()),
+                            None => ("0.0.0.0".to_string(), "0.0.0.0/0".to_string()),
+                        };
+                        let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                        let vpc_cidr = vpc_store
+                            .get(vm.vpc_id.as_str(), None)
+                            .await?
+                            .map(|v| v.cidr);
+                        let run_config = VmRunConfig {
+                            vm_id: vm.meta.id.clone(),
+                            vm_name: vm.meta.name.clone(),
+                            vcpus: vm.vcpus,
+                            memory_mb: vm.memory_mb,
+                            disk_gb: vm.disk_gb,
+                            image: vm.image.clone(),
+                            tap_name: provision::veth_guest_name(&vm.meta.id),
+                            private_ip: vm.private_ip.clone().unwrap_or_default(),
+                            gateway,
+                            subnet_cidr: cidr,
+                            vpc_cidr,
+                        };
+                        let oci = nauka_compute::runtime::gvisor::generate_oci_config(
+                            &run_config,
+                            has_tini,
+                        );
+                        if let Err(e) = std::fs::write(&config_path, oci) {
+                            tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to regenerate config.json");
+                        } else {
+                            tracing::info!(
+                                vm_id = vm.meta.id.as_str(),
+                                "regenerated corrupted config.json"
+                            );
+                            result.updated += 1;
+                        }
+                    }
+                }
+
                 // Health check: ensure sshd is alive inside containers
                 if use_veth && !crate::observer::health::is_sshd_alive(&vm.meta.id) {
                     match crate::observer::health::restart_sshd(&vm.meta.id) {
