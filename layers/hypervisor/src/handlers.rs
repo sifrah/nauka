@@ -340,8 +340,20 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .map(|s| s == "true")
         .unwrap_or(false);
 
-    let ipv6_block = req.fields.get("ipv6-block").cloned();
-    let ipv4_public = req.fields.get("ipv4-public").cloned();
+    let ipv6_block = req.fields.get("ipv6-block").cloned().or_else(|| {
+        let detected = crate::detect::detect_ipv6_block();
+        if let Some(ref v) = detected {
+            eprintln!("  Auto-detected IPv6 block: {v}");
+        }
+        detected
+    });
+    let ipv4_public = req.fields.get("ipv4-public").cloned().or_else(|| {
+        let detected = crate::detect::detect_ipv4_public();
+        if let Some(ref v) = detected {
+            eprintln!("  Auto-detected IPv4 address: {v}");
+        }
+        detected
+    });
 
     let db = open_db()?;
     let init_cfg = fabric::ops::InitConfig {
@@ -568,8 +580,20 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
                 .unwrap_or_else(|| "node".to_string())
         });
 
-    let ipv6_block = req.fields.get("ipv6-block").cloned();
-    let ipv4_public = req.fields.get("ipv4-public").cloned();
+    let ipv6_block = req.fields.get("ipv6-block").cloned().or_else(|| {
+        let detected = crate::detect::detect_ipv6_block();
+        if let Some(ref v) = detected {
+            eprintln!("  Auto-detected IPv6 block: {v}");
+        }
+        detected
+    });
+    let ipv4_public = req.fields.get("ipv4-public").cloned().or_else(|| {
+        let detected = crate::detect::detect_ipv4_public();
+        if let Some(ref v) = detected {
+            eprintln!("  Auto-detected IPv4 address: {v}");
+        }
+        detected
+    });
 
     let db = open_db()?;
     let join_cfg = fabric::ops::JoinConfig {
