@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["add_resource_routes","build_base_path","build_router","collect_routes","extract_scope","flatten_registrations","handle_scoped","list_routes","openapi_spec"],"struct":["RouteInfo"]};
+window.SIDEBAR_ITEMS = {"fn":["add_resource_routes","build_base_path","build_router","classify_anyhow","collect_routes","extract_scope","flatten_registrations","handle_scoped","list_routes","openapi_spec"],"struct":["RouteInfo"]};
