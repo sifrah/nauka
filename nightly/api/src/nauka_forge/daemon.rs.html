@@ -42,85 +42,97 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#40 id=40 data-nosnippet>40</a>
 <a href=#41 id=41 data-nosnippet>41</a><span class="doccomment">/// Execute one reconciliation cycle.
 <a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">async fn </span>run_cycle(cycle: u64) -&gt; anyhow::Result&lt;Vec&lt;<span class="kw">crate</span>::types::ReconcileResult&gt;&gt; {
-<a href=#43 id=43 data-nosnippet>43</a>    <span class="comment">// Connect to TiKV
-<a href=#44 id=44 data-nosnippet>44</a>    </span><span class="kw">let </span>db = controlplane::connect().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#45 id=45 data-nosnippet>45</a>
-<a href=#46 id=46 data-nosnippet>46</a>    <span class="comment">// Load this node's identity
-<a href=#47 id=47 data-nosnippet>47</a>    </span><span class="kw">let </span>local_db = LocalDb::open(<span class="string">"hypervisor"</span>)<span class="question-mark">?</span>;
-<a href=#48 id=48 data-nosnippet>48</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>local_db)
-<a href=#49 id=49 data-nosnippet>49</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
-<a href=#50 id=50 data-nosnippet>50</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized"</span>))<span class="question-mark">?</span>;
-<a href=#51 id=51 data-nosnippet>51</a>
-<a href=#52 id=52 data-nosnippet>52</a>    <span class="kw">let </span>runtime = <span class="kw">if </span>state.hypervisor.runtime == <span class="string">"container" </span>{
-<a href=#53 id=53 data-nosnippet>53</a>        nauka_compute::runtime::RuntimeMode::Container
-<a href=#54 id=54 data-nosnippet>54</a>    } <span class="kw">else </span>{
-<a href=#55 id=55 data-nosnippet>55</a>        nauka_compute::runtime::RuntimeMode::Kvm
-<a href=#56 id=56 data-nosnippet>56</a>    };
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="comment">// Pre-flight: recover TiKV if it crashed after a data wipe.
+<a href=#44 id=44 data-nosnippet>44</a>    // This must run before connect() since TiKV being down would fail the connection.
+<a href=#45 id=45 data-nosnippet>45</a>    </span>{
+<a href=#46 id=46 data-nosnippet>46</a>        <span class="kw">let </span>local_db = LocalDb::open(<span class="string">"hypervisor"</span>)<span class="question-mark">?</span>;
+<a href=#47 id=47 data-nosnippet>47</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(state)) = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>local_db) {
+<a href=#48 id=48 data-nosnippet>48</a>            <span class="kw">if </span>controlplane::service::recover_stale_store(<span class="kw-2">&amp;</span>state.hypervisor.mesh_ipv6) {
+<a href=#49 id=49 data-nosnippet>49</a>                <span class="comment">// Give TiKV time to start and register with PD
+<a href=#50 id=50 data-nosnippet>50</a>                </span>tokio::time::sleep(std::time::Duration::from_secs(<span class="number">5</span>)).<span class="kw">await</span>;
+<a href=#51 id=51 data-nosnippet>51</a>            }
+<a href=#52 id=52 data-nosnippet>52</a>        }
+<a href=#53 id=53 data-nosnippet>53</a>    }
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a>    <span class="comment">// Connect to TiKV
+<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">let </span>db = controlplane::connect().<span class="kw">await</span><span class="question-mark">?</span>;
 <a href=#57 id=57 data-nosnippet>57</a>
-<a href=#58 id=58 data-nosnippet>58</a>    <span class="comment">// Collect all IDs this node is known by:
-<a href=#59 id=59 data-nosnippet>59</a>    // - Its own HypervisorId (hv-...)
-<a href=#60 id=60 data-nosnippet>60</a>    // - Its name (used by peers to identify us)
-<a href=#61 id=61 data-nosnippet>61</a>    // - Any NodeId that peers assigned to us (node-...)
-<a href=#62 id=62 data-nosnippet>62</a>    // This ensures VMs scheduled from any node match correctly.
-<a href=#63 id=63 data-nosnippet>63</a>    </span><span class="kw">let </span>node_ids = <span class="macro">vec!</span>[
-<a href=#64 id=64 data-nosnippet>64</a>        state.hypervisor.id.as_str().to_string(),
-<a href=#65 id=65 data-nosnippet>65</a>        state.hypervisor.name.clone(),
-<a href=#66 id=66 data-nosnippet>66</a>    ];
-<a href=#67 id=67 data-nosnippet>67</a>    <span class="comment">// Check what IDs peers use for us by looking at peer lists on remote nodes
-<a href=#68 id=68 data-nosnippet>68</a>    // We can't do that directly, but peers reference us by NodeId.
-<a href=#69 id=69 data-nosnippet>69</a>    // The scheduler on remote nodes uses the peer's NodeId.
-<a href=#70 id=70 data-nosnippet>70</a>    // So we need to know our own NodeId as seen by peers.
-<a href=#71 id=71 data-nosnippet>71</a>    // This is stored in the peer list of OTHER nodes — we can't access it.
-<a href=#72 id=72 data-nosnippet>72</a>    // Workaround: also check by mesh_ipv6 match, or just match all VMs
-<a href=#73 id=73 data-nosnippet>73</a>    // assigned to any ID containing our name.
-<a href=#74 id=74 data-nosnippet>74</a>
-<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">let </span>ctx = ReconcileContext {
-<a href=#76 id=76 data-nosnippet>76</a>        db,
-<a href=#77 id=77 data-nosnippet>77</a>        hypervisor_id: state.hypervisor.id.as_str().to_string(),
-<a href=#78 id=78 data-nosnippet>78</a>        node_ids,
-<a href=#79 id=79 data-nosnippet>79</a>        node_name: state.hypervisor.name.clone(),
-<a href=#80 id=80 data-nosnippet>80</a>        mesh_ipv6: state.hypervisor.mesh_ipv6,
-<a href=#81 id=81 data-nosnippet>81</a>        runtime,
-<a href=#82 id=82 data-nosnippet>82</a>        cycle,
-<a href=#83 id=83 data-nosnippet>83</a>    };
-<a href=#84 id=84 data-nosnippet>84</a>
-<a href=#85 id=85 data-nosnippet>85</a>    <span class="comment">// Ensure replication is configured correctly.
-<a href=#86 id=86 data-nosnippet>86</a>    // On every cycle, check if max-replicas matches the number of active stores (capped at 3).
-<a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">let </span>pd_url = <span class="macro">format!</span>(
-<a href=#88 id=88 data-nosnippet>88</a>        <span class="string">"http://[{}]:{}"</span>,
-<a href=#89 id=89 data-nosnippet>89</a>        state.hypervisor.mesh_ipv6,
-<a href=#90 id=90 data-nosnippet>90</a>        controlplane::PD_CLIENT_PORT
-<a href=#91 id=91 data-nosnippet>91</a>    );
-<a href=#92 id=92 data-nosnippet>92</a>    <span class="kw">let </span>active_stores = controlplane::service::count_active_stores(<span class="kw-2">&amp;</span>pd_url);
-<a href=#93 id=93 data-nosnippet>93</a>    <span class="kw">if </span>active_stores &gt;= <span class="number">3 </span>{
-<a href=#94 id=94 data-nosnippet>94</a>        <span class="kw">let _ </span>= controlplane::service::adjust_max_replicas(<span class="kw-2">&amp;</span>pd_url, <span class="number">3</span>);
-<a href=#95 id=95 data-nosnippet>95</a>    }
+<a href=#58 id=58 data-nosnippet>58</a>    <span class="comment">// Load this node's identity
+<a href=#59 id=59 data-nosnippet>59</a>    </span><span class="kw">let </span>local_db = LocalDb::open(<span class="string">"hypervisor"</span>)<span class="question-mark">?</span>;
+<a href=#60 id=60 data-nosnippet>60</a>    <span class="kw">let </span>state = fabric::state::FabricState::load(<span class="kw-2">&amp;</span>local_db)
+<a href=#61 id=61 data-nosnippet>61</a>        .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?
+<a href=#62 id=62 data-nosnippet>62</a>        </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"not initialized"</span>))<span class="question-mark">?</span>;
+<a href=#63 id=63 data-nosnippet>63</a>
+<a href=#64 id=64 data-nosnippet>64</a>    <span class="kw">let </span>runtime = <span class="kw">if </span>state.hypervisor.runtime == <span class="string">"container" </span>{
+<a href=#65 id=65 data-nosnippet>65</a>        nauka_compute::runtime::RuntimeMode::Container
+<a href=#66 id=66 data-nosnippet>66</a>    } <span class="kw">else </span>{
+<a href=#67 id=67 data-nosnippet>67</a>        nauka_compute::runtime::RuntimeMode::Kvm
+<a href=#68 id=68 data-nosnippet>68</a>    };
+<a href=#69 id=69 data-nosnippet>69</a>
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="comment">// Collect all IDs this node is known by:
+<a href=#71 id=71 data-nosnippet>71</a>    // - Its own HypervisorId (hv-...)
+<a href=#72 id=72 data-nosnippet>72</a>    // - Its name (used by peers to identify us)
+<a href=#73 id=73 data-nosnippet>73</a>    // - Any NodeId that peers assigned to us (node-...)
+<a href=#74 id=74 data-nosnippet>74</a>    // This ensures VMs scheduled from any node match correctly.
+<a href=#75 id=75 data-nosnippet>75</a>    </span><span class="kw">let </span>node_ids = <span class="macro">vec!</span>[
+<a href=#76 id=76 data-nosnippet>76</a>        state.hypervisor.id.as_str().to_string(),
+<a href=#77 id=77 data-nosnippet>77</a>        state.hypervisor.name.clone(),
+<a href=#78 id=78 data-nosnippet>78</a>    ];
+<a href=#79 id=79 data-nosnippet>79</a>    <span class="comment">// Check what IDs peers use for us by looking at peer lists on remote nodes
+<a href=#80 id=80 data-nosnippet>80</a>    // We can't do that directly, but peers reference us by NodeId.
+<a href=#81 id=81 data-nosnippet>81</a>    // The scheduler on remote nodes uses the peer's NodeId.
+<a href=#82 id=82 data-nosnippet>82</a>    // So we need to know our own NodeId as seen by peers.
+<a href=#83 id=83 data-nosnippet>83</a>    // This is stored in the peer list of OTHER nodes — we can't access it.
+<a href=#84 id=84 data-nosnippet>84</a>    // Workaround: also check by mesh_ipv6 match, or just match all VMs
+<a href=#85 id=85 data-nosnippet>85</a>    // assigned to any ID containing our name.
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>    </span><span class="kw">let </span>ctx = ReconcileContext {
+<a href=#88 id=88 data-nosnippet>88</a>        db,
+<a href=#89 id=89 data-nosnippet>89</a>        hypervisor_id: state.hypervisor.id.as_str().to_string(),
+<a href=#90 id=90 data-nosnippet>90</a>        node_ids,
+<a href=#91 id=91 data-nosnippet>91</a>        node_name: state.hypervisor.name.clone(),
+<a href=#92 id=92 data-nosnippet>92</a>        mesh_ipv6: state.hypervisor.mesh_ipv6,
+<a href=#93 id=93 data-nosnippet>93</a>        runtime,
+<a href=#94 id=94 data-nosnippet>94</a>        cycle,
+<a href=#95 id=95 data-nosnippet>95</a>    };
 <a href=#96 id=96 data-nosnippet>96</a>
-<a href=#97 id=97 data-nosnippet>97</a>    <span class="macro">tracing::debug!</span>(
-<a href=#98 id=98 data-nosnippet>98</a>        cycle,
-<a href=#99 id=99 data-nosnippet>99</a>        node = ctx.node_name.as_str(),
-<a href=#100 id=100 data-nosnippet>100</a>        <span class="string">"reconcile cycle start"
-<a href=#101 id=101 data-nosnippet>101</a>    </span>);
-<a href=#102 id=102 data-nosnippet>102</a>
-<a href=#103 id=103 data-nosnippet>103</a>    <span class="kw">let </span>results = reconciler::run_all(<span class="kw-2">&amp;</span>ctx).<span class="kw">await</span>;
-<a href=#104 id=104 data-nosnippet>104</a>
-<a href=#105 id=105 data-nosnippet>105</a>    <span class="kw">let </span>total_actions: usize = results
-<a href=#106 id=106 data-nosnippet>106</a>        .iter()
-<a href=#107 id=107 data-nosnippet>107</a>        .map(|r| r.created + r.deleted + r.updated)
-<a href=#108 id=108 data-nosnippet>108</a>        .sum();
-<a href=#109 id=109 data-nosnippet>109</a>    <span class="kw">let </span>total_failures: usize = results.iter().map(|r| r.failed).sum();
-<a href=#110 id=110 data-nosnippet>110</a>
-<a href=#111 id=111 data-nosnippet>111</a>    <span class="kw">if </span>total_actions &gt; <span class="number">0 </span>|| total_failures &gt; <span class="number">0 </span>{
-<a href=#112 id=112 data-nosnippet>112</a>        <span class="macro">tracing::info!</span>(
-<a href=#113 id=113 data-nosnippet>113</a>            cycle,
-<a href=#114 id=114 data-nosnippet>114</a>            actions = total_actions,
-<a href=#115 id=115 data-nosnippet>115</a>            failures = total_failures,
-<a href=#116 id=116 data-nosnippet>116</a>            <span class="string">"reconcile cycle done"
-<a href=#117 id=117 data-nosnippet>117</a>        </span>);
-<a href=#118 id=118 data-nosnippet>118</a>    } <span class="kw">else </span>{
-<a href=#119 id=119 data-nosnippet>119</a>        <span class="macro">tracing::debug!</span>(cycle, <span class="string">"reconcile cycle done — in sync"</span>);
-<a href=#120 id=120 data-nosnippet>120</a>    }
-<a href=#121 id=121 data-nosnippet>121</a>
-<a href=#122 id=122 data-nosnippet>122</a>    <span class="prelude-val">Ok</span>(results)
-<a href=#123 id=123 data-nosnippet>123</a>}
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="comment">// Ensure replication is configured correctly.
+<a href=#98 id=98 data-nosnippet>98</a>    // On every cycle, check if max-replicas matches the number of active stores (capped at 3).
+<a href=#99 id=99 data-nosnippet>99</a>    </span><span class="kw">let </span>pd_url = <span class="macro">format!</span>(
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="string">"http://[{}]:{}"</span>,
+<a href=#101 id=101 data-nosnippet>101</a>        state.hypervisor.mesh_ipv6,
+<a href=#102 id=102 data-nosnippet>102</a>        controlplane::PD_CLIENT_PORT
+<a href=#103 id=103 data-nosnippet>103</a>    );
+<a href=#104 id=104 data-nosnippet>104</a>    <span class="kw">let </span>active_stores = controlplane::service::count_active_stores(<span class="kw-2">&amp;</span>pd_url);
+<a href=#105 id=105 data-nosnippet>105</a>    <span class="kw">if </span>active_stores &gt;= <span class="number">3 </span>{
+<a href=#106 id=106 data-nosnippet>106</a>        <span class="kw">let _ </span>= controlplane::service::adjust_max_replicas(<span class="kw-2">&amp;</span>pd_url, <span class="number">3</span>);
+<a href=#107 id=107 data-nosnippet>107</a>    }
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a>    <span class="macro">tracing::debug!</span>(
+<a href=#110 id=110 data-nosnippet>110</a>        cycle,
+<a href=#111 id=111 data-nosnippet>111</a>        node = ctx.node_name.as_str(),
+<a href=#112 id=112 data-nosnippet>112</a>        <span class="string">"reconcile cycle start"
+<a href=#113 id=113 data-nosnippet>113</a>    </span>);
+<a href=#114 id=114 data-nosnippet>114</a>
+<a href=#115 id=115 data-nosnippet>115</a>    <span class="kw">let </span>results = reconciler::run_all(<span class="kw-2">&amp;</span>ctx).<span class="kw">await</span>;
+<a href=#116 id=116 data-nosnippet>116</a>
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="kw">let </span>total_actions: usize = results
+<a href=#118 id=118 data-nosnippet>118</a>        .iter()
+<a href=#119 id=119 data-nosnippet>119</a>        .map(|r| r.created + r.deleted + r.updated)
+<a href=#120 id=120 data-nosnippet>120</a>        .sum();
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="kw">let </span>total_failures: usize = results.iter().map(|r| r.failed).sum();
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="kw">if </span>total_actions &gt; <span class="number">0 </span>|| total_failures &gt; <span class="number">0 </span>{
+<a href=#124 id=124 data-nosnippet>124</a>        <span class="macro">tracing::info!</span>(
+<a href=#125 id=125 data-nosnippet>125</a>            cycle,
+<a href=#126 id=126 data-nosnippet>126</a>            actions = total_actions,
+<a href=#127 id=127 data-nosnippet>127</a>            failures = total_failures,
+<a href=#128 id=128 data-nosnippet>128</a>            <span class="string">"reconcile cycle done"
+<a href=#129 id=129 data-nosnippet>129</a>        </span>);
+<a href=#130 id=130 data-nosnippet>130</a>    } <span class="kw">else </span>{
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="macro">tracing::debug!</span>(cycle, <span class="string">"reconcile cycle done — in sync"</span>);
+<a href=#132 id=132 data-nosnippet>132</a>    }
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="prelude-val">Ok</span>(results)
+<a href=#135 id=135 data-nosnippet>135</a>}
 </code></pre></div></section></main></body></html>
