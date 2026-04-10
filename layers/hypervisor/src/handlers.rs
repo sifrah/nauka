@@ -200,7 +200,14 @@ pub fn resource_def() -> ResourceDef {
         })
         .action("backup", "Create a backup of PD and TiKV data to S3")
         .op(|op| {
-            op.with_output(OutputKind::Message)
+            op.with_arg(OperationArg::optional(
+                "hot",
+                FieldDef::flag(
+                    "hot",
+                    "Hot backup: tar while services run (faster, but may have torn writes)",
+                ),
+            ))
+            .with_output(OutputKind::Message)
                 .with_progress(ProgressHint::Spinner("Creating backup..."))
                 .with_example("nauka hypervisor backup")
         })
@@ -276,7 +283,7 @@ pub fn handler() -> HandlerFn {
                 "get" => handle_get(req).await,
                 "join" => handle_join(req).await,
                 "peering" => handle_peering(req).await,
-                "backup" => handle_backup().await,
+                "backup" => handle_backup(req).await,
                 "backup-list" => handle_backup_list().await,
                 "cp-status" => handle_cp_status().await,
                 "upgrade-check" => handle_upgrade_check().await,
@@ -950,7 +957,9 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
     Ok(OperationResponse::None)
 }
 
-async fn handle_backup() -> anyhow::Result<OperationResponse> {
+async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationResponse> {
+    let hot = req.fields.get("hot").map(|s| s == "true").unwrap_or(false);
+
     let db = open_db()?;
 
     // Get S3 config from region registry
@@ -966,16 +975,17 @@ async fn handle_backup() -> anyhow::Result<OperationResponse> {
         })?
         .clone();
 
-    let mut results = Vec::new();
+    let mode = if hot { "hot" } else { "cold (consistent)" };
+    let mut results = vec![format!("Backup mode: {mode}")];
 
     // Backup PD
-    match controlplane::backup::backup_pd(&config) {
+    match controlplane::backup::backup_pd(&config, hot) {
         Ok(key) => results.push(format!("PD backup:   {key}")),
         Err(e) => results.push(format!("PD backup failed: {e}")),
     }
 
     // Backup TiKV
-    match controlplane::backup::backup_tikv(&config) {
+    match controlplane::backup::backup_tikv(&config, hot) {
         Ok(key) => results.push(format!("TiKV backup: {key}")),
         Err(e) => results.push(format!("TiKV backup failed: {e}")),
     }
@@ -1274,10 +1284,10 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     match registry {
         Ok(reg) => {
             if let Some(config) = reg.default_region() {
-                if let Err(e) = controlplane::backup::backup_pd(config) {
+                if let Err(e) = controlplane::backup::backup_pd(config, false) {
                     tracing::warn!("PD backup failed (non-fatal): {e}");
                 }
-                if let Err(e) = controlplane::backup::backup_tikv(config) {
+                if let Err(e) = controlplane::backup::backup_tikv(config, false) {
                     tracing::warn!("TiKV backup failed (non-fatal): {e}");
                 }
             } else {
