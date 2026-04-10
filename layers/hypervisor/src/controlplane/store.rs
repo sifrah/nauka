@@ -133,6 +133,42 @@ impl ClusterDb {
         Ok(results)
     }
 
+    /// Scan all keys under a namespace/prefix and return just the key suffixes.
+    ///
+    /// For example, `scan_keys("_reg_v2", "org/")` returns `["org/id1", "org/id2", ...]`.
+    /// Strip the prefix yourself to get just the IDs.
+    pub async fn scan_keys(
+        &self,
+        namespace: &str,
+        prefix: &str,
+    ) -> Result<Vec<String>, NaukaError> {
+        let full_prefix = format!("{namespace}/{prefix}");
+        let end_key = prefix_end(&full_prefix);
+
+        let pairs = self
+            .client
+            .scan(full_prefix.into_bytes()..end_key.into_bytes(), 10000)
+            .await
+            .map_err(|e| NaukaError::internal(format!("TiKV scan failed: {e}")))?;
+
+        let ns_prefix = format!("{namespace}/");
+        let mut keys = Vec::new();
+        for pair in pairs {
+            let key_bytes: Vec<u8> = Vec::from(pair.key().clone());
+            let key_str = String::from_utf8(key_bytes).unwrap_or_default();
+            if !key_str.starts_with(&ns_prefix) {
+                continue;
+            }
+            let short_key = key_str
+                .strip_prefix(&ns_prefix)
+                .unwrap_or(&key_str)
+                .to_string();
+            keys.push(short_key);
+        }
+
+        Ok(keys)
+    }
+
     /// Check if a key exists.
     pub async fn exists(&self, namespace: &str, key: &str) -> Result<bool, NaukaError> {
         let full_key = format!("{namespace}/{key}");

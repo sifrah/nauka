@@ -8,7 +8,9 @@ use super::types::Project;
 
 const NS_PROJ: &str = "proj";
 const NS_PROJ_IDX: &str = "proj-idx";
-const REG_PROJECTS: (&str, &str) = ("_reg", "proj-ids");
+const REG_V2_NS: &str = "_reg_v2";
+const REG_V2_PREFIX: &str = "proj/";
+const REG_V1: (&str, &str) = ("_reg", "proj-ids");
 
 pub struct ProjectStore {
     db: ClusterDb,
@@ -114,20 +116,34 @@ impl ProjectStore {
 }
 
 async fn load_ids(db: &ClusterDb) -> anyhow::Result<Vec<String>> {
-    let ids: Option<Vec<String>> = db.get(REG_PROJECTS.0, REG_PROJECTS.1).await?;
-    Ok(ids.unwrap_or_default())
+    let keys = db.scan_keys(REG_V2_NS, REG_V2_PREFIX).await?;
+    let mut ids: Vec<String> = keys
+        .into_iter()
+        .filter_map(|k| k.strip_prefix(REG_V2_PREFIX).map(|s| s.to_string()))
+        .collect();
+
+    if let Some(v1_ids) = db.get::<Vec<String>>(REG_V1.0, REG_V1.1).await? {
+        for old_id in v1_ids {
+            if !ids.contains(&old_id) {
+                let key = format!("{REG_V2_PREFIX}{old_id}");
+                db.put(REG_V2_NS, &key, &true).await?;
+                ids.push(old_id);
+            }
+        }
+        db.delete(REG_V1.0, REG_V1.1).await?;
+    }
+
+    Ok(ids)
 }
 
 async fn add_id(db: &ClusterDb, id: &str) -> anyhow::Result<()> {
-    let mut ids = load_ids(db).await?;
-    ids.push(id.to_string());
-    db.put(REG_PROJECTS.0, REG_PROJECTS.1, &ids).await?;
+    let key = format!("{REG_V2_PREFIX}{id}");
+    db.put(REG_V2_NS, &key, &true).await?;
     Ok(())
 }
 
 async fn remove_id(db: &ClusterDb, id: &str) -> anyhow::Result<()> {
-    let mut ids = load_ids(db).await?;
-    ids.retain(|i| i != id);
-    db.put(REG_PROJECTS.0, REG_PROJECTS.1, &ids).await?;
+    let key = format!("{REG_V2_PREFIX}{id}");
+    db.delete(REG_V2_NS, &key).await?;
     Ok(())
 }

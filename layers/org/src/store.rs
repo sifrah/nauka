@@ -8,7 +8,10 @@ use crate::types::Org;
 
 const NS_ORG: &str = "org";
 const NS_ORG_IDX: &str = "org-idx";
-const REG_ORGS: (&str, &str) = ("_reg", "org-ids");
+const REG_V2_NS: &str = "_reg_v2";
+const REG_V2_PREFIX: &str = "org/";
+/// Legacy v1 registry key — read during migration, never written.
+const REG_V1: (&str, &str) = ("_reg", "org-ids");
 
 pub struct OrgStore {
     db: ClusterDb,
@@ -88,20 +91,38 @@ impl OrgStore {
 }
 
 async fn load_ids(db: &ClusterDb) -> anyhow::Result<Vec<String>> {
-    let ids: Option<Vec<String>> = db.get(REG_ORGS.0, REG_ORGS.1).await?;
-    Ok(ids.unwrap_or_default())
+    // Primary: per-key scan (race-free)
+    let keys = db.scan_keys(REG_V2_NS, REG_V2_PREFIX).await?;
+    let mut ids: Vec<String> = keys
+        .into_iter()
+        .filter_map(|k| k.strip_prefix(REG_V2_PREFIX).map(|s| s.to_string()))
+        .collect();
+
+    // Backwards compat: merge any IDs from the legacy v1 list that aren't in v2 yet
+    if let Some(v1_ids) = db.get::<Vec<String>>(REG_V1.0, REG_V1.1).await? {
+        for old_id in v1_ids {
+            if !ids.contains(&old_id) {
+                // Migrate to v2 on the fly
+                let key = format!("{REG_V2_PREFIX}{old_id}");
+                db.put(REG_V2_NS, &key, &true).await?;
+                ids.push(old_id);
+            }
+        }
+        // Clean up legacy key after full migration
+        db.delete(REG_V1.0, REG_V1.1).await?;
+    }
+
+    Ok(ids)
 }
 
 async fn add_id(db: &ClusterDb, id: &str) -> anyhow::Result<()> {
-    let mut ids = load_ids(db).await?;
-    ids.push(id.to_string());
-    db.put(REG_ORGS.0, REG_ORGS.1, &ids).await?;
+    let key = format!("{REG_V2_PREFIX}{id}");
+    db.put(REG_V2_NS, &key, &true).await?;
     Ok(())
 }
 
 async fn remove_id(db: &ClusterDb, id: &str) -> anyhow::Result<()> {
-    let mut ids = load_ids(db).await?;
-    ids.retain(|i| i != id);
-    db.put(REG_ORGS.0, REG_ORGS.1, &ids).await?;
+    let key = format!("{REG_V2_PREFIX}{id}");
+    db.delete(REG_V2_NS, &key).await?;
     Ok(())
 }
