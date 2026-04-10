@@ -16,8 +16,9 @@ pub fn list_bridges() -> Vec<String> {
     stdout
         .lines()
         .filter_map(|line| {
-            // Format: "N: nkb-abc123: <...>"
-            let name = line.split(':').nth(1)?.trim();
+            // Format: "N: nkb-abc123: <...>" or "N: nkb-abc123@if1: <...>"
+            let raw = line.split(':').nth(1)?.trim();
+            let name = raw.split('@').next().unwrap_or(raw);
             if name.starts_with("nkb-") {
                 Some(name.to_string())
             } else {

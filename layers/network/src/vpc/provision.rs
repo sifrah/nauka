@@ -55,7 +55,8 @@ pub fn cleanup_all() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        if let Some(name) = line.split(':').nth(1).map(|s| s.trim()) {
+        if let Some(raw) = line.split(':').nth(1).map(|s| s.trim()) {
+            let name = raw.split('@').next().unwrap_or(raw);
             if name.starts_with("nkb-") || name.starts_with("nkx-") || name.starts_with("nkt-") {
                 tracing::info!(iface = name, "cleaning up stale interface");
                 let _ = Command::new("ip")
@@ -386,8 +387,9 @@ pub fn list_active_bridges() -> Vec<String> {
     stdout
         .lines()
         .filter_map(|line| {
-            // Format: "N: nkb-abc123: <...>"
-            let name = line.split(':').nth(1)?.trim();
+            // Format: "N: nkb-abc123: <...>" or "N: nkb-abc123@if1: <...>"
+            let raw = line.split(':').nth(1)?.trim();
+            let name = raw.split('@').next().unwrap_or(raw);
             if name.starts_with("nkb-") {
                 Some(name.to_string())
             } else {
