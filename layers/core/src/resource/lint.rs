@@ -619,9 +619,7 @@ fn state_machine_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violat
 
     // W061: update action should output Resource
     for op in &def.operations {
-        if matches!(op.name, "update")
-            && op.output.kind != OutputKind::Resource
-        {
+        if matches!(op.name, "update") && op.output.kind != OutputKind::Resource {
             v.push(Violation {
                 rule: "W061",
                 resource: kind,
