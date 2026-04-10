@@ -92,6 +92,7 @@ mod tests {
                 wg_port: 51820,
                 endpoint: None,
                 pin: None,
+                trace_id: None,
             },
         )
         .await;
@@ -140,6 +141,7 @@ mod tests {
             wg_port: 51820,
             endpoint: None,
             pin: Some("1234".into()),
+            trace_id: Some("test_trace_1234ab".into()),
         };
 
         let resp = join(&addr.to_string(), req).await.unwrap();

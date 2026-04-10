@@ -115,6 +115,7 @@ async fn peering_join_flow() {
         wg_port: 51820,
         endpoint: None,
         pin: Some(pin.clone()),
+        trace_id: Some("e2e_test_trace_01".into()),
     };
 
     let resp = peering_client::join(&peering_addr.to_string(), join_req)
@@ -175,6 +176,7 @@ async fn peering_wrong_pin_rejected() {
         wg_port: 51820,
         endpoint: None,
         pin: Some("0000".into()), // wrong PIN
+        trace_id: None,
     };
 
     let result = peering_client::join(&addr.to_string(), req).await;

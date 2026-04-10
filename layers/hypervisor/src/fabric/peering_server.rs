@@ -160,6 +160,11 @@ async fn handle_join(
 ) -> Result<String, NaukaError> {
     let mut req = read_json::<JoinRequest>(stream).await?;
 
+    // Log trace ID from the joining node for distributed correlation
+    if let Some(ref tid) = req.trace_id {
+        tracing::info!(trace_id = %tid, peer = %peer_addr, joiner = %req.name, "received join request with trace context");
+    }
+
     // Validate peer-provided fields against injection (newlines, control chars)
     validate_peer_field(&req.name, "name")?;
     validate_peer_field(&req.region, "region")?;
@@ -431,6 +436,7 @@ mod tests {
             wg_port: 51820,
             endpoint: None,
             pin: Some("1234".into()),
+            trace_id: None,
         };
         write_json(&mut client, &req).await.unwrap();
 
