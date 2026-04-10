@@ -159,6 +159,30 @@ impl super::Reconciler for VmReconciler {
                     }
                 }
 
+                // Verify base image exists — re-pull if deleted
+                if !nauka_compute::image::registry::exists(&vm.image) {
+                    tracing::warn!(
+                        vm_id = vm.meta.id.as_str(),
+                        image = vm.image.as_str(),
+                        "base image missing — pulling"
+                    );
+                    match nauka_compute::image::registry::pull(&vm.image).await {
+                        Ok(_) => {
+                            tracing::info!(
+                                vm_id = vm.meta.id.as_str(),
+                                image = vm.image.as_str(),
+                                "base image restored"
+                            );
+                            result.updated += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!(vm_id = vm.meta.id.as_str(), image = vm.image.as_str(), error = %e, "failed to pull base image");
+                            result.failed += 1;
+                            result.errors.push(format!("image {}: {e}", vm.image));
+                        }
+                    }
+                }
+
                 // Health check: ensure sshd is alive inside containers
                 if use_veth && !crate::observer::health::is_sshd_alive(&vm.meta.id) {
                     match crate::observer::health::restart_sshd(&vm.meta.id) {
