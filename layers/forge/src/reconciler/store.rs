@@ -16,6 +16,25 @@ use crate::types::{ReconcileContext, ReconcileResult};
 /// How long a peer must be unreachable before we offline its store (seconds).
 const UNREACHABLE_THRESHOLD_SECS: u64 = 60;
 
+/// Pure logic: returns true if the store address matches any of the expected
+/// peer addresses. Both sides use the `[ipv6]:port` format.
+fn match_store_to_peer(store_addr: &str, peer_addrs: &[String]) -> bool {
+    peer_addrs.iter().any(|a| a == store_addr)
+}
+
+/// Pure logic: returns true if a store with the given `state_name` is eligible
+/// for deregistration. Only "Up" stores should be offlined; Tombstone, Offline,
+/// and Disconnected stores are already handled by PD.
+fn is_store_eligible_for_deregister(state_name: &str) -> bool {
+    state_name == "Up"
+}
+
+/// Pure logic: returns true if a peer has been unreachable long enough based on
+/// its reference timestamp (`last_handshake` or `added_at`) and the current time.
+fn is_peer_unreachable_past_threshold(ref_time: u64, now: u64, threshold: u64) -> bool {
+    now.saturating_sub(ref_time) > threshold
+}
+
 pub struct StoreReconciler;
 
 #[async_trait::async_trait]
@@ -55,7 +74,7 @@ impl super::Reconciler for StoreReconciler {
                 } else {
                     p.added_at
                 };
-                now.saturating_sub(ref_time) > UNREACHABLE_THRESHOLD_SECS
+                is_peer_unreachable_past_threshold(ref_time, now, UNREACHABLE_THRESHOLD_SECS)
             })
             .collect();
 
@@ -96,7 +115,9 @@ impl super::Reconciler for StoreReconciler {
 
         result.desired = stores
             .iter()
-            .filter(|s| s["store"]["state_name"].as_str() == Some("Up"))
+            .filter(|s| {
+                is_store_eligible_for_deregister(s["store"]["state_name"].as_str().unwrap_or(""))
+            })
             .count();
 
         // For each "Up" store whose address matches an unreachable peer, offline it
@@ -105,11 +126,11 @@ impl super::Reconciler for StoreReconciler {
             let state_name = store["store"]["state_name"].as_str().unwrap_or("");
             let store_id = store["store"]["id"].as_u64().unwrap_or(0);
 
-            if state_name != "Up" || store_id == 0 {
+            if !is_store_eligible_for_deregister(state_name) || store_id == 0 {
                 continue;
             }
 
-            if !unreachable_addrs.iter().any(|a| a == addr) {
+            if !match_store_to_peer(addr, &unreachable_addrs) {
                 continue;
             }
 
@@ -145,5 +166,93 @@ impl super::Reconciler for StoreReconciler {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_address_matches_peer() {
+        let peer_addrs = vec![
+            "[fd12:3456:789a::1]:20160".to_string(),
+            "[fd12:3456:789a::2]:20160".to_string(),
+        ];
+
+        assert!(match_store_to_peer(
+            "[fd12:3456:789a::1]:20160",
+            &peer_addrs
+        ));
+        assert!(match_store_to_peer(
+            "[fd12:3456:789a::2]:20160",
+            &peer_addrs
+        ));
+    }
+
+    #[test]
+    fn store_address_no_match() {
+        let peer_addrs = vec!["[fd12:3456:789a::1]:20160".to_string()];
+
+        // Different address
+        assert!(!match_store_to_peer(
+            "[fd12:3456:789a::99]:20160",
+            &peer_addrs
+        ));
+        // Different port
+        assert!(!match_store_to_peer(
+            "[fd12:3456:789a::1]:20161",
+            &peer_addrs
+        ));
+        // Empty peer list
+        assert!(!match_store_to_peer("[fd12:3456:789a::1]:20160", &[]));
+    }
+
+    #[test]
+    fn store_up_is_eligible() {
+        assert!(is_store_eligible_for_deregister("Up"));
+    }
+
+    #[test]
+    fn store_tombstone_not_eligible() {
+        assert!(!is_store_eligible_for_deregister("Tombstone"));
+    }
+
+    #[test]
+    fn store_offline_not_eligible() {
+        assert!(!is_store_eligible_for_deregister("Offline"));
+        assert!(!is_store_eligible_for_deregister("Disconnected"));
+        assert!(!is_store_eligible_for_deregister(""));
+    }
+
+    #[test]
+    fn peer_unreachable_past_threshold() {
+        let now = 1000;
+        let threshold = 60;
+
+        // last_handshake was 120s ago — well past 60s threshold
+        assert!(is_peer_unreachable_past_threshold(880, now, threshold));
+
+        // last_handshake was 61s ago — just past threshold
+        assert!(is_peer_unreachable_past_threshold(939, now, threshold));
+    }
+
+    #[test]
+    fn peer_unreachable_within_threshold() {
+        let now = 1000;
+        let threshold = 60;
+
+        // last_handshake was 30s ago — within threshold
+        assert!(!is_peer_unreachable_past_threshold(970, now, threshold));
+
+        // last_handshake was exactly 60s ago — not past (> not >=)
+        assert!(!is_peer_unreachable_past_threshold(940, now, threshold));
+    }
+
+    #[test]
+    fn peer_unreachable_zero_ref_time() {
+        // ref_time = 0 (never handshaked), now = 100, threshold = 60
+        // saturating_sub(0) = 100 > 60 → unreachable
+        assert!(is_peer_unreachable_past_threshold(0, 100, 60));
     }
 }
