@@ -70,6 +70,15 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
 
             // Phase 4: remove zombie PD members (unhealthy >5 min)
             reconciler::pd::cleanup_zombie_members(&state.hypervisor.mesh_ipv6);
+
+            // Phase 5: sync TiKV PD endpoints with fabric state
+            if reconciler::tikv_endpoints::sync_pd_endpoints(
+                &state.hypervisor.mesh_ipv6,
+                &peer_ipv6s,
+            ) {
+                // Give TiKV time to restart and reconnect to PD
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         }
     }
 
