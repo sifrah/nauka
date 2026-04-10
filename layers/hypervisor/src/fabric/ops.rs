@@ -536,11 +536,21 @@ pub fn start(db: &LayerDb) -> Result<(), NaukaError> {
 
     let backend = super::backend::create_backend(state.network_mode);
 
-    // If the interface is missing (e.g., `ip link del nauka0`), stop the
-    // service (which may think it's still active) and restart it from config.
-    if !backend.is_up() {
+    // If the interface is missing (e.g., `ip link del nauka0`), or exists
+    // but lost its IPv6 address (e.g., `ip link set nauka0 down && up`),
+    // do a full service restart to restore the complete mesh config.
+    let needs_restart = if !backend.is_up() {
         tracing::info!("interface missing — recreating from saved state");
-        let _ = backend.stop(); // clear stale "active (exited)" state
+        true
+    } else if !has_mesh_ipv6(&state.hypervisor.mesh_ipv6) {
+        tracing::info!("mesh IPv6 address missing — restarting service");
+        true
+    } else {
+        false
+    };
+
+    if needs_restart {
+        let _ = backend.stop();
         return backend.start();
     }
 
@@ -548,6 +558,19 @@ pub fn start(db: &LayerDb) -> Result<(), NaukaError> {
         return Ok(()); // already running, idempotent
     }
     backend.start()
+}
+
+/// Check if the expected mesh IPv6 address is assigned to nauka0.
+fn has_mesh_ipv6(expected: &std::net::Ipv6Addr) -> bool {
+    let output = match std::process::Command::new("ip")
+        .args(["-6", "addr", "show", "dev", "nauka0"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.contains(&expected.to_string())
 }
 
 /// Stop the fabric network service.
