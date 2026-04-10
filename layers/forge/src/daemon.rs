@@ -40,11 +40,29 @@ pub async fn run_once() -> anyhow::Result<String> {
 
 /// Execute one reconciliation cycle.
 async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResult>> {
-    // Pre-flight: recover TiKV if it crashed after a data wipe.
-    // This must run before connect() since TiKV being down would fail the connection.
+    // Pre-flight: recover PD/TiKV if they crashed after a data wipe.
+    // This must run before connect() since PD/TiKV being down would fail the connection.
     {
         let local_db = LocalDb::open("hypervisor")?;
         if let Ok(Some(state)) = fabric::state::FabricState::load(&local_db) {
+            let peer_ipv6s: Vec<std::net::Ipv6Addr> =
+                state.peers.peers.iter().map(|p| p.mesh_ipv6).collect();
+
+            // Phase 1: if local PD is healthy but has dead peers, restore quorum
+            if controlplane::service::recover_pd_quorum(&state.hypervisor.mesh_ipv6) {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+
+            // Phase 2: if local PD is down, rejoin cluster via a healthy peer
+            if controlplane::service::recover_stale_pd_member(
+                &state.hypervisor.mesh_ipv6,
+                &state.hypervisor.name,
+                &peer_ipv6s,
+            ) {
+                // Give PD time to rejoin the cluster
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+
             if controlplane::service::recover_stale_store(&state.hypervisor.mesh_ipv6) {
                 // Give TiKV time to start and register with PD
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
