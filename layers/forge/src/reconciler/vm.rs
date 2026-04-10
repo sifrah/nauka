@@ -66,12 +66,58 @@ impl super::Reconciler for VmReconciler {
             if use_veth {
                 let expected = provision::veth_host_name(&vm.meta.id);
                 let actual = provision::list_veths();
-                if !actual.iter().any(|v| v == &expected) {
+                let veth_was_missing = !actual.iter().any(|v| v == &expected);
+                if veth_was_missing {
                     if let Err(e) = provision::ensure_veth(&vm.meta.id, &bridge) {
                         tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to create veth");
                         result.failed += 1;
                         result.errors.push(format!("veth {}: {e}", vm.meta.id));
                         continue;
+                    }
+
+                    // If container is running, inject the new veth into its netns
+                    if actual_processes.contains(&vm.meta.id) {
+                        if let Some(pid) = crate::observer::process::get_pid(&vm.meta.id) {
+                            let ip = vm.private_ip.as_deref().unwrap_or("0.0.0.0");
+                            let mac =
+                                nauka_network::vpc::provision::mac_from_ip(ip).unwrap_or_default();
+                            let subnet_store =
+                                nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                            let gateway = subnet_store
+                                .get(vm.subnet_id.as_str(), None, None)
+                                .await?
+                                .map(|s| s.gateway.clone())
+                                .unwrap_or_else(|| "0.0.0.0".to_string());
+                            let vpc_store =
+                                nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                            let vpc_cidr = vpc_store
+                                .get(vm.vpc_id.as_str(), None)
+                                .await?
+                                .map(|v| v.cidr);
+                            match provision::setup_container_net(
+                                &vm.meta.id,
+                                pid,
+                                ip,
+                                &gateway,
+                                &mac,
+                                vpc_cidr.as_deref(),
+                            ) {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        vm_id = vm.meta.id.as_str(),
+                                        "veth injected into container netns"
+                                    );
+                                    result.updated += 1;
+                                }
+                                Err(e) => {
+                                    tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to inject veth");
+                                    result.failed += 1;
+                                    result
+                                        .errors
+                                        .push(format!("veth inject {}: {e}", vm.meta.id));
+                                }
+                            }
+                        }
                     }
                 }
             } else {
