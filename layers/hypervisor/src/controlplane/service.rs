@@ -436,9 +436,7 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
     let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
 
     // Find stale stores at our address (any state)
-    let stores_url = format!(
-        "{pd_url}/pd/api/v1/stores?state=0&state=1&state=2"
-    );
+    let stores_url = format!("{pd_url}/pd/api/v1/stores?state=0&state=1&state=2");
     let output = match Command::new("curl")
         .args(["-sf", "--max-time", "5", &stores_url])
         .output()
@@ -478,8 +476,7 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
     // Step 1: Force-delete each store to move it from Up → Offline.
     // PD's unsafe API requires stores to be in a non-Up state.
     for store_id in &stale_ids {
-        let delete_url =
-            format!("{pd_url}/pd/api/v1/store/{store_id}?force=true");
+        let delete_url = format!("{pd_url}/pd/api/v1/store/{store_id}?force=true");
         let _ = Command::new("curl")
             .args(["-sf", "-X", "DELETE", "--max-time", "5", &delete_url])
             .output();
@@ -547,8 +544,7 @@ pub fn recover_stale_store(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
 
         if still_blocking.is_empty() {
             // Purge tombstones to fully free the address
-            let tombstone_url =
-                format!("{pd_url}/pd/api/v1/stores/remove-tombstone");
+            let tombstone_url = format!("{pd_url}/pd/api/v1/stores/remove-tombstone");
             let _ = Command::new("curl")
                 .args(["-sf", "-X", "DELETE", "--max-time", "5", &tombstone_url])
                 .output();
