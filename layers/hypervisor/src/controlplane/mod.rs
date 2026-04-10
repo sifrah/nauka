@@ -10,6 +10,7 @@
 //! - `ops`: High-level orchestration (bootstrap, join, leave)
 //! - `store`: `ClusterDb` — async TiKV client
 
+pub mod backup;
 pub mod ops;
 pub mod service;
 pub mod store;

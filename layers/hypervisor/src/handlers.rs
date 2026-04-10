@@ -190,6 +190,17 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_example("nauka hypervisor peering")
         })
+        .action("backup", "Create a backup of PD and TiKV data to S3")
+        .op(|op| {
+            op.with_output(OutputKind::Message)
+                .with_progress(ProgressHint::Spinner("Creating backup..."))
+                .with_example("nauka hypervisor backup")
+        })
+        .action("backup-list", "List available PD/TiKV backups in S3")
+        .op(|op| {
+            op.with_output(OutputKind::Message)
+                .with_example("nauka hypervisor backup-list")
+        })
         .action("doctor", "Diagnose hypervisor health")
         .action("announce-listen", "Run the announce listener (internal)")
         .op(|op| {
@@ -244,6 +255,8 @@ pub fn handler() -> HandlerFn {
                 "get" => handle_get(req).await,
                 "join" => handle_join(req).await,
                 "peering" => handle_peering(req).await,
+                "backup" => handle_backup().await,
+                "backup-list" => handle_backup_list().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
                 "drain" => Ok(OperationResponse::Message("drain: not yet implemented".into())),
@@ -882,6 +895,71 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
     fabric::announce::listen(db_opener, bind_addr).await?;
 
     Ok(OperationResponse::None)
+}
+
+async fn handle_backup() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+
+    // Get S3 config from region registry
+    let registry =
+        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config = registry
+        .default_region()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no storage region configured.\n\n\
+                 Initialize the cluster first with: nauka hypervisor init"
+            )
+        })?
+        .clone();
+
+    let mut results = Vec::new();
+
+    // Backup PD
+    match controlplane::backup::backup_pd(&config) {
+        Ok(key) => results.push(format!("PD backup:   {key}")),
+        Err(e) => results.push(format!("PD backup failed: {e}")),
+    }
+
+    // Backup TiKV
+    match controlplane::backup::backup_tikv(&config) {
+        Ok(key) => results.push(format!("TiKV backup: {key}")),
+        Err(e) => results.push(format!("TiKV backup failed: {e}")),
+    }
+
+    Ok(OperationResponse::Message(results.join("\n")))
+}
+
+async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+
+    let registry =
+        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let config = registry.default_region().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no storage region configured.\n\n\
+                 Initialize the cluster first with: nauka hypervisor init"
+        )
+    })?;
+
+    let backups = controlplane::backup::list_backups(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if backups.is_empty() {
+        return Ok(OperationResponse::Message("No backups found.".to_string()));
+    }
+
+    let mut lines = vec![format!("{:<65}  {:>10}  {}", "KEY", "SIZE", "MODIFIED")];
+    lines.push("-".repeat(95));
+    for b in &backups {
+        lines.push(format!(
+            "{:<65}  {:>10}  {}",
+            b.key,
+            controlplane::backup::format_size(b.size),
+            b.last_modified,
+        ));
+    }
+
+    Ok(OperationResponse::Message(lines.join("\n")))
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
