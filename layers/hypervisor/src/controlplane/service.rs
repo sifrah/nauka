@@ -230,7 +230,7 @@ Type=simple
 Environment=HOME=/root
 Environment=TIUP_HOME={TIUP_HOME}
 {exec_start}
-Restart=on-failure
+Restart=always
 RestartSec=5
 LimitNOFILE=1000000
 OOMScoreAdjust=-999
@@ -254,7 +254,7 @@ Type=simple
 Environment=HOME=/root
 Environment=TIUP_HOME={TIUP_HOME}
 ExecStart={TIUP_HOME}/bin/tiup tikv --config={TIKV_CONF_PATH}
-Restart=on-failure
+Restart=always
 RestartSec=5
 LimitNOFILE=1000000
 OOMScoreAdjust=-999

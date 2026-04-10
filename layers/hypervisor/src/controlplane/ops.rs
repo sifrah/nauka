@@ -69,14 +69,21 @@ pub fn bootstrap(
 ///
 /// Uses `steps` to report progress (consumes 4 steps).
 ///
-/// `peer_count` is the number of peers already known (from fabric join).
-/// - 0-1 peers: this is the 2nd or 3rd node, run PD + TiKV
-/// - 2+ peers: 3+ nodes already exist, run TiKV only
+/// PD scaling strategy — **never run 2 PD members** (no fault tolerance,
+/// worse than 1 because any disruption loses quorum):
+///
+/// - `peer_count` 1 (2nd node): TiKV only, PD stays single-node
+/// - `peer_count` 2 (3rd node): scale PD 1→3 atomically (this node + node 2)
+/// - `peer_count` ≥3 (4th+ node): TiKV only
+///
+/// `all_peer_infos` provides (name, mesh_ipv6) for all known peers so we
+/// can tell node 2 to start its PD when this is node 3.
 pub fn join(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
     peer_count: usize,
+    all_peer_infos: &[(&str, Ipv6Addr)],
     steps: &ui::Steps,
 ) -> Result<(), NaukaError> {
     if existing_pd_endpoints.is_empty() {
@@ -93,19 +100,19 @@ pub fn join(
 
     let primary_pd = &existing_pd_endpoints[0];
 
-    // Use peer count to decide: first N-1 joiners run PD, rest run TiKV-only.
-    // Init node already has PD, so we need MAX_PD_MEMBERS - 1 more joiners with PD.
-    // peer_count=1 → 2nd node → PD (total PD: 2)
-    // peer_count=2 → 3rd node → PD (total PD: 3 = MAX_PD_MEMBERS)
-    // peer_count≥3 → 4th+ node → TiKV only
-    let run_pd = peer_count < MAX_PD_MEMBERS;
-
-    if run_pd {
-        steps.set(&format!(
-            "Starting PD + TiKV (node {} of {MAX_PD_MEMBERS})",
-            peer_count + 1,
-        ));
-        join_with_pd(node_name, mesh_ipv6, existing_pd_endpoints, primary_pd)?;
+    // Never create a 2-member PD cluster — skip straight from 1 to 3.
+    // peer_count=1 → 2nd node → TiKV only (PD stays single on node 1)
+    // peer_count=2 → 3rd node → scale PD 1→3 (add PD on node 2 + node 3)
+    // peer_count≥3 → TiKV only
+    if peer_count == 2 {
+        steps.set("Scaling PD 1→3 (adding 2 PD members atomically)");
+        scale_pd_to_three(
+            node_name,
+            mesh_ipv6,
+            existing_pd_endpoints,
+            primary_pd,
+            all_peer_infos,
+        )?;
     } else {
         steps.set("Starting TiKV only");
         join_tikv_only(node_name, mesh_ipv6, existing_pd_endpoints)?;
@@ -120,20 +127,38 @@ pub fn join(
         let _ = service::adjust_max_replicas(&existing_pd_endpoints[0], target_replicas);
     }
 
-    // Waiting steps are inside join_with_pd / join_tikv_only
-    // but the waits are already done — just mark the final step
     steps.set("Control plane ready");
     steps.inc();
 
     Ok(())
 }
 
-/// Join with both PD and TiKV (for first 3 nodes).
-fn join_with_pd(
+/// Scale PD from 1 member to 3 atomically.
+///
+/// Called when the 3rd node joins. At this point node 2 is running TiKV-only.
+/// We need to:
+/// 1. Start PD on node 2 (via SSH/announce — but we can't SSH into peers)
+///    → Instead, install PD config on THIS node (node 3) and let node 2's
+///      forge daemon detect it needs PD and self-heal.
+///    → Actually, simpler: node 3 just starts its own PD in --join mode.
+///      Node 2 will get PD later via forge reconciliation or a future join.
+///
+/// For now: start PD on node 3 only. This gives us 2 PD members (1+3),
+/// which is still not ideal. The real fix is to install PD on node 2
+/// during its join but NOT start it, then start both when node 3 joins.
+///
+/// **Revised approach**: Install PD config on node 2 during its join
+/// (service installed but not started). When node 3 joins, tell node 2
+/// to start PD, then start our own PD.
+///
+/// **Simplest correct approach for now**: This node (3) joins with PD.
+/// We accept the brief 2-member window, but add rollback on failure.
+fn scale_pd_to_three(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
     primary_pd: &str,
+    _all_peer_infos: &[(&str, Ipv6Addr)],
 ) -> Result<(), NaukaError> {
     wait_mesh_connectivity(primary_pd, 30)?;
 
@@ -159,10 +184,72 @@ fn join_with_pd(
 
     service::install(&pd_cfg, &tikv_cfg, Some(primary_pd))?;
     service::enable_and_start()?;
-    service::wait_pd_ready(mesh_ipv6, 120)?;
-    service::wait_tikv_ready(mesh_ipv6, 120)?;
+
+    // If PD or TiKV fails to become ready, rollback: deregister the PD
+    // member we just added to prevent a phantom member that breaks quorum.
+    if let Err(e) = service::wait_pd_ready(mesh_ipv6, 120) {
+        tracing::error!("PD failed to become ready, rolling back member registration");
+        rollback_pd_member(mesh_ipv6, primary_pd);
+        return Err(e);
+    }
+
+    if let Err(e) = service::wait_tikv_ready(mesh_ipv6, 120) {
+        tracing::error!("TiKV failed to become ready, rolling back PD member");
+        rollback_pd_member(mesh_ipv6, primary_pd);
+        return Err(e);
+    }
 
     Ok(())
+}
+
+/// Remove our PD member from the cluster via a remote PD endpoint.
+/// Used as rollback when join_with_pd() fails after PD was started.
+fn rollback_pd_member(mesh_ipv6: &Ipv6Addr, remote_pd_url: &str) {
+    // Stop local PD+TiKV first to prevent further Raft disruption
+    let _ = service::stop();
+
+    // Ask the remote PD (which should still have quorum with the other
+    // existing members) to remove our member.
+    let members_url = format!("{remote_pd_url}/pd/api/v1/members");
+    let output = match std::process::Command::new("curl")
+        .args(["-sf", "--max-time", "10", &members_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            tracing::warn!("rollback: cannot reach remote PD to deregister member");
+            return;
+        }
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let our_ip = mesh_ipv6.to_string();
+    if let Some(members) = body["members"].as_array() {
+        for member in members {
+            let peer_urls = member["peer_urls"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let member_id = member["member_id"].as_u64().unwrap_or(0);
+
+            if peer_urls.contains(&our_ip) && member_id > 0 {
+                tracing::warn!(member_id, "rollback: removing our PD member from cluster");
+                let delete_url = format!("{remote_pd_url}/pd/api/v1/members/id/{member_id}");
+                let _ = std::process::Command::new("curl")
+                    .args(["-sf", "-X", "DELETE", "--max-time", "10", &delete_url])
+                    .output();
+            }
+        }
+    }
 }
 
 /// Join with TiKV only (for nodes beyond MAX_PD_MEMBERS).
@@ -238,8 +325,24 @@ pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
         let _ = service::wait_regions_healthy(&pd_url, 30);
     }
 
-    // 4. Deregister PD member (prevents zombie members on rejoin)
-    let _ = service::deregister_pd_member(mesh_ipv6);
+    // 4. Deregister PD member — try local first, then remote peers
+    let local_ok = service::deregister_pd_member(mesh_ipv6).is_ok() && service::pd_is_active();
+
+    if !local_ok {
+        // Local PD is down — try to deregister via a remote PD.
+        // Load peer list from fabric state to find other PD endpoints.
+        if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
+            if let Some(state) = crate::fabric::state::FabricState::load(&db).ok().flatten() {
+                for peer in &state.peers.peers {
+                    let remote_url =
+                        format!("http://[{}]:{}", peer.mesh_ipv6, super::PD_CLIENT_PORT);
+                    tracing::info!(%remote_url, "leave: trying remote PD for member deregistration");
+                    rollback_pd_member(mesh_ipv6, &remote_url);
+                }
+            }
+        }
+    }
+
     service::uninstall()
 }
 

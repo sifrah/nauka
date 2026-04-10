@@ -606,11 +606,18 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
             .collect();
         let peer_count = state.peers.len();
+        let all_peer_infos: Vec<(&str, std::net::Ipv6Addr)> = state
+            .peers
+            .peers
+            .iter()
+            .map(|p| (p.name.as_str(), p.mesh_ipv6))
+            .collect();
         controlplane::ops::join(
             &node_name,
             &result.hypervisor.mesh_ipv6,
             &pd_endpoints,
             peer_count,
+            &all_peer_infos,
             &steps,
         )?;
     }
