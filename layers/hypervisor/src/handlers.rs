@@ -1220,11 +1220,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
         })?;
 
     let mesh_ipv6 = state.hypervisor.mesh_ipv6;
-    let pd_url = format!(
-        "http://[{}]:{}",
-        mesh_ipv6,
-        controlplane::PD_CLIENT_PORT
-    );
+    let pd_url = format!("http://[{}]:{}", mesh_ipv6, controlplane::PD_CLIENT_PORT);
     let has_pd = controlplane::service::has_pd_unit();
 
     let target_pd = controlplane::PD_VERSION;
@@ -1268,9 +1264,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
             let addr = store["store"]["address"].as_str().unwrap_or("?");
             if state_name != "Up" {
                 steps.finish_err("TiKV store not Up");
-                anyhow::bail!(
-                    "pre-flight failed: store {addr} is {state_name} (expected Up)"
-                );
+                anyhow::bail!("pre-flight failed: store {addr} is {state_name} (expected Up)");
             }
         }
     }
@@ -1300,9 +1294,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
         if let Ok(ref db2) = db2 {
             // We're in a sync context in the closure — spawn a blocking task
             // to call the async enable. In practice, just set the state directly.
-            let mut st = fabric::state::FabricState::load(db2)
-                .ok()
-                .flatten();
+            let mut st = fabric::state::FabricState::load(db2).ok().flatten();
             if let Some(ref mut s) = st {
                 s.node_state = fabric::state::NodeState::Available;
                 let _ = s.save(db2);
@@ -1312,8 +1304,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
 
     // ── Step 4: Create backup ───────────────────────────────
     steps.set("Creating backup");
-    let registry =
-        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"));
+    let registry = storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"));
     match registry {
         Ok(reg) => {
             if let Some(config) = reg.default_region() {
@@ -1342,9 +1333,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     steps.inc();
 
     // ── Step 6: Install new versions via TiUP ───────────────
-    steps.set(
-        &format!("Installing PD {target_pd} + TiKV {target_tikv}"),
-    );
+    steps.set(&format!("Installing PD {target_pd} + TiKV {target_tikv}"));
     if let Err(e) = controlplane::service::install_version(target_pd, target_tikv) {
         rollback(&steps, &format!("install failed: {e}"));
         anyhow::bail!("binary install failed: {e}");

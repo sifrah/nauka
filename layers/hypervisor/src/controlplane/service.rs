@@ -152,11 +152,8 @@ pub fn regenerate_units(has_pd: bool) -> Result<(), NaukaError> {
         } else {
             None
         };
-        std::fs::write(
-            PD_UNIT_PATH,
-            generate_pd_unit(join_url.as_deref()),
-        )
-        .map_err(NaukaError::from)?;
+        std::fs::write(PD_UNIT_PATH, generate_pd_unit(join_url.as_deref()))
+            .map_err(NaukaError::from)?;
     }
 
     std::fs::write(TIKV_UNIT_PATH, generate_tikv_unit()).map_err(NaukaError::from)?;
