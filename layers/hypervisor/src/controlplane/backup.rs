@@ -67,7 +67,11 @@ impl ServiceGuard {
     /// Returns the downtime duration.
     fn restart(self) -> Result<std::time::Duration, NaukaError> {
         let dt = self.stopped_at.elapsed();
-        tracing::info!("restarting {} (downtime: {:.1}s)", self.service, dt.as_secs_f64());
+        tracing::info!(
+            "restarting {} (downtime: {:.1}s)",
+            self.service,
+            dt.as_secs_f64()
+        );
         run_systemctl(&["start", self.service])?;
         // Prevent the Drop impl from running a second start.
         std::mem::forget(self);

@@ -958,11 +958,7 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
 }
 
 async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationResponse> {
-    let hot = req
-        .fields
-        .get("hot")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    let hot = req.fields.get("hot").map(|s| s == "true").unwrap_or(false);
 
     let db = open_db()?;
 
