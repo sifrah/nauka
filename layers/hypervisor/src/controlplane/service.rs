@@ -918,7 +918,7 @@ pub fn count_active_stores(pd_url: &str) -> usize {
 ///
 /// Called on leave (scale down to prevent quorum loss) and on join
 /// (scale up to improve durability). Target should be
-/// `min(active_stores, MAX_PD_MEMBERS)`.
+/// `min(active_stores, max_pd_members)`.
 pub fn adjust_max_replicas(pd_url: &str, target: usize) -> Result<(), NaukaError> {
     if target == 0 {
         return Ok(());

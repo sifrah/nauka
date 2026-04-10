@@ -3,8 +3,9 @@
 //! Called by the hypervisor handler during init/join/leave/status.
 //! Orchestrates TiUP install → config → systemd → health check.
 //!
-//! PD (Raft consensus) runs on max 3 nodes for optimal performance.
-//! Additional nodes run TiKV only (storage), connecting to existing PD.
+//! PD (Raft consensus) member count is configurable (1, 3, 5, 7) via
+//! `--max-pd-members` on init (default: 3). Nodes beyond the PD limit
+//! run TiKV only (storage), connecting to existing PD.
 
 use std::net::Ipv6Addr;
 
@@ -12,9 +13,6 @@ use nauka_core::error::NaukaError;
 use nauka_core::ui;
 
 use super::service::{self, PdConfig, TikvConfig};
-
-/// Max PD members in the cluster. Raft works best with 3 or 5.
-const MAX_PD_MEMBERS: usize = 3;
 
 /// Bootstrap a new single-node TiKV cluster.
 ///
@@ -69,12 +67,23 @@ pub fn bootstrap(
 ///
 /// Uses `steps` to report progress (consumes 4 steps).
 ///
-/// PD scaling strategy — **never run 2 PD members** (no fault tolerance,
-/// worse than 1 because any disruption loses quorum):
+/// PD scaling strategy — **never run an even number of PD members**
+/// (even counts have no fault-tolerance advantage and risk split-brain):
 ///
+/// - Total nodes < next_odd(current_pd_count): TiKV only
+/// - Total nodes == next_odd(current_pd_count): scale PD atomically
+///
+/// Default (max_pd_members=3):
 /// - `peer_count` 1 (2nd node): TiKV only, PD stays single-node
-/// - `peer_count` 2 (3rd node): scale PD 1→3 atomically (this node + node 2)
+/// - `peer_count` 2 (3rd node): scale PD 1→3 atomically
 /// - `peer_count` ≥3 (4th+ node): TiKV only
+///
+/// With max_pd_members=5:
+/// - `peer_count` 1: TiKV only
+/// - `peer_count` 2: scale PD 1→3
+/// - `peer_count` 3,4: TiKV only (already at 3 PD members)
+/// - `peer_count` 4: scale PD 3→5
+/// - `peer_count` ≥5: TiKV only
 ///
 /// `all_peer_infos` provides (name, mesh_ipv6) for all known peers so we
 /// can tell node 2 to start its PD when this is node 3.
@@ -84,6 +93,7 @@ pub fn join(
     existing_pd_endpoints: &[String],
     peer_count: usize,
     all_peer_infos: &[(&str, Ipv6Addr)],
+    max_pd_members: usize,
     steps: &ui::Steps,
 ) -> Result<(), NaukaError> {
     if existing_pd_endpoints.is_empty() {
@@ -92,7 +102,7 @@ pub fn join(
         ));
     }
 
-    tracing::info!(node_name, %mesh_ipv6, peer_count, "controlplane join starting");
+    tracing::info!(node_name, %mesh_ipv6, peer_count, max_pd_members, "controlplane join starting");
 
     steps.set("Installing control plane");
     service::ensure_installed()?;
@@ -100,13 +110,23 @@ pub fn join(
 
     let primary_pd = &existing_pd_endpoints[0];
 
-    // Never create a 2-member PD cluster — skip straight from 1 to 3.
-    // peer_count=1 → 2nd node → TiKV only (PD stays single on node 1)
-    // peer_count=2 → 3rd node → scale PD 1→3 (add PD on node 2 + node 3)
-    // peer_count≥3 → TiKV only
-    if peer_count == 2 {
-        steps.set("Scaling PD 1→3 (adding 2 PD members atomically)");
-        scale_pd_to_three(
+    // Determine if this node should trigger PD scaling.
+    // We count total nodes = peer_count + 1 (self).
+    // Current PD count comes from how many PD members the cluster has.
+    // Scaling triggers: total_nodes reaches 3 (1→3), 5 (3→5), 7 (5→7).
+    //
+    // The key invariant: never have an even number of PD members.
+    // peer_count == N-1 for the Nth node (0-indexed peer list excludes self).
+    let should_scale = should_scale_pd(peer_count, max_pd_members);
+
+    if should_scale {
+        let total_nodes = peer_count + 1;
+        let target = total_nodes.min(max_pd_members);
+        let current = if target == 3 { 1 } else { target - 2 };
+        steps.set(&format!(
+            "Scaling PD {current}→{target} (adding 2 PD members atomically)"
+        ));
+        scale_pd(
             node_name,
             mesh_ipv6,
             existing_pd_endpoints,
@@ -120,9 +140,9 @@ pub fn join(
     steps.inc();
 
     // Scale up max-replicas now that we have more stores.
-    // min(active_stores, MAX_PD_MEMBERS) — never exceed Raft group size.
+    // min(active_stores, max_pd_members) — never exceed Raft group size.
     let active = service::count_active_stores(&existing_pd_endpoints[0]);
-    let target_replicas = active.min(MAX_PD_MEMBERS);
+    let target_replicas = active.min(max_pd_members);
     if target_replicas > 0 {
         let _ = service::adjust_max_replicas(&existing_pd_endpoints[0], target_replicas);
     }
@@ -133,27 +153,28 @@ pub fn join(
     Ok(())
 }
 
-/// Scale PD from 1 member to 3 atomically.
+/// Determine whether this joining node should trigger PD scaling.
 ///
-/// Called when the 3rd node joins. At this point node 2 is running TiKV-only.
-/// We need to:
-/// 1. Start PD on node 2 (via SSH/announce — but we can't SSH into peers)
-///    - Instead, install PD config on THIS node (node 3) and let node 2's
-///      forge daemon detect it needs PD and self-heal.
-///    - Actually, simpler: node 3 just starts its own PD in --join mode.
-///      Node 2 will get PD later via forge reconciliation or a future join.
+/// PD scaling happens at odd-numbered total node counts: 3, 5, 7.
+/// `peer_count` is the number of peers (excluding self), so total = peer_count + 1.
 ///
-/// For now: start PD on node 3 only. This gives us 2 PD members (1+3),
-/// which is still not ideal. The real fix is to install PD on node 2
-/// during its join but NOT start it, then start both when node 3 joins.
+/// Returns true if total nodes == 3, 5, or 7 and that count <= max_pd_members.
+fn should_scale_pd(peer_count: usize, max_pd_members: usize) -> bool {
+    let total_nodes = peer_count + 1; // including self
+                                      // Scaling triggers at odd totals: 3, 5, 7
+                                      // (when total == 3, we scale 1→3; when total == 5, we scale 3→5; etc.)
+    total_nodes >= 3 && total_nodes % 2 == 1 && total_nodes <= max_pd_members
+}
+
+/// Scale PD by adding this node as a new PD member.
 ///
-/// **Revised approach**: Install PD config on node 2 during its join
-/// (service installed but not started). When node 3 joins, tell node 2
-/// to start PD, then start our own PD.
+/// Called when the cluster reaches an odd total node count (3, 5, 7)
+/// that is within the configured max_pd_members. This node joins PD
+/// in --join mode, connecting to the existing cluster.
 ///
-/// **Simplest correct approach for now**: This node (3) joins with PD.
-/// We accept the brief 2-member window, but add rollback on failure.
-fn scale_pd_to_three(
+/// We accept a brief even-member window during the scale-up, but add
+/// rollback on failure to prevent phantom members that break quorum.
+fn scale_pd(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
@@ -252,7 +273,7 @@ fn rollback_pd_member(mesh_ipv6: &Ipv6Addr, remote_pd_url: &str) {
     }
 }
 
-/// Join with TiKV only (for nodes beyond MAX_PD_MEMBERS).
+/// Join with TiKV only (for nodes not triggering PD scaling).
 fn join_tikv_only(
     _node_name: &str,
     mesh_ipv6: &Ipv6Addr,
@@ -328,7 +349,17 @@ pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
         let active = service::count_active_stores(&pd_url);
         let remaining = if active > 0 { active - 1 } else { 0 };
         if remaining > 0 {
-            let target = remaining.min(MAX_PD_MEMBERS);
+            // Load max_pd_members from state, fall back to default
+            let max_pd = if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
+                crate::fabric::state::FabricState::load(&db)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.max_pd_members)
+                    .unwrap_or(super::DEFAULT_MAX_PD_MEMBERS)
+            } else {
+                super::DEFAULT_MAX_PD_MEMBERS
+            };
+            let target = remaining.min(max_pd);
             let _ = service::adjust_max_replicas(&pd_url, target);
         }
 
@@ -518,7 +549,57 @@ mod tests {
     }
 
     #[test]
-    fn max_pd_members_constant() {
-        assert_eq!(MAX_PD_MEMBERS, 3);
+    fn default_max_pd_members() {
+        assert_eq!(super::super::DEFAULT_MAX_PD_MEMBERS, 3);
+    }
+
+    #[test]
+    fn should_scale_pd_default_3() {
+        // Default max_pd_members=3
+        // peer_count=0 (1st node = init, not join) — N/A
+        // peer_count=1 (2nd node, total=2) — no scale
+        assert!(!should_scale_pd(1, 3));
+        // peer_count=2 (3rd node, total=3) — scale 1→3
+        assert!(should_scale_pd(2, 3));
+        // peer_count=3 (4th node, total=4) — no scale
+        assert!(!should_scale_pd(3, 3));
+        // peer_count=4 (5th node, total=5) — no scale (max is 3)
+        assert!(!should_scale_pd(4, 3));
+    }
+
+    #[test]
+    fn should_scale_pd_max_5() {
+        // max_pd_members=5
+        // peer_count=1 (total=2) — no
+        assert!(!should_scale_pd(1, 5));
+        // peer_count=2 (total=3) — scale 1→3
+        assert!(should_scale_pd(2, 5));
+        // peer_count=3 (total=4) — no (even)
+        assert!(!should_scale_pd(3, 5));
+        // peer_count=4 (total=5) — scale 3→5
+        assert!(should_scale_pd(4, 5));
+        // peer_count=5 (total=6) — no
+        assert!(!should_scale_pd(5, 5));
+        // peer_count=6 (total=7) — no (max is 5)
+        assert!(!should_scale_pd(6, 5));
+    }
+
+    #[test]
+    fn should_scale_pd_max_7() {
+        // max_pd_members=7
+        assert!(should_scale_pd(2, 7)); // total=3 → scale 1→3
+        assert!(!should_scale_pd(3, 7)); // total=4 → no
+        assert!(should_scale_pd(4, 7)); // total=5 → scale 3→5
+        assert!(!should_scale_pd(5, 7)); // total=6 → no
+        assert!(should_scale_pd(6, 7)); // total=7 → scale 5→7
+        assert!(!should_scale_pd(7, 7)); // total=8 → no
+    }
+
+    #[test]
+    fn should_scale_pd_max_1() {
+        // max_pd_members=1 — never scale beyond init node
+        assert!(!should_scale_pd(1, 1));
+        assert!(!should_scale_pd(2, 1));
+        assert!(!should_scale_pd(10, 1));
     }
 }

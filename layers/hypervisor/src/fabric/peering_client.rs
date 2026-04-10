@@ -127,6 +127,7 @@ mod tests {
                     endpoint: Some("1.2.3.4:51820".into()),
                     mesh_ipv6: "fd01::1".parse().unwrap(),
                 },
+                3,
             );
             write_json(&mut stream, &resp).await.unwrap();
         });

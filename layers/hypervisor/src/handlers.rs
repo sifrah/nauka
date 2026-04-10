@@ -98,6 +98,14 @@ pub fn resource_def() -> ResourceDef {
                     "Start peering listener after init (accepts joins)",
                 ),
             ))
+            .with_arg(OperationArg::optional(
+                "max-pd-members",
+                FieldDef::integer(
+                    "max-pd-members",
+                    "Maximum PD (Placement Driver) members (1, 3, 5, or 7)",
+                )
+                .with_default("3"),
+            ))
             .with_output(OutputKind::Resource)
             .with_progress(ProgressHint::Steps(11))
             .with_example("nauka hypervisor init --name my-cloud --region eu --zone fsn1 --s3-endpoint https://s3.eu.example.com --s3-bucket nauka-eu --s3-access-key AKID --s3-secret-key SECRET --peering")
@@ -362,6 +370,17 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    let max_pd_members: usize = req
+        .fields
+        .get("max-pd-members")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(controlplane::DEFAULT_MAX_PD_MEMBERS);
+    if !controlplane::VALID_PD_MEMBER_COUNTS.contains(&max_pd_members) {
+        anyhow::bail!(
+            "invalid --max-pd-members value: {max_pd_members}. Must be one of: 1, 3, 5, 7"
+        );
+    }
+
     let ipv6_block = req.fields.get("ipv6-block").cloned().or_else(|| {
         let detected = crate::detect::detect_ipv6_block();
         if let Some(ref v) = detected {
@@ -388,6 +407,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         endpoint,
         ipv6_block,
         ipv4_public,
+        max_pd_members,
     };
 
     // Generate a deterministic encryption password from the S3 secret key + region.
@@ -664,6 +684,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             &pd_endpoints,
             peer_count,
             &all_peer_infos,
+            state.max_pd_members,
             &steps,
         )?;
     }
