@@ -84,6 +84,17 @@ pub struct PeerRemove {
     pub wg_public_key: String,
 }
 
+/// Node state change — broadcast when a node enters/exits maintenance mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateChange {
+    /// Name of the node whose state changed.
+    pub name: String,
+    /// WireGuard public key (identifies the node).
+    pub wg_public_key: String,
+    /// New scheduling state ("available" or "draining").
+    pub node_state: super::state::NodeState,
+}
+
 impl JoinResponse {
     /// Create an accepted response.
     pub fn accepted(

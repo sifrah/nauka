@@ -89,6 +89,7 @@ pub fn init(
         secret: secret_str.clone(),
         peers: PeerList::new(),
         network_mode: cfg.network_mode,
+        node_state: super::state::NodeState::default(),
     };
     state
         .save(db)
@@ -447,6 +448,7 @@ pub async fn join(
         secret: secret_str,
         peers,
         network_mode: cfg.network_mode,
+        node_state: super::state::NodeState::default(),
     };
     state
         .save(db)
@@ -490,12 +492,16 @@ pub fn status(db: &LayerDb) -> Result<StatusResult, NaukaError> {
     let svc_active = service::is_active();
     let wg_up = wg::interface_exists();
 
-    let fabric_state = if svc_active && wg_up {
-        "available"
-    } else if svc_installed {
-        "stopped"
+    let fabric_state = if !svc_active || !wg_up {
+        if svc_installed {
+            "stopped"
+        } else {
+            "not installed"
+        }
+    } else if state.node_state == super::state::NodeState::Draining {
+        "draining"
     } else {
-        "not installed"
+        "available"
     };
 
     let (wg_port, wg_peer_count, rx, tx) = if wg_up {
@@ -644,6 +650,90 @@ pub fn update(db: &LayerDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, Na
     tracing::info!(node = state.hypervisor.name.as_str(), "hypervisor updated");
 
     Ok(state.hypervisor)
+}
+
+/// Set node scheduling state to draining (maintenance mode).
+/// Persists the state and broadcasts the change to all peers.
+pub async fn drain(db: &LayerDb) -> Result<(), NaukaError> {
+    let mut state = FabricState::load(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
+        })?;
+
+    if state.node_state == super::state::NodeState::Draining {
+        return Err(NaukaError::conflict(
+            "hypervisor",
+            &state.hypervisor.name,
+            "already draining",
+        ));
+    }
+
+    state.node_state = super::state::NodeState::Draining;
+    state
+        .save(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+    tracing::info!(
+        node = state.hypervisor.name.as_str(),
+        "node set to draining"
+    );
+
+    // Broadcast state change to peers (best-effort)
+    if !state.peers.is_empty() {
+        let change = super::peering::StateChange {
+            name: state.hypervisor.name.clone(),
+            wg_public_key: state.hypervisor.wg_public_key.clone(),
+            node_state: super::state::NodeState::Draining,
+        };
+        let peers: Vec<_> = state.peers.peers.clone();
+        let (ok, fail) = super::announce::broadcast_state_change(&change, &peers).await;
+        tracing::info!(successes = ok, failures = fail, "drain broadcast complete");
+    }
+
+    Ok(())
+}
+
+/// Set node scheduling state back to available (exit maintenance mode).
+/// Persists the state and broadcasts the change to all peers.
+pub async fn enable(db: &LayerDb) -> Result<(), NaukaError> {
+    let mut state = FabricState::load(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
+        })?;
+
+    if state.node_state == super::state::NodeState::Available {
+        return Err(NaukaError::conflict(
+            "hypervisor",
+            &state.hypervisor.name,
+            "already available",
+        ));
+    }
+
+    state.node_state = super::state::NodeState::Available;
+    state
+        .save(db)
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+    tracing::info!(
+        node = state.hypervisor.name.as_str(),
+        "node set to available"
+    );
+
+    // Broadcast state change to peers (best-effort)
+    if !state.peers.is_empty() {
+        let change = super::peering::StateChange {
+            name: state.hypervisor.name.clone(),
+            wg_public_key: state.hypervisor.wg_public_key.clone(),
+            node_state: super::state::NodeState::Available,
+        };
+        let peers: Vec<_> = state.peers.peers.clone();
+        let (ok, fail) = super::announce::broadcast_state_change(&change, &peers).await;
+        tracing::info!(successes = ok, failures = fail, "enable broadcast complete");
+    }
+
+    Ok(())
 }
 
 /// Number of removal broadcast attempts before giving up.

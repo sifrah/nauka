@@ -259,8 +259,8 @@ pub fn handler() -> HandlerFn {
                 "backup-list" => handle_backup_list().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
-                "drain" => Ok(OperationResponse::Message("drain: not yet implemented".into())),
-                "enable" => Ok(OperationResponse::Message("enable: not yet implemented".into())),
+                "drain" => handle_drain().await,
+                "enable" => handle_enable().await,
                 other => Ok(OperationResponse::Message(format!("unknown: {other}"))),
             }
         })
@@ -873,6 +873,22 @@ async fn handle_start() -> anyhow::Result<OperationResponse> {
     Ok(OperationResponse::Message("all services started.".into()))
 }
 
+async fn handle_drain() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+    fabric::ops::drain(&db).await?;
+    Ok(OperationResponse::Message(
+        "node set to draining — no new VMs will be scheduled.".into(),
+    ))
+}
+
+async fn handle_enable() -> anyhow::Result<OperationResponse> {
+    let db = open_db()?;
+    fabric::ops::enable(&db).await?;
+    Ok(OperationResponse::Message(
+        "node set to available — ready for VM scheduling.".into(),
+    ))
+}
+
 async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<OperationResponse> {
     let port: u16 = req
         .fields
@@ -1023,7 +1039,13 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
     };
 
     let backend = fabric::backend::create_backend(state.network_mode);
-    let self_state = if backend.is_up() { "available" } else { "down" };
+    let self_state = if !backend.is_up() {
+        "down"
+    } else if state.node_state == fabric::state::NodeState::Draining {
+        "draining"
+    } else {
+        "available"
+    };
 
     let mut items = vec![serde_json::json!({
         "name": state.hypervisor.name,
@@ -1068,7 +1090,7 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
             "region": state.hypervisor.region,
             "zone": state.hypervisor.zone,
             "mesh_ipv6": state.hypervisor.mesh_ipv6.to_string(),
-            "state": if backend.is_up() { "available" } else { "down" },
+            "state": if !backend.is_up() { "down" } else if state.node_state == fabric::state::NodeState::Draining { "draining" } else { "available" },
         })));
     }
 
@@ -1089,7 +1111,13 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
 /// Map peer status to user-facing label.
 fn peer_state_label(peer: &fabric::peer::Peer) -> &'static str {
     match peer.status {
-        fabric::peer::PeerStatus::Active => "available",
+        fabric::peer::PeerStatus::Active => {
+            if peer.node_state == fabric::state::NodeState::Draining {
+                "draining"
+            } else {
+                "available"
+            }
+        }
         fabric::peer::PeerStatus::Unreachable => "unreachable",
         fabric::peer::PeerStatus::Removed => "removed",
     }

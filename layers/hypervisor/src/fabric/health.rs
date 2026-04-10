@@ -246,6 +246,7 @@ mod tests {
             secret: secret.to_string(),
             peers: super::super::peer::PeerList::new(),
             network_mode: super::super::backend::NetworkMode::default(),
+            node_state: super::super::state::NodeState::default(),
         };
         state.save(&db).unwrap();
 
@@ -293,6 +294,7 @@ mod tests {
             secret: secret.to_string(),
             peers,
             network_mode: super::super::backend::NetworkMode::default(),
+            node_state: super::super::state::NodeState::default(),
         };
         state.save(&db).unwrap();
 
