@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BACKUP_TMP_DIR","PD_DATA_DIR","TIKV_DATA_DIR"],"fn":["backup_pd","backup_tikv","cleanup_old_backups","create_archive","extract_xml_tag","format_size","list_backups","parse_backup_timestamp","parse_s3_list_xml","s3_delete","s3_list","s3_upload","timestamp_label"],"struct":["BackupInfo"]};

@@ -23,6 +23,24 @@
         ]
       }
     },
+    "/admin/v1/hypervisors/backup": {
+      "post": {
+        "operationId": "hypervisor_backup",
+        "summary": "Create a backup of PD and TiKV data to S3",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/hypervisors/backup-list": {
+      "post": {
+        "operationId": "hypervisor_backup-list",
+        "summary": "List available PD/TiKV backups in S3",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
     "/admin/v1/hypervisors/doctor": {
       "post": {
         "operationId": "hypervisor_doctor",
