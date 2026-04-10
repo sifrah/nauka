@@ -377,10 +377,40 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     let steps = ui::Steps::new(step_count);
 
     let result = fabric::ops::init(&db, &init_cfg, &steps)?;
+    // Track how far we got for rollback on failure
+    let fabric_initialized = true;
+    let mut controlplane_initialized = false;
+    let mut storage_initialized = false;
+
+    // Rollback closure — undoes completed steps in reverse order
+    let rollback = |fabric: bool, cp: bool, stor: bool| {
+        tracing::warn!("init failed — rolling back");
+        if stor {
+            tracing::info!("rollback: uninstalling storage");
+            let _ = storage::ops::leave();
+        }
+        if cp {
+            tracing::info!("rollback: uninstalling control plane");
+            let _ = controlplane::service::uninstall();
+        }
+        if fabric {
+            tracing::info!("rollback: removing fabric state and interface");
+            let backend = fabric::backend::create_backend(network_mode);
+            let _ = backend.teardown();
+            let _ = fabric::state::FabricState::delete(&db);
+        }
+    };
 
     // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
-        controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)?;
+        if let Err(e) =
+            controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)
+        {
+            steps.finish_err(&format!("Control plane failed: {e}"));
+            rollback(fabric_initialized, false, false);
+            return Err(e.into());
+        }
+        controlplane_initialized = true;
     }
 
     // Publish region storage config to distributed KV, then setup local storage
@@ -391,27 +421,40 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
             result.hypervisor.mesh_ipv6,
             controlplane::PD_CLIENT_PORT,
         );
-        storage::ops::publish_region_config(&[pd_endpoint.as_str()], &region_storage).await?;
+        if let Err(e) =
+            storage::ops::publish_region_config(&[pd_endpoint.as_str()], &region_storage).await
+        {
+            steps.finish_err(&format!("Storage config failed: {e}"));
+            rollback(fabric_initialized, controlplane_initialized, false);
+            anyhow::bail!("{e}");
+        }
         steps.inc();
     }
 
     if network_mode == fabric::NetworkMode::WireGuard {
         steps.set("Setting up storage");
-        storage::ops::setup_region(&db, region_storage.clone())?;
+        if let Err(e) = storage::ops::setup_region(&db, region_storage.clone()) {
+            steps.finish_err(&format!("Storage setup failed: {e}"));
+            rollback(fabric_initialized, controlplane_initialized, false);
+            return Err(e.into());
+        }
+        storage_initialized = true;
         steps.inc();
     }
 
-    // Install compute runtime (crun or cloud-hypervisor) + base image
+    // Non-critical steps — warn but don't rollback
     if let Err(e) = crate::compute_setup::install(&steps) {
         tracing::warn!(error = %e, "compute setup failed (VMs won't work until fixed)");
     }
 
-    // Install persistent announce listener (don't start if --peering will run its own)
     if !peering {
         if let Err(e) = fabric::announce::install_service(port) {
             tracing::warn!(error = %e, "announce service install failed");
         }
     }
+
+    // Suppress unused variable warnings
+    let _ = (fabric_initialized, storage_initialized);
 
     steps.finish("Hypervisor initialized");
     eprintln!();
