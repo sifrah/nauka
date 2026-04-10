@@ -93,8 +93,8 @@ pub fn ensure_nat_gateway(
         ],
     );
 
-    // ── 3. NAT44 MASQUERADE for IPv4 outbound (fallback) ──
-    ensure_nft_nat4(public_interface)?;
+    // ── 3. NAT44 MASQUERADE for IPv4 outbound (per-VPC bridge, not wildcard) ──
+    ensure_nft_nat4(&br, public_interface)?;
 
     // ── 4. Jool NAT64 ──
     let _ = run_cmd("modprobe", &["jool"]);
@@ -128,19 +128,122 @@ pub fn ensure_nat_gateway(
 }
 
 /// Remove NAT gateway provisioning for a VPC.
+///
+/// Cleans up: Jool instance, public IPv6 address, and nftables NAT rules.
 pub fn remove_nat_gateway(
     vpc_id: &str,
     public_ipv6: &Ipv6Addr,
     public_interface: &str,
 ) -> anyhow::Result<()> {
     let instance = jool_instance_name(vpc_id);
+    let br = bridge_name(vpc_id);
+
+    // Remove Jool NAT64 instance
     let _ = run_cmd("jool", &["instance", "remove", &instance]);
+
+    // Remove public IPv6 from interface
     let addr_cidr = format!("{}/128", public_ipv6);
     let _ = run_cmd(
         "ip",
         &["-6", "addr", "del", &addr_cidr, "dev", public_interface],
     );
+
+    // Remove NAT44 masquerade rule for this bridge
+    remove_nft_rules_matching("ip", "nauka_nat4", "postrouting", &br);
+
+    // Remove NAT66 SNAT rule for this bridge
+    remove_nft_rules_matching("ip6", "nauka_nat", "postrouting", &br);
+
     Ok(())
+}
+
+/// Remove all nftables rules in a chain that match a substring.
+fn remove_nft_rules_matching(family: &str, table: &str, chain: &str, pattern: &str) {
+    // List rules with handles
+    let output = Command::new("nft")
+        .args(["-a", "list", "chain", family, table, chain])
+        .output();
+    let text = match output {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return,
+    };
+    // Find handle numbers for matching rules and delete them
+    for line in text.lines() {
+        if line.contains(pattern) {
+            if let Some(handle) = line.rsplit("# handle ").next() {
+                if let Ok(_h) = handle.trim().parse::<u64>() {
+                    let _ = Command::new("nft")
+                        .args([
+                            "delete",
+                            "rule",
+                            family,
+                            table,
+                            chain,
+                            "handle",
+                            handle.trim(),
+                        ])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
+}
+
+/// Remove NAT rules for bridges that no longer have a NAT gateway.
+///
+/// Compares active NAT gateway bridges against existing nftables rules and
+/// removes any rules for bridges that shouldn't have NAT.
+pub fn flush_stale_nat_rules(active_natgws: &[&super::types::NatGw]) {
+    let active_bridges: Vec<String> = active_natgws
+        .iter()
+        .map(|n| bridge_name(n.vpc_id.as_str()))
+        .collect();
+
+    // Clean stale NAT44 masquerade rules
+    flush_stale_rules_in_chain("ip", "nauka_nat4", "postrouting", &active_bridges);
+
+    // Clean stale NAT66 SNAT rules
+    flush_stale_rules_in_chain("ip6", "nauka_nat", "postrouting", &active_bridges);
+}
+
+fn flush_stale_rules_in_chain(
+    family: &str,
+    table: &str,
+    chain: &str,
+    active_bridges: &[String],
+) {
+    let output = Command::new("nft")
+        .args(["-a", "list", "chain", family, table, chain])
+        .output();
+    let text = match output {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return,
+    };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Only process actual rules with iifname (skip chain header/type lines)
+        if !trimmed.contains("iifname") {
+            continue;
+        }
+        // Check if this rule references a bridge NOT in the active set
+        let is_active = active_bridges.iter().any(|br| trimmed.contains(br.as_str()));
+        if !is_active {
+            if let Some(handle) = trimmed.rsplit("# handle ").next() {
+                if let Ok(_h) = handle.trim().parse::<u64>() {
+                    let _ = Command::new("nft")
+                        .args([
+                            "delete", "rule", family, table, chain, "handle",
+                            handle.trim(),
+                        ])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
 }
 
 /// Detect the host's default IPv4 gateway.
@@ -177,26 +280,29 @@ fn detect_bridge_ipv4(bridge: &str) -> Option<String> {
     None
 }
 
-/// NAT44: MASQUERADE for IPv4 traffic from VPC bridges.
-fn ensure_nft_nat4(out_iface: &str) -> anyhow::Result<()> {
+/// NAT44: MASQUERADE for IPv4 traffic from a specific VPC bridge.
+fn ensure_nft_nat4(vpc_bridge: &str, out_iface: &str) -> anyhow::Result<()> {
     let _ = run_nft("add table ip nauka_nat4");
     let _ =
         run_nft("add chain ip nauka_nat4 postrouting { type nat hook postrouting priority 100 ; }");
     let existing = Command::new("nft")
         .args(["list", "chain", "ip", "nauka_nat4", "postrouting"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("masquerade"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(vpc_bridge))
         .unwrap_or(false);
     if !existing {
         run_nft(&format!(
-            "add rule ip nauka_nat4 postrouting iifname \"nkb-*\" oifname \"{}\" masquerade",
-            out_iface
+            "add rule ip nauka_nat4 postrouting iifname \"{}\" oifname \"{}\" masquerade",
+            vpc_bridge, out_iface
         ))?;
     }
     Ok(())
 }
 
 /// NAT66: SNAT VM IPv6 traffic from a specific VPC bridge to the NAT GW's public IPv6.
+///
+/// Removes any stale SNAT rule for this bridge before adding the current one.
+/// This handles the case where a NAT gateway is deleted and recreated with a new IPv6.
 fn ensure_nft_nat6(
     vpc_bridge: &str,
     public_ipv6: &Ipv6Addr,
@@ -205,14 +311,37 @@ fn ensure_nft_nat6(
     let _ = run_nft("add table ip6 nauka_nat");
     let _ =
         run_nft("add chain ip6 nauka_nat postrouting { type nat hook postrouting priority 100 ; }");
+
+    // Check if correct rule already exists
     let ipv6_str = public_ipv6.to_string();
-    let existing = Command::new("nft")
+    let chain_output = Command::new("nft")
         .args(["list", "chain", "ip6", "nauka_nat", "postrouting"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&ipv6_str))
-        .unwrap_or(false);
-    if !existing {
-        // SNAT traffic from this VPC's bridge to its dedicated public IPv6
+        .ok();
+    let chain_text = chain_output
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let has_correct_rule = chain_text.contains(vpc_bridge) && chain_text.contains(&ipv6_str);
+    let has_stale_rule = chain_text.contains(vpc_bridge) && !chain_text.contains(&ipv6_str);
+
+    if has_stale_rule {
+        // Flush and recreate all rules — stale SNAT for this bridge exists
+        let _ = run_nft("flush chain ip6 nauka_nat postrouting");
+        // Re-add rules for all bridges that aren't this one
+        for line in chain_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("snat to") && !trimmed.contains(vpc_bridge) {
+                let _ = run_nft(&format!("add rule ip6 nauka_nat postrouting {}", trimmed));
+            }
+        }
+        // Add correct rule for this bridge
+        run_nft(&format!(
+            "add rule ip6 nauka_nat postrouting iifname \"{}\" oifname \"{}\" snat to {}",
+            vpc_bridge, out_iface, public_ipv6
+        ))?;
+    } else if !has_correct_rule {
         run_nft(&format!(
             "add rule ip6 nauka_nat postrouting iifname \"{}\" oifname \"{}\" snat to {}",
             vpc_bridge, out_iface, public_ipv6

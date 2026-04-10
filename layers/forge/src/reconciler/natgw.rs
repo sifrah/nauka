@@ -32,6 +32,10 @@ impl super::Reconciler for NatGwReconciler {
         // Resolve the public interface (interface with default IPv6 route)
         let public_interface = detect_public_interface().unwrap_or_else(|| "eth0".to_string());
 
+        // Flush stale NAT rules before re-provisioning.
+        // This ensures deleted NAT gateways have their masquerade/SNAT rules removed.
+        provision::flush_stale_nat_rules(&local_natgws);
+
         // Ensure each NAT GW is provisioned
         for natgw in &local_natgws {
             // Resolve VPC VNI

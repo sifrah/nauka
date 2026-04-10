@@ -47,7 +47,12 @@ impl VpcStore {
             .ok_or_else(|| anyhow::anyhow!("org '{org_name}' not found"))?;
 
         // Validate CIDR
-        crate::validate::private_cidr(cidr)?;
+        let new_net = crate::validate::private_cidr(cidr)?;
+
+        // Check CIDR doesn't overlap with existing VPCs in this org
+        let existing_vpcs = self.list(Some(org_name)).await?;
+        let existing_cidrs: Vec<String> = existing_vpcs.iter().map(|v| v.cidr.clone()).collect();
+        crate::validate::no_overlap(&new_net, &existing_cidrs)?;
 
         // Check uniqueness within org
         let idx_key = format!("{}/{}", org.meta.id, name);
