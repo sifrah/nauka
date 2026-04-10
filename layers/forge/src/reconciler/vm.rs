@@ -260,25 +260,8 @@ impl super::Reconciler for VmReconciler {
                 continue;
             }
 
-            // Ensure process is running — clean up stale state first
+            // Ensure process is running
             if !actual_processes.contains(&vm.meta.id) {
-                // Kill orphaned processes and clean stale container state
-                // before recreating. This handles the case where the container
-                // died but `sleep infinity` or tini survived as an orphan.
-                let _ = rt.stop(&vm.meta.id);
-
-                // Remove stale veth pair — the guest side is stuck in the
-                // dead container's netns and can't be reused. Recreate a
-                // fresh pair so rt.start() can inject it into the new container.
-                if use_veth {
-                    let _ = provision::remove_veth(&vm.meta.id);
-                    if let Err(e) = provision::ensure_veth(&vm.meta.id, &bridge) {
-                        tracing::error!(vm_id = vm.meta.id.as_str(), error = %e, "failed to recreate veth");
-                        result.failed += 1;
-                        result.errors.push(format!("veth {}: {e}", vm.meta.id));
-                        continue;
-                    }
-                }
                 let subnet_store =
                     nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
                 let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
