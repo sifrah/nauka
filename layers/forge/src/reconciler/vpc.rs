@@ -270,21 +270,9 @@ impl super::Reconciler for VpcReconciler {
 fn ensure_forward_rules(peered_pairs: &[(String, String)]) {
     use std::process::Command;
 
-    if peered_pairs.is_empty() {
-        // No peerings — disable forwarding and clean up
-        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "0");
-        let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "0");
-        let _ = Command::new("nft")
-            .args(["delete", "chain", "inet", "nauka", "forward"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        return;
-    }
-
-    // Enable forwarding (required for peering)
-    let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-    let _ = std::fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1");
+    // Always keep a FORWARD chain with policy DROP. This ensures VPC
+    // isolation even when ip_forward is enabled (NAT gateways need it).
+    // Only whitelist specific peered bridge pairs.
 
     // Ensure nauka table exists
     let _ = Command::new("nft")
@@ -322,6 +310,20 @@ fn ensure_forward_rules(peered_pairs: &[(String, String)]) {
             "nauka",
             "forward",
             "ct state established,related accept",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Allow outbound traffic from VPC bridges to the public interface (NAT gateway internet)
+    let _ = Command::new("nft")
+        .args([
+            "add",
+            "rule",
+            "inet",
+            "nauka",
+            "forward",
+            "iifname \"nkb-*\" oifname != \"nkb-*\" accept",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
