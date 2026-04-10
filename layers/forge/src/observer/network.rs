@@ -27,6 +27,11 @@ pub fn list_bridges() -> Vec<String> {
         .collect()
 }
 
+/// Check if any network interface exists by name.
+pub fn iface_exists(name: &str) -> bool {
+    bridge_exists(name)
+}
+
 /// Check if a specific bridge interface exists.
 pub fn bridge_exists(name: &str) -> bool {
     Command::new("ip")
