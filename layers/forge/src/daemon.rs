@@ -26,6 +26,10 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
 
+        // Post-reconcile: health checks every 60s (every other cycle).
+        // Runs outside run_cycle so health is reported even when TiKV is down.
+        run_health_if_due(cycle);
+
         tokio::time::sleep(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECS)).await;
     }
 }
@@ -36,6 +40,21 @@ pub async fn run_once() -> anyhow::Result<String> {
 
     let lines: Vec<String> = results.iter().map(|r| format!("  {r}")).collect();
     Ok(format!("reconciliation complete\n{}", lines.join("\n")))
+}
+
+/// Run health checks if this cycle is eligible.
+///
+/// Loads mesh_ipv6 from local state so it works even when TiKV is down.
+fn run_health_if_due(cycle: u64) {
+    let local_db = match LocalDb::open("hypervisor") {
+        Ok(db) => db,
+        Err(_) => return,
+    };
+    let state = match fabric::state::FabricState::load(&local_db) {
+        Ok(Some(s)) => s,
+        _ => return,
+    };
+    reconciler::health::run_if_due(cycle, &state.hypervisor.mesh_ipv6);
 }
 
 /// Execute one reconciliation cycle.
