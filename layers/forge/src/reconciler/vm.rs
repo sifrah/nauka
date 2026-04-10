@@ -260,8 +260,12 @@ impl super::Reconciler for VmReconciler {
                 continue;
             }
 
-            // Ensure process is running
+            // Ensure process is running — clean up stale state first
             if !actual_processes.contains(&vm.meta.id) {
+                // Kill orphaned processes and clean stale container state
+                // before recreating. This handles the case where the container
+                // died but `sleep infinity` or tini survived as an orphan.
+                let _ = rt.stop(&vm.meta.id);
                 let subnet_store =
                     nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
                 let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
