@@ -29,14 +29,19 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#27 id=27 data-nosnippet>27</a>        .collect()
 <a href=#28 id=28 data-nosnippet>28</a>}
 <a href=#29 id=29 data-nosnippet>29</a>
-<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// Check if a specific bridge interface exists.
-<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub fn </span>bridge_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
-<a href=#32 id=32 data-nosnippet>32</a>    Command::new(<span class="string">"ip"</span>)
-<a href=#33 id=33 data-nosnippet>33</a>        .args([<span class="string">"link"</span>, <span class="string">"show"</span>, name])
-<a href=#34 id=34 data-nosnippet>34</a>        .stdout(std::process::Stdio::null())
-<a href=#35 id=35 data-nosnippet>35</a>        .stderr(std::process::Stdio::null())
-<a href=#36 id=36 data-nosnippet>36</a>        .status()
-<a href=#37 id=37 data-nosnippet>37</a>        .map(|s| s.success())
-<a href=#38 id=38 data-nosnippet>38</a>        .unwrap_or(<span class="bool-val">false</span>)
-<a href=#39 id=39 data-nosnippet>39</a>}
+<a href=#30 id=30 data-nosnippet>30</a><span class="doccomment">/// Check if any network interface exists by name.
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub fn </span>iface_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#32 id=32 data-nosnippet>32</a>    bridge_exists(name)
+<a href=#33 id=33 data-nosnippet>33</a>}
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="doccomment">/// Check if a specific bridge interface exists.
+<a href=#36 id=36 data-nosnippet>36</a></span><span class="kw">pub fn </span>bridge_exists(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#37 id=37 data-nosnippet>37</a>    Command::new(<span class="string">"ip"</span>)
+<a href=#38 id=38 data-nosnippet>38</a>        .args([<span class="string">"link"</span>, <span class="string">"show"</span>, name])
+<a href=#39 id=39 data-nosnippet>39</a>        .stdout(std::process::Stdio::null())
+<a href=#40 id=40 data-nosnippet>40</a>        .stderr(std::process::Stdio::null())
+<a href=#41 id=41 data-nosnippet>41</a>        .status()
+<a href=#42 id=42 data-nosnippet>42</a>        .map(|s| s.success())
+<a href=#43 id=43 data-nosnippet>43</a>        .unwrap_or(<span class="bool-val">false</span>)
+<a href=#44 id=44 data-nosnippet>44</a>}
 </code></pre></div></section></main></body></html>

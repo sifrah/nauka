@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["bridge_exists","list_bridges"]};
+window.SIDEBAR_ITEMS = {"fn":["bridge_exists","iface_exists","list_bridges"]};
