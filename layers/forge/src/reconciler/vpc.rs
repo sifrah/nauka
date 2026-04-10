@@ -91,6 +91,9 @@ impl super::Reconciler for VpcReconciler {
             }
         }
 
+        // 5b. Ensure nftables host isolation rules for all active bridges
+        provision::ensure_host_isolation_all(&needed_bridge_names);
+
         // 6. FDB distribution — add entries for remote VMs in our VPCs
         for (vpc_id, _vni) in &needed_vpcs {
             // Find ALL VMs in this VPC (local + remote)
