@@ -183,6 +183,8 @@ pub fn generate_tikv_conf(cfg: &TikvConfig) -> String {
 addr = "[{ip}]:{tikv_port}"
 advertise-addr = "[{ip}]:{tikv_port}"
 status-addr = "[{ip}]:{status_port}"
+grpc-keepalive-time = "15s"
+grpc-keepalive-timeout = "30s"
 
 [storage]
 data-dir = "{TIKV_DATA_DIR}"
@@ -638,8 +640,8 @@ pub fn recover_pd_quorum(mesh_ipv6: &std::net::Ipv6Addr) -> bool {
     let _ = run_systemctl(&["stop", PD_SERVICE]);
 
     // Run pd-server --force-new-cluster briefly to rewrite etcd state
-    const PD_BINARY: &str = "/opt/nauka/tiup/components/pd/v8.5.5/pd-server";
-    let child = Command::new(PD_BINARY)
+    let pd_binary = format!("{TIUP_HOME}/components/pd/{}/pd-server", super::PD_VERSION);
+    let child = Command::new(&pd_binary)
         .args(["--config", PD_CONF_PATH, "--force-new-cluster"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -944,6 +946,31 @@ pub fn wait_regions_healthy(pd_url: &str, timeout_secs: u64) -> Result<(), Nauka
     // Not fatal — best effort
     tracing::warn!("timed out waiting for region leaders, proceeding anyway");
     Ok(())
+}
+
+/// Detect installed PD version by scanning the TiUP components directory.
+///
+/// Returns `Some("v8.5.5")` if a versioned directory exists, `None` otherwise.
+pub fn installed_pd_version() -> Option<String> {
+    installed_component_version("pd")
+}
+
+/// Detect installed TiKV version by scanning the TiUP components directory.
+pub fn installed_tikv_version() -> Option<String> {
+    installed_component_version("tikv")
+}
+
+fn installed_component_version(component: &str) -> Option<String> {
+    let dir = format!("{TIUP_HOME}/components/{component}");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    // Find the first directory matching v<digits>
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('v') && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Uninstall everything — stop services, remove configs, data.

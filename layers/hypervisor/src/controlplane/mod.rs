@@ -15,6 +15,10 @@ pub mod ops;
 pub mod service;
 pub mod store;
 
+/// Expected component versions (used by upgrade-check and doctor).
+pub const PD_VERSION: &str = "v8.5.5";
+pub const TIKV_VERSION: &str = "v8.5.5";
+
 /// Default ports (on mesh IPv6).
 pub const PD_CLIENT_PORT: u16 = 2379;
 pub const PD_PEER_PORT: u16 = 2380;

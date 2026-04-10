@@ -266,6 +266,37 @@ fn check_controlplane(report: &mut DoctorReport, mesh_ipv6: Option<&Ipv6Addr>) {
         checks.push(fail("tikv service", "not installed"));
     }
 
+    // Version checks — compare installed vs expected
+    match controlplane::service::installed_pd_version() {
+        Some(ref v) if v == controlplane::PD_VERSION => {
+            checks.push(ok("pd version", &format!("{v} (expected)")));
+        }
+        Some(ref v) => {
+            checks.push(warn(
+                "pd version",
+                &format!("{v} (expected {})", controlplane::PD_VERSION),
+            ));
+        }
+        None => {
+            checks.push(skip("pd version", "not installed"));
+        }
+    }
+
+    match controlplane::service::installed_tikv_version() {
+        Some(ref v) if v == controlplane::TIKV_VERSION => {
+            checks.push(ok("tikv version", &format!("{v} (expected)")));
+        }
+        Some(ref v) => {
+            checks.push(warn(
+                "tikv version",
+                &format!("{v} (expected {})", controlplane::TIKV_VERSION),
+            ));
+        }
+        None => {
+            checks.push(skip("tikv version", "not installed"));
+        }
+    }
+
     // PD health + leader
     if let Some(ip) = mesh_ipv6 {
         let pd_url = format!("http://[{}]:{}", ip, controlplane::PD_CLIENT_PORT);
