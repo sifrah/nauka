@@ -182,6 +182,7 @@ pub fn generate_tikv_conf(cfg: &TikvConfig) -> String {
 [server]
 addr = "[{ip}]:{tikv_port}"
 advertise-addr = "[{ip}]:{tikv_port}"
+status-addr = "[{ip}]:{status_port}"
 
 [storage]
 data-dir = "{TIKV_DATA_DIR}"
@@ -202,6 +203,7 @@ capacity = "0"
 "#,
         ip = cfg.mesh_ipv6,
         tikv_port = super::TIKV_PORT,
+        status_port = super::TIKV_STATUS_PORT,
         pd_list = pd_endpoints.join(", "),
     )
 }

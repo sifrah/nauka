@@ -18,6 +18,7 @@ pub mod store;
 pub const PD_CLIENT_PORT: u16 = 2379;
 pub const PD_PEER_PORT: u16 = 2380;
 pub const TIKV_PORT: u16 = 20160;
+pub const TIKV_STATUS_PORT: u16 = 20180;
 
 pub use store::ClusterDb;
 
