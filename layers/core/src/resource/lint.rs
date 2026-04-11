@@ -550,19 +550,6 @@ fn scope_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
     // get/delete don't have. Hard to check generically without knowing which
     // args are parent filters vs data filters. Skip for now — covered by
     // handler review.
-
-    // W080: delete with multiple parents should clarify scope
-    if has_op(def, "delete") && def.scope.parents.len() > 1 {
-        let all_resolve = def.scope.parents.iter().all(|p| p.required_on_resolve);
-        if !all_resolve {
-            v.push(Violation {
-                rule: "W080",
-                resource: kind,
-                message: "delete operation with multiple parents: consider setting required_on_resolve=true for unambiguous deletion".into(),
-                severity: Severity::Warning,
-            });
-        }
-    }
 }
 
 // ── Description (W040, W041) ─────────────────────────────────

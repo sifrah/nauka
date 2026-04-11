@@ -36,13 +36,13 @@ fn test_resource() -> ResourceRegistration {
         Box::pin(async move {
             match req.operation.as_str() {
                 "list" => Ok(OperationResponse::ResourceList(vec![
-                    serde_json::json!({"name": "w1", "state": "active"}),
+                    serde_json::json!({"id": "wdg-001", "name": "w1", "state": "active"}),
                 ])),
                 "get" => Ok(OperationResponse::Resource(
-                    serde_json::json!({"name": req.name.unwrap_or_default()}),
+                    serde_json::json!({"id": "wdg-001", "name": req.name.unwrap_or_default()}),
                 )),
                 "create" => Ok(OperationResponse::Resource(
-                    serde_json::json!({"name": req.fields.get("name").cloned().unwrap_or_default()}),
+                    serde_json::json!({"id": "wdg-002", "name": req.fields.get("name").cloned().unwrap_or_default()}),
                 )),
                 _ => Ok(OperationResponse::None),
             }
