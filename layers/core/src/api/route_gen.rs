@@ -1050,7 +1050,7 @@ fn build_tags(registrations: &[ResourceRegistration]) -> Vec<serde_json::Value> 
                 .identity
                 .kind
                 .split('-')
-                .map(|w| capitalize(w))
+                .map(capitalize)
                 .collect::<Vec<_>>()
                 .join(" ");
             tags.push(serde_json::json!({
