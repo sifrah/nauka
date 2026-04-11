@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["build_registry","main","serve"],"mod":["update"]};
+window.SIDEBAR_ITEMS = {"fn":["main","serve"],"mod":["registry","update"]};

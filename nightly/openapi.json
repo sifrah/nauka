@@ -1,7 +1,117 @@
 {
   "components": {
     "schemas": {
+      "env": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "forge": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "hypervisor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "image": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "nat-gateway": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "org": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "peering": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "project": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "subnet": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "vm": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "vpc": {
         "properties": {
           "name": {
             "type": "string"
@@ -15,11 +125,43 @@
     }
   },
   "info": {
+    "description": "Nauka turns bare-metal servers into a programmable cloud. This is the admin API reference.",
     "title": "Nauka API",
-    "version": "2.0.0"
+    "version": "2.0.0",
+    "x-logo": {
+      "altText": "Nauka",
+      "url": "/logo-dark.svg"
+    }
   },
   "openapi": "3.0.0",
   "paths": {
+    "/admin/v1/forges/reconcile": {
+      "post": {
+        "operationId": "forge_reconcile",
+        "summary": "Trigger a single reconciliation cycle",
+        "tags": [
+          "forge"
+        ]
+      }
+    },
+    "/admin/v1/forges/run": {
+      "post": {
+        "operationId": "forge_run",
+        "summary": "Start the reconciliation daemon",
+        "tags": [
+          "forge"
+        ]
+      }
+    },
+    "/admin/v1/forges/status": {
+      "post": {
+        "operationId": "forge_status",
+        "summary": "Show reconciler status",
+        "tags": [
+          "forge"
+        ]
+      }
+    },
     "/admin/v1/hypervisors": {
       "get": {
         "operationId": "hypervisor_list",
@@ -188,6 +330,316 @@
         "summary": "Get resource details",
         "tags": [
           "hypervisor"
+        ]
+      }
+    },
+    "/admin/v1/images/catalog": {
+      "post": {
+        "operationId": "image_catalog",
+        "summary": "List images available in the registry",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/admin/v1/images/delete": {
+      "post": {
+        "operationId": "image_delete",
+        "summary": "Delete a local image",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/admin/v1/images/list": {
+      "post": {
+        "operationId": "image_list",
+        "summary": "List locally available images",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/admin/v1/images/pull": {
+      "post": {
+        "operationId": "image_pull",
+        "summary": "Pull an image from the registry",
+        "tags": [
+          "image"
+        ]
+      }
+    },
+    "/admin/v1/orgs": {
+      "get": {
+        "operationId": "org_list",
+        "summary": "List resources",
+        "tags": [
+          "org"
+        ]
+      },
+      "post": {
+        "operationId": "org_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{id}": {
+      "delete": {
+        "operationId": "org_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "org"
+        ]
+      },
+      "get": {
+        "operationId": "org_get",
+        "summary": "Get resource details",
+        "tags": [
+          "org"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/projects": {
+      "get": {
+        "operationId": "project_list",
+        "summary": "List resources",
+        "tags": [
+          "project"
+        ]
+      },
+      "post": {
+        "operationId": "project_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/projects/{id}": {
+      "delete": {
+        "operationId": "project_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "project"
+        ]
+      },
+      "get": {
+        "operationId": "project_get",
+        "summary": "Get resource details",
+        "tags": [
+          "project"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/projects/{project_id}/environments": {
+      "get": {
+        "operationId": "env_list",
+        "summary": "List resources",
+        "tags": [
+          "env"
+        ]
+      },
+      "post": {
+        "operationId": "env_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "env"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/projects/{project_id}/environments/{id}": {
+      "delete": {
+        "operationId": "env_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "env"
+        ]
+      },
+      "get": {
+        "operationId": "env_get",
+        "summary": "Get resource details",
+        "tags": [
+          "env"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vms": {
+      "get": {
+        "operationId": "vm_list",
+        "summary": "List resources",
+        "tags": [
+          "vm"
+        ]
+      },
+      "post": {
+        "operationId": "vm_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "vm"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vms/start": {
+      "post": {
+        "operationId": "vm_start",
+        "summary": "Start a stopped VM",
+        "tags": [
+          "vm"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vms/stop": {
+      "post": {
+        "operationId": "vm_stop",
+        "summary": "Stop a running VM",
+        "tags": [
+          "vm"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vms/{id}": {
+      "delete": {
+        "operationId": "vm_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "vm"
+        ]
+      },
+      "get": {
+        "operationId": "vm_get",
+        "summary": "Get resource details",
+        "tags": [
+          "vm"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs": {
+      "get": {
+        "operationId": "vpc_list",
+        "summary": "List resources",
+        "tags": [
+          "vpc"
+        ]
+      },
+      "post": {
+        "operationId": "vpc_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "vpc"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{id}": {
+      "delete": {
+        "operationId": "vpc_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "vpc"
+        ]
+      },
+      "get": {
+        "operationId": "vpc_get",
+        "summary": "Get resource details",
+        "tags": [
+          "vpc"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways": {
+      "get": {
+        "operationId": "nat-gateway_list",
+        "summary": "List resources",
+        "tags": [
+          "nat-gateway"
+        ]
+      },
+      "post": {
+        "operationId": "nat-gateway_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "nat-gateway"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways/{id}": {
+      "delete": {
+        "operationId": "nat-gateway_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "nat-gateway"
+        ]
+      },
+      "get": {
+        "operationId": "nat-gateway_get",
+        "summary": "Get resource details",
+        "tags": [
+          "nat-gateway"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings": {
+      "get": {
+        "operationId": "peering_list",
+        "summary": "List resources",
+        "tags": [
+          "peering"
+        ]
+      },
+      "post": {
+        "operationId": "peering_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "peering"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings/{id}": {
+      "delete": {
+        "operationId": "peering_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "peering"
+        ]
+      },
+      "get": {
+        "operationId": "peering_get",
+        "summary": "Get resource details",
+        "tags": [
+          "peering"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets": {
+      "get": {
+        "operationId": "subnet_list",
+        "summary": "List resources",
+        "tags": [
+          "subnet"
+        ]
+      },
+      "post": {
+        "operationId": "subnet_create",
+        "summary": "Create a new resource",
+        "tags": [
+          "subnet"
+        ]
+      }
+    },
+    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets/{id}": {
+      "delete": {
+        "operationId": "subnet_delete",
+        "summary": "Delete a resource",
+        "tags": [
+          "subnet"
+        ]
+      },
+      "get": {
+        "operationId": "subnet_get",
+        "summary": "Get resource details",
+        "tags": [
+          "subnet"
         ]
       }
     }

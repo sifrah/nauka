@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["OperationResponse"],"struct":["OperationRequest","ResourceRegistration","ResourceRegistry","ScopeValues","ValidatedRequest"],"type":["HandlerFn"]};
+window.SIDEBAR_ITEMS = {"enum":["OperationResponse"],"struct":["LayerRegistration","OperationRequest","ResourceRegistration","ResourceRegistry","ScopeValues","ValidatedRequest"],"type":["HandlerFn"]};
