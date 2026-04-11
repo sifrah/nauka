@@ -1,6 +1,127 @@
 {
   "components": {
+    "responses": {
+      "Conflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Resource already exists"
+      },
+      "HasDependents": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Cannot delete — resource has dependents"
+      },
+      "InternalError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Internal server error"
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Resource not found"
+      },
+      "ValidationError": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Invalid input"
+      }
+    },
     "schemas": {
+      "Error": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "description": "Machine-readable error code",
+                "type": "string"
+              },
+              "message": {
+                "description": "Human-readable error message",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "PaginatedResponse": {
+        "properties": {
+          "data": {
+            "items": {},
+            "type": "array"
+          },
+          "pagination": {
+            "properties": {
+              "next_page": {
+                "nullable": true,
+                "type": "integer"
+              },
+              "page": {
+                "type": "integer"
+              },
+              "per_page": {
+                "type": "integer"
+              },
+              "previous_page": {
+                "nullable": true,
+                "type": "integer"
+              },
+              "total_entries": {
+                "type": "integer"
+              },
+              "total_pages": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "page",
+              "per_page",
+              "total_pages",
+              "total_entries"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "type": "object"
+      },
       "env": {
         "properties": {
           "name": {
@@ -125,7 +246,7 @@
     }
   },
   "info": {
-    "description": "Nauka turns bare-metal servers into a programmable cloud. This is the admin API reference.",
+    "description": "The Nauka API is a RESTful interface for turning bare-metal servers into a programmable cloud. Every hypervisor in your mesh exposes the same API, providing a single control plane for compute, networking, and storage resources.",
     "title": "Nauka API",
     "version": "2.0.0",
     "x-logo": {
@@ -135,243 +256,291 @@
   },
   "openapi": "3.0.0",
   "paths": {
-    "/admin/v1/forges/reconcile": {
+    "/cloud/v1/forges/reconcile": {
       "post": {
         "operationId": "forge_reconcile",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Trigger a single reconciliation cycle",
         "tags": [
           "forge"
         ]
       }
     },
-    "/admin/v1/forges/run": {
+    "/cloud/v1/forges/run": {
       "post": {
         "operationId": "forge_run",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Start the reconciliation daemon",
         "tags": [
           "forge"
         ]
       }
     },
-    "/admin/v1/forges/status": {
+    "/cloud/v1/forges/status": {
       "post": {
         "operationId": "forge_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Show reconciler status",
         "tags": [
           "forge"
         ]
       }
     },
-    "/admin/v1/hypervisors": {
-      "get": {
-        "operationId": "hypervisor_list",
-        "summary": "List resources",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/announce-listen": {
-      "post": {
-        "operationId": "hypervisor_announce-listen",
-        "summary": "Run the announce listener (internal)",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/backup": {
-      "post": {
-        "operationId": "hypervisor_backup",
-        "summary": "Create a backup of PD and TiKV data to S3",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/backup-list": {
-      "post": {
-        "operationId": "hypervisor_backup-list",
-        "summary": "List available PD/TiKV backups in S3",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/cp-status": {
-      "post": {
-        "operationId": "hypervisor_cp-status",
-        "summary": "Show control plane (PD/TiKV) cluster status",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/doctor": {
-      "post": {
-        "operationId": "hypervisor_doctor",
-        "summary": "Diagnose hypervisor health",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/drain": {
-      "post": {
-        "operationId": "hypervisor_drain",
-        "summary": "Evacuate all VMs before maintenance",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/enable": {
-      "post": {
-        "operationId": "hypervisor_enable",
-        "summary": "Enable for VM scheduling",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/init": {
-      "post": {
-        "operationId": "hypervisor_init",
-        "summary": "Initialize a new cluster",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/join": {
-      "post": {
-        "operationId": "hypervisor_join",
-        "summary": "Join an existing cluster",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/leave": {
-      "post": {
-        "operationId": "hypervisor_leave",
-        "summary": "Leave the cluster and uninstall services",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/peering": {
-      "post": {
-        "operationId": "hypervisor_peering",
-        "summary": "Start peering listener to accept new nodes",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/start": {
-      "post": {
-        "operationId": "hypervisor_start",
-        "summary": "Start hypervisor services (fabric, storage, tikv)",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/status": {
-      "post": {
-        "operationId": "hypervisor_status",
-        "summary": "Show hypervisor status",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/stop": {
-      "post": {
-        "operationId": "hypervisor_stop",
-        "summary": "Stop hypervisor services (fabric, storage, tikv)",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/update": {
-      "post": {
-        "operationId": "hypervisor_update",
-        "summary": "Update hypervisor configuration",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/upgrade": {
-      "post": {
-        "operationId": "hypervisor_upgrade",
-        "summary": "Rolling upgrade of PD/TiKV on this node",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/upgrade-check": {
-      "post": {
-        "operationId": "hypervisor_upgrade-check",
-        "summary": "Check TiKV/PD versions and upgrade readiness",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/hypervisors/{id}": {
-      "get": {
-        "operationId": "hypervisor_get",
-        "summary": "Get resource details",
-        "tags": [
-          "hypervisor"
-        ]
-      }
-    },
-    "/admin/v1/images/catalog": {
+    "/cloud/v1/images/catalog": {
       "post": {
         "operationId": "image_catalog",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List images available in the registry",
         "tags": [
           "image"
         ]
       }
     },
-    "/admin/v1/images/delete": {
+    "/cloud/v1/images/delete": {
       "post": {
         "operationId": "image_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a local image",
         "tags": [
           "image"
         ]
       }
     },
-    "/admin/v1/images/list": {
+    "/cloud/v1/images/list": {
       "post": {
         "operationId": "image_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List locally available images",
         "tags": [
           "image"
         ]
       }
     },
-    "/admin/v1/images/pull": {
+    "/cloud/v1/images/pull": {
       "post": {
         "operationId": "image_pull",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Pull an image from the registry",
         "tags": [
           "image"
         ]
       }
     },
-    "/admin/v1/orgs": {
+    "/cloud/v1/orgs": {
       "get": {
         "operationId": "org_list",
+        "parameters": [
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/org"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "org"
@@ -379,15 +548,83 @@
       },
       "post": {
         "operationId": "org_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/org"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "org"
         ]
       }
     },
-    "/admin/v1/orgs/{id}": {
+    "/cloud/v1/orgs/{id}": {
       "delete": {
         "operationId": "org_delete",
+        "parameters": [
+          {
+            "description": "org name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "org"
@@ -395,15 +632,114 @@
       },
       "get": {
         "operationId": "org_get",
+        "parameters": [
+          {
+            "description": "org name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/org"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "org"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/projects": {
+    "/cloud/v1/orgs/{org_id}/projects": {
       "get": {
         "operationId": "project_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/project"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "project"
@@ -411,15 +747,103 @@
       },
       "post": {
         "operationId": "project_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/project"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "project"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/projects/{id}": {
+    "/cloud/v1/orgs/{org_id}/projects/{id}": {
       "delete": {
         "operationId": "project_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "project name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "project"
@@ -427,15 +851,132 @@
       },
       "get": {
         "operationId": "project_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "project name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/project"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "project"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/projects/{project_id}/environments": {
+    "/cloud/v1/orgs/{org_id}/projects/{project_id}/environments": {
       "get": {
         "operationId": "env_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/env"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "env"
@@ -443,15 +984,121 @@
       },
       "post": {
         "operationId": "env_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/env"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "env"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/projects/{project_id}/environments/{id}": {
+    "/cloud/v1/orgs/{org_id}/projects/{project_id}/environments/{id}": {
       "delete": {
         "operationId": "env_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "env name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "env"
@@ -459,15 +1106,132 @@
       },
       "get": {
         "operationId": "env_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Project",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "env name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/env"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "env"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vms": {
+    "/cloud/v1/orgs/{org_id}/vms": {
       "get": {
         "operationId": "vm_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/vm"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "vm"
@@ -475,33 +1239,239 @@
       },
       "post": {
         "operationId": "vm_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cpu": {
+                    "description": "Number of vCPUs",
+                    "type": "integer"
+                  },
+                  "disk": {
+                    "description": "Disk size in GB",
+                    "type": "integer"
+                  },
+                  "env": {
+                    "description": "Environment",
+                    "type": "string"
+                  },
+                  "image": {
+                    "description": "OS image (e.g. ubuntu-24.04)",
+                    "type": "string"
+                  },
+                  "memory": {
+                    "description": "Memory in MB",
+                    "type": "integer"
+                  },
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  },
+                  "project": {
+                    "description": "Project",
+                    "type": "string"
+                  },
+                  "region": {
+                    "default": "default",
+                    "description": "Region",
+                    "type": "string"
+                  },
+                  "subnet": {
+                    "description": "Subnet",
+                    "type": "string"
+                  },
+                  "vpc": {
+                    "description": "VPC",
+                    "type": "string"
+                  },
+                  "zone": {
+                    "default": "default",
+                    "description": "Zone",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "project",
+                  "env",
+                  "vpc",
+                  "subnet",
+                  "cpu",
+                  "memory",
+                  "disk",
+                  "image"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/vm"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "vm"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vms/start": {
+    "/cloud/v1/orgs/{org_id}/vms/start": {
       "post": {
         "operationId": "vm_start",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Start a stopped VM",
         "tags": [
           "vm"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vms/stop": {
+    "/cloud/v1/orgs/{org_id}/vms/stop": {
       "post": {
         "operationId": "vm_stop",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Stop a running VM",
         "tags": [
           "vm"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vms/{id}": {
+    "/cloud/v1/orgs/{org_id}/vms/{id}": {
       "delete": {
         "operationId": "vm_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "vm name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "vm"
@@ -509,15 +1479,123 @@
       },
       "get": {
         "operationId": "vm_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "vm name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/vm"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "vm"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs": {
+    "/cloud/v1/orgs/{org_id}/vpcs": {
       "get": {
         "operationId": "vpc_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/vpc"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "vpc"
@@ -525,15 +1603,116 @@
       },
       "post": {
         "operationId": "vpc_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cidr": {
+                    "description": "VPC CIDR block (e.g. 10.0.0.0/16)",
+                    "type": "string"
+                  },
+                  "env": {
+                    "description": "Scope to an environment",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  },
+                  "project": {
+                    "description": "Scope to a project",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "cidr"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/vpc"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "vpc"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{id}": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{id}": {
       "delete": {
         "operationId": "vpc_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "vpc name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "vpc"
@@ -541,15 +1720,132 @@
       },
       "get": {
         "operationId": "vpc_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "vpc name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/vpc"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "vpc"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways": {
       "get": {
         "operationId": "nat-gateway_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/nat-gateway"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "nat-gateway"
@@ -557,15 +1853,125 @@
       },
       "post": {
         "operationId": "nat-gateway_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "hypervisor": {
+                    "description": "Hypervisor to provision on (auto-selected if omitted)",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/nat-gateway"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "nat-gateway"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways/{id}": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/nat-gateways/{id}": {
       "delete": {
         "operationId": "nat-gateway_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "nat-gateway name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "nat-gateway"
@@ -573,15 +1979,141 @@
       },
       "get": {
         "operationId": "nat-gateway_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "nat-gateway name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/nat-gateway"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "nat-gateway"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings": {
       "get": {
         "operationId": "peering_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/peering"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "peering"
@@ -589,15 +2121,126 @@
       },
       "post": {
         "operationId": "peering_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  },
+                  "peer-vpc": {
+                    "description": "VPC to peer with",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "peer-vpc"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/peering"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "peering"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings/{id}": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/peerings/{id}": {
       "delete": {
         "operationId": "peering_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "peering name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "peering"
@@ -605,15 +2248,141 @@
       },
       "get": {
         "operationId": "peering_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "peering name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/peering"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "peering"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets": {
       "get": {
         "operationId": "subnet_list",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/subnet"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "List resources",
         "tags": [
           "subnet"
@@ -621,15 +2390,126 @@
       },
       "post": {
         "operationId": "subnet_create",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cidr": {
+                    "description": "Subnet CIDR block (e.g. 10.0.1.0/24)",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Resource name",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "cidr"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/subnet"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Create a new resource",
         "tags": [
           "subnet"
         ]
       }
     },
-    "/admin/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets/{id}": {
+    "/cloud/v1/orgs/{org_id}/vpcs/{vpc_id}/subnets/{id}": {
       "delete": {
         "operationId": "subnet_delete",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "subnet name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/HasDependents"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Delete a resource",
         "tags": [
           "subnet"
@@ -637,11 +2517,1092 @@
       },
       "get": {
         "operationId": "subnet_get",
+        "parameters": [
+          {
+            "description": "Organization",
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "VPC",
+            "in": "path",
+            "name": "vpc_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "subnet name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/subnet"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
         "summary": "Get resource details",
         "tags": [
           "subnet"
         ]
       }
+    },
+    "/platform/v1/hypervisors": {
+      "get": {
+        "operationId": "hypervisor_list",
+        "parameters": [
+          {
+            "description": "Page number",
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Items per page (max 100)",
+            "in": "query",
+            "name": "per_page",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PaginatedResponse"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "items": {
+                            "$ref": "#/components/schemas/hypervisor"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "List resources",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/announce-listen": {
+      "post": {
+        "operationId": "hypervisor_announce-listen",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "port": {
+                    "default": 51822,
+                    "description": "Announce listen port",
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Run the announce listener (internal)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/backup": {
+      "post": {
+        "operationId": "hypervisor_backup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "hot": {
+                    "description": "Hot backup: tar while services run (faster, but may have torn writes)",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Create a backup of PD and TiKV data to S3",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/backup-list": {
+      "post": {
+        "operationId": "hypervisor_backup-list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "List available PD/TiKV backups in S3",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/cp-status": {
+      "post": {
+        "operationId": "hypervisor_cp-status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Show control plane (PD/TiKV) cluster status",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/doctor": {
+      "post": {
+        "operationId": "hypervisor_doctor",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Diagnose hypervisor health",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/drain": {
+      "post": {
+        "operationId": "hypervisor_drain",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Evacuate all VMs before maintenance",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/enable": {
+      "post": {
+        "operationId": "hypervisor_enable",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Enable for VM scheduling",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/init": {
+      "post": {
+        "operationId": "hypervisor_init",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "endpoint": {
+                    "description": "Public endpoint IP for peering (auto-detected if omitted)",
+                    "type": "string"
+                  },
+                  "interface": {
+                    "description": "Fabric network interface (e.g., eth1). Auto-detected if omitted",
+                    "type": "string"
+                  },
+                  "ipv4-public": {
+                    "description": "Public IPv4 address of this server",
+                    "type": "string"
+                  },
+                  "ipv6-block": {
+                    "description": "Public IPv6 /64 block from hosting provider (e.g., 2a01:4f8:c012:abcd::/64)",
+                    "type": "string"
+                  },
+                  "max-pd-members": {
+                    "default": 3,
+                    "description": "Maximum PD (Placement Driver) members (1, 3, 5, or 7)",
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "default": "wireguard",
+                    "description": "Network mode: wireguard (default), direct, mock",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Node name (defaults to hostname)",
+                    "type": "string"
+                  },
+                  "peering": {
+                    "description": "Start peering listener after init (accepts joins)",
+                    "type": "boolean"
+                  },
+                  "port": {
+                    "default": 51820,
+                    "description": "Listen port (also uses port+1 for peering, port+2 for announce)",
+                    "type": "integer"
+                  },
+                  "region": {
+                    "default": "default",
+                    "description": "Region label",
+                    "type": "string"
+                  },
+                  "s3-access-key": {
+                    "description": "S3 access key",
+                    "type": "string"
+                  },
+                  "s3-bucket": {
+                    "description": "S3 bucket name for region storage",
+                    "type": "string"
+                  },
+                  "s3-endpoint": {
+                    "description": "S3 endpoint URL for region storage",
+                    "type": "string"
+                  },
+                  "s3-region": {
+                    "default": "",
+                    "description": "S3 region (e.g., eu-central-1)",
+                    "type": "string"
+                  },
+                  "s3-secret-key": {
+                    "description": "S3 secret key",
+                    "type": "string"
+                  },
+                  "zone": {
+                    "default": "default",
+                    "description": "Zone label",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "s3-endpoint",
+                  "s3-bucket",
+                  "s3-access-key",
+                  "s3-secret-key"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Initialize a new cluster",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/join": {
+      "post": {
+        "operationId": "hypervisor_join",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "ipv4-public": {
+                    "description": "Public IPv4 address of this server",
+                    "type": "string"
+                  },
+                  "ipv6-block": {
+                    "description": "Public IPv6 /64 block from hosting provider (e.g., 2a01:4f8:c012:abcd::/64)",
+                    "type": "string"
+                  },
+                  "mode": {
+                    "default": "wireguard",
+                    "description": "Network mode: wireguard (default), direct, mock",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Node name (defaults to hostname)",
+                    "type": "string"
+                  },
+                  "pin": {
+                    "description": "PIN for auto-accept",
+                    "type": "string"
+                  },
+                  "port": {
+                    "default": 51820,
+                    "description": "Listen port (also uses port+1 for peering, port+2 for announce)",
+                    "type": "integer"
+                  },
+                  "region": {
+                    "default": "default",
+                    "description": "Region label",
+                    "type": "string"
+                  },
+                  "target": {
+                    "description": "IP or IP:port of an existing node",
+                    "type": "string"
+                  },
+                  "zone": {
+                    "default": "default",
+                    "description": "Zone label",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Join an existing cluster",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/leave": {
+      "post": {
+        "operationId": "hypervisor_leave",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Leave the cluster and uninstall services",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/peering": {
+      "post": {
+        "operationId": "hypervisor_peering",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "timeout": {
+                    "default": 3600,
+                    "description": "Listener timeout in seconds",
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Start peering listener to accept new nodes",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/start": {
+      "post": {
+        "operationId": "hypervisor_start",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Start hypervisor services (fabric, storage, tikv)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/status": {
+      "post": {
+        "operationId": "hypervisor_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Show hypervisor status",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/stop": {
+      "post": {
+        "operationId": "hypervisor_stop",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Stop hypervisor services (fabric, storage, tikv)",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/update": {
+      "post": {
+        "operationId": "hypervisor_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "ipv4-public": {
+                    "description": "Public IPv4 address",
+                    "type": "string"
+                  },
+                  "ipv6-block": {
+                    "description": "Public IPv6 /64 block (e.g., 2a01:4f8:c012:abcd::/64)",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "Node name",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Update hypervisor configuration",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/upgrade": {
+      "post": {
+        "operationId": "hypervisor_upgrade",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Rolling upgrade of PD/TiKV on this node",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/upgrade-check": {
+      "post": {
+        "operationId": "hypervisor_upgrade-check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Check TiKV/PD versions and upgrade readiness",
+        "tags": [
+          "hypervisor"
+        ]
+      }
+    },
+    "/platform/v1/hypervisors/{id}": {
+      "get": {
+        "operationId": "hypervisor_get",
+        "parameters": [
+          {
+            "description": "hypervisor name or ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/hypervisor"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        },
+        "summary": "Get resource details",
+        "tags": [
+          "hypervisor"
+        ]
+      }
     }
-  }
+  },
+  "tags": [
+    {
+      "description": "The API authenticates requests using Bearer tokens passed in the `Authorization` header.\n\n```http\nGET /cloud/v1/orgs HTTP/1.1\nHost: your-server:8443\nAuthorization: Bearer nk_live_a1b2c3d4e5f6...\n```\n\nAll API requests must be made over HTTPS. Requests without a valid token will return `403 Forbidden`.\n\nThere are two types of tokens:\n\n| Type | Prefix | Scope |\n|------|--------|-------|\n| Admin | `nk_live_` | Full access to all resources in the mesh |\n| Service | `nk_svc_` | Scoped to a specific organization and project |\n\n> Tokens are issued during `nauka hypervisor init` and can be rotated with `nauka token rotate`.",
+      "name": "Authentication",
+      "x-traitTag": true
+    },
+    {
+      "description": "The API uses conventional HTTP status codes to indicate the outcome of a request. Codes in the `2xx` range indicate success, `4xx` indicate a client error, and `5xx` indicate a server error.\n\nAll errors return a consistent JSON body with a machine-readable `code` and a human-readable `message`:\n\n```json\n{\n  \"error\": {\n    \"code\": \"ResourceNotFound\",\n    \"message\": \"vpc 'web' not found\"\n  }\n}\n```\n\n### Error codes\n\n| Status | Code | Description |\n|--------|------|-------------|\n| `400` | `ValidationError` | The request body is invalid. Check field types, required fields, and naming rules. |\n| `403` | `PermissionDenied` | The token does not have permission for this operation. |\n| `404` | `ResourceNotFound` | The requested resource does not exist. Verify the name or ID. |\n| `409` | `ResourceAlreadyExists` | A resource with this name already exists in the same scope. |\n| `415` | `UnsupportedMediaType` | The request is missing `Content-Type: application/json`. |\n| `422` | `HasDependents` | The resource cannot be deleted because other resources depend on it. Delete them first. |\n| `429` | `RateLimited` | You have exceeded the rate limit. Wait and retry with exponential backoff. |\n| `500` | `InternalError` | An unexpected server error occurred. Retry the request or contact support with the `x-request-id`. |\n| `504` | `Timeout` | The operation did not complete within the server timeout (30s). |\n\n### Handling errors\n\nWe recommend writing code that gracefully handles all possible error codes. Below is a typical pattern:\n\n```bash\nresponse=$(curl -s -w \"\\n%{http_code}\" \\\n        -H \"Authorization: Bearer $TOKEN\" \\\n  https://your-server:8443/cloud/v1/vpcs)\n\nhttp_code=$(echo \"$response\" | tail -1)\nbody=$(echo \"$response\" | sed '$d')\n\ncase $http_code in\n  200) echo \"$body\" | jq '.data' ;;\n  429) sleep 5 && retry ;;\n  4*)  echo \"$body\" | jq -r '.error.message' >&2 ;;\n  5*)  echo \"Server error (request-id in headers), retrying...\" >&2 ;;\nesac\n```",
+      "name": "Errors",
+      "x-traitTag": true
+    },
+    {
+      "description": "All list endpoints return paginated responses. Pagination is cursor-based using page numbers.\n\n### Request parameters\n\n| Parameter | Type | Default | Max | Description |\n|-----------|------|---------|-----|-------------|\n| `page` | integer | `1` | — | Page number to retrieve |\n| `per_page` | integer | `25` | `100` | Number of items per page |\n\n### Response format\n\n```json\n{\n  \"data\": [\n    {\"id\": \"vpc-01abc\", \"name\": \"production\", \"cidr\": \"10.0.0.0/16\"},\n    {\"id\": \"vpc-02def\", \"name\": \"staging\", \"cidr\": \"10.1.0.0/16\"}\n  ],\n  \"pagination\": {\n    \"page\": 1,\n    \"per_page\": 25,\n    \"total_pages\": 4,\n    \"total_entries\": 87,\n    \"next_page\": 2,\n    \"previous_page\": null\n  }\n}\n```\n\nThe `next_page` and `previous_page` fields are `null` when there is no corresponding page. Use them to navigate through results.\n\n### Example\n\n```bash\n# First page\ncurl https://your-server:8443/cloud/v1/orgs?page=1&per_page=10\n\n# Next page\ncurl https://your-server:8443/cloud/v1/orgs?page=2&per_page=10\n```",
+      "name": "Pagination",
+      "x-traitTag": true
+    },
+    {
+      "description": "The API enforces a rate limit to protect the cluster from excessive load. Limits are applied per source IP across a sliding time window.\n\n### Response headers\n\nEvery response includes rate limit information:\n\n| Header | Description |\n|--------|-------------|\n| `x-ratelimit-remaining` | Number of requests remaining in the current window |\n\n### Exceeding the limit\n\nWhen the limit is exceeded, the API returns `429 Too Many Requests`:\n\n```json\n{\n  \"error\": {\n    \"code\": \"RateLimited\",\n    \"message\": \"Too many requests. Please retry later.\"\n  }\n}\n```\n\n### Best practices\n\n- Cache responses when possible to reduce the number of API calls\n- Implement exponential backoff when you receive a `429` response\n- Use `per_page` to fetch more items in a single request instead of making many small requests",
+      "name": "Rate Limiting",
+      "x-traitTag": true
+    },
+    {
+      "description": "Every API response includes an `x-request-id` header containing a unique identifier for the request.\n\n```http\nHTTP/1.1 200 OK\nx-request-id: req-0000004a38bf\nx-nauka-version: 2.0.0\ncontent-type: application/json\n```\n\nInclude this identifier when contacting support or reporting an issue. It allows the team to trace the exact request through the server logs.\n\n> The request ID is also attached to structured log entries on the server side, making it possible to correlate API calls with internal operations.",
+      "name": "Request IDs",
+      "x-traitTag": true
+    },
+    {
+      "description": "### URL prefix\n\nThe API version is embedded in the URL path. The current version is **v1**. URLs use two prefixes: `/platform/v1` for infrastructure, `/cloud/v1` for cloud resources.\n\n```\nhttps://your-server:8443/platform/v1/hypervisors\nhttps://your-server:8443/cloud/v1/orgs\n```\n\n| Prefix | Scope | Description |\n|--------|-------|-------------|\n| `/platform/v1` | Infrastructure | Hypervisor management, mesh operations, node lifecycle. |\n| `/cloud/v1` | Cloud resources | Organizations, VPCs, subnets, VMs, images, and all tenant resources. |\n\nBoth prefixes are served on the same port (`127.0.0.1:8443` by default). This documentation covers both the **Platform API** and the **Cloud API**.\n\n### Server version header\n\nEvery response includes an `x-nauka-version` header with the exact server build version:\n\n```http\nHTTP/1.1 200 OK\nx-nauka-version: 2.0.0\ncontent-type: application/json\n```\n\nThe version follows [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`. Pre-release builds append a channel suffix:\n\n| Format | Example | Channel |\n|--------|---------|---------|\n| `MAJOR.MINOR.PATCH` | `2.0.0` | Stable |\n| `MAJOR.MINOR.PATCH-beta.N` | `2.1.0-beta.3` | Beta |\n| `MAJOR.MINOR.PATCH-nightly.N` | `2.1.0-nightly.47` | Nightly |\n| `MAJOR.MINOR.PATCH-rc.N` | `2.1.0-rc.1` | Release candidate |\n\n### Release channels\n\nNauka maintains four release channels. Each channel receives a different level of testing:\n\n| Channel | Stability | Use case |\n|---------|-----------|----------|\n| **Stable** | Production-ready | Production clusters |\n| **RC** | Feature-complete, final testing | Staging environments |\n| **Beta** | New features, may contain bugs | Development and testing |\n| **Nightly** | Bleeding edge, no stability guarantees | Contributors and early adopters |\n\nThe channel determines which updates `nauka update` will install. A node running `2.0.0` (stable) will only receive stable updates unless `--channel` is specified.\n\n### Compatibility\n\nNodes in the same mesh must share the same **major** version. Minor and patch differences are tolerated for rolling upgrades.\n\n| Local | Remote | Compatible |\n|-------|--------|------------|\n| `2.0.0` | `2.1.3` | Yes — same major |\n| `2.0.0` | `2.0.0-beta.5` | Yes — same major |\n| `2.0.0` | `3.0.0` | **No** — different major |\n\nWhen a node joins a mesh, the peering protocol verifies version compatibility. Incompatible nodes are rejected.\n\n### Stability guarantees\n\nThe `v1` API provides these guarantees:\n\n- **Non-breaking changes** are made without incrementing the URL prefix. This includes: new fields in response bodies, new endpoints, new optional request parameters, new error codes, and new query filters.\n- **Breaking changes** will increment the prefix to `/platform/v2` and `/cloud/v2`. This includes: removing or renaming response fields, changing field types, removing endpoints, and making optional parameters required.\n- **Deprecation** of an endpoint or field is announced in the changelog at least one major release before removal. Deprecated features continue to function until the next major version.",
+      "name": "Versioning",
+      "x-traitTag": true
+    },
+    {
+      "description": "Manage hypervisors (compute hosts)",
+      "name": "hypervisor",
+      "x-displayName": "Hypervisor"
+    },
+    {
+      "description": "The API authenticates requests using Bearer tokens passed in the `Authorization` header.\n\n```http\nGET /cloud/v1/orgs HTTP/1.1\nHost: your-server:8443\nAuthorization: Bearer nk_live_a1b2c3d4e5f6...\n```\n\nAll API requests must be made over HTTPS. Requests without a valid token will return `403 Forbidden`.\n\nThere are two types of tokens:\n\n| Type | Prefix | Scope |\n|------|--------|-------|\n| Admin | `nk_live_` | Full access to all resources in the mesh |\n| Service | `nk_svc_` | Scoped to a specific organization and project |\n\n> Tokens are issued during `nauka hypervisor init` and can be rotated with `nauka token rotate`.",
+      "name": "Authentication",
+      "x-traitTag": true
+    },
+    {
+      "description": "The API uses conventional HTTP status codes to indicate the outcome of a request. Codes in the `2xx` range indicate success, `4xx` indicate a client error, and `5xx` indicate a server error.\n\nAll errors return a consistent JSON body with a machine-readable `code` and a human-readable `message`:\n\n```json\n{\n  \"error\": {\n    \"code\": \"ResourceNotFound\",\n    \"message\": \"vpc 'web' not found\"\n  }\n}\n```\n\n### Error codes\n\n| Status | Code | Description |\n|--------|------|-------------|\n| `400` | `ValidationError` | The request body is invalid. Check field types, required fields, and naming rules. |\n| `403` | `PermissionDenied` | The token does not have permission for this operation. |\n| `404` | `ResourceNotFound` | The requested resource does not exist. Verify the name or ID. |\n| `409` | `ResourceAlreadyExists` | A resource with this name already exists in the same scope. |\n| `415` | `UnsupportedMediaType` | The request is missing `Content-Type: application/json`. |\n| `422` | `HasDependents` | The resource cannot be deleted because other resources depend on it. Delete them first. |\n| `429` | `RateLimited` | You have exceeded the rate limit. Wait and retry with exponential backoff. |\n| `500` | `InternalError` | An unexpected server error occurred. Retry the request or contact support with the `x-request-id`. |\n| `504` | `Timeout` | The operation did not complete within the server timeout (30s). |\n\n### Handling errors\n\nWe recommend writing code that gracefully handles all possible error codes. Below is a typical pattern:\n\n```bash\nresponse=$(curl -s -w \"\\n%{http_code}\" \\\n        -H \"Authorization: Bearer $TOKEN\" \\\n  https://your-server:8443/cloud/v1/vpcs)\n\nhttp_code=$(echo \"$response\" | tail -1)\nbody=$(echo \"$response\" | sed '$d')\n\ncase $http_code in\n  200) echo \"$body\" | jq '.data' ;;\n  429) sleep 5 && retry ;;\n  4*)  echo \"$body\" | jq -r '.error.message' >&2 ;;\n  5*)  echo \"Server error (request-id in headers), retrying...\" >&2 ;;\nesac\n```",
+      "name": "Errors",
+      "x-traitTag": true
+    },
+    {
+      "description": "All list endpoints return paginated responses. Pagination is cursor-based using page numbers.\n\n### Request parameters\n\n| Parameter | Type | Default | Max | Description |\n|-----------|------|---------|-----|-------------|\n| `page` | integer | `1` | — | Page number to retrieve |\n| `per_page` | integer | `25` | `100` | Number of items per page |\n\n### Response format\n\n```json\n{\n  \"data\": [\n    {\"id\": \"vpc-01abc\", \"name\": \"production\", \"cidr\": \"10.0.0.0/16\"},\n    {\"id\": \"vpc-02def\", \"name\": \"staging\", \"cidr\": \"10.1.0.0/16\"}\n  ],\n  \"pagination\": {\n    \"page\": 1,\n    \"per_page\": 25,\n    \"total_pages\": 4,\n    \"total_entries\": 87,\n    \"next_page\": 2,\n    \"previous_page\": null\n  }\n}\n```\n\nThe `next_page` and `previous_page` fields are `null` when there is no corresponding page. Use them to navigate through results.\n\n### Example\n\n```bash\n# First page\ncurl https://your-server:8443/cloud/v1/orgs?page=1&per_page=10\n\n# Next page\ncurl https://your-server:8443/cloud/v1/orgs?page=2&per_page=10\n```",
+      "name": "Pagination",
+      "x-traitTag": true
+    },
+    {
+      "description": "The API enforces a rate limit to protect the cluster from excessive load. Limits are applied per source IP across a sliding time window.\n\n### Response headers\n\nEvery response includes rate limit information:\n\n| Header | Description |\n|--------|-------------|\n| `x-ratelimit-remaining` | Number of requests remaining in the current window |\n\n### Exceeding the limit\n\nWhen the limit is exceeded, the API returns `429 Too Many Requests`:\n\n```json\n{\n  \"error\": {\n    \"code\": \"RateLimited\",\n    \"message\": \"Too many requests. Please retry later.\"\n  }\n}\n```\n\n### Best practices\n\n- Cache responses when possible to reduce the number of API calls\n- Implement exponential backoff when you receive a `429` response\n- Use `per_page` to fetch more items in a single request instead of making many small requests",
+      "name": "Rate Limiting",
+      "x-traitTag": true
+    },
+    {
+      "description": "Every API response includes an `x-request-id` header containing a unique identifier for the request.\n\n```http\nHTTP/1.1 200 OK\nx-request-id: req-0000004a38bf\nx-nauka-version: 2.0.0\ncontent-type: application/json\n```\n\nInclude this identifier when contacting support or reporting an issue. It allows the team to trace the exact request through the server logs.\n\n> The request ID is also attached to structured log entries on the server side, making it possible to correlate API calls with internal operations.",
+      "name": "Request IDs",
+      "x-traitTag": true
+    },
+    {
+      "description": "### URL prefix\n\nThe API version is embedded in the URL path. The current version is **v1**. URLs use two prefixes: `/platform/v1` for infrastructure, `/cloud/v1` for cloud resources.\n\n```\nhttps://your-server:8443/platform/v1/hypervisors\nhttps://your-server:8443/cloud/v1/orgs\n```\n\n| Prefix | Scope | Description |\n|--------|-------|-------------|\n| `/platform/v1` | Infrastructure | Hypervisor management, mesh operations, node lifecycle. |\n| `/cloud/v1` | Cloud resources | Organizations, VPCs, subnets, VMs, images, and all tenant resources. |\n\nBoth prefixes are served on the same port (`127.0.0.1:8443` by default). This documentation covers both the **Platform API** and the **Cloud API**.\n\n### Server version header\n\nEvery response includes an `x-nauka-version` header with the exact server build version:\n\n```http\nHTTP/1.1 200 OK\nx-nauka-version: 2.0.0\ncontent-type: application/json\n```\n\nThe version follows [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`. Pre-release builds append a channel suffix:\n\n| Format | Example | Channel |\n|--------|---------|---------|\n| `MAJOR.MINOR.PATCH` | `2.0.0` | Stable |\n| `MAJOR.MINOR.PATCH-beta.N` | `2.1.0-beta.3` | Beta |\n| `MAJOR.MINOR.PATCH-nightly.N` | `2.1.0-nightly.47` | Nightly |\n| `MAJOR.MINOR.PATCH-rc.N` | `2.1.0-rc.1` | Release candidate |\n\n### Release channels\n\nNauka maintains four release channels. Each channel receives a different level of testing:\n\n| Channel | Stability | Use case |\n|---------|-----------|----------|\n| **Stable** | Production-ready | Production clusters |\n| **RC** | Feature-complete, final testing | Staging environments |\n| **Beta** | New features, may contain bugs | Development and testing |\n| **Nightly** | Bleeding edge, no stability guarantees | Contributors and early adopters |\n\nThe channel determines which updates `nauka update` will install. A node running `2.0.0` (stable) will only receive stable updates unless `--channel` is specified.\n\n### Compatibility\n\nNodes in the same mesh must share the same **major** version. Minor and patch differences are tolerated for rolling upgrades.\n\n| Local | Remote | Compatible |\n|-------|--------|------------|\n| `2.0.0` | `2.1.3` | Yes — same major |\n| `2.0.0` | `2.0.0-beta.5` | Yes — same major |\n| `2.0.0` | `3.0.0` | **No** — different major |\n\nWhen a node joins a mesh, the peering protocol verifies version compatibility. Incompatible nodes are rejected.\n\n### Stability guarantees\n\nThe `v1` API provides these guarantees:\n\n- **Non-breaking changes** are made without incrementing the URL prefix. This includes: new fields in response bodies, new endpoints, new optional request parameters, new error codes, and new query filters.\n- **Breaking changes** will increment the prefix to `/platform/v2` and `/cloud/v2`. This includes: removing or renaming response fields, changing field types, removing endpoints, and making optional parameters required.\n- **Deprecation** of an endpoint or field is announced in the changelog at least one major release before removal. Deprecated features continue to function until the next major version.",
+      "name": "Versioning",
+      "x-traitTag": true
+    },
+    {
+      "description": "Manage organizations",
+      "name": "org",
+      "x-displayName": "Org"
+    },
+    {
+      "description": "Manage projects within an organization",
+      "name": "project",
+      "x-displayName": "Project"
+    },
+    {
+      "description": "Manage environments within a project",
+      "name": "env",
+      "x-displayName": "Env"
+    },
+    {
+      "description": "Manage virtual private clouds",
+      "name": "vpc",
+      "x-displayName": "Vpc"
+    },
+    {
+      "description": "Manage subnets within a VPC",
+      "name": "subnet",
+      "x-displayName": "Subnet"
+    },
+    {
+      "description": "Manage VPC peering connections",
+      "name": "peering",
+      "x-displayName": "Peering"
+    },
+    {
+      "description": "Manage NAT gateways for outbound internet access",
+      "name": "nat-gateway",
+      "x-displayName": "Nat Gateway"
+    },
+    {
+      "description": "Manage virtual machines",
+      "name": "vm",
+      "x-displayName": "Vm"
+    },
+    {
+      "description": "Manage OS images",
+      "name": "image",
+      "x-displayName": "Image"
+    },
+    {
+      "description": "Per-node resource reconciler",
+      "name": "forge",
+      "x-displayName": "Forge"
+    }
+  ],
+  "x-tagGroups": [
+    {
+      "name": "",
+      "tags": [
+        "Authentication",
+        "Errors",
+        "Pagination",
+        "Rate Limiting",
+        "Request IDs",
+        "Versioning"
+      ]
+    },
+    {
+      "name": "Resources",
+      "tags": [
+        "hypervisor"
+      ]
+    },
+    {
+      "name": "",
+      "tags": [
+        "Authentication",
+        "Errors",
+        "Pagination",
+        "Rate Limiting",
+        "Request IDs",
+        "Versioning"
+      ]
+    },
+    {
+      "name": "Resources",
+      "tags": [
+        "org",
+        "project",
+        "env",
+        "vpc",
+        "subnet",
+        "peering",
+        "nat-gateway",
+        "vm",
+        "image",
+        "forge"
+      ]
+    }
+  ]
 }
