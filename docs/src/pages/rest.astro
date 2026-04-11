@@ -1,5 +1,6 @@
 ---
-// REST API Reference — Scalar UI themed to match the Nauka docs zinc palette
+// REST API Reference — Scalar themed to be indistinguishable from the platform docs
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 ---
 <html lang="en" data-theme="dark">
   <head>
@@ -7,169 +8,199 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nauka REST API</title>
     <meta name="description" content="Nauka REST API Reference" />
-    <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
+    <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
     <style>@import '@fontsource-variable/inter';</style>
-    <style>{`
-      /* ── Zinc dark (matches Starlight custom.css) ── */
-      .dark-mode {
-        --scalar-color-1: #fafafa;
-        --scalar-color-2: #e4e4e7;
-        --scalar-color-3: #a1a1aa;
-        --scalar-color-accent: #a1a1aa;
-        --scalar-color-green: #6ee7b7;
-        --scalar-color-red: #fca5a5;
-        --scalar-color-yellow: #fcd34d;
-        --scalar-color-blue: #93c5fd;
-        --scalar-color-orange: #fdba74;
-        --scalar-color-purple: #c4b5fd;
-
-        --scalar-background-1: #1c1c20;
-        --scalar-background-2: #18181b;
-        --scalar-background-3: #27272a;
-        --scalar-background-accent: #3f3f46;
-
-        --scalar-border-color: #27272a;
-
-        --scalar-button-1: #fafafa;
-        --scalar-button-1-color: #18181b;
-        --scalar-button-1-hover: #e4e4e7;
-
-        --scalar-sidebar-background-1: #18181b;
-        --scalar-sidebar-color-1: #fafafa;
-        --scalar-sidebar-color-2: #a1a1aa;
-        --scalar-sidebar-color-active: #fafafa;
-        --scalar-sidebar-border-color: #27272a;
-        --scalar-sidebar-item-hover-background: #27272a;
-        --scalar-sidebar-item-active-background: #27272a;
-
-        --scalar-header-background-1: #18181b;
-        --scalar-header-border-color: #27272a;
-        --scalar-header-color-1: #fafafa;
-        --scalar-header-color-2: #a1a1aa;
-
-        --scalar-card-background: #18181b;
-
-        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      }
-
-      /* ── Zinc light ── */
-      .light-mode {
-        --scalar-color-1: #09090b;
-        --scalar-color-2: #27272a;
-        --scalar-color-3: #52525b;
-        --scalar-color-accent: #52525b;
-        --scalar-color-green: #059669;
-        --scalar-color-red: #dc2626;
-        --scalar-color-yellow: #d97706;
-        --scalar-color-blue: #2563eb;
-        --scalar-color-orange: #ea580c;
-        --scalar-color-purple: #7c3aed;
-
-        --scalar-background-1: #ffffff;
-        --scalar-background-2: #fafafa;
-        --scalar-background-3: #f4f4f5;
-        --scalar-background-accent: #e4e4e7;
-
-        --scalar-border-color: #e4e4e7;
-
-        --scalar-button-1: #09090b;
-        --scalar-button-1-color: #ffffff;
-        --scalar-button-1-hover: #27272a;
-
-        --scalar-sidebar-background-1: #fafafa;
-        --scalar-sidebar-color-1: #09090b;
-        --scalar-sidebar-color-2: #52525b;
-        --scalar-sidebar-color-active: #09090b;
-        --scalar-sidebar-border-color: #e4e4e7;
-        --scalar-sidebar-item-hover-background: #f4f4f5;
-        --scalar-sidebar-item-active-background: #f4f4f5;
-
-        --scalar-header-background-1: #ffffff;
-        --scalar-header-border-color: #e4e4e7;
-        --scalar-header-color-1: #09090b;
-        --scalar-header-color-2: #52525b;
-
-        --scalar-card-background: #fafafa;
-
-        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      }
-
-      /* ── Shared overrides ── */
-      :root, .dark-mode, .light-mode {
-        --scalar-font: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      }
-
-      body, * {
-        font-family: var(--scalar-font) !important;
-      }
-
-      code, pre, .cm-editor, [class*="codeblock"], [class*="code-"] {
-        font-family: var(--scalar-font-code) !important;
-      }
-
-      /* ── Force backgrounds to match platform docs ── */
-      .dark-mode body,
-      .dark-mode .scalar-app,
-      .dark-mode .references-layout,
-      .dark-mode .references-layout-content,
-      .dark-mode .section-container,
-      .dark-mode .section,
-      .dark-mode main,
-      .dark-mode .rendered-markdown {
-        background: #1c1c20 !important;
-        background-color: #1c1c20 !important;
-      }
-
-      .dark-mode .sidebar,
-      .dark-mode .sidebar-content,
-      .dark-mode nav {
-        background: #18181b !important;
-        background-color: #18181b !important;
-      }
-
-      .dark-mode .scalar-card {
-        background: #18181b !important;
-        background-color: #18181b !important;
-      }
-
-      /* Match Starlight radius and spacing */
-      .scalar-card,
-      .section-container {
-        border-radius: 0.5rem !important;
-      }
-
-      /* Code blocks — match Starlight */
-      .scalar-codeblock-pre,
-      pre {
-        border-radius: 0.5rem !important;
-        font-size: 0.8rem !important;
-        line-height: 1.75 !important;
-      }
-    `}</style>
   </head>
   <body>
     <script
       id="api-reference"
-      data-url={`${import.meta.env.BASE_URL}openapi.json`}
+      data-url={`${base}/openapi.json`}
       data-configuration={JSON.stringify({
         theme: 'none',
         layout: 'modern',
         darkMode: true,
         hideDownloadButton: false,
         hiddenClients: [],
-        metaData: {
-          title: 'Nauka REST API',
-        },
-        spec: {
-          url: undefined,
-        },
+        metaData: { title: 'Nauka REST API' },
         customCss: `
-          .darklight-reference-promo { display: none !important; }
-          .introduction-description h1 { display: none !important; }
+/* ═══════════════════════════════════════════════
+   Nauka platform-matched theme for Scalar
+   Every value is measured from the live platform
+   ═══════════════════════════════════════════════ */
+
+/* ── Font: Inter Variable (same source as platform) ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root, .light-mode, .dark-mode {
+  --scalar-font: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --refs-sidebar-width: 272px;
+}
+
+/* ── Light mode (platform measured) ── */
+.light-mode {
+  --scalar-color-1: #09090b;
+  --scalar-color-2: #27272a;
+  --scalar-color-3: #52525b;
+  --scalar-color-accent: #52525b;
+  --scalar-background-1: #ffffff;
+  --scalar-background-2: #fafafa;
+  --scalar-background-3: #f4f4f5;
+  --scalar-background-accent: #e4e4e7;
+  --scalar-border-color: #e4e4e7;
+  --scalar-button-1: #09090b;
+  --scalar-button-1-color: #ffffff;
+  --scalar-button-1-hover: #27272a;
+  --scalar-sidebar-background-1: #fafafa;
+  --scalar-sidebar-color-1: #09090b;
+  --scalar-sidebar-color-2: #52525b;
+  --scalar-sidebar-color-active: #09090b;
+  --scalar-sidebar-border-color: #e4e4e7;
+  --scalar-sidebar-item-hover-background: #f4f4f5;
+  --scalar-sidebar-item-active-background: #f4f4f5;
+  --scalar-header-background-1: #ffffff;
+  --scalar-header-border-color: #e4e4e7;
+  --scalar-header-color-1: #09090b;
+  --scalar-header-color-2: #a1a1aa;
+  --scalar-card-background: #fafafa;
+  --scalar-color-green: #059669;
+  --scalar-color-red: #dc2626;
+  --scalar-color-yellow: #d97706;
+  --scalar-color-blue: #2563eb;
+  --scalar-color-orange: #ea580c;
+  --scalar-color-purple: #7c3aed;
+}
+
+/* ── Dark mode (platform measured) ── */
+.dark-mode {
+  --scalar-color-1: #fafafa;
+  --scalar-color-2: #e4e4e7;
+  --scalar-color-3: #a1a1aa;
+  --scalar-color-accent: #a1a1aa;
+  --scalar-background-1: #1c1c20;
+  --scalar-background-2: #18181b;
+  --scalar-background-3: #27272a;
+  --scalar-background-accent: #3f3f46;
+  --scalar-border-color: #27272a;
+  --scalar-button-1: #fafafa;
+  --scalar-button-1-color: #18181b;
+  --scalar-button-1-hover: #e4e4e7;
+  --scalar-sidebar-background-1: #18181b;
+  --scalar-sidebar-color-1: #fafafa;
+  --scalar-sidebar-color-2: #a1a1aa;
+  --scalar-sidebar-color-active: #fafafa;
+  --scalar-sidebar-border-color: #27272a;
+  --scalar-sidebar-item-hover-background: #27272a;
+  --scalar-sidebar-item-active-background: #27272a;
+  --scalar-header-background-1: #18181b;
+  --scalar-header-border-color: #27272a;
+  --scalar-header-color-1: #fafafa;
+  --scalar-header-color-2: #a1a1aa;
+  --scalar-card-background: #18181b;
+  --scalar-color-green: #6ee7b7;
+  --scalar-color-red: #fca5a5;
+  --scalar-color-yellow: #fcd34d;
+  --scalar-color-blue: #93c5fd;
+  --scalar-color-orange: #fdba74;
+  --scalar-color-purple: #c4b5fd;
+}
+
+/* ── Hide all Scalar chrome ── */
+.api-reference-toolbar,
+.references-developer-tools { display: none !important; }
+.darklight-reference { display: none !important; }
+.scalar-mcp-layer { display: none !important; }
+
+/* ── Sidebar width: 272px (platform = 272px) ── */
+.t-doc__sidebar { width: 272px !important; min-width: 272px !important; }
+
+/* ── Sidebar links: match platform 15.2px/400/padding ── */
+.t-doc__sidebar a,
+.t-doc__sidebar button:not([role="search"]) {
+  font-size: 15.2px !important;
+  font-weight: 400 !important;
+  color: var(--scalar-sidebar-color-2) !important;
+  padding: 5.32px 12px !important;
+  border-radius: 6px !important;
+  transition: color 0.15s ease, background 0.15s ease !important;
+}
+.t-doc__sidebar a:hover,
+.t-doc__sidebar button:not([role="search"]):hover {
+  color: var(--scalar-sidebar-color-1) !important;
+  background: var(--scalar-sidebar-item-hover-background) !important;
+}
+.t-doc__sidebar a[aria-current],
+.t-doc__sidebar .active-item a {
+  font-weight: 500 !important;
+  color: var(--scalar-sidebar-color-active) !important;
+}
+
+/* ── Sidebar group labels: 12px/600/uppercase/1.2px ls ── */
+.sidebar-group-title,
+[data-testid="sidebar-group-title"],
+.t-doc__sidebar .font-medium {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 1.2px !important;
+  color: var(--scalar-sidebar-color-2) !important;
+  padding-bottom: 4px !important;
+}
+
+/* ── Typography: match platform exactly ── */
+h1, .section-header-label { font-size: 28px !important; font-weight: 700 !important; letter-spacing: -0.84px !important; color: var(--scalar-color-1) !important; }
+h2 { font-size: 21.6px !important; font-weight: 600 !important; letter-spacing: -0.43px !important; margin-top: 40px !important; padding-bottom: 8px !important; border-bottom: 1px solid var(--scalar-border-color) !important; }
+h3 { font-size: 17.6px !important; font-weight: 600 !important; letter-spacing: -0.35px !important; margin-top: 32px !important; }
+h4 { font-size: 15.2px !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: 0.61px !important; color: var(--scalar-color-3) !important; }
+p, li { font-size: 15.2px !important; line-height: 1.8 !important; color: var(--scalar-color-3) !important; }
+
+/* ── Tables: platform style ── */
+table { border: 1px solid var(--scalar-border-color) !important; border-radius: 8px !important; overflow: hidden !important; border-collapse: separate !important; border-spacing: 0 !important; }
+th { font-size: 11.2px !important; font-weight: 600 !important; text-transform: uppercase !important; letter-spacing: 1.28px !important; color: var(--scalar-color-3) !important; background: var(--scalar-background-2) !important; border-bottom: 1px solid var(--scalar-border-color) !important; }
+th, td { padding: 10px 16px !important; font-size: 14px !important; }
+td { color: var(--scalar-color-2) !important; border-bottom: 1px solid var(--scalar-border-color) !important; }
+tr:last-child td { border-bottom: none !important; }
+
+/* ── Code blocks: platform style ── */
+pre { border: 1px solid var(--scalar-border-color) !important; border-radius: 8px !important; font-size: 12.8px !important; line-height: 1.75 !important; padding: 20px 24px !important; }
+:not(pre) > code { background: var(--scalar-background-3) !important; border: 1px solid var(--scalar-border-color) !important; border-radius: 4px !important; padding: 1.6px 5.6px !important; font-size: 0.85em !important; font-weight: 500 !important; }
+
+/* ── Links: platform style ── */
+.rendered-markdown a { text-decoration: none !important; border-bottom: 1px solid var(--scalar-border-color) !important; transition: border-color 0.15s ease !important; }
+.rendered-markdown a:hover { border-bottom-color: var(--scalar-color-1) !important; }
+
+/* ── Cards ── */
+.scalar-card { border-radius: 8px !important; }
+
+/* ── Horizontal rules ── */
+hr { margin: 48px 0 !important; border: none !important; border-bottom: 1px solid var(--scalar-border-color) !important; }
+
+/* ── Blockquotes: match platform asides ── */
+blockquote { border-left: 3px solid var(--scalar-border-color) !important; padding: 8px 0 8px 20px !important; color: var(--scalar-color-3) !important; font-style: italic !important; font-size: 15.2px !important; }
         `,
       })}
     ></script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+
+    <!-- Theme sync: respects platform docs localStorage + provides toggle -->
+    <script is:inline>
+      const KEY = 'starlight-theme';
+      function getTheme() { return localStorage.getItem(KEY) || 'dark'; }
+      function applyTheme(t) {
+        document.documentElement.dataset.theme = t;
+        localStorage.setItem(KEY, t);
+        const app = document.querySelector('.scalar-app');
+        if (app) {
+          app.classList.toggle('dark-mode', t === 'dark');
+          app.classList.toggle('light-mode', t === 'light');
+        }
+      }
+      applyTheme(getTheme());
+      // Re-apply when Scalar finishes mounting
+      new MutationObserver((_, obs) => {
+        const app = document.querySelector('.scalar-app');
+        if (app) { applyTheme(getTheme()); obs.disconnect(); }
+      }).observe(document.body, { childList: true, subtree: true });
+    </script>
   </body>
 </html>
