@@ -1,31 +1,19 @@
+// Force-link layer crates so inventory collects their registrations.
+extern crate nauka_compute;
+extern crate nauka_forge;
+extern crate nauka_hypervisor;
+extern crate nauka_network;
+extern crate nauka_org;
+
 use anyhow::Result;
 use clap::Command;
 
-use nauka_core::resource::{dispatch, generate_command_with_children, ResourceRegistry};
+use nauka_core::resource::{dispatch, generate_command_with_children};
 
+mod registry;
 mod update;
 
-/// Build the resource registry with all known resources.
-fn build_registry() -> ResourceRegistry {
-    let mut registry = ResourceRegistry::new();
-
-    // Hypervisor — the core resource
-    registry.register(nauka_hypervisor::handlers::registration());
-
-    // Org hierarchy (org → project → env)
-    registry.register(nauka_org::registration());
-
-    // Network (vpc → subnet, peering)
-    registry.register(nauka_network::registration());
-
-    // Compute (vm)
-    registry.register(nauka_compute::registration());
-
-    // Forge (reconciler)
-    registry.register(nauka_forge::registration());
-
-    registry
-}
+use registry::build_registry;
 
 #[tokio::main]
 async fn main() -> Result<()> {

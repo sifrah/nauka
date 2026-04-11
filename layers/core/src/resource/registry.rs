@@ -155,3 +155,28 @@ impl Default for ResourceRegistry {
         Self::new()
     }
 }
+
+// ── Auto-registration via inventory ──────────────────────────
+
+/// A layer registration factory — submitted by each layer crate via
+/// `inventory::submit!`. The binary collects all submissions automatically.
+///
+/// To register a layer, add this to your crate's `lib.rs`:
+/// ```ignore
+/// inventory::submit!(nauka_core::resource::LayerRegistration(registration));
+/// ```
+pub struct LayerRegistration(pub fn() -> ResourceRegistration);
+
+inventory::collect!(LayerRegistration);
+
+impl ResourceRegistry {
+    /// Build a registry from all layers that submitted a `LayerRegistration`
+    /// via `inventory::submit!`. No manual wiring needed.
+    pub fn from_layers() -> Self {
+        let mut registry = Self::new();
+        for layer in inventory::iter::<LayerRegistration> {
+            registry.register((layer.0)());
+        }
+        registry
+    }
+}

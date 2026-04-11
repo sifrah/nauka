@@ -612,6 +612,11 @@ pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> ser
         "info": {
             "title": "Nauka API",
             "version": env!("CARGO_PKG_VERSION"),
+            "description": "Nauka turns bare-metal servers into a programmable cloud. This is the admin API reference.",
+            "x-logo": {
+                "url": "/logo-dark.svg",
+                "altText": "Nauka",
+            },
         },
         "paths": paths,
         "components": {

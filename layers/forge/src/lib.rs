@@ -17,6 +17,8 @@ use std::pin::Pin;
 
 use nauka_core::resource::*;
 
+inventory::submit!(LayerRegistration(registration));
+
 /// Register the forge as a CLI resource.
 pub fn registration() -> ResourceRegistration {
     let def = ResourceDef::build("forge", "Per-node resource reconciler")
