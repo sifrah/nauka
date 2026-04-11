@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["add_arp_in_container","ensure_forward_rules","ensure_ip_rule","get_container_pid","resolve_hypervisor_ipv6"],"struct":["VpcReconciler"]};
+window.SIDEBAR_ITEMS = {"fn":["add_arp_in_container","build_forward_rules","ensure_forward_rules","ensure_ip_rule","find_orphaned_bridges","gateway_cidr","get_container_pid","ip_rule_exists","parse_container_pid","peering_pair_exists","resolve_hypervisor_ipv6","vxlan_name_from_bridge"],"struct":["VpcReconciler"]};
