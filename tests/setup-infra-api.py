@@ -450,7 +450,7 @@ def setup(api, args):
                 f = pool.submit(
                     api.post,
                     f"/orgs/{oid}/vpcs/{vid}/peerings",
-                    {"peer_vpc": peer_name},
+                    {"peer-vpc": peer_name},
                 )
                 futures.append(f)
             for f in as_completed(futures):

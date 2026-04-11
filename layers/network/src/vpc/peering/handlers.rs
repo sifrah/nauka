@@ -10,7 +10,7 @@ pub fn resource_def() -> ResourceDef {
         .plural("peerings")
         .parent("org", "--org", "Organization")
         .parent("vpc", "--vpc", "VPC")
-        .action("create", "Create a peering connection")
+        .create()
         .op(|op| {
             op.with_arg(OperationArg::required(
                 "peer-vpc",
@@ -18,6 +18,7 @@ pub fn resource_def() -> ResourceDef {
             ))
             .with_output(OutputKind::Resource)
             .with_progress(ProgressHint::Spinner("Creating peering..."))
+            .with_example("nauka vpc peering create --org acme --vpc prod-net --peer-vpc dev-net")
         })
         .list()
         .get()
