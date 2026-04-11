@@ -1,26 +1,139 @@
 ---
-// REST API Reference — Scalar UI powered by OpenAPI spec
+// REST API Reference — Scalar UI themed to match the Nauka docs zinc palette
 ---
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Nauka REST API</title>
     <meta name="description" content="Nauka REST API Reference" />
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>{`
+      /* ── Zinc dark (matches Starlight custom.css) ── */
+      .dark-mode {
+        --scalar-color-1: #fafafa;
+        --scalar-color-2: #e4e4e7;
+        --scalar-color-3: #a1a1aa;
+        --scalar-color-accent: #a1a1aa;
+        --scalar-color-green: #6ee7b7;
+        --scalar-color-red: #fca5a5;
+        --scalar-color-yellow: #fcd34d;
+        --scalar-color-blue: #93c5fd;
+        --scalar-color-orange: #fdba74;
+        --scalar-color-purple: #c4b5fd;
+
+        --scalar-background-1: #1c1c20;
+        --scalar-background-2: #18181b;
+        --scalar-background-3: #27272a;
+        --scalar-background-accent: #3f3f46;
+
+        --scalar-border-color: #27272a;
+
+        --scalar-button-1: #fafafa;
+        --scalar-button-1-color: #18181b;
+        --scalar-button-1-hover: #e4e4e7;
+
+        --scalar-sidebar-background-1: #18181b;
+        --scalar-sidebar-color-1: #fafafa;
+        --scalar-sidebar-color-2: #a1a1aa;
+        --scalar-sidebar-color-active: #fafafa;
+        --scalar-sidebar-border-color: #27272a;
+        --scalar-sidebar-item-hover-background: #27272a;
+        --scalar-sidebar-item-active-background: #27272a;
+
+        --scalar-header-background-1: #18181b;
+        --scalar-header-border-color: #27272a;
+        --scalar-header-color-1: #fafafa;
+        --scalar-header-color-2: #a1a1aa;
+
+        --scalar-card-background: #18181b;
+
+        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      /* ── Zinc light ── */
+      .light-mode {
+        --scalar-color-1: #09090b;
+        --scalar-color-2: #27272a;
+        --scalar-color-3: #52525b;
+        --scalar-color-accent: #52525b;
+        --scalar-color-green: #059669;
+        --scalar-color-red: #dc2626;
+        --scalar-color-yellow: #d97706;
+        --scalar-color-blue: #2563eb;
+        --scalar-color-orange: #ea580c;
+        --scalar-color-purple: #7c3aed;
+
+        --scalar-background-1: #ffffff;
+        --scalar-background-2: #fafafa;
+        --scalar-background-3: #f4f4f5;
+        --scalar-background-accent: #e4e4e7;
+
+        --scalar-border-color: #e4e4e7;
+
+        --scalar-button-1: #09090b;
+        --scalar-button-1-color: #ffffff;
+        --scalar-button-1-hover: #27272a;
+
+        --scalar-sidebar-background-1: #fafafa;
+        --scalar-sidebar-color-1: #09090b;
+        --scalar-sidebar-color-2: #52525b;
+        --scalar-sidebar-color-active: #09090b;
+        --scalar-sidebar-border-color: #e4e4e7;
+        --scalar-sidebar-item-hover-background: #f4f4f5;
+        --scalar-sidebar-item-active-background: #f4f4f5;
+
+        --scalar-header-background-1: #ffffff;
+        --scalar-header-border-color: #e4e4e7;
+        --scalar-header-color-1: #09090b;
+        --scalar-header-color-2: #52525b;
+
+        --scalar-card-background: #fafafa;
+
+        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      /* ── Shared overrides ── */
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      }
+
+      /* Match Starlight radius and spacing */
+      .scalar-card,
+      .section-container {
+        border-radius: 0.5rem !important;
+      }
+
+      /* Code blocks — match Starlight */
+      .scalar-codeblock-pre,
+      pre {
+        border-radius: 0.5rem !important;
+        font-size: 0.8rem !important;
+        line-height: 1.75 !important;
+      }
+    `}</style>
   </head>
   <body>
     <script
       id="api-reference"
       data-url={`${import.meta.env.BASE_URL}openapi.json`}
       data-configuration={JSON.stringify({
-        theme: 'kepler',
+        theme: 'none',
         layout: 'modern',
         darkMode: true,
         hideDownloadButton: false,
+        hiddenClients: [],
         metaData: {
           title: 'Nauka REST API',
         },
+        spec: {
+          url: undefined,
+        },
+        customCss: `
+          .darklight-reference-promo { display: none !important; }
+        `,
       })}
     ></script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>

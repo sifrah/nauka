@@ -37,3 +37,4 @@ hyper = "1"
 openssl = { version = "0.10", features = ["vendored"] }
 ipnet = "2"
 async-trait = "0.1"
+inventory = "0.3"

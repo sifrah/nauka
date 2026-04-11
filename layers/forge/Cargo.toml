@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nauka-core = { path = "../core" }
+inventory.workspace = true
 nauka-state = { path = "../state" }
 nauka-hypervisor = { path = "../hypervisor" }
 nauka-compute = { path = "../compute" }

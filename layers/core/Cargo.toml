@@ -36,6 +36,7 @@ bs58 = "0.5"
 toml = "0.8"
 async-trait = "0.1"
 dirs = "5"
+inventory.workspace = true
 libc = "0.2"
 
 [dev-dependencies]

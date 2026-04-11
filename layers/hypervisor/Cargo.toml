@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nauka-core = { path = "../core" }
+inventory.workspace = true
 nauka-state = { path = "../state" }
 serde.workspace = true
 serde_json.workspace = true

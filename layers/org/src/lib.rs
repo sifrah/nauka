@@ -14,6 +14,8 @@ pub mod types;
 
 use nauka_core::resource::ResourceRegistration;
 
+inventory::submit!(nauka_core::resource::LayerRegistration(registration));
+
 /// Top-level registration: org with project (with env) as children.
 pub fn registration() -> ResourceRegistration {
     ResourceRegistration {

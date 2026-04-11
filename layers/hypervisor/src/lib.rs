@@ -9,6 +9,10 @@
 //! - **compute**: VM/container runtime (future)
 //! - **storage**: ZeroFS volumes, S3 backend (future)
 
+inventory::submit!(nauka_core::resource::LayerRegistration(
+    handlers::registration,
+));
+
 pub mod compute_setup;
 pub mod controlplane;
 pub mod detect;

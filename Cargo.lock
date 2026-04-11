@@ -1241,6 +1241,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1468,6 +1477,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "futures-util",
+ "inventory",
  "libc",
  "nauka-core",
  "nauka-hypervisor",
@@ -1501,6 +1511,7 @@ dependencies = [
  "http 1.4.0",
  "hyper 1.9.0",
  "indicatif",
+ "inventory",
  "libc",
  "rand 0.8.5",
  "serde",
@@ -1539,6 +1550,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "inventory",
  "libc",
  "nauka-compute",
  "nauka-core",
@@ -1563,6 +1575,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "hostname",
+ "inventory",
  "nauka-core",
  "nauka-state",
  "rcgen",
@@ -1601,6 +1614,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "hex",
+ "inventory",
  "ipnet",
  "nauka-core",
  "nauka-hypervisor",
@@ -1621,6 +1635,7 @@ name = "nauka-org"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "inventory",
  "nauka-core",
  "nauka-hypervisor",
  "nauka-state",
