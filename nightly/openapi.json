@@ -1,4 +1,19 @@
 {
+  "components": {
+    "schemas": {
+      "hypervisor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    }
+  },
   "info": {
     "title": "Nauka API",
     "version": "2.0.0"

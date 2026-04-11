@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["default_limit","default_order","request_id","version_header"],"static":["REQUEST_COUNTER"],"struct":["PaginatedResponse","Pagination","RateLimitState","RateLimiter"]};
+window.SIDEBAR_ITEMS = {"fn":["request_id","require_json_content_type","version_header"],"static":["REQUEST_COUNTER"],"struct":["RateLimitState","RateLimiter"]};
