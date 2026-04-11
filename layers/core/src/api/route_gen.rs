@@ -212,13 +212,11 @@ fn add_resource_routes(
                     router = router.route(&instance_path, handler);
                 } else {
                     let handler = axum::routing::patch(
-                        move |Path(id): Path<String>,
-                              Json(body): Json<HashMap<String, String>>| {
+                        move |Path(id): Path<String>, Json(body): Json<HashMap<String, String>>| {
                             let r = Arc::clone(&r);
                             let op = op_name.clone();
                             async move {
-                                handle_scoped(&r, &op, Some(id), body, ScopeValues::default())
-                                    .await
+                                handle_scoped(&r, &op, Some(id), body, ScopeValues::default()).await
                             }
                         },
                     );
@@ -326,7 +324,10 @@ fn classify_anyhow(err: anyhow::Error) -> NaukaError {
     }
 
     // Missing / required field → 400
-    if msg.contains("missing required field") || msg.contains("is required") || msg.contains("missing name") {
+    if msg.contains("missing required field")
+        || msg.contains("is required")
+        || msg.contains("missing name")
+    {
         return NaukaError::validation(msg);
     }
 
@@ -380,20 +381,16 @@ async fn handle_scoped(
         validation::apply_defaults(&reg.def, op_def, &mut fields);
 
         // Validate name
-        validation::validate_name(&name, &op_def.semantics)
-            .map_err(ApiError)?;
+        validation::validate_name(&name, &op_def.semantics).map_err(ApiError)?;
 
         // Validate scope parents
-        validation::validate_scope(&reg.def, op_def, &scope)
-            .map_err(ApiError)?;
+        validation::validate_scope(&reg.def, op_def, &scope).map_err(ApiError)?;
 
         // Validate required fields
-        validation::validate_required_fields(&reg.def, op_def, &fields)
-            .map_err(ApiError)?;
+        validation::validate_required_fields(&reg.def, op_def, &fields).map_err(ApiError)?;
 
         // Validate field types
-        validation::validate_field_types(&reg.def, op_def, &fields)
-            .map_err(ApiError)?;
+        validation::validate_field_types(&reg.def, op_def, &fields).map_err(ApiError)?;
 
         // Validate constraints
         for constraint in &op_def.constraints {
@@ -431,7 +428,9 @@ async fn handle_scoped(
                 if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
                     let location = format!("/{}/{}", reg.def.identity.plural, id);
                     if let Ok(loc) = axum::http::HeaderValue::from_str(&location) {
-                        response.headers_mut().insert(axum::http::header::LOCATION, loc);
+                        response
+                            .headers_mut()
+                            .insert(axum::http::header::LOCATION, loc);
                     }
                 }
             }
@@ -548,10 +547,7 @@ pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> ser
 
     let mut schemas = serde_json::Map::new();
     for reg in registrations {
-        schemas.insert(
-            reg.def.identity.kind.to_string(),
-            resource_schema(&reg.def),
-        );
+        schemas.insert(reg.def.identity.kind.to_string(), resource_schema(&reg.def));
         fn add_child_schemas(
             children: &[ResourceRegistration],
             schemas: &mut serde_json::Map<String, serde_json::Value>,

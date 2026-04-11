@@ -8,8 +8,8 @@ use super::operation::OutputKind;
 use super::registry::{
     OperationRequest, OperationResponse, ResourceRegistration, ScopeValues, ValidatedRequest,
 };
-use super::ResourceDef;
 use super::validation;
+use super::ResourceDef;
 
 /// Dispatch a parsed CLI invocation to the appropriate resource handler.
 ///

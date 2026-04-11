@@ -107,8 +107,12 @@ impl RateLimiter {
 /// Middleware that validates Content-Type on POST/PATCH/PUT requests.
 /// Returns 415 Unsupported Media Type if Content-Type is not application/json.
 pub async fn require_json_content_type(req: Request, next: Next) -> Response {
-    if matches!(*req.method(), axum::http::Method::POST | axum::http::Method::PATCH | axum::http::Method::PUT) {
-        let content_type = req.headers()
+    if matches!(
+        *req.method(),
+        axum::http::Method::POST | axum::http::Method::PATCH | axum::http::Method::PUT
+    ) {
+        let content_type = req
+            .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
@@ -228,10 +232,7 @@ mod tests {
             .route("/test", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn(require_json_content_type));
 
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }

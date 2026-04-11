@@ -137,7 +137,9 @@ fn build_api_router(
         .merge(health)
         .merge(openapi)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(middleware::require_json_content_type))
+        .layer(axum::middleware::from_fn(
+            middleware::require_json_content_type,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_id))
         .layer(axum::middleware::from_fn(middleware::version_header))
 }

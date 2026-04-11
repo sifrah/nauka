@@ -3,12 +3,12 @@
 //! Called from both CLI dispatch and API route_gen BEFORE the handler.
 //! Handlers can assume all inputs are validated.
 
-use crate::error::NaukaError;
 use super::constraint::FieldMap;
-use super::operation::{OperationDef, OperationSemantics, ArgSource};
+use super::operation::{ArgSource, OperationDef, OperationSemantics};
+use super::registry::ScopeValues;
 use super::schema::{FieldDef, FieldType, Mutability};
 use super::ResourceDef;
-use super::registry::ScopeValues;
+use crate::error::NaukaError;
 
 /// Validate the resource name based on operation semantics.
 ///
@@ -24,9 +24,9 @@ pub fn validate_name(
         | OperationSemantics::Get
         | OperationSemantics::Delete
         | OperationSemantics::Update { .. } => {
-            let n = name.as_deref().ok_or_else(|| {
-                NaukaError::validation("name is required for this operation")
-            })?;
+            let n = name
+                .as_deref()
+                .ok_or_else(|| NaukaError::validation("name is required for this operation"))?;
             crate::validate::name(n)
         }
         OperationSemantics::List | OperationSemantics::Action => Ok(()),
@@ -45,9 +45,7 @@ pub fn validate_scope(
 ) -> Result<(), NaukaError> {
     for parent in &def.scope.parents {
         let required = match &op.semantics {
-            OperationSemantics::Create | OperationSemantics::Delete => {
-                parent.required_on_create
-            }
+            OperationSemantics::Create | OperationSemantics::Delete => parent.required_on_create,
             _ => false,
         };
 
@@ -132,7 +130,9 @@ pub fn apply_defaults(def: &ResourceDef, op: &OperationDef, fields: &mut FieldMa
     // Schema-level defaults.
     for field in &def.schema.fields {
         if let Some(default) = field.default {
-            fields.entry(field.name.to_string()).or_insert_with(|| default.to_string());
+            fields
+                .entry(field.name.to_string())
+                .or_insert_with(|| default.to_string());
         }
     }
 
@@ -140,7 +140,9 @@ pub fn apply_defaults(def: &ResourceDef, op: &OperationDef, fields: &mut FieldMa
     for arg in &op.args {
         if let ArgSource::Custom(ref field_def) = arg.source {
             if let Some(default) = field_def.default {
-                fields.entry(arg.name.to_string()).or_insert_with(|| default.to_string());
+                fields
+                    .entry(arg.name.to_string())
+                    .or_insert_with(|| default.to_string());
             }
         }
     }
@@ -157,7 +159,10 @@ pub fn filter_readonly_fields(def: &ResourceDef, fields: &mut FieldMap) {
             // Not a schema field — keep it (might be an operation-specific arg).
             return true;
         };
-        !matches!(field.mutability, Mutability::ReadOnly | Mutability::Internal)
+        !matches!(
+            field.mutability,
+            Mutability::ReadOnly | Mutability::Internal
+        )
     });
 }
 
@@ -205,10 +210,7 @@ fn validate_single_field(
         }
         FieldType::Integer => {
             value.parse::<i64>().map_err(|_| {
-                NaukaError::validation(format!(
-                    "--{}: expected an integer, got '{}'",
-                    name, value,
-                ))
+                NaukaError::validation(format!("--{}: expected an integer, got '{}'", name, value,))
             })?;
         }
         FieldType::Port => {
@@ -229,18 +231,12 @@ fn validate_single_field(
         }
         FieldType::Cidr => {
             crate::validate::cidr(value).map_err(|_| {
-                NaukaError::validation(format!(
-                    "--{}: invalid CIDR notation '{}'",
-                    name, value,
-                ))
+                NaukaError::validation(format!("--{}: invalid CIDR notation '{}'", name, value,))
             })?;
         }
         FieldType::IpAddr => {
             value.parse::<std::net::IpAddr>().map_err(|_| {
-                NaukaError::validation(format!(
-                    "--{}: invalid IP address '{}'",
-                    name, value,
-                ))
+                NaukaError::validation(format!("--{}: invalid IP address '{}'", name, value,))
             })?;
         }
         FieldType::Flag => {
@@ -265,11 +261,11 @@ fn validate_single_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::identity::ResourceIdentity;
     use crate::resource::operation::{OperationArg, OutputDef, OutputKind, ProgressHint};
+    use crate::resource::presentation::PresentationDef;
     use crate::resource::schema::{FieldDef, ResourceSchema};
     use crate::resource::scope::ScopeDef;
-    use crate::resource::identity::ResourceIdentity;
-    use crate::resource::presentation::PresentationDef;
 
     fn test_resource_def() -> ResourceDef {
         ResourceDef {
@@ -283,8 +279,7 @@ mod tests {
             scope: ScopeDef::within("vpc", "--vpc", "Parent VPC"),
             schema: ResourceSchema {
                 fields: vec![
-                    FieldDef::string("region", "Region")
-                        .with_default("fsn1"),
+                    FieldDef::string("region", "Region").with_default("fsn1"),
                     FieldDef::string("type", "Server type"),
                     FieldDef {
                         name: "id",
@@ -296,8 +291,7 @@ mod tests {
                         env_var: None,
                         visibility: crate::resource::schema::CliVisibility::Hidden,
                     },
-                    FieldDef::integer("vcpus", "Number of vCPUs")
-                        .with_default("2"),
+                    FieldDef::integer("vcpus", "Number of vCPUs").with_default("2"),
                     FieldDef::enum_field("size", "Disk size", &["small", "medium", "large"]),
                 ],
             },
@@ -311,14 +305,12 @@ mod tests {
             name: "create",
             description: "Create a VM",
             semantics: OperationSemantics::Create,
-            args: vec![
-                OperationArg {
-                    name: "image",
-                    description: "OS image",
-                    required: true,
-                    source: ArgSource::Custom(FieldDef::string("image", "OS image")),
-                },
-            ],
+            args: vec![OperationArg {
+                name: "image",
+                description: "OS image",
+                required: true,
+                source: ArgSource::Custom(FieldDef::string("image", "OS image")),
+            }],
             constraints: Vec::new(),
             confirmable: false,
             output: OutputDef {
@@ -357,10 +349,7 @@ mod tests {
 
     #[test]
     fn name_valid_for_create() {
-        let result = validate_name(
-            &Some("my-vm".to_string()),
-            &OperationSemantics::Create,
-        );
+        let result = validate_name(&Some("my-vm".to_string()), &OperationSemantics::Create);
         assert!(result.is_ok());
     }
 
@@ -378,10 +367,7 @@ mod tests {
 
     #[test]
     fn name_invalid_characters() {
-        let result = validate_name(
-            &Some("MY_VM".to_string()),
-            &OperationSemantics::Get,
-        );
+        let result = validate_name(&Some("MY_VM".to_string()), &OperationSemantics::Get);
         assert!(result.is_err());
     }
 

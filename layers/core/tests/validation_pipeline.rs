@@ -82,10 +82,7 @@ fn rejects_missing_name_on_create() {
 
 #[test]
 fn rejects_invalid_name_uppercase() {
-    let result = validate_name(
-        &Some("MY_WIDGET".to_string()),
-        &OperationSemantics::Create,
-    );
+    let result = validate_name(&Some("MY_WIDGET".to_string()), &OperationSemantics::Create);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
     assert!(
@@ -96,10 +93,7 @@ fn rejects_invalid_name_uppercase() {
 
 #[test]
 fn rejects_name_too_short() {
-    let result = validate_name(
-        &Some("ab".to_string()),
-        &OperationSemantics::Create,
-    );
+    let result = validate_name(&Some("ab".to_string()), &OperationSemantics::Create);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
     assert!(
@@ -110,10 +104,7 @@ fn rejects_name_too_short() {
 
 #[test]
 fn rejects_name_consecutive_hyphens() {
-    let result = validate_name(
-        &Some("my--widget".to_string()),
-        &OperationSemantics::Create,
-    );
+    let result = validate_name(&Some("my--widget".to_string()), &OperationSemantics::Create);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
     assert!(
@@ -124,10 +115,7 @@ fn rejects_name_consecutive_hyphens() {
 
 #[test]
 fn rejects_name_starting_with_digit() {
-    let result = validate_name(
-        &Some("1widget".to_string()),
-        &OperationSemantics::Create,
-    );
+    let result = validate_name(&Some("1widget".to_string()), &OperationSemantics::Create);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
     assert!(
@@ -138,10 +126,7 @@ fn rejects_name_starting_with_digit() {
 
 #[test]
 fn rejects_name_ending_with_hyphen() {
-    let result = validate_name(
-        &Some("widget-".to_string()),
-        &OperationSemantics::Create,
-    );
+    let result = validate_name(&Some("widget-".to_string()), &OperationSemantics::Create);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
     assert!(
@@ -359,7 +344,10 @@ fn rejects_invalid_enum_value() {
     let result = validate_field_types(&def, op, &fields);
     assert!(result.is_err());
     let msg = result.unwrap_err().message;
-    assert!(msg.contains("--size"), "expected --size in error, got: {msg}");
+    assert!(
+        msg.contains("--size"),
+        "expected --size in error, got: {msg}"
+    );
     assert!(msg.contains("xxl"), "expected 'xxl' in error, got: {msg}");
     assert!(
         msg.contains("small") && msg.contains("medium") && msg.contains("large"),
@@ -437,7 +425,10 @@ fn validates_each_enum_variant() {
         let mut fields = HashMap::new();
         fields.insert("size".to_string(), variant.to_string());
         let result = validate_field_types(&def, op, &fields);
-        assert!(result.is_ok(), "enum variant '{variant}' should be accepted");
+        assert!(
+            result.is_ok(),
+            "enum variant '{variant}' should be accepted"
+        );
     }
 }
 
@@ -479,12 +470,10 @@ fn applies_op_arg_defaults() {
         },
         scope: ScopeDef::global(),
         schema: ResourceSchema { fields: vec![] },
-        operations: vec![
-            OperationDef::create().with_arg(OperationArg::optional(
-                "mode",
-                FieldDef::string("mode", "Operating mode").with_default("auto"),
-            )),
-        ],
+        operations: vec![OperationDef::create().with_arg(OperationArg::optional(
+            "mode",
+            FieldDef::string("mode", "Operating mode").with_default("auto"),
+        ))],
         presentation: PresentationDef::none(),
     };
     let op = &def.operations[0];
@@ -509,12 +498,10 @@ fn op_arg_default_does_not_overwrite() {
         },
         scope: ScopeDef::global(),
         schema: ResourceSchema { fields: vec![] },
-        operations: vec![
-            OperationDef::create().with_arg(OperationArg::optional(
-                "mode",
-                FieldDef::string("mode", "Operating mode").with_default("auto"),
-            )),
-        ],
+        operations: vec![OperationDef::create().with_arg(OperationArg::optional(
+            "mode",
+            FieldDef::string("mode", "Operating mode").with_default("auto"),
+        ))],
         presentation: PresentationDef::none(),
     };
     let op = &def.operations[0];

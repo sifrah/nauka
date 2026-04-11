@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn e040_from_schema_references_nonexistent_field() {
-        use crate::resource::operation::{OperationArg, ArgSource};
+        use crate::resource::operation::{ArgSource, OperationArg};
 
         let def = ResourceDef {
             identity: ResourceIdentity {
@@ -927,15 +927,14 @@ mod tests {
             },
             scope: ScopeDef::global(),
             schema: ResourceSchema::new(),
-            operations: vec![
-                OperationDef::action("filter", "Filter things")
-                    .with_arg(OperationArg {
-                        name: "missing-field",
-                        description: "A field that doesn't exist",
-                        required: false,
-                        source: ArgSource::FromSchema("nonexistent"),
-                    }),
-            ],
+            operations: vec![OperationDef::action("filter", "Filter things").with_arg(
+                OperationArg {
+                    name: "missing-field",
+                    description: "A field that doesn't exist",
+                    required: false,
+                    source: ArgSource::FromSchema("nonexistent"),
+                },
+            )],
             presentation: PresentationDef::none(),
         };
         let violations = lint_def(&def);
