@@ -1430,6 +1430,7 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
     };
 
     let mut items = vec![serde_json::json!({
+        "id": state.hypervisor.id.as_str(),
         "name": state.hypervisor.name,
         "region": state.hypervisor.region,
         "zone": state.hypervisor.zone,
@@ -1441,6 +1442,7 @@ async fn handle_list() -> anyhow::Result<OperationResponse> {
 
     for peer in &state.peers.peers {
         items.push(serde_json::json!({
+            "id": peer.id.as_str(),
             "name": peer.name,
             "region": peer.region,
             "zone": peer.zone,

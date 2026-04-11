@@ -59,6 +59,7 @@ pub fn handler() -> HandlerFn {
                             .ok_or_else(|| anyhow::anyhow!("missing name"))?;
                         let size = registry::pull(&name).await?;
                         Ok(OperationResponse::Resource(serde_json::json!({
+                            "id": name,
                             "name": name,
                             "status": "ready",
                             "size_bytes": size,
@@ -81,6 +82,7 @@ pub fn handler() -> HandlerFn {
                             .iter()
                             .map(|(name, size)| {
                                 serde_json::json!({
+                                    "id": name,
                                     "name": name,
                                     "type": image_type,
                                     "size": format_size(*size),
@@ -97,6 +99,7 @@ pub fn handler() -> HandlerFn {
                             .iter()
                             .map(|e| {
                                 serde_json::json!({
+                                    "id": e.name,
                                     "name": e.name,
                                     "type": e.image_type,
                                     "size": format_size(e.size),
