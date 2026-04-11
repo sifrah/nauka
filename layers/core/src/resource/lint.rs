@@ -279,6 +279,26 @@ fn structural_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation
             }
         }
     }
+
+    // E040: FromSchema references must resolve to existing schema fields
+    for op in &def.operations {
+        for arg in &op.args {
+            if let super::operation::ArgSource::FromSchema(field_name) = &arg.source {
+                let exists = def.schema.fields.iter().any(|f| f.name == *field_name);
+                if !exists {
+                    v.push(Violation {
+                        rule: "E040",
+                        resource: kind,
+                        message: format!(
+                            "operation '{}' arg '{}' references schema field '{}' which does not exist",
+                            op.name, arg.name, field_name
+                        ),
+                        severity: Severity::Error,
+                    });
+                }
+            }
+        }
+    }
 }
 
 // ── UX (W001–W007) ───────────────────────────────────────────
@@ -530,6 +550,19 @@ fn scope_rules(def: &ResourceDef, kind: &'static str, v: &mut Vec<Violation>) {
     // get/delete don't have. Hard to check generically without knowing which
     // args are parent filters vs data filters. Skip for now — covered by
     // handler review.
+
+    // W080: delete with multiple parents should clarify scope
+    if has_op(def, "delete") && def.scope.parents.len() > 1 {
+        let all_resolve = def.scope.parents.iter().all(|p| p.required_on_resolve);
+        if !all_resolve {
+            v.push(Violation {
+                rule: "W080",
+                resource: kind,
+                message: "delete operation with multiple parents: consider setting required_on_resolve=true for unambiguous deletion".into(),
+                severity: Severity::Warning,
+            });
+        }
+    }
 }
 
 // ── Description (W040, W041) ─────────────────────────────────
@@ -878,5 +911,38 @@ mod tests {
             .done();
         let violations = lint_registry(&[&def]);
         assert!(violations.iter().any(|v| v.rule == "E011"), "expected E011");
+    }
+
+    #[test]
+    fn e040_from_schema_references_nonexistent_field() {
+        use crate::resource::operation::{OperationArg, ArgSource};
+
+        let def = ResourceDef {
+            identity: ResourceIdentity {
+                kind: "thing",
+                cli_name: "thing",
+                plural: "things",
+                description: "Test thing",
+                aliases: &[],
+            },
+            scope: ScopeDef::global(),
+            schema: ResourceSchema::new(),
+            operations: vec![
+                OperationDef::action("filter", "Filter things")
+                    .with_arg(OperationArg {
+                        name: "missing-field",
+                        description: "A field that doesn't exist",
+                        required: false,
+                        source: ArgSource::FromSchema("nonexistent"),
+                    }),
+            ],
+            presentation: PresentationDef::none(),
+        };
+        let violations = lint_def(&def);
+        assert!(
+            violations.iter().any(|v| v.rule == "E040"),
+            "expected E040, got: {}",
+            format_violations(&violations)
+        );
     }
 }

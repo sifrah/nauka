@@ -12,6 +12,24 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.0.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Structured error logging
+        if status.is_server_error() {
+            tracing::error!(
+                error_code = self.0.code.as_str(),
+                http_status = status.as_u16(),
+                message = %self.0.message,
+                "API server error"
+            );
+        } else if status.is_client_error() {
+            tracing::warn!(
+                error_code = self.0.code.as_str(),
+                http_status = status.as_u16(),
+                message = %self.0.message,
+                "API client error"
+            );
+        }
+
         let body = axum::Json(serde_json::json!({
             "error": {
                 "code": self.0.code.as_str(),
