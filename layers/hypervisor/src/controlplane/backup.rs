@@ -418,9 +418,11 @@ fn s3_download(config: &RegionStorage, s3_key: &str, local_path: &str) -> Result
             "--aws-sigv4",
             &format!("aws:amz:{region}:s3"),
             "-u",
-            &format!("{}:{}", config.s3_access_key, config.s3_secret_key),
+            ":",
             &url,
         ])
+        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
+        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
         .output()
         .map_err(|e| NaukaError::internal(format!("S3 download failed: {e}")))?;
 
@@ -466,7 +468,6 @@ pub fn backup_pd(config: &RegionStorage, hot: bool) -> Result<String, NaukaError
         tracing::info!("PD downtime for backup: {:.1}s", dt.as_secs_f64());
     }
 
-    create_archive(PD_DATA_DIR, &archive_path, hot)?;
     let enc_path = encrypt_archive(&archive_path)?;
     s3_upload(config, &enc_path, &s3_key)?;
 
@@ -508,7 +509,6 @@ pub fn backup_tikv(config: &RegionStorage, hot: bool) -> Result<String, NaukaErr
         tracing::info!("TiKV downtime for backup: {:.1}s", dt.as_secs_f64());
     }
 
-    create_archive(TIKV_DATA_DIR, &archive_path, hot)?;
     let enc_path = encrypt_archive(&archive_path)?;
     s3_upload(config, &enc_path, &s3_key)?;
 
