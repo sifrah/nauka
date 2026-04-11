@@ -341,6 +341,17 @@ fn classify_anyhow(err: anyhow::Error) -> NaukaError {
         return NaukaError::validation(msg);
     }
 
+    // Permission denied → 403
+    if msg.contains("permission denied") || msg.contains("not allowed") || msg.contains("forbidden")
+    {
+        return NaukaError::new(crate::error::ErrorCode::PermissionDenied, msg);
+    }
+
+    // Timeout → 504
+    if msg.contains("timed out") || msg.contains("timeout") {
+        return NaukaError::new(crate::error::ErrorCode::Timeout, msg);
+    }
+
     // Default: 500
     NaukaError::internal(msg)
 }
@@ -401,8 +412,24 @@ async fn handle_scoped(
     }
 
     // Extract pagination params before moving fields into the request
-    let pagination_page = fields.get("page").and_then(|v| v.parse::<usize>().ok());
-    let pagination_per_page = fields.get("per_page").and_then(|v| v.parse::<usize>().ok());
+    let pagination_page = if let Some(raw) = fields.get("page") {
+        Some(raw.parse::<usize>().map_err(|_| {
+            ApiError(NaukaError::validation(format!(
+                "invalid pagination parameter 'page': expected a positive integer, got '{raw}'"
+            )))
+        })?)
+    } else {
+        None
+    };
+    let pagination_per_page = if let Some(raw) = fields.get("per_page") {
+        Some(raw.parse::<usize>().map_err(|_| {
+            ApiError(NaukaError::validation(format!(
+                "invalid pagination parameter 'per_page': expected a positive integer, got '{raw}'"
+            )))
+        })?)
+    } else {
+        None
+    };
 
     let request = OperationRequest {
         operation: operation.to_string(),
@@ -411,9 +438,26 @@ async fn handle_scoped(
         fields,
     };
 
-    let response = (reg.handler)(request)
-        .await
-        .map_err(|e: anyhow::Error| ApiError(classify_anyhow(e)))?;
+    let response = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        (reg.handler)(request),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e: anyhow::Error| ApiError(classify_anyhow(e)))?,
+        Err(_elapsed) => {
+            return Err(ApiError(NaukaError::new(
+                crate::error::ErrorCode::Timeout,
+                "handler timed out after 30s".to_string(),
+            )));
+        }
+    };
+
+    // ── Post-handler output pipeline ──
+    let mut response = response;
+    validation::validate_response_contract(reg.def.identity.kind, &response).map_err(ApiError)?;
+    validation::filter_response_secrets(&reg.def, &mut response);
+    validation::normalize_timestamps(&mut response);
 
     match response {
         OperationResponse::Resource(v) => {
@@ -656,13 +700,13 @@ mod tests {
             Box::pin(async move {
                 match req.operation.as_str() {
                     "list" => Ok(OperationResponse::ResourceList(vec![
-                        serde_json::json!({"name": "w1"}),
+                        serde_json::json!({"id": "w1-id", "name": "w1"}),
                     ])),
                     "create" => Ok(OperationResponse::Resource(
-                        serde_json::json!({"name": req.name.unwrap_or_default()}),
+                        serde_json::json!({"id": "new-id", "name": req.name.unwrap_or_default()}),
                     )),
                     "get" => Ok(OperationResponse::Resource(
-                        serde_json::json!({"name": req.name.unwrap_or_default()}),
+                        serde_json::json!({"id": "get-id", "name": req.name.unwrap_or_default()}),
                     )),
                     "delete" => Ok(OperationResponse::Message("deleted".into())),
                     "polish" => Ok(OperationResponse::Message("polished".into())),
@@ -872,7 +916,7 @@ mod tests {
 
         let handler: HandlerFn = Box::new(move |_req| {
             let items: Vec<serde_json::Value> = (0..count)
-                .map(|i| serde_json::json!({"name": format!("w{i}")}))
+                .map(|i| serde_json::json!({"id": format!("w{i}-id"), "name": format!("w{i}")}))
                 .collect();
             Box::pin(async move { Ok(OperationResponse::ResourceList(items)) })
         });
@@ -1078,5 +1122,41 @@ mod tests {
         let classified = classify_anyhow(err);
         assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
         assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_permission_denied() {
+        let err = anyhow::anyhow!("permission denied for this operation");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::PermissionDenied);
+        assert_eq!(classified.http_status(), 403);
+    }
+
+    #[test]
+    fn classify_timeout() {
+        let err = anyhow::anyhow!("operation timed out after 30s");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::Timeout);
+        assert_eq!(classified.http_status(), 504);
+    }
+
+    #[tokio::test]
+    async fn pagination_invalid_page_returns_400() {
+        let reg = paginated_resource(10);
+        let fields: HashMap<String, String> = [("page".to_string(), "abc".to_string())]
+            .into_iter()
+            .collect();
+        let resp = handle_scoped(&reg, "list", None, fields, ScopeValues::default()).await;
+        assert_eq!(resp.into_response().status(), 400);
+    }
+
+    #[tokio::test]
+    async fn pagination_invalid_per_page_returns_400() {
+        let reg = paginated_resource(10);
+        let fields: HashMap<String, String> = [("per_page".to_string(), "xyz".to_string())]
+            .into_iter()
+            .collect();
+        let resp = handle_scoped(&reg, "list", None, fields, ScopeValues::default()).await;
+        assert_eq!(resp.into_response().status(), 400);
     }
 }
