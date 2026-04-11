@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use super::error_response::ApiError;
 use crate::error::NaukaError;
+use crate::resource::validation;
 use crate::resource::{
     OperationRequest, OperationResponse, OperationSemantics, ResourceRegistration, ScopeValues,
 };
@@ -193,6 +194,35 @@ fn add_resource_routes(
                     router = router.route(&instance_path, handler);
                 }
             }
+            OperationSemantics::Update { .. } => {
+                if has_parents {
+                    let handler = axum::routing::patch(
+                        move |Path(path_params): Path<HashMap<String, String>>,
+                              Json(body): Json<HashMap<String, String>>| {
+                            let r = Arc::clone(&r);
+                            let op = op_name.clone();
+                            let pk = pkinds.clone();
+                            async move {
+                                let scope = extract_scope(&path_params, &pk);
+                                let id = path_params.get("id").cloned();
+                                handle_scoped(&r, &op, id, body, scope).await
+                            }
+                        },
+                    );
+                    router = router.route(&instance_path, handler);
+                } else {
+                    let handler = axum::routing::patch(
+                        move |Path(id): Path<String>, Json(body): Json<HashMap<String, String>>| {
+                            let r = Arc::clone(&r);
+                            let op = op_name.clone();
+                            async move {
+                                handle_scoped(&r, &op, Some(id), body, ScopeValues::default()).await
+                            }
+                        },
+                    );
+                    router = router.route(&instance_path, handler);
+                }
+            }
             OperationSemantics::Action => {
                 let route = format!("{base}/{}", op.name);
                 if has_parents {
@@ -293,6 +323,24 @@ fn classify_anyhow(err: anyhow::Error) -> NaukaError {
         return NaukaError::validation(msg);
     }
 
+    // Missing / required field → 400
+    if msg.contains("missing required field")
+        || msg.contains("is required")
+        || msg.contains("missing name")
+    {
+        return NaukaError::validation(msg);
+    }
+
+    // Invalid name → 400
+    if msg.contains("invalid name") || msg.contains("InvalidName") {
+        return NaukaError::validation(msg);
+    }
+
+    // General validation errors → 400
+    if msg.contains("invalid") || msg.contains("cannot be empty") {
+        return NaukaError::validation(msg);
+    }
+
     // Default: 500
     NaukaError::internal(msg)
 }
@@ -305,8 +353,46 @@ async fn handle_scoped(
     fields: HashMap<String, String>,
     scope: ScopeValues,
 ) -> impl IntoResponse {
+    let span = tracing::info_span!(
+        "api_operation",
+        resource = reg.def.identity.kind,
+        operation = operation,
+    );
+    let _guard = span.enter();
+
+    tracing::debug!(
+        resource = reg.def.identity.kind,
+        operation = operation,
+        name = ?name,
+        "handling API request"
+    );
+
+    drop(_guard);
+
     let op_def = reg.def.operations.iter().find(|o| o.name == operation);
+
+    // ── Pre-handler validation pipeline ──
+    let mut fields = fields; // make mutable
     if let Some(op_def) = op_def {
+        // Filter ReadOnly/Internal fields from API input
+        validation::filter_readonly_fields(&reg.def, &mut fields);
+
+        // Apply defaults for missing optional fields
+        validation::apply_defaults(&reg.def, op_def, &mut fields);
+
+        // Validate name
+        validation::validate_name(&name, &op_def.semantics).map_err(ApiError)?;
+
+        // Validate scope parents
+        validation::validate_scope(&reg.def, op_def, &scope).map_err(ApiError)?;
+
+        // Validate required fields
+        validation::validate_required_fields(&reg.def, op_def, &fields).map_err(ApiError)?;
+
+        // Validate field types
+        validation::validate_field_types(&reg.def, op_def, &fields).map_err(ApiError)?;
+
+        // Validate constraints
         for constraint in &op_def.constraints {
             if let Err(msg) = constraint.validate(&fields) {
                 return Err(ApiError(NaukaError::validation(msg)));
@@ -336,7 +422,19 @@ async fn handle_scoped(
             } else {
                 axum::http::StatusCode::OK
             };
-            Ok((status, axum::Json(v)).into_response())
+            let mut response = (status, axum::Json(v.clone())).into_response();
+            // Add Location header for created resources
+            if operation == "create" {
+                if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                    let location = format!("/{}/{}", reg.def.identity.plural, id);
+                    if let Ok(loc) = axum::http::HeaderValue::from_str(&location) {
+                        response
+                            .headers_mut()
+                            .insert(axum::http::header::LOCATION, loc);
+                    }
+                }
+            }
+            Ok(response)
         }
         OperationResponse::ResourceList(items) => {
             let total = items.len();
@@ -447,6 +545,24 @@ pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> ser
         });
     }
 
+    let mut schemas = serde_json::Map::new();
+    for reg in registrations {
+        schemas.insert(reg.def.identity.kind.to_string(), resource_schema(&reg.def));
+        fn add_child_schemas(
+            children: &[ResourceRegistration],
+            schemas: &mut serde_json::Map<String, serde_json::Value>,
+        ) {
+            for child in children {
+                schemas.insert(
+                    child.def.identity.kind.to_string(),
+                    resource_schema(&child.def),
+                );
+                add_child_schemas(&child.children, schemas);
+            }
+        }
+        add_child_schemas(&reg.children, &mut schemas);
+    }
+
     serde_json::json!({
         "openapi": "3.0.0",
         "info": {
@@ -454,6 +570,59 @@ pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> ser
             "version": env!("CARGO_PKG_VERSION"),
         },
         "paths": paths,
+        "components": {
+            "schemas": schemas,
+        },
+    })
+}
+
+/// Generate a JSON Schema-like object from a ResourceDef's schema fields.
+fn resource_schema(def: &crate::resource::ResourceDef) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+
+    // Name is always present
+    properties.insert("name".to_string(), serde_json::json!({"type": "string"}));
+    required.push(serde_json::json!("name"));
+
+    for field in &def.schema.fields {
+        let field_schema = match &field.field_type {
+            crate::resource::FieldType::String
+            | crate::resource::FieldType::Secret
+            | crate::resource::FieldType::Path
+            | crate::resource::FieldType::Duration
+            | crate::resource::FieldType::Cidr
+            | crate::resource::FieldType::IpAddr
+            | crate::resource::FieldType::ResourceRef(_)
+            | crate::resource::FieldType::KeyValue => {
+                serde_json::json!({"type": "string", "description": field.description})
+            }
+            crate::resource::FieldType::Integer
+            | crate::resource::FieldType::Port
+            | crate::resource::FieldType::SizeGb
+            | crate::resource::FieldType::SizeMb => {
+                serde_json::json!({"type": "integer", "description": field.description})
+            }
+            crate::resource::FieldType::Flag => {
+                serde_json::json!({"type": "boolean", "description": field.description})
+            }
+            crate::resource::FieldType::Enum(e) => {
+                serde_json::json!({"type": "string", "enum": e.values, "description": field.description})
+            }
+        };
+        properties.insert(field.name.to_string(), field_schema);
+
+        if matches!(field.mutability, crate::resource::Mutability::CreateOnly)
+            && field.default.is_none()
+        {
+            required.push(serde_json::json!(field.name));
+        }
+    }
+
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
     })
 }
 
@@ -639,7 +808,7 @@ mod tests {
         let resp = handle_scoped(
             &reg,
             "create",
-            Some("w1".into()),
+            Some("widget-one".into()),
             HashMap::new(),
             ScopeValues::default(),
         )
@@ -653,7 +822,7 @@ mod tests {
         let resp = handle_scoped(
             &reg,
             "delete",
-            Some("w1".into()),
+            Some("widget-one".into()),
             HashMap::new(),
             ScopeValues::default(),
         )
@@ -673,6 +842,7 @@ mod tests {
         assert!(spec["paths"]["/admin/v1/widgets"]["post"].is_object());
         assert!(spec["paths"]["/admin/v1/widgets/{id}"]["get"].is_object());
         assert!(spec["paths"]["/admin/v1/widgets/{id}"]["delete"].is_object());
+        assert!(spec["components"]["schemas"].is_object());
     }
 
     #[test]
@@ -680,6 +850,7 @@ mod tests {
         let spec = openapi_spec(&[], "/v1");
         assert_eq!(spec["openapi"], "3.0.0");
         assert!(spec["paths"].as_object().unwrap().is_empty());
+        assert!(spec["components"]["schemas"].is_object());
     }
 
     // ── Pagination (#116) ──
@@ -875,5 +1046,37 @@ mod tests {
         let classified = classify_anyhow(err);
         assert_eq!(classified.code, crate::error::ErrorCode::InternalError);
         assert_eq!(classified.http_status(), 500);
+    }
+
+    #[test]
+    fn classify_missing_required_field() {
+        let err = anyhow::anyhow!("missing required field: s3-endpoint");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_is_required() {
+        let err = anyhow::anyhow!("--org is required");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_missing_name() {
+        let err = anyhow::anyhow!("missing name");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
+    }
+
+    #[test]
+    fn classify_invalid_name() {
+        let err = anyhow::anyhow!("invalid name 'AB': must start with a lowercase letter");
+        let classified = classify_anyhow(err);
+        assert_eq!(classified.code, crate::error::ErrorCode::ValidationError);
+        assert_eq!(classified.http_status(), 400);
     }
 }

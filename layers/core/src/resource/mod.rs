@@ -17,6 +17,7 @@ mod presentation;
 mod registry;
 mod schema;
 mod scope;
+pub(crate) mod validation;
 
 pub use api_response::*;
 pub use builder::*;
@@ -29,6 +30,7 @@ pub use presentation::*;
 pub use registry::*;
 pub use schema::*;
 pub use scope::*;
+pub use validation::*;
 
 /// The complete definition of a cloud resource.
 /// This is the single source of truth from which CLI, API, validation,

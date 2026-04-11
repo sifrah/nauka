@@ -3,7 +3,7 @@
 use axum::extract::Request;
 use axum::http::HeaderValue;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -101,64 +101,33 @@ impl RateLimiter {
 }
 
 // ═══════════════════════════════════════════════════
-// 3. Pagination query params
+// 7. Content-Type validation
 // ═══════════════════════════════════════════════════
 
-/// Standard pagination parameters extracted from query string.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Pagination {
-    /// Number of items to return (default 50, max 200).
-    #[serde(default = "default_limit")]
-    pub limit: u64,
-    /// Offset for pagination (default 0).
-    #[serde(default)]
-    pub offset: u64,
-    /// Sort field.
-    #[serde(default)]
-    pub sort: Option<String>,
-    /// Sort order: "asc" or "desc".
-    #[serde(default = "default_order")]
-    pub order: String,
-}
+/// Middleware that validates Content-Type on POST/PATCH/PUT requests.
+/// Returns 415 Unsupported Media Type if Content-Type is not application/json.
+pub async fn require_json_content_type(req: Request, next: Next) -> Response {
+    if matches!(
+        *req.method(),
+        axum::http::Method::POST | axum::http::Method::PATCH | axum::http::Method::PUT
+    ) {
+        let content_type = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
 
-fn default_limit() -> u64 {
-    50
-}
-fn default_order() -> String {
-    "asc".into()
-}
-
-impl Pagination {
-    /// Clamp limit to max 200.
-    pub fn clamped_limit(&self) -> u64 {
-        self.limit.min(200)
-    }
-}
-
-/// Paginated list response.
-#[derive(Debug, serde::Serialize)]
-pub struct PaginatedResponse<T: serde::Serialize> {
-    pub items: Vec<T>,
-    pub count: usize,
-    pub total: u64,
-    pub offset: u64,
-    pub limit: u64,
-    pub has_more: bool,
-}
-
-impl<T: serde::Serialize> PaginatedResponse<T> {
-    pub fn new(items: Vec<T>, total: u64, pagination: &Pagination) -> Self {
-        let count = items.len();
-        let has_more = pagination.offset + (count as u64) < total;
-        Self {
-            items,
-            count,
-            total,
-            offset: pagination.offset,
-            limit: pagination.clamped_limit(),
-            has_more,
+        if !content_type.starts_with("application/json") {
+            let body = axum::Json(serde_json::json!({
+                "error": {
+                    "code": "UnsupportedMediaType",
+                    "message": "Content-Type must be application/json",
+                }
+            }));
+            return (axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE, body).into_response();
         }
     }
+    next.run(req).await
 }
 
 #[cfg(test)]
@@ -201,67 +170,6 @@ mod tests {
         assert_eq!(rl.check().unwrap(), 3);
     }
 
-    // ── Pagination ──
-
-    #[test]
-    fn pagination_defaults() {
-        let p: Pagination = serde_json::from_str("{}").unwrap();
-        assert_eq!(p.limit, 50);
-        assert_eq!(p.offset, 0);
-        assert_eq!(p.order, "asc");
-    }
-
-    #[test]
-    fn pagination_clamped() {
-        let p = Pagination {
-            limit: 999,
-            offset: 0,
-            sort: None,
-            order: "asc".into(),
-        };
-        assert_eq!(p.clamped_limit(), 200);
-    }
-
-    #[test]
-    fn paginated_response_has_more() {
-        let p = Pagination {
-            limit: 2,
-            offset: 0,
-            sort: None,
-            order: "asc".into(),
-        };
-        let resp = PaginatedResponse::new(vec!["a", "b"], 5, &p);
-        assert!(resp.has_more);
-        assert_eq!(resp.total, 5);
-        assert_eq!(resp.count, 2);
-    }
-
-    #[test]
-    fn paginated_response_no_more() {
-        let p = Pagination {
-            limit: 10,
-            offset: 0,
-            sort: None,
-            order: "asc".into(),
-        };
-        let resp = PaginatedResponse::new(vec!["a", "b"], 2, &p);
-        assert!(!resp.has_more);
-    }
-
-    #[test]
-    fn paginated_response_serializes() {
-        let p = Pagination {
-            limit: 50,
-            offset: 0,
-            sort: None,
-            order: "asc".into(),
-        };
-        let resp = PaginatedResponse::new(vec!["x"], 100, &p);
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"has_more\":true"));
-        assert!(json.contains("\"total\":100"));
-    }
-
     // ── Request counter ──
 
     #[test]
@@ -270,5 +178,62 @@ mod tests {
         REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let b = REQUEST_COUNTER.load(Ordering::Relaxed);
         assert_eq!(b, a + 1);
+    }
+
+    // ── Content-Type validation ──
+
+    #[tokio::test]
+    async fn content_type_rejects_non_json() {
+        use axum::{body::Body, routing::post, Router};
+        use http::Request;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/test", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_json_content_type));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/test")
+            .header("content-type", "text/plain")
+            .body(Body::from("hello"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 415);
+    }
+
+    #[tokio::test]
+    async fn content_type_allows_json() {
+        use axum::{body::Body, routing::post, Router};
+        use http::Request;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/test", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_json_content_type));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/test")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn content_type_skips_get() {
+        use axum::{body::Body, routing::get, Router};
+        use http::Request;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(require_json_content_type));
+
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }

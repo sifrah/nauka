@@ -108,6 +108,9 @@ fn build_api_router(
     registrations: Vec<ResourceRegistration>,
     prefix: &str,
 ) -> Router {
+    use super::route_gen::openapi_spec;
+    let spec = openapi_spec(&registrations, prefix);
+
     let api_routes = build_router(registrations, prefix);
 
     let health = Router::new().route(
@@ -124,17 +127,8 @@ fn build_api_router(
     let openapi = Router::new().route(
         "/openapi.json",
         axum::routing::get(move || {
-            async move {
-                // Can't access registrations here easily — return minimal spec
-                axum::Json(serde_json::json!({
-                    "openapi": "3.0.0",
-                    "info": {
-                        "title": "Nauka API",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "paths": {},
-                }))
-            }
+            let spec = spec.clone();
+            async move { axum::Json(spec) }
         }),
     );
 
@@ -143,6 +137,9 @@ fn build_api_router(
         .merge(health)
         .merge(openapi)
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(
+            middleware::require_json_content_type,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_id))
         .layer(axum::middleware::from_fn(middleware::version_header))
 }
@@ -264,7 +261,7 @@ mod tests {
 
         // GET
         let req = Request::builder()
-            .uri("/admin/v1/things/t1")
+            .uri("/admin/v1/things/thing-one")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
@@ -273,7 +270,7 @@ mod tests {
         // DELETE
         let req = Request::builder()
             .method("DELETE")
-            .uri("/admin/v1/things/t1")
+            .uri("/admin/v1/things/thing-one")
             .body(Body::empty())
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
@@ -327,6 +324,13 @@ mod tests {
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(spec["openapi"], "3.0.0");
+        assert!(spec["paths"]["/admin/v1/things"]["get"].is_object());
+        assert!(spec["components"]["schemas"].is_object());
     }
 
     #[tokio::test]

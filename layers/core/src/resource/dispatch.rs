@@ -8,6 +8,7 @@ use super::operation::OutputKind;
 use super::registry::{
     OperationRequest, OperationResponse, ResourceRegistration, ScopeValues, ValidatedRequest,
 };
+use super::validation;
 use super::ResourceDef;
 
 /// Dispatch a parsed CLI invocation to the appropriate resource handler.
@@ -117,6 +118,15 @@ pub async fn dispatch(
             }
         }
     }
+
+    // ── 1c. Apply defaults for missing optional fields ──
+    validation::apply_defaults(def, op, &mut fields);
+
+    // ── 1d. Pre-handler validation pipeline ──
+    validation::validate_name(&name, &op.semantics)?;
+    validation::validate_scope(def, op, &scope)?;
+    validation::validate_required_fields(def, op, &fields)?;
+    validation::validate_field_types(def, op, &fields)?;
 
     // ── 2. Validate constraints → ValidatedRequest ──
 
@@ -307,6 +317,11 @@ fn extract_fields(
                     .unwrap_or(false)
             {
                 fields.insert(arg.name.to_string(), "true".to_string());
+            }
+        }
+        if let super::operation::ArgSource::FromSchema(_schema_field_name) = &arg.source {
+            if let Some(val) = matches.try_get_one::<String>(arg.name).ok().flatten() {
+                fields.insert(arg.name.to_string(), val.clone());
             }
         }
     }
