@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["VmReconciler"]};
+window.SIDEBAR_ITEMS = {"enum":["VmAction"],"fn":["decide_vm_action","find_orphaned_processes","is_interface_present","is_local_vm","should_vm_exist"],"struct":["VmReconciler"]};
