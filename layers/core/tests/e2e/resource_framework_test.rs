@@ -102,14 +102,14 @@ async fn api_server_serves_routes() {
     use nauka_core::api::{ApiConfig, ApiServer};
     use tower::ServiceExt;
 
-    let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+    let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
 
-    // GET /admin/v1/widgets → list
+    // GET /cloud/v1/widgets → list
     let req = Request::builder()
-        .uri("/admin/v1/widgets")
+        .uri("/cloud/v1/widgets")
         .body(Body::empty())
         .unwrap();
-    let resp = server.admin_router().clone().oneshot(req).await.unwrap();
+    let resp = server.router().clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
 
     // GET /health
@@ -117,7 +117,7 @@ async fn api_server_serves_routes() {
         .uri("/health")
         .body(Body::empty())
         .unwrap();
-    let resp = server.admin_router().clone().oneshot(req).await.unwrap();
+    let resp = server.router().clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200);
 }
 

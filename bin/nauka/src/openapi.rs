@@ -18,6 +18,47 @@ use nauka_core::api::openapi_spec;
 
 fn main() {
     let registry = registry::build_registry();
-    let spec = openapi_spec(registry.as_slice(), "/admin/v1");
-    println!("{}", serde_json::to_string_pretty(&spec).unwrap());
+
+    // Split registrations: hypervisor → /platform/v1, rest → /cloud/v1
+    let (platform, cloud): (Vec<_>, Vec<_>) = registry
+        .into_registrations()
+        .into_iter()
+        .partition(|r| r.def.identity.kind == "hypervisor");
+
+    let platform_spec = openapi_spec(&platform, "/platform/v1");
+    let cloud_spec = openapi_spec(&cloud, "/cloud/v1");
+
+    // Merge specs
+    let mut merged = platform_spec;
+    if let (Some(merged_paths), Some(cloud_paths)) = (
+        merged["paths"].as_object_mut(),
+        cloud_spec["paths"].as_object(),
+    ) {
+        for (k, v) in cloud_paths {
+            merged_paths.insert(k.clone(), v.clone());
+        }
+    }
+    if let (Some(merged_schemas), Some(cloud_schemas)) = (
+        merged["components"]["schemas"].as_object_mut(),
+        cloud_spec["components"]["schemas"].as_object(),
+    ) {
+        for (k, v) in cloud_schemas {
+            merged_schemas.insert(k.clone(), v.clone());
+        }
+    }
+    if let (Some(merged_tags), Some(cloud_tags)) =
+        (merged["tags"].as_array_mut(), cloud_spec["tags"].as_array())
+    {
+        merged_tags.extend(cloud_tags.iter().cloned());
+    }
+    if let (Some(merged_groups), Some(cloud_groups)) = (
+        merged["x-tagGroups"].as_array_mut(),
+        cloud_spec["x-tagGroups"].as_array(),
+    ) {
+        for group in cloud_groups {
+            merged_groups.push(group.clone());
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&merged).unwrap());
 }
