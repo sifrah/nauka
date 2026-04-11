@@ -274,8 +274,8 @@ fn extract_scope(path_params: &HashMap<String, String>, parent_kinds: &[String])
 
 /// #10: Build a route path incorporating scope parents.
 ///
-/// No parents: `/admin/v1/orgs`
-/// With parents: `/admin/v1/orgs/{org_id}/projects/{project_id}/environments`
+/// No parents: `/cloud/v1/orgs`
+/// With parents: `/cloud/v1/orgs/{org_id}/projects/{project_id}/environments`
 fn build_base_path(prefix: &str, plural: &str, parents: &[crate::resource::ParentRef]) -> String {
     if parents.is_empty() {
         return format!("{prefix}/{plural}");
@@ -572,39 +572,444 @@ pub struct RouteInfo {
     pub description: String,
 }
 
-/// #7: Generate a minimal OpenAPI-style spec from routes.
-pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> serde_json::Value {
-    let routes = list_routes(registrations, prefix);
+/// Markdown intro for the OpenAPI spec `info.description`.
+const OPENAPI_DESCRIPTION: &str = "The Nauka API is a RESTful interface for turning bare-metal servers into a programmable cloud. Every hypervisor in your mesh exposes the same API, providing a single control plane for compute, networking, and storage resources.";
 
-    let mut paths = serde_json::Map::new();
-    for route in &routes {
-        let path_entry = paths
-            .entry(route.path.clone())
-            .or_insert_with(|| serde_json::json!({}));
-        let method_lower = route.method.to_lowercase();
-        path_entry[method_lower] = serde_json::json!({
-            "summary": route.description,
-            "operationId": format!("{}_{}", route.resource, route.operation),
-            "tags": [route.resource],
-        });
-    }
+/// Build the introduction tags — each appears as a top-level section in the sidebar.
+fn build_intro_tags() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "Authentication",
+            "x-traitTag": true,
+            "description": r#"The API authenticates requests using Bearer tokens passed in the `Authorization` header.
+
+```http
+GET /cloud/v1/orgs HTTP/1.1
+Host: your-server:8443
+Authorization: Bearer nk_live_a1b2c3d4e5f6...
+```
+
+All API requests must be made over HTTPS. Requests without a valid token will return `403 Forbidden`.
+
+There are two types of tokens:
+
+| Type | Prefix | Scope |
+|------|--------|-------|
+| Admin | `nk_live_` | Full access to all resources in the mesh |
+| Service | `nk_svc_` | Scoped to a specific organization and project |
+
+> Tokens are issued during `nauka hypervisor init` and can be rotated with `nauka token rotate`."#
+        }),
+        serde_json::json!({
+            "name": "Errors",
+            "x-traitTag": true,
+            "description": r#"The API uses conventional HTTP status codes to indicate the outcome of a request. Codes in the `2xx` range indicate success, `4xx` indicate a client error, and `5xx` indicate a server error.
+
+All errors return a consistent JSON body with a machine-readable `code` and a human-readable `message`:
+
+```json
+{
+  "error": {
+    "code": "ResourceNotFound",
+    "message": "vpc 'web' not found"
+  }
+}
+```
+
+### Error codes
+
+| Status | Code | Description |
+|--------|------|-------------|
+| `400` | `ValidationError` | The request body is invalid. Check field types, required fields, and naming rules. |
+| `403` | `PermissionDenied` | The token does not have permission for this operation. |
+| `404` | `ResourceNotFound` | The requested resource does not exist. Verify the name or ID. |
+| `409` | `ResourceAlreadyExists` | A resource with this name already exists in the same scope. |
+| `415` | `UnsupportedMediaType` | The request is missing `Content-Type: application/json`. |
+| `422` | `HasDependents` | The resource cannot be deleted because other resources depend on it. Delete them first. |
+| `429` | `RateLimited` | You have exceeded the rate limit. Wait and retry with exponential backoff. |
+| `500` | `InternalError` | An unexpected server error occurred. Retry the request or contact support with the `x-request-id`. |
+| `504` | `Timeout` | The operation did not complete within the server timeout (30s). |
+
+### Handling errors
+
+We recommend writing code that gracefully handles all possible error codes. Below is a typical pattern:
+
+```bash
+response=$(curl -s -w "\n%{http_code}" \
+        -H "Authorization: Bearer $TOKEN" \
+  https://your-server:8443/cloud/v1/vpcs)
+
+http_code=$(echo "$response" | tail -1)
+body=$(echo "$response" | sed '$d')
+
+case $http_code in
+  200) echo "$body" | jq '.data' ;;
+  429) sleep 5 && retry ;;
+  4*)  echo "$body" | jq -r '.error.message' >&2 ;;
+  5*)  echo "Server error (request-id in headers), retrying..." >&2 ;;
+esac
+```"#
+        }),
+        serde_json::json!({
+            "name": "Pagination",
+            "x-traitTag": true,
+            "description": r#"All list endpoints return paginated responses. Pagination is cursor-based using page numbers.
+
+### Request parameters
+
+| Parameter | Type | Default | Max | Description |
+|-----------|------|---------|-----|-------------|
+| `page` | integer | `1` | — | Page number to retrieve |
+| `per_page` | integer | `25` | `100` | Number of items per page |
+
+### Response format
+
+```json
+{
+  "data": [
+    {"id": "vpc-01abc", "name": "production", "cidr": "10.0.0.0/16"},
+    {"id": "vpc-02def", "name": "staging", "cidr": "10.1.0.0/16"}
+  ],
+  "pagination": {
+    "page": 1,
+    "per_page": 25,
+    "total_pages": 4,
+    "total_entries": 87,
+    "next_page": 2,
+    "previous_page": null
+  }
+}
+```
+
+The `next_page` and `previous_page` fields are `null` when there is no corresponding page. Use them to navigate through results.
+
+### Example
+
+```bash
+# First page
+curl https://your-server:8443/cloud/v1/orgs?page=1&per_page=10
+
+# Next page
+curl https://your-server:8443/cloud/v1/orgs?page=2&per_page=10
+```"#
+        }),
+        serde_json::json!({
+            "name": "Rate Limiting",
+            "x-traitTag": true,
+            "description": r#"The API enforces a rate limit to protect the cluster from excessive load. Limits are applied per source IP across a sliding time window.
+
+### Response headers
+
+Every response includes rate limit information:
+
+| Header | Description |
+|--------|-------------|
+| `x-ratelimit-remaining` | Number of requests remaining in the current window |
+
+### Exceeding the limit
+
+When the limit is exceeded, the API returns `429 Too Many Requests`:
+
+```json
+{
+  "error": {
+    "code": "RateLimited",
+    "message": "Too many requests. Please retry later."
+  }
+}
+```
+
+### Best practices
+
+- Cache responses when possible to reduce the number of API calls
+- Implement exponential backoff when you receive a `429` response
+- Use `per_page` to fetch more items in a single request instead of making many small requests"#
+        }),
+        serde_json::json!({
+            "name": "Request IDs",
+            "x-traitTag": true,
+            "description": r#"Every API response includes an `x-request-id` header containing a unique identifier for the request.
+
+```http
+HTTP/1.1 200 OK
+x-request-id: req-0000004a38bf
+x-nauka-version: 2.0.0
+content-type: application/json
+```
+
+Include this identifier when contacting support or reporting an issue. It allows the team to trace the exact request through the server logs.
+
+> The request ID is also attached to structured log entries on the server side, making it possible to correlate API calls with internal operations."#
+        }),
+        serde_json::json!({
+            "name": "Versioning",
+            "x-traitTag": true,
+            "description": r#"### URL prefix
+
+The API version is embedded in the URL path. The current version is **v1**. URLs use two prefixes: `/platform/v1` for infrastructure, `/cloud/v1` for cloud resources.
+
+```
+https://your-server:8443/platform/v1/hypervisors
+https://your-server:8443/cloud/v1/orgs
+```
+
+| Prefix | Scope | Description |
+|--------|-------|-------------|
+| `/platform/v1` | Infrastructure | Hypervisor management, mesh operations, node lifecycle. |
+| `/cloud/v1` | Cloud resources | Organizations, VPCs, subnets, VMs, images, and all tenant resources. |
+
+Both prefixes are served on the same port (`127.0.0.1:8443` by default). This documentation covers both the **Platform API** and the **Cloud API**.
+
+### Server version header
+
+Every response includes an `x-nauka-version` header with the exact server build version:
+
+```http
+HTTP/1.1 200 OK
+x-nauka-version: 2.0.0
+content-type: application/json
+```
+
+The version follows [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`. Pre-release builds append a channel suffix:
+
+| Format | Example | Channel |
+|--------|---------|---------|
+| `MAJOR.MINOR.PATCH` | `2.0.0` | Stable |
+| `MAJOR.MINOR.PATCH-beta.N` | `2.1.0-beta.3` | Beta |
+| `MAJOR.MINOR.PATCH-nightly.N` | `2.1.0-nightly.47` | Nightly |
+| `MAJOR.MINOR.PATCH-rc.N` | `2.1.0-rc.1` | Release candidate |
+
+### Release channels
+
+Nauka maintains four release channels. Each channel receives a different level of testing:
+
+| Channel | Stability | Use case |
+|---------|-----------|----------|
+| **Stable** | Production-ready | Production clusters |
+| **RC** | Feature-complete, final testing | Staging environments |
+| **Beta** | New features, may contain bugs | Development and testing |
+| **Nightly** | Bleeding edge, no stability guarantees | Contributors and early adopters |
+
+The channel determines which updates `nauka update` will install. A node running `2.0.0` (stable) will only receive stable updates unless `--channel` is specified.
+
+### Compatibility
+
+Nodes in the same mesh must share the same **major** version. Minor and patch differences are tolerated for rolling upgrades.
+
+| Local | Remote | Compatible |
+|-------|--------|------------|
+| `2.0.0` | `2.1.3` | Yes — same major |
+| `2.0.0` | `2.0.0-beta.5` | Yes — same major |
+| `2.0.0` | `3.0.0` | **No** — different major |
+
+When a node joins a mesh, the peering protocol verifies version compatibility. Incompatible nodes are rejected.
+
+### Stability guarantees
+
+The `v1` API provides these guarantees:
+
+- **Non-breaking changes** are made without incrementing the URL prefix. This includes: new fields in response bodies, new endpoints, new optional request parameters, new error codes, and new query filters.
+- **Breaking changes** will increment the prefix to `/platform/v2` and `/cloud/v2`. This includes: removing or renaming response fields, changing field types, removing endpoints, and making optional parameters required.
+- **Deprecation** of an endpoint or field is announced in the changelog at least one major release before removal. Deprecated features continue to function until the next major version."#
+        }),
+    ]
+}
+
+/// #7: Generate a production-quality OpenAPI 3.0 spec from resource registrations.
+pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> serde_json::Value {
+    let paths = build_openapi_paths(registrations, prefix);
 
     let mut schemas = serde_json::Map::new();
-    for reg in registrations {
-        schemas.insert(reg.def.identity.kind.to_string(), resource_schema(&reg.def));
-        fn add_child_schemas(
-            children: &[ResourceRegistration],
-            schemas: &mut serde_json::Map<String, serde_json::Value>,
-        ) {
-            for child in children {
-                schemas.insert(
-                    child.def.identity.kind.to_string(),
-                    resource_schema(&child.def),
-                );
-                add_child_schemas(&child.children, schemas);
-            }
+    collect_resource_schemas(registrations, &mut schemas);
+
+    // Error schema
+    schemas.insert(
+        "Error".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "description": "Machine-readable error code"},
+                        "message": {"type": "string", "description": "Human-readable error message"}
+                    },
+                    "required": ["code", "message"]
+                }
+            },
+            "required": ["error"]
+        }),
+    );
+
+    // Paginated response wrapper
+    schemas.insert(
+        "PaginatedResponse".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {"type": "array", "items": {}},
+                "pagination": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer"},
+                        "per_page": {"type": "integer"},
+                        "total_pages": {"type": "integer"},
+                        "total_entries": {"type": "integer"},
+                        "next_page": {"type": "integer", "nullable": true},
+                        "previous_page": {"type": "integer", "nullable": true}
+                    },
+                    "required": ["page", "per_page", "total_pages", "total_entries"]
+                }
+            },
+            "required": ["data", "pagination"]
+        }),
+    );
+
+    let responses = build_shared_responses();
+
+    let intro_tags = build_intro_tags();
+    let resource_tags = build_tags(registrations);
+
+    let intro_tag_names: Vec<String> = intro_tags
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    let resource_tag_names: Vec<String> = resource_tags
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    let mut tags = intro_tags;
+    tags.extend(resource_tags);
+
+    let tag_groups = serde_json::json!([
+        {
+            "name": "",
+            "tags": intro_tag_names,
+        },
+        {
+            "name": "Resources",
+            "tags": resource_tag_names,
         }
-        add_child_schemas(&reg.children, &mut schemas);
+    ]);
+
+    serde_json::json!({
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Nauka API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": OPENAPI_DESCRIPTION,
+            "x-logo": {
+                "url": "/logo-dark.svg",
+                "altText": "Nauka",
+            },
+        },
+        "x-tagGroups": tag_groups,
+        "tags": tags,
+        "paths": paths,
+        "components": {
+            "schemas": schemas,
+            "responses": responses,
+        },
+    })
+}
+
+/// Build a combined OpenAPI spec covering two sets of resources under different prefixes.
+pub fn combined_openapi_spec(
+    platform_resources: &[ResourceRegistration],
+    platform_prefix: &str,
+    cloud_resources: &[ResourceRegistration],
+    cloud_prefix: &str,
+) -> serde_json::Value {
+    // Build paths from both sets
+    let mut paths = build_openapi_paths(platform_resources, platform_prefix);
+    let cloud_paths = build_openapi_paths(cloud_resources, cloud_prefix);
+    paths.extend(cloud_paths);
+
+    // Merge schemas
+    let mut schemas = serde_json::Map::new();
+    collect_resource_schemas(platform_resources, &mut schemas);
+    collect_resource_schemas(cloud_resources, &mut schemas);
+
+    schemas.insert(
+        "Error".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "description": "Machine-readable error code"},
+                        "message": {"type": "string", "description": "Human-readable error message"}
+                    },
+                    "required": ["code", "message"]
+                }
+            },
+            "required": ["error"]
+        }),
+    );
+
+    schemas.insert(
+        "PaginatedResponse".to_string(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {"type": "array", "items": {}},
+                "pagination": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer"},
+                        "per_page": {"type": "integer"},
+                        "total_pages": {"type": "integer"},
+                        "total_entries": {"type": "integer"},
+                        "next_page": {"type": "integer", "nullable": true},
+                        "previous_page": {"type": "integer", "nullable": true}
+                    },
+                    "required": ["page", "per_page", "total_pages", "total_entries"]
+                }
+            },
+            "required": ["data", "pagination"]
+        }),
+    );
+
+    let responses = build_shared_responses();
+
+    let intro_tags = build_intro_tags();
+    let mut platform_tags = build_tags(platform_resources);
+    let cloud_tags = build_tags(cloud_resources);
+
+    let intro_tag_names: Vec<String> = intro_tags
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    let platform_tag_names: Vec<String> = platform_tags
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+    let cloud_tag_names: Vec<String> = cloud_tags
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    let mut all_tags = intro_tags;
+    all_tags.append(&mut platform_tags);
+    all_tags.extend(cloud_tags);
+
+    let mut tag_groups = vec![serde_json::json!({
+        "name": "",
+        "tags": intro_tag_names,
+    })];
+    if !platform_tag_names.is_empty() {
+        tag_groups.push(serde_json::json!({
+            "name": "Platform",
+            "tags": platform_tag_names,
+        }));
+    }
+    if !cloud_tag_names.is_empty() {
+        tag_groups.push(serde_json::json!({
+            "name": "Cloud",
+            "tags": cloud_tag_names,
+        }));
     }
 
     serde_json::json!({
@@ -612,17 +1017,520 @@ pub fn openapi_spec(registrations: &[ResourceRegistration], prefix: &str) -> ser
         "info": {
             "title": "Nauka API",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "Nauka turns bare-metal servers into a programmable cloud. This is the admin API reference.",
+            "description": OPENAPI_DESCRIPTION,
             "x-logo": {
                 "url": "/logo-dark.svg",
                 "altText": "Nauka",
             },
         },
+        "x-tagGroups": tag_groups,
+        "tags": all_tags,
         "paths": paths,
         "components": {
             "schemas": schemas,
+            "responses": responses,
         },
     })
+}
+
+/// Build the top-level `tags` array from all resource registrations.
+fn build_tags(registrations: &[ResourceRegistration]) -> Vec<serde_json::Value> {
+    let mut tags = Vec::new();
+    fn capitalize(s: &str) -> String {
+        let mut c = s.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().to_string() + c.as_str(),
+        }
+    }
+    fn collect_tags(regs: &[ResourceRegistration], tags: &mut Vec<serde_json::Value>) {
+        for reg in regs {
+            let display = reg
+                .def
+                .identity
+                .kind
+                .split('-')
+                .map(|w| capitalize(w))
+                .collect::<Vec<_>>()
+                .join(" ");
+            tags.push(serde_json::json!({
+                "name": reg.def.identity.kind,
+                "x-displayName": display,
+                "description": reg.def.identity.description
+            }));
+            collect_tags(&reg.children, tags);
+        }
+    }
+    collect_tags(registrations, &mut tags);
+    tags
+}
+
+/// Collect resource schemas recursively into the schemas map.
+fn collect_resource_schemas(
+    registrations: &[ResourceRegistration],
+    schemas: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    for reg in registrations {
+        schemas.insert(reg.def.identity.kind.to_string(), resource_schema(&reg.def));
+        collect_resource_schemas(&reg.children, schemas);
+    }
+}
+
+/// Build shared error responses for `components.responses`.
+fn build_shared_responses() -> serde_json::Map<String, serde_json::Value> {
+    let error_ref = serde_json::json!({"$ref": "#/components/schemas/Error"});
+    let mut responses = serde_json::Map::new();
+
+    let entries: &[(&str, &str, u16)] = &[
+        ("ValidationError", "Invalid input", 400),
+        ("NotFound", "Resource not found", 404),
+        ("Conflict", "Resource already exists", 409),
+        (
+            "HasDependents",
+            "Cannot delete — resource has dependents",
+            422,
+        ),
+        ("InternalError", "Internal server error", 500),
+    ];
+
+    for (name, desc, _status) in entries {
+        responses.insert(
+            name.to_string(),
+            serde_json::json!({
+                "description": desc,
+                "content": {
+                    "application/json": {
+                        "schema": error_ref
+                    }
+                }
+            }),
+        );
+    }
+    responses
+}
+
+/// Build the OpenAPI `paths` object by iterating registrations recursively.
+fn build_openapi_paths(
+    registrations: &[ResourceRegistration],
+    prefix: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut paths = serde_json::Map::new();
+
+    fn collect_paths(
+        regs: &[ResourceRegistration],
+        prefix: &str,
+        paths: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        for reg in regs {
+            let def = &reg.def;
+            let kind = def.identity.kind;
+            let base = build_base_path(prefix, def.identity.plural, &def.scope.parents);
+
+            for op in &def.operations {
+                let (method, path) = match &op.semantics {
+                    OperationSemantics::List => ("get", base.clone()),
+                    OperationSemantics::Create => ("post", base.clone()),
+                    OperationSemantics::Get => ("get", format!("{base}/{{id}}")),
+                    OperationSemantics::Delete => ("delete", format!("{base}/{{id}}")),
+                    OperationSemantics::Update { .. } => ("patch", format!("{base}/{{id}}")),
+                    OperationSemantics::Action => ("post", format!("{base}/{}", op.name)),
+                };
+
+                let mut operation_obj = serde_json::Map::new();
+                operation_obj.insert(
+                    "summary".to_string(),
+                    serde_json::Value::String(op.description.to_string()),
+                );
+                operation_obj.insert(
+                    "operationId".to_string(),
+                    serde_json::Value::String(format!("{}_{}", kind, op.name)),
+                );
+                operation_obj.insert("tags".to_string(), serde_json::json!([kind]));
+
+                // Parameters (path + query)
+                let params = operation_parameters(def, op);
+                if !params.is_empty() {
+                    operation_obj
+                        .insert("parameters".to_string(), serde_json::Value::Array(params));
+                }
+
+                // Request body
+                if let Some(body) = operation_request_body(def, op) {
+                    operation_obj.insert("requestBody".to_string(), body);
+                }
+
+                // Responses
+                operation_obj.insert("responses".to_string(), operation_responses(kind, op));
+
+                let path_entry = paths.entry(path).or_insert_with(|| serde_json::json!({}));
+                path_entry[method] = serde_json::Value::Object(operation_obj);
+            }
+
+            collect_paths(&reg.children, prefix, paths);
+        }
+    }
+
+    collect_paths(registrations, prefix, &mut paths);
+    paths
+}
+
+/// Build the `parameters` array for an operation (path params + query params).
+fn operation_parameters(
+    def: &crate::resource::ResourceDef,
+    op: &crate::resource::OperationDef,
+) -> Vec<serde_json::Value> {
+    let mut params = Vec::new();
+
+    // Path parameters from scope parents
+    for parent in &def.scope.parents {
+        params.push(serde_json::json!({
+            "name": format!("{}_id", parent.kind),
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "description": parent.description
+        }));
+    }
+
+    // Instance operations (Get, Delete, Update) have an {id} path parameter
+    match &op.semantics {
+        OperationSemantics::Get
+        | OperationSemantics::Delete
+        | OperationSemantics::Update { .. } => {
+            params.push(serde_json::json!({
+                "name": "id",
+                "in": "path",
+                "required": true,
+                "schema": {"type": "string"},
+                "description": format!("{} name or ID", def.identity.kind)
+            }));
+        }
+        _ => {}
+    }
+
+    // List operations get pagination query parameters
+    if matches!(op.semantics, OperationSemantics::List) {
+        params.push(serde_json::json!({
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "default": 1, "minimum": 1},
+            "description": "Page number"
+        }));
+        params.push(serde_json::json!({
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer", "default": 25, "minimum": 1, "maximum": 100},
+            "description": "Items per page (max 100)"
+        }));
+    }
+
+    params
+}
+
+/// Build the `requestBody` for an operation, or None if the operation has no body.
+fn operation_request_body(
+    def: &crate::resource::ResourceDef,
+    op: &crate::resource::OperationDef,
+) -> Option<serde_json::Value> {
+    use crate::resource::{ArgSource, Mutability, OperationSemantics};
+
+    let mut properties = serde_json::Map::new();
+    let mut required_fields: Vec<serde_json::Value> = Vec::new();
+
+    match &op.semantics {
+        OperationSemantics::Create => {
+            // name is always required on create
+            properties.insert(
+                "name".to_string(),
+                serde_json::json!({"type": "string", "description": "Resource name"}),
+            );
+            required_fields.push(serde_json::json!("name"));
+
+            // Schema fields with CreateOnly or Mutable mutability
+            for field in &def.schema.fields {
+                if matches!(
+                    field.mutability,
+                    Mutability::CreateOnly | Mutability::Mutable
+                ) {
+                    let schema = field_type_to_json_schema(field);
+                    properties.insert(field.name.to_string(), schema);
+                    if matches!(field.mutability, Mutability::CreateOnly) && field.default.is_none()
+                    {
+                        required_fields.push(serde_json::json!(field.name));
+                    }
+                }
+            }
+
+            // Operation custom args
+            add_operation_args_to_schema(op, def, &mut properties, &mut required_fields);
+        }
+        OperationSemantics::Update { .. } => {
+            // Schema fields with Mutable mutability
+            for field in &def.schema.fields {
+                if matches!(field.mutability, Mutability::Mutable) {
+                    let schema = field_type_to_json_schema(field);
+                    properties.insert(field.name.to_string(), schema);
+                }
+            }
+
+            // Operation custom args
+            add_operation_args_to_schema(op, def, &mut properties, &mut required_fields);
+
+            // Update with no mutable fields and no args => no body
+            if properties.is_empty() {
+                return None;
+            }
+        }
+        OperationSemantics::Action => {
+            // Action operations: custom args only
+            for arg in &op.args {
+                let field_def = match &arg.source {
+                    ArgSource::Custom(f) => f,
+                    ArgSource::FromSchema(name) => {
+                        match def.schema.fields.iter().find(|f| f.name == *name) {
+                            Some(f) => f,
+                            None => continue,
+                        }
+                    }
+                };
+                let schema = field_type_to_json_schema(field_def);
+                properties.insert(arg.name.to_string(), schema);
+                if arg.required {
+                    required_fields.push(serde_json::json!(arg.name));
+                }
+            }
+
+            // Action with no args => no body
+            if properties.is_empty() {
+                return None;
+            }
+        }
+        // Get, List, Delete => no request body
+        _ => return None,
+    }
+
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": properties
+    });
+    if !required_fields.is_empty() {
+        schema["required"] = serde_json::Value::Array(required_fields);
+    }
+
+    Some(serde_json::json!({
+        "required": true,
+        "content": {
+            "application/json": {
+                "schema": schema
+            }
+        }
+    }))
+}
+
+/// Add operation-specific custom args to a request body schema.
+fn add_operation_args_to_schema(
+    op: &crate::resource::OperationDef,
+    def: &crate::resource::ResourceDef,
+    properties: &mut serde_json::Map<String, serde_json::Value>,
+    required_fields: &mut Vec<serde_json::Value>,
+) {
+    use crate::resource::ArgSource;
+
+    for arg in &op.args {
+        let field_def = match &arg.source {
+            ArgSource::Custom(f) => f,
+            ArgSource::FromSchema(name) => {
+                match def.schema.fields.iter().find(|f| f.name == *name) {
+                    Some(f) => f,
+                    None => continue,
+                }
+            }
+        };
+        let schema = field_type_to_json_schema(field_def);
+        properties.insert(arg.name.to_string(), schema);
+        if arg.required {
+            required_fields.push(serde_json::json!(arg.name));
+        }
+    }
+}
+
+/// Convert a FieldDef to a JSON Schema object, including description and default.
+fn field_type_to_json_schema(field: &crate::resource::FieldDef) -> serde_json::Value {
+    use crate::resource::FieldType;
+
+    let mut schema = serde_json::Map::new();
+
+    match &field.field_type {
+        FieldType::String
+        | FieldType::Secret
+        | FieldType::Path
+        | FieldType::Duration
+        | FieldType::Cidr
+        | FieldType::IpAddr
+        | FieldType::ResourceRef(_)
+        | FieldType::KeyValue => {
+            schema.insert("type".to_string(), serde_json::json!("string"));
+        }
+        FieldType::Integer | FieldType::Port | FieldType::SizeGb | FieldType::SizeMb => {
+            schema.insert("type".to_string(), serde_json::json!("integer"));
+        }
+        FieldType::Flag => {
+            schema.insert("type".to_string(), serde_json::json!("boolean"));
+        }
+        FieldType::Enum(e) => {
+            schema.insert("type".to_string(), serde_json::json!("string"));
+            schema.insert("enum".to_string(), serde_json::json!(e.values));
+        }
+    }
+
+    if !field.description.is_empty() {
+        schema.insert(
+            "description".to_string(),
+            serde_json::Value::String(field.description.to_string()),
+        );
+    }
+
+    if let Some(default) = field.default {
+        // Parse numeric defaults for integer types
+        match &field.field_type {
+            FieldType::Integer | FieldType::Port | FieldType::SizeGb | FieldType::SizeMb => {
+                if let Ok(n) = default.parse::<i64>() {
+                    schema.insert("default".to_string(), serde_json::json!(n));
+                } else {
+                    schema.insert(
+                        "default".to_string(),
+                        serde_json::Value::String(default.to_string()),
+                    );
+                }
+            }
+            FieldType::Flag => {
+                let v = default == "true";
+                schema.insert("default".to_string(), serde_json::json!(v));
+            }
+            _ => {
+                schema.insert(
+                    "default".to_string(),
+                    serde_json::Value::String(default.to_string()),
+                );
+            }
+        }
+    }
+
+    serde_json::Value::Object(schema)
+}
+
+/// Build the `responses` object for an operation.
+fn operation_responses(kind: &str, op: &crate::resource::OperationDef) -> serde_json::Value {
+    use crate::resource::OperationSemantics;
+
+    let resource_ref = serde_json::json!({"$ref": format!("#/components/schemas/{}", kind)});
+
+    match &op.semantics {
+        OperationSemantics::Create => {
+            serde_json::json!({
+                "201": {
+                    "description": "Created",
+                    "content": {
+                        "application/json": {
+                            "schema": resource_ref
+                        }
+                    }
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "409": {"$ref": "#/components/responses/Conflict"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+        OperationSemantics::Get => {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": resource_ref
+                        }
+                    }
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "404": {"$ref": "#/components/responses/NotFound"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+        OperationSemantics::List => {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "allOf": [
+                                    {"$ref": "#/components/schemas/PaginatedResponse"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "data": {
+                                                "type": "array",
+                                                "items": resource_ref
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+        OperationSemantics::Delete => {
+            serde_json::json!({
+                "204": {
+                    "description": "No Content"
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "404": {"$ref": "#/components/responses/NotFound"},
+                "422": {"$ref": "#/components/responses/HasDependents"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+        OperationSemantics::Update { .. } => {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": resource_ref
+                        }
+                    }
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "404": {"$ref": "#/components/responses/NotFound"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+        OperationSemantics::Action => {
+            serde_json::json!({
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                },
+                "400": {"$ref": "#/components/responses/ValidationError"},
+                "500": {"$ref": "#/components/responses/InternalError"}
+            })
+        }
+    }
 }
 
 /// Generate a JSON Schema-like object from a ResourceDef's schema fields.
@@ -756,7 +1664,7 @@ mod tests {
 
     #[test]
     fn list_routes_generates_all() {
-        let routes = list_routes(&[test_resource()], "/admin/v1");
+        let routes = list_routes(&[test_resource()], "/cloud/v1");
         assert_eq!(routes.len(), 5);
         let methods: Vec<&str> = routes.iter().map(|r| r.method.as_str()).collect();
         assert!(methods.contains(&"GET"));
@@ -773,13 +1681,13 @@ mod tests {
     #[test]
     fn build_router_with_get_and_delete() {
         let reg = test_resource();
-        let _router = build_router(vec![reg], "/admin/v1"); // should not panic
+        let _router = build_router(vec![reg], "/cloud/v1"); // should not panic
     }
 
     // #10: Scoped routes
     #[test]
     fn scoped_routes_include_parent() {
-        let routes = list_routes(&[scoped_resource()], "/admin/v1");
+        let routes = list_routes(&[scoped_resource()], "/cloud/v1");
         let paths: Vec<&str> = routes.iter().map(|r| r.path.as_str()).collect();
         assert!(
             paths
@@ -791,8 +1699,8 @@ mod tests {
 
     #[test]
     fn base_path_no_parents() {
-        let path = build_base_path("/admin/v1", "orgs", &[]);
-        assert_eq!(path, "/admin/v1/orgs");
+        let path = build_base_path("/cloud/v1", "orgs", &[]);
+        assert_eq!(path, "/cloud/v1/orgs");
     }
 
     #[test]
@@ -804,8 +1712,8 @@ mod tests {
             required_on_resolve: false,
             description: "Organization",
         }];
-        let path = build_base_path("/admin/v1", "projects", &parents);
-        assert_eq!(path, "/admin/v1/orgs/{org_id}/projects");
+        let path = build_base_path("/cloud/v1", "projects", &parents);
+        assert_eq!(path, "/cloud/v1/orgs/{org_id}/projects");
     }
 
     #[test]
@@ -885,13 +1793,83 @@ mod tests {
     // #7: OpenAPI spec
     #[test]
     fn openapi_spec_generates() {
-        let spec = openapi_spec(&[test_resource()], "/admin/v1");
+        let spec = openapi_spec(&[test_resource()], "/cloud/v1");
         assert_eq!(spec["openapi"], "3.0.0");
-        assert!(spec["paths"]["/admin/v1/widgets"]["get"].is_object());
-        assert!(spec["paths"]["/admin/v1/widgets"]["post"].is_object());
-        assert!(spec["paths"]["/admin/v1/widgets/{id}"]["get"].is_object());
-        assert!(spec["paths"]["/admin/v1/widgets/{id}"]["delete"].is_object());
+        assert!(spec["paths"]["/cloud/v1/widgets"]["get"].is_object());
+        assert!(spec["paths"]["/cloud/v1/widgets"]["post"].is_object());
+        assert!(spec["paths"]["/cloud/v1/widgets/{id}"]["get"].is_object());
+        assert!(spec["paths"]["/cloud/v1/widgets/{id}"]["delete"].is_object());
         assert!(spec["components"]["schemas"].is_object());
+
+        // Description present
+        assert!(
+            spec["info"]["description"].as_str().unwrap().len() > 10,
+            "expected non-empty description"
+        );
+
+        // Intro tags (Authentication, Errors, Pagination, etc.)
+        let tags = spec["tags"].as_array().unwrap();
+        assert!(!tags.is_empty());
+        let tag_names: Vec<&str> = tags.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(
+            tag_names.contains(&"Pagination"),
+            "expected Pagination intro tag"
+        );
+        assert!(tag_names.contains(&"Errors"), "expected Errors intro tag");
+
+        // Resource tags
+        assert!(
+            tag_names.contains(&"widget"),
+            "expected widget resource tag"
+        );
+
+        // Shared error responses
+        assert!(spec["components"]["responses"]["ValidationError"].is_object());
+        assert!(spec["components"]["responses"]["NotFound"].is_object());
+        assert!(spec["components"]["responses"]["Conflict"].is_object());
+        assert!(spec["components"]["responses"]["HasDependents"].is_object());
+        assert!(spec["components"]["responses"]["InternalError"].is_object());
+
+        // Error + PaginatedResponse schemas
+        assert!(spec["components"]["schemas"]["Error"].is_object());
+        assert!(spec["components"]["schemas"]["PaginatedResponse"].is_object());
+
+        // Create has 201 response + request body
+        let create = &spec["paths"]["/cloud/v1/widgets"]["post"];
+        assert!(create["responses"]["201"].is_object());
+        assert!(create["responses"]["409"].is_object());
+        assert!(create["requestBody"].is_object());
+
+        // List has pagination query params
+        let list = &spec["paths"]["/cloud/v1/widgets"]["get"];
+        let params = list["parameters"].as_array().unwrap();
+        let param_names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert!(param_names.contains(&"page"));
+        assert!(param_names.contains(&"per_page"));
+
+        // List response uses PaginatedResponse
+        assert!(
+            list["responses"]["200"]["content"]["application/json"]["schema"]["allOf"].is_array()
+        );
+
+        // Get has {id} path param
+        let get_op = &spec["paths"]["/cloud/v1/widgets/{id}"]["get"];
+        let get_params = get_op["parameters"].as_array().unwrap();
+        assert!(
+            get_params
+                .iter()
+                .any(|p| p["name"] == "id" && p["in"] == "path"),
+            "expected {{id}} path parameter on get"
+        );
+
+        // Delete has 204 + 422
+        let delete_op = &spec["paths"]["/cloud/v1/widgets/{id}"]["delete"];
+        assert!(delete_op["responses"]["204"].is_object());
+        assert!(delete_op["responses"]["422"].is_object());
+
+        // Action has 200 with message schema
+        let polish = &spec["paths"]["/cloud/v1/widgets/polish"]["post"];
+        assert!(polish["responses"]["200"].is_object());
     }
 
     #[test]
@@ -900,6 +1878,16 @@ mod tests {
         assert_eq!(spec["openapi"], "3.0.0");
         assert!(spec["paths"].as_object().unwrap().is_empty());
         assert!(spec["components"]["schemas"].is_object());
+        // Shared schemas present even with no resources
+        assert!(spec["components"]["schemas"]["Error"].is_object());
+        assert!(spec["components"]["schemas"]["PaginatedResponse"].is_object());
+        assert!(spec["components"]["responses"].is_object());
+        // Intro tags always present, but no resource tags
+        let tags = spec["tags"].as_array().unwrap();
+        assert!(
+            tags.iter().all(|t| t.get("x-traitTag").is_some()),
+            "expected only intro tags when no resources"
+        );
     }
 
     // ── Pagination (#116) ──
@@ -1015,7 +2003,7 @@ mod tests {
     fn route_info_serializes() {
         let ri = RouteInfo {
             method: "GET".into(),
-            path: "/admin/v1/widget".into(),
+            path: "/cloud/v1/widget".into(),
             operation: "list".into(),
             resource: "widget".into(),
             description: "List widgets".into(),

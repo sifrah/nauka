@@ -16,7 +16,7 @@
 //! # async fn example() {
 //! let config = ApiConfig::default();
 //! let server = ApiServer::new(config, vec![], vec![]);
-//! // server.run_admin().await;
+//! // server.run().await;
 //! # }
 //! ```
 

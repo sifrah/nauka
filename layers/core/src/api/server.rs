@@ -10,14 +10,12 @@ use crate::resource::ResourceRegistration;
 /// API server configuration.
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
-    /// Admin API bind address.
-    pub admin_addr: SocketAddr,
-    /// Public API bind address (None = disabled).
-    pub public_addr: Option<SocketAddr>,
-    /// API prefix for admin routes.
-    pub admin_prefix: String,
-    /// API prefix for public routes.
-    pub public_prefix: String,
+    /// API bind address (serves both platform and cloud routes).
+    pub platform_addr: SocketAddr,
+    /// URL prefix for platform routes (hypervisor infrastructure).
+    pub platform_prefix: String,
+    /// URL prefix for cloud routes (org, vpc, vm, etc.).
+    pub cloud_prefix: String,
     /// Rate limit: max requests per window.
     pub rate_limit_requests: u64,
     /// Rate limit: window in seconds.
@@ -29,10 +27,9 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            admin_addr: "127.0.0.1:8443".parse().unwrap(),
-            public_addr: None,
-            admin_prefix: "/admin/v1".to_string(),
-            public_prefix: "/v1".to_string(),
+            platform_addr: "127.0.0.1:8443".parse().unwrap(),
+            platform_prefix: "/platform/v1".to_string(),
+            cloud_prefix: "/cloud/v1".to_string(),
             rate_limit_requests: 1000,
             rate_limit_window_secs: 60,
             shutdown_timeout_secs: 30,
@@ -43,68 +40,34 @@ impl Default for ApiConfig {
 /// The API server.
 pub struct ApiServer {
     pub config: ApiConfig,
-    admin_router: Router,
-    public_router: Option<Router>,
+    router: Router,
 }
 
 impl ApiServer {
     /// Create a new API server.
     pub fn new(
         config: ApiConfig,
-        admin_resources: Vec<ResourceRegistration>,
-        public_resources: Vec<ResourceRegistration>,
+        platform_resources: Vec<ResourceRegistration>,
+        cloud_resources: Vec<ResourceRegistration>,
     ) -> Self {
-        let admin_router = build_api_router(&config, admin_resources, &config.admin_prefix);
-        let public_router = if !public_resources.is_empty() {
-            Some(build_api_router(
-                &config,
-                public_resources,
-                &config.public_prefix,
-            ))
-        } else {
-            None
-        };
-
-        Self {
-            config,
-            admin_router,
-            public_router,
-        }
+        let router = build_api_router(&config, platform_resources, cloud_resources);
+        Self { config, router }
     }
 
-    pub fn admin_router(&self) -> &Router {
-        &self.admin_router
+    pub fn router(&self) -> &Router {
+        &self.router
     }
 
-    pub fn public_router(&self) -> Option<&Router> {
-        self.public_router.as_ref()
-    }
-
-    /// #8: Run admin API with graceful shutdown on SIGTERM/SIGINT.
-    pub async fn run_admin(self) -> Result<(), std::io::Error> {
-        let listener = tokio::net::TcpListener::bind(self.config.admin_addr).await?;
+    /// Run the API server with graceful shutdown on SIGTERM/SIGINT.
+    pub async fn run(self) -> Result<(), std::io::Error> {
+        let listener = tokio::net::TcpListener::bind(self.config.platform_addr).await?;
         tracing::info!(
-            addr = %self.config.admin_addr,
+            addr = %self.config.platform_addr,
             shutdown_timeout = self.config.shutdown_timeout_secs,
-            "admin API listening"
+            "API server listening"
         );
 
-        axum::serve(listener, self.admin_router)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-    }
-
-    /// Run public API with graceful shutdown.
-    pub async fn run_public(self) -> Result<(), std::io::Error> {
-        let addr = self
-            .config
-            .public_addr
-            .unwrap_or_else(|| "0.0.0.0:443".parse().unwrap());
-        let router = self.public_router.unwrap_or_default();
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!(addr = %addr, "public API listening");
-
-        axum::serve(listener, router)
+        axum::serve(listener, self.router)
             .with_graceful_shutdown(shutdown_signal())
             .await
     }
@@ -112,13 +75,21 @@ impl ApiServer {
 
 fn build_api_router(
     config: &ApiConfig,
-    registrations: Vec<ResourceRegistration>,
-    prefix: &str,
+    platform_resources: Vec<ResourceRegistration>,
+    cloud_resources: Vec<ResourceRegistration>,
 ) -> Router {
-    use super::route_gen::openapi_spec;
-    let spec = openapi_spec(&registrations, prefix);
+    use super::route_gen::combined_openapi_spec;
 
-    let api_routes = build_router(registrations, prefix);
+    // Build combined OpenAPI spec
+    let spec = combined_openapi_spec(
+        &platform_resources,
+        &config.platform_prefix,
+        &cloud_resources,
+        &config.cloud_prefix,
+    );
+
+    let platform_routes = build_router(platform_resources, &config.platform_prefix);
+    let cloud_routes = build_router(cloud_resources, &config.cloud_prefix);
 
     let health = Router::new().route(
         "/health",
@@ -154,7 +125,8 @@ fn build_api_router(
         middleware::RateLimiter::new(config.rate_limit_requests, config.rate_limit_window_secs);
 
     Router::new()
-        .merge(api_routes)
+        .merge(platform_routes)
+        .merge(cloud_routes)
         .merge(health)
         .merge(openapi)
         .fallback(fallback)
@@ -252,124 +224,124 @@ mod tests {
     #[test]
     fn default_config() {
         let c = ApiConfig::default();
-        assert_eq!(c.admin_addr.port(), 8443);
+        assert_eq!(c.platform_addr.port(), 8443);
         assert_eq!(c.rate_limit_requests, 1000);
     }
 
     #[test]
     fn server_builds() {
-        let _server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let _server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
     }
 
     #[tokio::test]
     async fn health_endpoint() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
 
     #[tokio::test]
     async fn list_endpoint() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
-            .uri("/admin/v1/things")
+            .uri("/cloud/v1/things")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
 
     // #11: GET and DELETE on same /{id} path
     #[tokio::test]
     async fn get_and_delete_same_path() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
 
         // GET
         let req = Request::builder()
-            .uri("/admin/v1/things/thing-one")
+            .uri("/cloud/v1/things/thing-one")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
         // DELETE
         let req = Request::builder()
             .method("DELETE")
-            .uri("/admin/v1/things/thing-one")
+            .uri("/cloud/v1/things/thing-one")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 204);
     }
 
     #[tokio::test]
     async fn action_endpoint() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
             .method("POST")
-            .uri("/admin/v1/things/ping")
+            .uri("/cloud/v1/things/ping")
             .header("content-type", "application/json")
             .body(Body::from("{}"))
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
 
     // #5: Request ID header
     #[tokio::test]
     async fn response_has_request_id() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert!(resp.headers().contains_key("x-request-id"));
     }
 
     // #6: Version header
     #[tokio::test]
     async fn response_has_version() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert!(resp.headers().contains_key("x-nauka-version"));
     }
 
     // #7: OpenAPI endpoint
     #[tokio::test]
     async fn openapi_endpoint() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
             .uri("/openapi.json")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let spec: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(spec["openapi"], "3.0.0");
-        assert!(spec["paths"]["/admin/v1/things"]["get"].is_object());
+        assert!(spec["paths"]["/cloud/v1/things"]["get"].is_object());
         assert!(spec["components"]["schemas"].is_object());
     }
 
     #[tokio::test]
     async fn not_found_route() {
-        let server = ApiServer::new(ApiConfig::default(), vec![test_resource()], vec![]);
+        let server = ApiServer::new(ApiConfig::default(), vec![], vec![test_resource()]);
         let req = Request::builder()
-            .uri("/admin/v1/nonexistent")
+            .uri("/cloud/v1/nonexistent")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router.clone().oneshot(req).await.unwrap();
+        let resp = server.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 404);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await

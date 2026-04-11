@@ -8,8 +8,7 @@
     <title>Nauka REST API</title>
     <meta name="description" content="Nauka REST API Reference" />
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}favicon.svg`} />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>@import '@fontsource-variable/inter';</style>
     <style>{`
       /* ── Zinc dark (matches Starlight custom.css) ── */
       .dark-mode {
@@ -96,8 +95,42 @@
       }
 
       /* ── Shared overrides ── */
-      body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      :root, .dark-mode, .light-mode {
+        --scalar-font: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      body, * {
+        font-family: var(--scalar-font) !important;
+      }
+
+      code, pre, .cm-editor, [class*="codeblock"], [class*="code-"] {
+        font-family: var(--scalar-font-code) !important;
+      }
+
+      /* ── Force backgrounds to match platform docs ── */
+      .dark-mode body,
+      .dark-mode .scalar-app,
+      .dark-mode .references-layout,
+      .dark-mode .references-layout-content,
+      .dark-mode .section-container,
+      .dark-mode .section,
+      .dark-mode main,
+      .dark-mode .rendered-markdown {
+        background: #1c1c20 !important;
+        background-color: #1c1c20 !important;
+      }
+
+      .dark-mode .sidebar,
+      .dark-mode .sidebar-content,
+      .dark-mode nav {
+        background: #18181b !important;
+        background-color: #18181b !important;
+      }
+
+      .dark-mode .scalar-card {
+        background: #18181b !important;
+        background-color: #18181b !important;
       }
 
       /* Match Starlight radius and spacing */
@@ -133,6 +166,7 @@
         },
         customCss: `
           .darklight-reference-promo { display: none !important; }
+          .introduction-description h1 { display: none !important; }
         `,
       })}
     ></script>

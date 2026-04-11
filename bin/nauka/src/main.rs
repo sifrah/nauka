@@ -149,19 +149,22 @@ async fn serve(matches: &clap::ArgMatches) -> Result<()> {
     };
 
     let config = ApiConfig {
-        admin_addr: bind_addr,
+        platform_addr: bind_addr,
         ..Default::default()
     };
 
     // Build registry — same handlers as CLI
-    let registry = build_registry();
-    let registrations: Vec<_> = registry.into_registrations();
+    // Split: hypervisor → platform, rest → cloud
+    let all = build_registry().into_registrations();
+    let (platform, cloud): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .partition(|r| r.def.identity.kind == "hypervisor");
 
     eprintln!("  Starting API server on {bind_addr}");
     eprintln!("  Press Ctrl+C to stop");
 
-    let server = ApiServer::new(config, registrations, vec![]);
-    server.run_admin().await?;
+    let server = ApiServer::new(config, platform, cloud);
+    server.run().await?;
 
     Ok(())
 }
@@ -175,7 +178,7 @@ mod tests {
     #[test]
     fn api_routes_generated_from_resource_def() {
         let reg = handlers::registration();
-        let routes = list_routes(&[reg], "/admin/v1");
+        let routes = list_routes(&[reg], "/platform/v1");
 
         let ops: Vec<&str> = routes.iter().map(|r| r.operation.as_str()).collect();
 
@@ -191,9 +194,9 @@ mod tests {
     #[test]
     fn openapi_spec_generated() {
         let reg = handlers::registration();
-        let spec = openapi_spec(&[reg], "/admin/v1");
+        let spec = openapi_spec(&[reg], "/platform/v1");
         assert_eq!(spec["openapi"], "3.0.0");
-        assert!(spec["paths"]["/admin/v1/hypervisors"].is_object());
+        assert!(spec["paths"]["/platform/v1/hypervisors"].is_object());
     }
 
     /// Collect all ResourceDefs from a registration tree (recursive).
@@ -249,17 +252,17 @@ mod tests {
         let server = ApiServer::new(ApiConfig::default(), vec![handlers::registration()], vec![]);
 
         let req = Request::builder()
-            .uri("/admin/v1/hypervisors")
+            .uri("/platform/v1/hypervisors")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router().clone().oneshot(req).await.unwrap();
+        let resp = server.router().clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
             .unwrap();
-        let resp = server.admin_router().clone().oneshot(req).await.unwrap();
+        let resp = server.router().clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
     }
 }

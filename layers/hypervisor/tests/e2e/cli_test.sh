@@ -96,7 +96,7 @@ check_output "health endpoint" '"status":"ok"' \
     curl -sf http://127.0.0.1:18443/health
 
 check_output "list endpoint" '"data"' \
-    curl -sf http://127.0.0.1:18443/admin/v1/hypervisors
+    curl -sf http://127.0.0.1:18443/platform/v1/hypervisors
 
 check_output "openapi endpoint" '"openapi"' \
     curl -sf http://127.0.0.1:18443/openapi.json
