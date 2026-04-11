@@ -186,36 +186,10 @@ pub async fn dispatch(
         _ => (reg.handler)(raw_request).await?,
     };
 
-    // ── 4b. JSON contract validation (debug builds only) ──
-    #[cfg(debug_assertions)]
-    {
-        let kind = def.identity.kind;
-        match &response {
-            OperationResponse::Resource(v) => {
-                debug_assert!(
-                    v.get("id").is_some(),
-                    "[E080] {kind}: response JSON missing 'id'"
-                );
-                debug_assert!(
-                    v.get("name").is_some(),
-                    "[E081] {kind}: response JSON missing 'name'"
-                );
-            }
-            OperationResponse::ResourceList(items) => {
-                for (i, item) in items.iter().enumerate() {
-                    debug_assert!(
-                        item.get("id").is_some(),
-                        "[E080] {kind}: list item [{i}] missing 'id'"
-                    );
-                    debug_assert!(
-                        item.get("name").is_some(),
-                        "[E081] {kind}: list item [{i}] missing 'name'"
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
+    // ── 4b. Post-handler output pipeline ──
+    let mut response = response;
+    validation::validate_response_contract(def.identity.kind, &response)?;
+    validation::filter_response_secrets(def, &mut response);
 
     // ── 5. Render output ──
 

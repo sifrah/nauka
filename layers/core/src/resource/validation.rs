@@ -258,6 +258,121 @@ fn validate_single_field(
     Ok(())
 }
 
+/// Validate the response contract: Resource responses must have `id` and `name`.
+///
+/// Called after handler returns, in both CLI and API paths.
+/// Returns an error if the contract is violated (replaces the old debug_assert).
+pub fn validate_response_contract(
+    kind: &str,
+    response: &super::registry::OperationResponse,
+) -> Result<(), NaukaError> {
+    match response {
+        super::registry::OperationResponse::Resource(v) => {
+            if v.get("id").is_none() {
+                return Err(NaukaError::internal(format!(
+                    "[E080] {kind}: response JSON missing 'id'"
+                )));
+            }
+            if v.get("name").is_none() {
+                return Err(NaukaError::internal(format!(
+                    "[E081] {kind}: response JSON missing 'name'"
+                )));
+            }
+        }
+        super::registry::OperationResponse::ResourceList(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if item.get("id").is_none() {
+                    return Err(NaukaError::internal(format!(
+                        "[E080] {kind}: list item [{i}] missing 'id'"
+                    )));
+                }
+                if item.get("name").is_none() {
+                    return Err(NaukaError::internal(format!(
+                        "[E081] {kind}: list item [{i}] missing 'name'"
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Filter secret fields from response JSON.
+///
+/// Replaces any field marked as `FieldType::Secret` in the schema with `"****"`.
+/// Prevents accidental exposure of passwords, API keys, etc.
+pub fn filter_response_secrets(
+    def: &ResourceDef,
+    response: &mut super::registry::OperationResponse,
+) {
+    let secret_fields: Vec<&str> = def
+        .schema
+        .fields
+        .iter()
+        .filter(|f| matches!(f.field_type, FieldType::Secret))
+        .map(|f| f.name)
+        .collect();
+
+    if secret_fields.is_empty() {
+        return;
+    }
+
+    match response {
+        super::registry::OperationResponse::Resource(v) => {
+            mask_secrets(v, &secret_fields);
+        }
+        super::registry::OperationResponse::ResourceList(items) => {
+            for item in items.iter_mut() {
+                mask_secrets(item, &secret_fields);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mask_secrets(value: &mut serde_json::Value, secret_fields: &[&str]) {
+    if let Some(obj) = value.as_object_mut() {
+        for field in secret_fields {
+            if obj.contains_key(*field) {
+                obj.insert(field.to_string(), serde_json::json!("****"));
+            }
+        }
+    }
+}
+
+/// Normalize timestamp fields in API responses to ISO 8601.
+///
+/// For any field ending in `_at` whose value is a number (epoch seconds),
+/// converts it to ISO 8601 format (e.g., `"2026-04-11T14:30:00Z"`).
+pub fn normalize_timestamps(response: &mut super::registry::OperationResponse) {
+    match response {
+        super::registry::OperationResponse::Resource(v) => {
+            normalize_value_timestamps(v);
+        }
+        super::registry::OperationResponse::ResourceList(items) => {
+            for item in items.iter_mut() {
+                normalize_value_timestamps(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_value_timestamps(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        let keys: Vec<String> = obj.keys().filter(|k| k.ends_with("_at")).cloned().collect();
+        for key in keys {
+            if let Some(serde_json::Value::Number(n)) = obj.get(&key) {
+                if let Some(epoch) = n.as_u64() {
+                    let iso = crate::resource::api_response::epoch_to_iso8601(epoch);
+                    obj.insert(key, serde_json::json!(iso));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +651,66 @@ mod tests {
         fields.insert("custom-op-arg".to_string(), "value".to_string());
         filter_readonly_fields(&def, &mut fields);
         assert!(fields.contains_key("custom-op-arg"));
+    }
+
+    // ── validate_response_contract ──
+
+    #[test]
+    fn response_contract_valid() {
+        use crate::resource::registry::OperationResponse;
+        let resp = OperationResponse::Resource(serde_json::json!({"id": "x", "name": "y"}));
+        assert!(validate_response_contract("test", &resp).is_ok());
+    }
+
+    #[test]
+    fn response_contract_missing_id() {
+        use crate::resource::registry::OperationResponse;
+        let resp = OperationResponse::Resource(serde_json::json!({"name": "y"}));
+        assert!(validate_response_contract("test", &resp).is_err());
+    }
+
+    #[test]
+    fn response_contract_list_missing_name() {
+        use crate::resource::registry::OperationResponse;
+        let resp = OperationResponse::ResourceList(vec![serde_json::json!({"id": "x"})]);
+        assert!(validate_response_contract("test", &resp).is_err());
+    }
+
+    // ── filter_response_secrets ──
+
+    #[test]
+    fn secrets_masked() {
+        use crate::resource::registry::OperationResponse;
+        let mut def = test_resource_def();
+        def.schema
+            .fields
+            .push(FieldDef::secret("api-key", "API key"));
+        let mut resp =
+            OperationResponse::Resource(serde_json::json!({"api-key": "sk-123", "name": "x"}));
+        filter_response_secrets(&def, &mut resp);
+        if let OperationResponse::Resource(v) = &resp {
+            assert_eq!(v["api-key"], "****");
+            assert_eq!(v["name"], "x");
+        }
+    }
+
+    // ── normalize_timestamps ──
+
+    #[test]
+    fn timestamps_normalized() {
+        use crate::resource::registry::OperationResponse;
+        let mut resp = OperationResponse::Resource(serde_json::json!({
+            "name": "x",
+            "created_at": 1712847000u64,
+            "status": "active"
+        }));
+        normalize_timestamps(&mut resp);
+        if let OperationResponse::Resource(v) = &resp {
+            let ts = v["created_at"].as_str().unwrap();
+            assert!(ts.ends_with('Z'), "expected ISO 8601, got: {ts}");
+            assert!(ts.contains('T'), "expected ISO 8601, got: {ts}");
+            // status should not be touched
+            assert_eq!(v["status"], "active");
+        }
     }
 }

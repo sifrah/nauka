@@ -22,6 +22,8 @@ pub struct ApiConfig {
     pub rate_limit_requests: u64,
     /// Rate limit: window in seconds.
     pub rate_limit_window_secs: u64,
+    /// Graceful shutdown drain timeout in seconds.
+    pub shutdown_timeout_secs: u64,
 }
 
 impl Default for ApiConfig {
@@ -33,6 +35,7 @@ impl Default for ApiConfig {
             public_prefix: "/v1".to_string(),
             rate_limit_requests: 1000,
             rate_limit_window_secs: 60,
+            shutdown_timeout_secs: 30,
         }
     }
 }
@@ -80,7 +83,11 @@ impl ApiServer {
     /// #8: Run admin API with graceful shutdown on SIGTERM/SIGINT.
     pub async fn run_admin(self) -> Result<(), std::io::Error> {
         let listener = tokio::net::TcpListener::bind(self.config.admin_addr).await?;
-        tracing::info!(addr = %self.config.admin_addr, "admin API listening");
+        tracing::info!(
+            addr = %self.config.admin_addr,
+            shutdown_timeout = self.config.shutdown_timeout_secs,
+            "admin API listening"
+        );
 
         axum::serve(listener, self.admin_router)
             .with_graceful_shutdown(shutdown_signal())
@@ -104,7 +111,7 @@ impl ApiServer {
 }
 
 fn build_api_router(
-    _config: &ApiConfig,
+    config: &ApiConfig,
     registrations: Vec<ResourceRegistration>,
     prefix: &str,
 ) -> Router {
@@ -132,13 +139,35 @@ fn build_api_router(
         }),
     );
 
+    let fallback = || async {
+        let body = axum::Json(serde_json::json!({
+            "error": {
+                "code": "NotFound",
+                "message": "The requested endpoint does not exist.",
+            }
+        }));
+        (axum::http::StatusCode::NOT_FOUND, body)
+    };
+
+    // Rate limiter
+    let limiter =
+        middleware::RateLimiter::new(config.rate_limit_requests, config.rate_limit_window_secs);
+
     Router::new()
         .merge(api_routes)
         .merge(health)
         .merge(openapi)
+        .fallback(fallback)
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(1024 * 1024)) // 1MB
+        .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(
             middleware::require_json_content_type,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            limiter,
+            middleware::rate_limit,
         ))
         .layer(axum::middleware::from_fn(middleware::request_id))
         .layer(axum::middleware::from_fn(middleware::version_header))
@@ -201,10 +230,10 @@ mod tests {
             Box::pin(async move {
                 match req.operation.as_str() {
                     "list" => Ok(OperationResponse::ResourceList(vec![
-                        serde_json::json!({"name": "t1"}),
+                        serde_json::json!({"id": "t1-id", "name": "t1"}),
                     ])),
                     "get" => Ok(OperationResponse::Resource(
-                        serde_json::json!({"name": req.name.unwrap_or_default()}),
+                        serde_json::json!({"id": "get-id", "name": req.name.unwrap_or_default()}),
                     )),
                     "delete" => Ok(OperationResponse::Message("deleted".into())),
                     "ping" => Ok(OperationResponse::Message("pong".into())),
@@ -342,5 +371,10 @@ mod tests {
             .unwrap();
         let resp = server.admin_router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 404);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "NotFound");
     }
 }

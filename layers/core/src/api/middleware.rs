@@ -75,7 +75,11 @@ impl RateLimiter {
     /// Check if a request is allowed. Returns remaining requests or false if rejected.
     #[allow(clippy::result_unit_err)]
     pub fn check(&self) -> Result<u64, ()> {
-        let mut start = self.state.window_start.lock().unwrap();
+        let mut start = self
+            .state
+            .window_start
+            .lock()
+            .expect("rate limiter lock poisoned");
         let elapsed = start.elapsed().as_secs();
 
         // Reset window if expired
@@ -96,7 +100,11 @@ impl RateLimiter {
     /// Reset the limiter (for testing).
     pub fn reset(&self) {
         self.state.count.store(0, Ordering::Relaxed);
-        *self.state.window_start.lock().unwrap() = Instant::now();
+        *self
+            .state
+            .window_start
+            .lock()
+            .expect("rate limiter lock poisoned") = Instant::now();
     }
 }
 
@@ -128,6 +136,53 @@ pub async fn require_json_content_type(req: Request, next: Next) -> Response {
         }
     }
     next.run(req).await
+}
+
+// ═══════════════════════════════════════════════════
+// 8. Rate limiter middleware
+// ═══════════════════════════════════════════════════
+
+/// Middleware that enforces the rate limit. Returns 429 if exceeded.
+pub async fn rate_limit(
+    axum::extract::State(limiter): axum::extract::State<RateLimiter>,
+    req: Request,
+    next: Next,
+) -> Response {
+    match limiter.check() {
+        Ok(remaining) => {
+            let mut resp = next.run(req).await;
+            if let Ok(val) = HeaderValue::from_str(&remaining.to_string()) {
+                resp.headers_mut().insert("x-ratelimit-remaining", val);
+            }
+            resp
+        }
+        Err(()) => {
+            let body = axum::Json(serde_json::json!({
+                "error": {
+                    "code": "RateLimited",
+                    "message": "Too many requests. Please retry later.",
+                }
+            }));
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, body).into_response()
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════
+// 9. Security headers
+// ═══════════════════════════════════════════════════
+
+/// Middleware that adds security headers to every response.
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    resp
 }
 
 #[cfg(test)]
