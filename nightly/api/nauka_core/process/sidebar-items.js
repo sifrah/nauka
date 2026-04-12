@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["ensure_nauka_dir","nauka_dir","socket_path"]};
+window.SIDEBAR_ITEMS = {"fn":["ensure_nauka_dir","ensure_nauka_state_dir","is_service_mode","nauka_db_path","nauka_dir","nauka_state_dir","set_dir_perms","socket_path"]};
