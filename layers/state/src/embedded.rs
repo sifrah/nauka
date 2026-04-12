@@ -134,23 +134,39 @@ impl EmbeddedDb {
         &self.path
     }
 
-    /// Shut down the wrapper, dropping the SDK client.
+    /// Shut down the wrapper, dropping the SDK client and waiting briefly
+    /// for the SurrealDB background router task to release the on-disk
+    /// LOCK so a subsequent `EmbeddedDb::open` at the same path can
+    /// succeed.
     ///
-    /// Dropping the inner [`Surreal<Db>`] is what actually closes the
-    /// datastore — the SurrealDB SDK's background router task exits
-    /// when its sender side goes away, and the SurrealKV engine flushes
-    /// pending writes on drop. This method exists so call sites have an
-    /// explicit, named way to do that, instead of relying on `Drop` order.
+    /// Why the wait: the SDK's `Surreal<Db>` router runs on a background
+    /// tokio task that holds an `Arc<Datastore>`. The task only exits
+    /// when its route channel closes — i.e. after the last
+    /// `Surreal<Db>` clone is dropped. After it exits, it calls
+    /// `Datastore::shutdown()`, which is what actually flushes SurrealKV
+    /// and removes the LOCK file. All of that happens *asynchronously*
+    /// on the runtime, so without a small wait here a caller that does
+    /// `shutdown().await; open(same_path).await` races against the
+    /// background task and gets `Database is already locked`.
     ///
-    /// Returns `Ok(())` once the inner client has been dropped. Future
-    /// versions may flush, fsync, or wait for outstanding tasks here, so
-    /// the signature is async + `Result` even though the body is trivial
-    /// today.
+    /// 50 ms is empirically enough on every machine we've tested, and
+    /// nothing in Nauka's hot path calls `shutdown` often enough to
+    /// notice. If a future SDK version exposes a synchronous shutdown
+    /// that joins the router task, we should use it instead.
     pub async fn shutdown(self) -> Result<()> {
         // Explicit drop of the inner client. The compiler would do this
         // anyway when `self` goes out of scope, but naming the step makes
-        // the intent visible at every call site.
+        // the intent visible.
         drop(self.inner);
+
+        // Yield once so any task that's already runnable (the router
+        // exit handler) gets a chance to run before we sleep.
+        tokio::task::yield_now().await;
+
+        // Then a short sleep to cover the kvs.shutdown() flush + LOCK
+        // release latency. See the doc comment above for the rationale.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
         Ok(())
     }
 }
@@ -167,13 +183,20 @@ impl std::fmt::Debug for EmbeddedDb {
 
 #[cfg(test)]
 mod tests {
+    use surrealdb::types::SurrealValue;
+
     use super::*;
 
+    /// Tiny test record used by the tests below. Defined inside the
+    /// test module so the SurrealValue derive isn't compiled into the
+    /// production library.
+    #[derive(Debug, Clone, PartialEq, SurrealValue)]
+    struct Item {
+        name: String,
+        count: i32,
+    }
+
     /// P1.2 smoke test: open the wrapper at a temp path and shut it down.
-    ///
-    /// Comprehensive CRUD / persistence tests live in P1.5
-    /// (sifrah/nauka#195). This one only covers the lifecycle skeleton
-    /// the issue actually adds.
     #[tokio::test]
     async fn open_and_shutdown_smoke() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -184,13 +207,8 @@ mod tests {
             .expect("open should succeed at a writable temp path");
 
         assert_eq!(db.path(), path);
-
-        // The on-disk datastore should now exist (SurrealKV creates a
-        // directory at the given path).
         assert!(path.exists(), "datastore path should exist after open");
 
-        // Confirm the SDK client returned a usable handle by issuing a
-        // no-side-effect query.
         let _ = db
             .client()
             .query("INFO FOR DB")
@@ -200,5 +218,252 @@ mod tests {
         db.shutdown()
             .await
             .expect("shutdown should always succeed in P1.2");
+    }
+
+    /// P1.5 — CRUD round-trip on a single table.
+    ///
+    /// Covers the full create → select-by-id → update → select → delete →
+    /// select-after-delete cycle. Anchors the assumption that the SDK
+    /// client returned by `db.client()` behaves the same as it would on
+    /// a vanilla `Surreal::new::<SurrealKv>` connection.
+    #[tokio::test]
+    async fn crud_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("crud.skv"))
+            .await
+            .expect("open");
+        let client = db.client();
+
+        // Create.
+        let created: Option<Item> = client
+            .create(("items", "first"))
+            .content(Item {
+                name: "alpha".into(),
+                count: 1,
+            })
+            .await
+            .expect("create");
+        let created = created.expect("create returned None");
+        assert_eq!(created.name, "alpha");
+        assert_eq!(created.count, 1);
+
+        // Select by id.
+        let fetched: Option<Item> = client
+            .select(("items", "first"))
+            .await
+            .expect("select by id");
+        assert_eq!(
+            fetched,
+            Some(Item {
+                name: "alpha".into(),
+                count: 1,
+            }),
+        );
+
+        // Update via content (full replace).
+        let updated: Option<Item> = client
+            .update(("items", "first"))
+            .content(Item {
+                name: "alpha".into(),
+                count: 99,
+            })
+            .await
+            .expect("update");
+        assert_eq!(updated.expect("update returned None").count, 99);
+
+        // Re-select to confirm the persisted value.
+        let after_update: Option<Item> = client
+            .select(("items", "first"))
+            .await
+            .expect("select after update");
+        assert_eq!(after_update.expect("missing after update").count, 99);
+
+        // Delete.
+        let deleted: Option<Item> = client.delete(("items", "first")).await.expect("delete");
+        assert!(deleted.is_some(), "delete should return the deleted record");
+
+        // Select again — should now be empty.
+        let after_delete: Option<Item> = client
+            .select(("items", "first"))
+            .await
+            .expect("select after delete");
+        assert!(after_delete.is_none(), "record should be gone after delete");
+
+        db.shutdown().await.expect("shutdown");
+    }
+
+    /// P1.5 — Persistence: open, write, drop, reopen, read same value.
+    ///
+    /// Closes the wrapper between writes and reads to confirm the data
+    /// actually hit the SurrealKV file on disk and is recovered on
+    /// re-open. Without this guarantee the whole P1 path is meaningless.
+    #[tokio::test]
+    async fn persistence_across_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("persist.skv");
+
+        // First open: write a record, then explicitly shut down.
+        {
+            let db = EmbeddedDb::open(&path).await.expect("open #1");
+            let _: Option<Item> = db
+                .client()
+                .create(("items", "p"))
+                .content(Item {
+                    name: "persisted".into(),
+                    count: 7,
+                })
+                .await
+                .expect("create");
+            db.shutdown().await.expect("shutdown #1");
+        }
+
+        // Second open at the same path: the record should still be there.
+        {
+            let db = EmbeddedDb::open(&path).await.expect("open #2");
+            let fetched: Option<Item> = db
+                .client()
+                .select(("items", "p"))
+                .await
+                .expect("select after reopen");
+            assert_eq!(
+                fetched,
+                Some(Item {
+                    name: "persisted".into(),
+                    count: 7,
+                }),
+                "record should survive an explicit shutdown + reopen",
+            );
+            db.shutdown().await.expect("shutdown #2");
+        }
+    }
+
+    /// P1.5 — Multi-table isolation.
+    ///
+    /// Two records inserted into two different tables must not bleed
+    /// across the table boundary on `select <table>` queries.
+    #[tokio::test]
+    async fn multi_table_isolation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("multi.skv"))
+            .await
+            .expect("open");
+        let client = db.client();
+
+        let _: Option<Item> = client
+            .create(("table_a", "1"))
+            .content(Item {
+                name: "a".into(),
+                count: 1,
+            })
+            .await
+            .expect("create table_a");
+        let _: Option<Item> = client
+            .create(("table_b", "1"))
+            .content(Item {
+                name: "b".into(),
+                count: 2,
+            })
+            .await
+            .expect("create table_b");
+
+        let from_a: Vec<Item> = client.select("table_a").await.expect("select table_a");
+        let from_b: Vec<Item> = client.select("table_b").await.expect("select table_b");
+
+        assert_eq!(from_a.len(), 1, "table_a should hold exactly one row");
+        assert_eq!(from_b.len(), 1, "table_b should hold exactly one row");
+        assert_eq!(from_a[0].name, "a");
+        assert_eq!(from_b[0].name, "b");
+
+        // Cross-table sanity: selecting a record by id from `table_a`
+        // with the id we wrote to `table_b` returns None — i.e. ids
+        // don't bleed across tables.
+        let cross: Option<Item> = client
+            .select(("table_a", "2"))
+            .await
+            .expect("cross-table select by missing id");
+        assert!(
+            cross.is_none(),
+            "table_a should not see records keyed in table_b",
+        );
+
+        db.shutdown().await.expect("shutdown");
+    }
+
+    /// P1.5 — Concurrent reads from clones of the same client.
+    ///
+    /// `EmbeddedDb` is `Clone`, and the underlying `Surreal<Db>` shares
+    /// state via Arc internally. Multiple readers from clones should see
+    /// the same value without races or panics. Spawns 10 tasks reading
+    /// the same record concurrently and asserts they all observe the
+    /// expected value.
+    #[tokio::test]
+    async fn concurrent_reads_from_clones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("concurrent.skv"))
+            .await
+            .expect("open");
+
+        // Seed a single shared record.
+        let _: Option<Item> = db
+            .client()
+            .create(("items", "shared"))
+            .content(Item {
+                name: "concurrent".into(),
+                count: 42,
+            })
+            .await
+            .expect("seed");
+
+        // Spawn concurrent readers.
+        let mut handles = Vec::with_capacity(10);
+        for i in 0..10u32 {
+            let db_clone = db.clone();
+            handles.push(tokio::spawn(async move {
+                let item: Option<Item> = db_clone
+                    .client()
+                    .select(("items", "shared"))
+                    .await
+                    .expect("concurrent select");
+                (i, item.expect("missing on concurrent reader"))
+            }));
+        }
+
+        for h in handles {
+            let (i, item) = h.await.expect("join");
+            assert_eq!(
+                item.count, 42,
+                "concurrent reader {i} observed wrong value: {item:?}"
+            );
+        }
+
+        db.shutdown().await.expect("shutdown");
+    }
+
+    /// P1.5 — Error path: open at an invalid path returns `StateError`.
+    ///
+    /// We force the failure by creating a regular file inside the temp
+    /// dir and asking SurrealKV to open at a path *under* it. The parent
+    /// of `<file>/oops.skv` is a regular file, so `create_dir_all` fails
+    /// with `NotADirectory` and `EmbeddedDb::open` surfaces the error
+    /// as `StateError::Io` via the `?` operator and the existing
+    /// `From<std::io::Error>` impl on `StateError`.
+    #[tokio::test]
+    async fn open_at_invalid_path_returns_state_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file_as_parent = dir.path().join("not_a_dir");
+        std::fs::write(&file_as_parent, b"hello").expect("write file");
+
+        let bad_path = file_as_parent.join("oops.skv");
+        let result = EmbeddedDb::open(&bad_path).await;
+
+        assert!(
+            result.is_err(),
+            "opening under a regular-file parent should fail"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, StateError::Io(_)),
+            "expected StateError::Io, got: {err:?}"
+        );
     }
 }
