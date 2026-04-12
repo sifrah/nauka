@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["EmbeddedDb"]};
+window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_SCHEMA"],"struct":["EmbeddedDb"]};
