@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["main"],"struct":["SpikeRecord"]};
+window.SIDEBAR_ITEMS = {"fn":["main","print_help"],"struct":["SpikeRecord"]};
