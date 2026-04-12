@@ -46,6 +46,14 @@ use surrealdb::Surreal;
 
 use crate::{Result, StateError, BOOTSTRAP_DB, NAUKA_NS};
 
+/// The bootstrap-state SurrealQL schema, embedded at compile time.
+///
+/// Defined in `layers/state/schemas/bootstrap.surql` (P1.6, sifrah/nauka#196).
+/// `EmbeddedDb::open` applies this on every open. The schema is fully
+/// idempotent thanks to `IF NOT EXISTS` on every `DEFINE` statement, so
+/// re-applying against an already-initialised database is a no-op.
+const BOOTSTRAP_SCHEMA: &str = include_str!("../schemas/bootstrap.surql");
+
 /// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
 ///
 /// Cheap to clone: every clone shares the same underlying `Surreal<Db>`
@@ -75,11 +83,20 @@ impl EmbeddedDb {
         Self::open(&path).await
     }
 
-    /// Open (or create) the SurrealKV-backed database at `path` and select
-    /// the `nauka` / `bootstrap` namespace/database.
+    /// Open (or create) the SurrealKV-backed database at `path`, select the
+    /// `nauka` / `bootstrap` namespace/database, and apply the embedded
+    /// bootstrap schema.
     ///
     /// The parent directory is created if it doesn't exist. On Unix the
     /// parent directory is also chmod-ed to 0o700 (best-effort).
+    ///
+    /// The bootstrap schema (`schemas/bootstrap.surql`, P1.6) is applied on
+    /// every open. It is fully idempotent thanks to `IF NOT EXISTS` on
+    /// every `DEFINE` statement, so reopening an existing database is a
+    /// no-op for already-defined tables, fields, and indexes — and any
+    /// new tables/fields/indexes that have appeared since last open are
+    /// added forward-compatibly. P1.7 (sifrah/nauka#197) is the issue that
+    /// wires this in.
     ///
     /// For the run-mode-aware default path, use [`Self::open_default`].
     ///
@@ -88,9 +105,10 @@ impl EmbeddedDb {
     /// Returns [`StateError::Io`] if the parent directory cannot be created,
     /// or one of [`StateError::NotFound`] / [`StateError::Schema`] /
     /// [`StateError::Database`] (depending on the underlying SurrealDB
-    /// failure mode) if SurrealDB cannot open the datastore or switch to
-    /// the configured namespace/database. The classification is done by the
-    /// `From<surrealdb::Error>` impl in `lib.rs` (P1.3, sifrah/nauka#193).
+    /// failure mode) if SurrealDB cannot open the datastore, switch to the
+    /// configured namespace/database, or apply the bootstrap schema. The
+    /// classification is done by the `From<surrealdb::Error>` impl in
+    /// `lib.rs` (P1.3, sifrah/nauka#193).
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -113,6 +131,12 @@ impl EmbeddedDb {
         let inner = Surreal::new::<SurrealKv>(path_str.as_str()).await?;
 
         inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).await?;
+
+        // Apply the bootstrap schema after switching to the right ns/db.
+        // DEFINE TABLE / FIELD / INDEX are db-scoped, so use_db must
+        // happen first. The schema's IF NOT EXISTS clauses make this
+        // safe to run on every open.
+        inner.query(BOOTSTRAP_SCHEMA).await?.check()?;
 
         Ok(Self {
             inner,
@@ -467,13 +491,66 @@ mod tests {
         );
     }
 
+    /// P1.7 — `EmbeddedDb::open` applies the bootstrap schema automatically.
+    ///
+    /// Opens a fresh database (no manual schema application) and asserts
+    /// that the four bootstrap tables (`mesh`, `hypervisor`, `peer`,
+    /// `wg_key`) are reachable. With the schema NOT auto-applied, a
+    /// `select` against a never-touched table returns SurrealDB's
+    /// `NotFound` error (verified by `multi_table_isolation` in P1.5).
+    /// With the schema auto-applied, the table is defined-but-empty and
+    /// `select` returns an empty Vec.
+    #[tokio::test]
+    async fn open_applies_bootstrap_schema_automatically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("auto_schema.skv"))
+            .await
+            .expect("open should also apply the schema");
+
+        // Each schema-defined table must be reachable on a fresh DB.
+        // We use surrealdb::types::Value to avoid forcing a SurrealValue
+        // derive on a strongly-typed mirror of every table.
+        for table in &["mesh", "hypervisor", "peer", "wg_key"] {
+            let rows: Vec<surrealdb::types::Value> =
+                db.client().select(*table).await.unwrap_or_else(|e| {
+                    panic!("select on {table} should succeed (schema not applied?): {e}")
+                });
+            assert!(
+                rows.is_empty(),
+                "table {table} should be empty on a fresh DB but contained {} rows",
+                rows.len()
+            );
+        }
+
+        // The schema is also idempotent: a second open at the same path
+        // (after explicit shutdown) must succeed and the tables must
+        // still be defined.
+        let path = db.path().to_path_buf();
+        db.shutdown().await.expect("shutdown");
+
+        let db2 = EmbeddedDb::open(&path)
+            .await
+            .expect("reopening an already-initialised DB should succeed");
+        for table in &["mesh", "hypervisor", "peer", "wg_key"] {
+            let rows: Vec<surrealdb::types::Value> =
+                db2.client().select(*table).await.unwrap_or_else(|e| {
+                    panic!("post-reopen select on {table} should succeed: {e}")
+                });
+            assert!(
+                rows.is_empty(),
+                "table {table} should still be empty after reopen"
+            );
+        }
+        db2.shutdown().await.expect("shutdown #2");
+    }
+
     /// P1.6 — the bootstrap.surql schema must apply cleanly to a fresh
     /// database, must be idempotent (re-applying is a no-op), and must
     /// allow inserting one record into every table it defines.
     ///
-    /// This test does NOT wire the schema into `EmbeddedDb::open` — that's
-    /// P1.7 (sifrah/nauka#197). It only validates the schema file's
-    /// correctness against a real SurrealKV instance.
+    /// After P1.7 (sifrah/nauka#197) `EmbeddedDb::open` applies the schema
+    /// automatically, so this test now also covers the
+    /// "open + auto-apply + manual re-apply" idempotency contract.
     #[tokio::test]
     async fn bootstrap_schema_applies_cleanly() {
         const SCHEMA: &str = include_str!("../schemas/bootstrap.surql");
