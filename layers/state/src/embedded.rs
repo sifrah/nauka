@@ -466,4 +466,95 @@ mod tests {
             "expected StateError::Io, got: {err:?}"
         );
     }
+
+    /// P1.6 — the bootstrap.surql schema must apply cleanly to a fresh
+    /// database, must be idempotent (re-applying is a no-op), and must
+    /// allow inserting one record into every table it defines.
+    ///
+    /// This test does NOT wire the schema into `EmbeddedDb::open` — that's
+    /// P1.7 (sifrah/nauka#197). It only validates the schema file's
+    /// correctness against a real SurrealKV instance.
+    #[tokio::test]
+    async fn bootstrap_schema_applies_cleanly() {
+        const SCHEMA: &str = include_str!("../schemas/bootstrap.surql");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("schema_test.skv"))
+            .await
+            .expect("open");
+
+        // First application — must succeed against an empty database.
+        db.client()
+            .query(SCHEMA)
+            .await
+            .expect("schema first apply")
+            .check()
+            .expect("schema first apply check");
+
+        // Second application — must be a no-op thanks to IF NOT EXISTS.
+        db.client()
+            .query(SCHEMA)
+            .await
+            .expect("schema second apply")
+            .check()
+            .expect("schema second apply check");
+
+        // Each table is reachable. Inserting a row exercises the field
+        // ASSERTs and confirms the SCHEMAFULL definitions accept the
+        // documented shapes. We use SurrealQL's `time::now()` directly so
+        // the test doesn't need a chrono dev-dep.
+        db.client()
+            .query(
+                "CREATE mesh:current SET ipv6_ula = $u, secret_hash = $h, \
+                 created_at = time::now()",
+            )
+            .bind(("u", "fdc5:8ba:9b14::/48"))
+            .bind(("h", "0123456789abcdef"))
+            .await
+            .expect("insert mesh")
+            .check()
+            .expect("insert mesh check");
+
+        // The record id `hypervisor:hv-01HXXX` IS the ULID — there's no
+        // separate `id` field in the schema (see schemas/bootstrap.surql
+        // for the rationale). P1.10 will create rows the same way:
+        // `CREATE hypervisor:<ulid> SET name = ..., ...`.
+        db.client()
+            .query(
+                "CREATE hypervisor:`hv-01HXXX` SET name = $n, mesh_ipv6 = $m, \
+                 public_key = $p, role = $r",
+            )
+            .bind(("n", "node-1"))
+            .bind(("m", "fdc5:8ba:9b14::1"))
+            .bind(("p", "BASE64=="))
+            .bind(("r", "leader"))
+            .await
+            .expect("insert hypervisor")
+            .check()
+            .expect("insert hypervisor check");
+
+        db.client()
+            .query(
+                "CREATE peer:p1 SET mesh_ipv6 = $m, public_key = $p, \
+                 endpoint = $e, last_seen = time::now()",
+            )
+            .bind(("m", "fdc5:8ba:9b14::2"))
+            .bind(("p", "PEERKEY=="))
+            .bind(("e", "1.2.3.4:51820"))
+            .await
+            .expect("insert peer")
+            .check()
+            .expect("insert peer check");
+
+        db.client()
+            .query("CREATE wg_key:current SET private_key = $k, public_key = $p")
+            .bind(("k", "PRIVKEY=="))
+            .bind(("p", "PUBKEY=="))
+            .await
+            .expect("insert wg_key")
+            .check()
+            .expect("insert wg_key check");
+
+        db.shutdown().await.expect("shutdown");
+    }
 }
