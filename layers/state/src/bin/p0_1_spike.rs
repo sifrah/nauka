@@ -40,8 +40,51 @@ struct SpikeRecord {
     answer: i32,
 }
 
+/// Print a short usage message and exit cleanly. Wired to `--help` / `-h`
+/// so the binary can be used as a smoke test for cross-compile validation
+/// (P1.8, sifrah/nauka#198) without producing side effects on disk.
+fn print_help() {
+    println!("nauka p0-1 spike — EmbeddedDb cross-compile + Hetzner smoke test");
+    println!();
+    println!("Exercises the EmbeddedDb<SurrealKv> wrapper end-to-end. Used by");
+    println!("the per-ticket workflow (compile → Hetzner → CI → merge) to");
+    println!("re-validate the build chain on every Phase 1 PR.");
+    println!();
+    println!("USAGE:");
+    println!("    p0-1-spike [FLAGS]");
+    println!();
+    println!("FLAGS:");
+    println!("    -h, --help    Print this help and exit (no side effects)");
+    println!();
+    println!("With no flags the binary runs in two phases against the actual");
+    println!("filesystem:");
+    println!("    Phase A — EmbeddedDb::open at $TMPDIR/nauka-p0-1-spike.skv");
+    println!("              and a CRUD round-trip via db.client().");
+    println!("    Phase B — EmbeddedDb::open_default() to exercise the");
+    println!("              run-mode-aware path picker (CLI → ~/.nauka,");
+    println!("              service mode → /var/lib/nauka), with INFO FOR DB");
+    println!("              and 0o700 perms verification on the parent.");
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Manual flag handling: only `--help` / `-h` need to be recognised at
+    // P1.8 time, so a tiny if-let is preferable to pulling clap into a
+    // spike binary.
+    if let Some(arg) = std::env::args().nth(1) {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                return Ok(());
+            }
+            other => {
+                eprintln!("error: unknown flag: {other}");
+                eprintln!("hint:  run `--help` for usage");
+                std::process::exit(2);
+            }
+        }
+    }
+
     println!("== nauka p0-1 spike (P1.4 — run-mode-aware paths) ==");
     println!("target_arch    = {}", std::env::consts::ARCH);
     println!("target_os      = {}", std::env::consts::OS);
