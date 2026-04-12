@@ -13,6 +13,20 @@ thiserror.workspace = true
 dirs = "5"
 tikv-client = "0.4"
 tokio.workspace = true
+# Force vendored OpenSSL into the build graph: surrealdb-tikv-client and the
+# existing tikv-client both pull openssl-sys via prometheus → reqwest →
+# native-tls. Without a vendored OpenSSL the musl cross-compile cannot find
+# system openssl. The workspace declaration already enables the `vendored`
+# feature.
+openssl.workspace = true
+# P0.1 spike: validate that the surrealdb SDK with kv-surrealkv + kv-tikv
+# can be linked into nauka-state and cross-compiled to musl. Not used by
+# any production code yet — that lands in P1.1 / P2.1.
+surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surrealkv", "kv-tikv"] }
+
+[[bin]]
+name = "p0-1-spike"
+path = "src/bin/p0_1_spike.rs"
 
 [dev-dependencies]
 tempfile = "3"
