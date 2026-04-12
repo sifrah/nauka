@@ -145,7 +145,19 @@ impl FabricState {
     /// `SurrealValue` derive cascade), then written via SurrealQL
     /// `UPSERT fabric:state CONTENT $data` so the first save creates
     /// the row and subsequent saves replace it in place.
+    ///
+    /// The first save also lazily creates the SCHEMALESS `fabric`
+    /// table via `DEFINE TABLE IF NOT EXISTS`. This is done inline
+    /// here instead of in `bootstrap.surql` because the table is a
+    /// transitional artefact that only the FabricState async path
+    /// uses — it should not appear in the bootstrap schema that
+    /// every `EmbeddedDb::open` runs (P1.7, sifrah/nauka#197).
+    /// P3 codegen (sifrah/nauka#225 ff) will eventually replace this
+    /// JSON-blob storage with a proper SCHEMAFULL split across
+    /// `mesh` / `hypervisor` / `peer` / `wg_key`.
     pub async fn save_async(&self, db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
+        ensure_fabric_table(db).await?;
+
         let json = serde_json::to_value(self)
             .map_err(|e| nauka_state::StateError::Serialization(e.to_string()))?;
         let result = db
@@ -162,6 +174,8 @@ impl FabricState {
     /// Load state from the SurrealKV-backed [`EmbeddedDb`]. Returns `None`
     /// if no state exists.
     pub async fn load_async(db: &EmbeddedDb) -> Result<Option<Self>, nauka_state::StateError> {
+        ensure_fabric_table(db).await?;
+
         let mut response = db
             .client()
             .query("SELECT * FROM type::record($tbl, $id)")
@@ -185,6 +199,8 @@ impl FabricState {
 
     /// Delete state from the SurrealKV-backed [`EmbeddedDb`] (used by `leave`).
     pub async fn delete_async(db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
+        ensure_fabric_table(db).await?;
+
         let result = db
             .client()
             .query("DELETE type::record($tbl, $id)")
@@ -200,6 +216,25 @@ impl FabricState {
     pub async fn exists_async(db: &EmbeddedDb) -> Result<bool, nauka_state::StateError> {
         Ok(Self::load_async(db).await?.is_some())
     }
+}
+
+/// Lazily create the SCHEMALESS `fabric` table on first use.
+///
+/// Idempotent thanks to `IF NOT EXISTS`. Called by every async
+/// FabricState method that touches the table, so callers don't need
+/// to remember to do it themselves.
+///
+/// This lives outside `bootstrap.surql` because the table is a
+/// transitional artefact for P1.10 only — Phase 3 (sifrah/nauka#225 ff)
+/// replaces this with a SCHEMAFULL split across the existing
+/// `mesh` / `hypervisor` / `peer` / `wg_key` tables, at which point
+/// this function and the `fabric` table both go away.
+async fn ensure_fabric_table(db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
+    db.client()
+        .query("DEFINE TABLE IF NOT EXISTS fabric SCHEMALESS")
+        .await?
+        .check()?;
+    Ok(())
 }
 
 #[cfg(test)]

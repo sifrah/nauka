@@ -146,22 +146,3 @@ DEFINE FIELD IF NOT EXISTS private_key ON wg_key TYPE string
 -- but stored explicitly for cheap reads in the hot path).
 DEFINE FIELD IF NOT EXISTS public_key ON wg_key TYPE string
     ASSERT string::len($value) > 0;
-
-
--- ── fabric ───────────────────────────────────────────────────────────────
--- Transitional SCHEMALESS table used by P1.10 (sifrah/nauka#200) as a
--- single-row blob store for the legacy `FabricState` struct during the
--- migration from `LayerDb` (JSON file) to `EmbeddedDb` (SurrealKV).
---
--- The struct is serialised via serde_json::Value and stored as the
--- single `data` field on the `fabric:state` record. The wider P3
--- (sifrah/nauka#225 ff) codegen will eventually replace this with a
--- proper schemafull split across the existing `mesh` / `hypervisor` /
--- `peer` / `wg_key` tables. Until then this row is the canonical
--- bootstrap state for the embedded path.
---
--- The table is SCHEMALESS rather than SCHEMAFULL because we don't yet
--- want to lock the FabricState shape — Phase 3 will own the strict
--- field-level definitions.
-
-DEFINE TABLE IF NOT EXISTS fabric SCHEMALESS;
