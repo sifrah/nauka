@@ -6,6 +6,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Off by default. Enable to compile the P0.3 spike binary, which needs the
+# kv-tikv backend on top of kv-surrealkv. The production build path (and CI's
+# default `cargo build -p nauka-state`) intentionally does NOT enable this —
+# Phase 1 is SurrealKV-only; kv-tikv comes back as a permanent feature in
+# Phase 2 (P2.1, sifrah/nauka#205).
+spike-tikv = ["surrealdb/kv-tikv"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -13,16 +21,19 @@ thiserror.workspace = true
 dirs = "5"
 tikv-client = "0.4"
 tokio.workspace = true
-# Force vendored OpenSSL into the build graph: surrealdb-tikv-client and the
-# existing tikv-client both pull openssl-sys via prometheus → reqwest →
-# native-tls. Without a vendored OpenSSL the musl cross-compile cannot find
-# system openssl. The workspace declaration already enables the `vendored`
-# feature.
+# Force vendored OpenSSL into the build graph: tikv-client (and, when the
+# `spike-tikv` feature is on, surrealdb-tikv-client) both pull openssl-sys via
+# prometheus → reqwest → native-tls. Without a vendored OpenSSL the musl
+# cross-compile cannot find system openssl. The workspace declaration already
+# enables the `vendored` feature. This stays until P2.16 (sifrah/nauka#220)
+# removes the legacy tikv-client.
 openssl.workspace = true
-# P0.1 spike: validate that the surrealdb SDK with kv-surrealkv + kv-tikv
-# can be linked into nauka-state and cross-compiled to musl. Not used by
-# any production code yet — that lands in P1.1 / P2.1.
-surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surrealkv", "kv-tikv"] }
+# P1.1: surrealdb SDK with kv-surrealkv only. The kv-tikv backend is gated
+# behind the local `spike-tikv` feature so that production builds (the CI
+# default) do not pull surrealdb-tikv-client transitively. P2.1
+# (sifrah/nauka#205) flips kv-tikv on permanently when the cluster-side
+# integration lands.
+surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surrealkv"] }
 
 [[bin]]
 name = "p0-1-spike"
@@ -31,6 +42,7 @@ path = "src/bin/p0_1_spike.rs"
 [[bin]]
 name = "p0-3-spike"
 path = "src/bin/p0_3_spike.rs"
+required-features = ["spike-tikv"]
 
 [dev-dependencies]
 tempfile = "3"
