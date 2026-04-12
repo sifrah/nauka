@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RECORDS","TABLE","TEST_PATH"],"fn":["main","print_help","seed","verify"],"struct":["Record"]};
