@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use surrealdb::engine::local::{Db, SurrealKv};
 use surrealdb::Surreal;
 
-use crate::{Result, BOOTSTRAP_DB, NAUKA_NS};
+use crate::{Result, StateError, BOOTSTRAP_DB, NAUKA_NS};
 
 /// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
 ///
@@ -57,10 +57,31 @@ pub struct EmbeddedDb {
 }
 
 impl EmbeddedDb {
+    /// Open (or create) the SurrealKV-backed database at the run-mode-aware
+    /// default path provided by [`nauka_core::process::nauka_db_path`]:
+    ///
+    /// - CLI mode: `~/.nauka/bootstrap.skv`
+    /// - Service mode (root): `/var/lib/nauka/bootstrap.skv`
+    ///
+    /// The parent state directory is created via
+    /// [`nauka_core::process::ensure_nauka_state_dir`] (with 0o700 perms),
+    /// then the rest of the open path is the same as [`Self::open`].
+    pub async fn open_default() -> Result<Self> {
+        // Create the state directory with the right perms; the SurrealKV
+        // datastore directory itself is created by `Surreal::new::<SurrealKv>`.
+        let _ = nauka_core::process::ensure_nauka_state_dir()
+            .map_err(|e| StateError::Database(format!("ensure state dir: {e}")))?;
+        let path = nauka_core::process::nauka_db_path();
+        Self::open(&path).await
+    }
+
     /// Open (or create) the SurrealKV-backed database at `path` and select
     /// the `nauka` / `bootstrap` namespace/database.
     ///
-    /// The parent directory is created if it doesn't exist.
+    /// The parent directory is created if it doesn't exist. On Unix the
+    /// parent directory is also chmod-ed to 0o700 (best-effort).
+    ///
+    /// For the run-mode-aware default path, use [`Self::open_default`].
     ///
     /// # Errors
     ///
@@ -74,6 +95,17 @@ impl EmbeddedDb {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    // Best-effort 0o700 on the parent (P1.4 perms target).
+                    // We don't surface a chmod failure as a hard error: the
+                    // dir was created successfully, refusing to start over a
+                    // chmod refusal would be obnoxious. Logged via tracing
+                    // by nauka_core::process when the helper is used.
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                }
             }
         }
 
