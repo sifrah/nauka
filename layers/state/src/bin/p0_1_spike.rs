@@ -1,22 +1,25 @@
-//! Spike binary for P0.1 (#185).
+//! Spike binary for P0.1 (#185), kept around as a re-validation tool for the
+//! Phase 1 SurrealKV build chain.
 //!
-//! Goal: prove that `surrealdb` 3.0.5 with `kv-surrealkv` + `kv-tikv` features
-//! can be cross-compiled to `x86_64-unknown-linux-musl` and that the resulting
-//! binary runs on a real Hetzner Ubuntu host.
+//! Goal: prove that `surrealdb` 3.0.5 with the `kv-surrealkv` feature can be
+//! cross-compiled to `x86_64-unknown-linux-musl` and that the resulting
+//! statically-linked binary runs on a real Hetzner Ubuntu host.
 //!
 //! What this does:
 //! 1. Print build/runtime info (target, surrealdb version)
 //! 2. Open an in-process SurrealKV datastore at a temp path
 //! 3. Run a CRUD round-trip with SurrealQL
-//! 4. Confirm both code paths (`SurrealKv` engine marker + the `TiKv` import)
-//!    actually link into the binary
 //!
-//! It does NOT connect to TiKV — that's P0.3 (#187). Linking the symbol is
-//! enough to validate the build chain for the spike.
+//! Originally (P0.1) this binary also imported `surrealdb::engine::local::TiKv`
+//! purely to keep the linker symbol alive and prove both backends could
+//! coexist in the build graph. P1.1 (sifrah/nauka#191) drops `kv-tikv` from
+//! the production feature set, so the TiKv import is gone. The P0.3 spike
+//! (`p0-3-spike`) still exercises that backend, but it now requires the
+//! local `spike-tikv` feature to compile.
 
 use std::path::PathBuf;
 
-use surrealdb::engine::local::{SurrealKv, TiKv};
+use surrealdb::engine::local::SurrealKv;
 use surrealdb::types::SurrealValue;
 use surrealdb::Surreal;
 
@@ -32,12 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("target_arch    = {}", std::env::consts::ARCH);
     println!("target_os      = {}", std::env::consts::OS);
     println!("target_env     = {}", std::env::consts::FAMILY);
-    println!("surrealdb_dep  = 3.0.5 (kv-surrealkv + kv-tikv)");
-
-    // Force the TiKv marker to be referenced so the linker keeps the symbol.
-    // We don't actually open a TiKv connection (that needs a real cluster).
-    let _tikv_marker = std::any::type_name::<TiKv>();
-    println!("tikv_marker    = {_tikv_marker}");
+    println!("surrealdb_dep  = 3.0.5 (kv-surrealkv only — P1.1)");
 
     // Open a SurrealKV datastore at a temp path.
     let path: PathBuf = std::env::temp_dir().join("nauka-p0-1-spike.skv");
