@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use surrealdb::engine::local::{Db, SurrealKv};
 use surrealdb::Surreal;
 
-use crate::{Result, StateError, BOOTSTRAP_DB, NAUKA_NS};
+use crate::{Result, BOOTSTRAP_DB, NAUKA_NS};
 
 /// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
 ///
@@ -65,8 +65,11 @@ impl EmbeddedDb {
     /// # Errors
     ///
     /// Returns [`StateError::Io`] if the parent directory cannot be created,
-    /// or [`StateError::Database`] if SurrealDB fails to open the datastore
-    /// or to switch to the configured namespace/database.
+    /// or one of [`StateError::NotFound`] / [`StateError::Schema`] /
+    /// [`StateError::Database`] (depending on the underlying SurrealDB
+    /// failure mode) if SurrealDB cannot open the datastore or switch to
+    /// the configured namespace/database. The classification is done by the
+    /// `From<surrealdb::Error>` impl in `lib.rs` (P1.3, sifrah/nauka#193).
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -75,15 +78,9 @@ impl EmbeddedDb {
         }
 
         let path_str = path.to_string_lossy().into_owned();
-        let inner = Surreal::new::<SurrealKv>(path_str.as_str())
-            .await
-            .map_err(|e| StateError::Database(format!("open {}: {e}", path.display())))?;
+        let inner = Surreal::new::<SurrealKv>(path_str.as_str()).await?;
 
-        inner
-            .use_ns(NAUKA_NS)
-            .use_db(BOOTSTRAP_DB)
-            .await
-            .map_err(|e| StateError::Database(format!("use ns/db: {e}")))?;
+        inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).await?;
 
         Ok(Self {
             inner,

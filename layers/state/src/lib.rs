@@ -89,14 +89,69 @@ pub const CLUSTER_DB: &str = "cluster";
 // Errors
 // ═══════════════════════════════════════════════════
 
+/// Error type returned by every fallible nauka-state operation.
+///
+/// Variants are deliberately coarse-grained: callers either care about the
+/// specific failure mode (e.g. `NotFound` vs everything else) or they
+/// propagate the error opaquely. Anything finer than these four variants
+/// stays in the inner message string.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
+    /// A SurrealDB-side or generic backend error: connection failures,
+    /// query errors, internal engine errors, anything that does not fit
+    /// the more specific variants below.
     #[error("database error: {0}")]
     Database(String),
+
+    /// A schema-level error: a `DEFINE TABLE` constraint was violated, an
+    /// `ASSERT` clause failed, a unique index conflicted, a SCHEMAFULL field
+    /// type mismatched, etc. The inner string is the human-readable detail.
+    ///
+    /// Mapped from `surrealdb::Error` variants where the engine reports
+    /// `is_validation()` (parse / invalid params / SCHEMAFULL violations) or
+    /// `is_already_exists()` (unique-index conflicts during writes).
+    #[error("schema error: {0}")]
+    Schema(String),
+
+    /// A "record / table / namespace / database does not exist" error.
+    ///
+    /// Mapped from `surrealdb::Error::is_not_found()`.
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    /// A serde / JSON serialization error from the legacy `LocalDb` and
+    /// `ClusterDb` paths. Will go away when those layers are deleted in
+    /// P1.12 (sifrah/nauka#202) and P2.16 (sifrah/nauka#220).
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    /// A filesystem-level error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<surrealdb::Error> for StateError {
+    /// Best-effort classification of `surrealdb::Error` into the right
+    /// `StateError` variant.
+    ///
+    /// The mapping is conservative: only `is_not_found()`, `is_validation()`,
+    /// and `is_already_exists()` get specific variants. Everything else
+    /// (query errors, connection errors, internal errors, thrown errors,
+    /// not-allowed, configuration, serialization-on-the-wire) becomes
+    /// `Database` because callers shouldn't need to distinguish them — they
+    /// either want to know "did the record exist?" / "did the schema
+    /// reject this?" or they propagate the error opaquely.
+    fn from(err: surrealdb::Error) -> Self {
+        let msg = format!("{err}");
+        let details = err.details();
+        if details.is_not_found() {
+            StateError::NotFound(msg)
+        } else if details.is_validation() || details.is_already_exists() {
+            StateError::Schema(msg)
+        } else {
+            StateError::Database(msg)
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StateError>;
@@ -382,5 +437,102 @@ mod tests {
         let db2 = db.clone();
         let val: Option<String> = db2.get("k", "v").unwrap();
         assert_eq!(val, Some("value".into()));
+    }
+
+    // ─── Error mapping (P1.3, sifrah/nauka#193) ──────────────────────
+
+    #[test]
+    fn error_mapping_not_found() {
+        // surrealdb::Error::not_found is the canonical "record/table/ns/db
+        // does not exist" constructor. It must round-trip into our
+        // StateError::NotFound variant.
+        let surreal_err =
+            surrealdb::Error::not_found("record `vm:does_not_exist`".to_string(), None);
+        let state_err: StateError = surreal_err.into();
+        assert!(
+            matches!(state_err, StateError::NotFound(_)),
+            "expected NotFound, got: {state_err:?}"
+        );
+    }
+
+    #[test]
+    fn error_mapping_validation_to_schema() {
+        // SCHEMAFULL constraint failures, parse errors, and ASSERT failures
+        // all surface as `Error::validation`. They map to StateError::Schema
+        // because the caller's recourse is "fix the schema or the input",
+        // not "retry against the backend".
+        let surreal_err =
+            surrealdb::Error::validation("DEFINE FIELD ... ASSERT failed".to_string(), None);
+        let state_err: StateError = surreal_err.into();
+        assert!(
+            matches!(state_err, StateError::Schema(_)),
+            "expected Schema, got: {state_err:?}"
+        );
+    }
+
+    #[test]
+    fn error_mapping_already_exists_to_schema() {
+        // Unique-index conflicts on writes are also schema-level signals
+        // for the caller (the constraint exists, the input violates it).
+        let surreal_err =
+            surrealdb::Error::already_exists("unique index `vm_name` violated".to_string(), None);
+        let state_err: StateError = surreal_err.into();
+        assert!(
+            matches!(state_err, StateError::Schema(_)),
+            "expected Schema, got: {state_err:?}"
+        );
+    }
+
+    #[test]
+    fn error_mapping_internal_to_database() {
+        // Internal/connection/query/etc. errors all collapse to Database.
+        // Internal is the most "catch-all" of the surrealdb variants and
+        // is the right canary for the default-mapping path.
+        let surreal_err = surrealdb::Error::internal("transaction conflict".to_string());
+        let state_err: StateError = surreal_err.into();
+        assert!(
+            matches!(state_err, StateError::Database(_)),
+            "expected Database, got: {state_err:?}"
+        );
+    }
+
+    #[test]
+    fn error_mapping_connection_to_database() {
+        // Connection errors are operationally distinct ("the cluster is
+        // gone") but the call site doesn't get a different recovery path
+        // — it has to retry or surface the error to the user. Database
+        // is the right bucket.
+        let surreal_err = surrealdb::Error::connection("router uninitialised".to_string(), None);
+        let state_err: StateError = surreal_err.into();
+        assert!(
+            matches!(state_err, StateError::Database(_)),
+            "expected Database, got: {state_err:?}"
+        );
+    }
+
+    #[test]
+    fn error_mapping_question_mark_via_into() {
+        // Sanity check that the `?` operator picks up the From impl
+        // automatically (i.e. that it's a `From`, not a one-off helper).
+        fn returns_state_result() -> Result<()> {
+            Err(surrealdb::Error::not_found("missing".to_string(), None))?;
+            Ok(())
+        }
+        let err = returns_state_result().unwrap_err();
+        assert!(matches!(err, StateError::NotFound(_)));
+    }
+
+    #[test]
+    fn error_mapping_preserves_message() {
+        // The inner String of each variant should carry the original
+        // message so logs and CLI output stay readable.
+        let surreal_err =
+            surrealdb::Error::not_found("record `vm:abc` does not exist".to_string(), None);
+        let state_err: StateError = surreal_err.into();
+        let rendered = format!("{state_err}");
+        assert!(
+            rendered.contains("vm:abc"),
+            "rendered error should keep the original detail, got: {rendered}"
+        );
     }
 }
