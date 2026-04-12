@@ -329,7 +329,7 @@ mod tests {
     }
 
     /// P1.2 smoke test: open the wrapper at a temp path and shut it down.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn open_and_shutdown_smoke() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("smoke.skv");
@@ -358,7 +358,7 @@ mod tests {
     /// select-after-delete cycle. Anchors the assumption that the SDK
     /// client returned by `db.client()` behaves the same as it would on
     /// a vanilla `Surreal::new::<SurrealKv>` connection.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn crud_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = EmbeddedDb::open(&dir.path().join("crud.skv"))
@@ -429,7 +429,7 @@ mod tests {
     /// Closes the wrapper between writes and reads to confirm the data
     /// actually hit the SurrealKV file on disk and is recovered on
     /// re-open. Without this guarantee the whole P1 path is meaningless.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn persistence_across_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("persist.skv");
@@ -473,7 +473,7 @@ mod tests {
     ///
     /// Two records inserted into two different tables must not bleed
     /// across the table boundary on `select <table>` queries.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn multi_table_isolation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = EmbeddedDb::open(&dir.path().join("multi.skv"))
@@ -528,7 +528,7 @@ mod tests {
     /// the same value without races or panics. Spawns 10 tasks reading
     /// the same record concurrently and asserts they all observe the
     /// expected value.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn concurrent_reads_from_clones() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = EmbeddedDb::open(&dir.path().join("concurrent.skv"))
@@ -579,7 +579,7 @@ mod tests {
     /// with `NotADirectory` and `EmbeddedDb::open` surfaces the error
     /// as `StateError::Io` via the `?` operator and the existing
     /// `From<std::io::Error>` impl on `StateError`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn open_at_invalid_path_returns_state_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file_as_parent = dir.path().join("not_a_dir");
@@ -608,7 +608,7 @@ mod tests {
     /// `NotFound` error (verified by `multi_table_isolation` in P1.5).
     /// With the schema auto-applied, the table is defined-but-empty and
     /// `select` returns an empty Vec.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn open_applies_bootstrap_schema_automatically() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = EmbeddedDb::open(&dir.path().join("auto_schema.skv"))
@@ -659,7 +659,7 @@ mod tests {
     /// After P1.7 (sifrah/nauka#197) `EmbeddedDb::open` applies the schema
     /// automatically, so this test now also covers the
     /// "open + auto-apply + manual re-apply" idempotency contract.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn bootstrap_schema_applies_cleanly() {
         const SCHEMA: &str = include_str!("../schemas/bootstrap.surql");
 
