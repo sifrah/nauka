@@ -1,27 +1,31 @@
-//! Spike binary for P0.1 (#185), kept around as a re-validation tool for the
-//! Phase 1 SurrealKV build chain.
+//! Spike binary for P0.1 (sifrah/nauka#185), repurposed in P1.2 to be the
+//! Hetzner-side smoke test for [`nauka_state::EmbeddedDb`].
 //!
-//! Goal: prove that `surrealdb` 3.0.5 with the `kv-surrealkv` feature can be
-//! cross-compiled to `x86_64-unknown-linux-musl` and that the resulting
-//! statically-linked binary runs on a real Hetzner Ubuntu host.
+//! The spike's purpose evolves with each phase that touches the same code:
 //!
-//! What this does:
-//! 1. Print build/runtime info (target, surrealdb version)
-//! 2. Open an in-process SurrealKV datastore at a temp path
-//! 3. Run a CRUD round-trip with SurrealQL
+//! - **P0.1**: prove that `surrealdb` 3.0.5 with `kv-surrealkv` (+ `kv-tikv`)
+//!   cross-compiles to `x86_64-unknown-linux-musl` and runs as a
+//!   statically-linked binary on a real Hetzner Ubuntu host. ✅ done.
+//! - **P1.1**: drop `kv-tikv` from the production feature set. ✅ done.
+//! - **P1.2** (this version): exercise the new [`EmbeddedDb`] wrapper
+//!   end-to-end on Hetzner — open at a temp path, run a CRUD round-trip
+//!   via `db.client()`, shut down cleanly. The wrapper is the production
+//!   code path that all of Phase 1 builds on, so an actual run on Hetzner
+//!   is the strongest signal that the cross-compile + the wrapper + the
+//!   SDK still all agree about how to talk to SurrealKV.
 //!
-//! Originally (P0.1) this binary also imported `surrealdb::engine::local::TiKv`
-//! purely to keep the linker symbol alive and prove both backends could
-//! coexist in the build graph. P1.1 (sifrah/nauka#191) drops `kv-tikv` from
-//! the production feature set, so the TiKv import is gone. The P0.3 spike
-//! (`p0-3-spike`) still exercises that backend, but it now requires the
-//! local `spike-tikv` feature to compile.
+//! What this binary does on each run:
+//! 1. Print build / runtime info
+//! 2. `EmbeddedDb::open` at `$TMPDIR/nauka-p0-1-spike.skv`
+//! 3. CRUD round-trip via the wrapped client (`create`, `select id`,
+//!    `select all`)
+//! 4. `EmbeddedDb::shutdown`
+//! 5. Wipe the temp datastore so re-runs are clean
 
 use std::path::PathBuf;
 
-use surrealdb::engine::local::SurrealKv;
+use nauka_state::EmbeddedDb;
 use surrealdb::types::SurrealValue;
-use surrealdb::Surreal;
 
 #[derive(Debug, SurrealValue)]
 struct SpikeRecord {
@@ -31,38 +35,40 @@ struct SpikeRecord {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("== nauka p0-1 spike ==");
+    println!("== nauka p0-1 spike (P1.2 — EmbeddedDb wrapper) ==");
     println!("target_arch    = {}", std::env::consts::ARCH);
     println!("target_os      = {}", std::env::consts::OS);
     println!("target_env     = {}", std::env::consts::FAMILY);
-    println!("surrealdb_dep  = 3.0.5 (kv-surrealkv only — P1.1)");
+    println!("surrealdb_dep  = 3.0.5 (kv-surrealkv only)");
 
-    // Open a SurrealKV datastore at a temp path.
+    // Open the wrapper at a temp path.
     let path: PathBuf = std::env::temp_dir().join("nauka-p0-1-spike.skv");
-    let path_str = path.to_string_lossy().into_owned();
-    println!("skv_path       = {path_str}");
+    println!("skv_path       = {}", path.display());
 
-    let db = Surreal::new::<SurrealKv>(path_str.as_str()).await?;
-    db.use_ns("nauka").use_db("spike").await?;
+    let db = EmbeddedDb::open(&path).await?;
+    println!("ns/db          = nauka/bootstrap (auto-selected by EmbeddedDb::open)");
 
-    // Round-trip: create → select.
-    let created: Option<SpikeRecord> = db
+    // Round-trip via the underlying SDK client.
+    let client = db.client();
+
+    let created: Option<SpikeRecord> = client
         .create(("spike_record", "first"))
         .content(SpikeRecord {
             name: "p0-1".into(),
             answer: 42,
         })
         .await?;
-    println!("created        = {:?}", created);
+    println!("created        = {created:?}");
 
-    let fetched: Option<SpikeRecord> = db.select(("spike_record", "first")).await?;
-    println!("fetched        = {:?}", fetched);
+    let fetched: Option<SpikeRecord> = client.select(("spike_record", "first")).await?;
+    println!("fetched        = {fetched:?}");
 
-    let all: Vec<SpikeRecord> = db.select("spike_record").await?;
+    let all: Vec<SpikeRecord> = client.select("spike_record").await?;
     println!("all_count      = {}", all.len());
 
-    // Cleanup the temp dir so reruns are clean.
-    drop(db);
+    // Explicit shutdown via the wrapper, then wipe the datastore directory
+    // so re-running the spike on the same Hetzner box is idempotent.
+    db.shutdown().await?;
     let _ = std::fs::remove_dir_all(&path);
 
     println!("== p0-1 spike OK ==");
