@@ -1,13 +1,41 @@
 #![allow(clippy::result_large_err)]
 //! State persistence for Nauka.
 //!
-//! Two backends:
-//! - **`LocalDb`** — JSON file store for bootstrap state (fabric identity, WG keys).
-//!   Works before TiKV is up. Replaces the old redb-based `LayerDb`.
-//! - **`ClusterDb`** — TiKV-backed distributed KV store for everything else
-//!   (VMs, VPCs, users, subnets, etc.). Replicated across the mesh via Raft.
+//! Three backends, in increasing order of where they live:
+//! - **`EmbeddedDb`** — embedded SurrealDB on disk via the SurrealKV backend.
+//!   Used for **bootstrap** state that must be readable before any cluster
+//!   exists (mesh identity, hypervisor identity, peers, WireGuard keys).
+//!   This is the long-term replacement for `LocalDb`.
+//! - **`LocalDb`** — legacy JSON file store. Still in use; will be retired
+//!   by P1.10–P1.12 (sifrah/nauka#200 → sifrah/nauka#202).
+//! - **`ClusterDb`** — TiKV-backed distributed raw KV store for shared state
+//!   (orgs, projects, VMs, VPCs, etc.). Will be retired by P2.16
+//!   (sifrah/nauka#220) once the SurrealDB SDK in `kv-tikv` mode (P2.x) takes
+//!   over.
 //!
-//! # Usage
+//! # SurrealDB namespace / database conventions
+//!
+//! Per ADR 0003 (sifrah/nauka#190):
+//!
+//! - Local SurrealKV: namespace `nauka`, database `bootstrap`
+//! - Distributed TiKV (Phase 2): namespace `nauka`, database `cluster`
+//!
+//! These literals are exported as the [`NAUKA_NS`], [`BOOTSTRAP_DB`], and
+//! [`CLUSTER_DB`] constants so call sites never inline the strings.
+//!
+//! # Usage — `EmbeddedDb` (SurrealKV-backed bootstrap state)
+//!
+//! ```no_run
+//! # use nauka_state::EmbeddedDb;
+//! # use std::path::Path;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = EmbeddedDb::open(Path::new("/var/lib/nauka/bootstrap.skv")).await?;
+//! db.client().query("INFO FOR DB").await?;
+//! db.shutdown().await?;
+//! # Ok(()) }
+//! ```
+//!
+//! # Usage — `LocalDb` (legacy JSON, to be retired)
 //!
 //! ```no_run
 //! use nauka_state::LocalDb;
@@ -22,6 +50,7 @@
 //! ```
 
 pub mod cluster;
+pub mod embedded;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,6 +60,30 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 pub use cluster::ClusterDb;
+pub use embedded::EmbeddedDb;
+
+// ═══════════════════════════════════════════════════
+// SurrealDB namespace / database constants (ADR 0003)
+// ═══════════════════════════════════════════════════
+
+/// SurrealDB namespace used by all Nauka SurrealDB instances.
+///
+/// Per ADR 0003 (sifrah/nauka#190), Nauka writes only to this single
+/// namespace. Multi-tenancy lives at the row level inside the cluster
+/// database, not at the namespace level.
+pub const NAUKA_NS: &str = "nauka";
+
+/// SurrealDB database name for the local SurrealKV-backed bootstrap state.
+///
+/// Used by [`EmbeddedDb::open`].
+pub const BOOTSTRAP_DB: &str = "bootstrap";
+
+/// SurrealDB database name for the distributed TiKV-backed cluster state.
+///
+/// Reserved for the Phase 2 TiKV-backed `EmbeddedDb` constructor (P2.2,
+/// sifrah/nauka#206). Defined here in P1.2 so the constants live in one
+/// place and the cluster-side issue can refer to the existing symbol.
+pub const CLUSTER_DB: &str = "cluster";
 
 // ═══════════════════════════════════════════════════
 // Errors
