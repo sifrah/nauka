@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["StateError"],"fn":["nauka_dir"],"mod":["cluster"],"struct":["LocalDb"],"type":["LayerDb","Result","StoreMap"]};
+window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_DB","CLUSTER_DB","NAUKA_NS"],"enum":["StateError"],"fn":["nauka_dir"],"mod":["cluster","embedded"],"struct":["LocalDb"],"type":["LayerDb","Result","StoreMap"]};
