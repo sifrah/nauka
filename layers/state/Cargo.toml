@@ -45,5 +45,9 @@ name = "p0-3-spike"
 path = "src/bin/p0_3_spike.rs"
 required-features = ["spike-tikv"]
 
+[[bin]]
+name = "p1-9-integration"
+path = "src/bin/p1_9_integration.rs"
+
 [dev-dependencies]
 tempfile = "3"
