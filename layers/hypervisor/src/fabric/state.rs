@@ -440,7 +440,7 @@ mod tests {
         (dir, db)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_save_and_load() {
         let (_d, db) = temp_embedded().await;
         let state = make_state();
@@ -454,14 +454,14 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_load_empty() {
         let (_d, db) = temp_embedded().await;
         assert!(FabricState::load_async(&db).await.unwrap().is_none());
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_exists_check() {
         let (_d, db) = temp_embedded().await;
         assert!(!FabricState::exists_async(&db).await.unwrap());
@@ -470,7 +470,7 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_delete_state() {
         let (_d, db) = temp_embedded().await;
         make_state().save_async(&db).await.unwrap();
@@ -479,7 +479,7 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_save_with_peers() {
         let (_d, db) = temp_embedded().await;
         let mut state = make_state();
@@ -504,7 +504,7 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_secret_persists() {
         let (_d, db) = temp_embedded().await;
         let state = make_state();
@@ -518,7 +518,7 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_private_key_persists() {
         let (_d, db) = temp_embedded().await;
         let state = make_state();
@@ -532,7 +532,7 @@ mod tests {
         db.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_save_overwrites_previous() {
         let (_d, db) = temp_embedded().await;
         let mut state = make_state();
@@ -553,7 +553,7 @@ mod tests {
     /// EmbeddedDb, reopen at the same path, read back. Mirrors what
     /// the P1.5 in-process persistence test proves for arbitrary
     /// records, but for FabricState specifically.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn async_persistence_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.skv");
