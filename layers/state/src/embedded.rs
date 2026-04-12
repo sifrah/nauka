@@ -365,12 +365,38 @@ mod tests {
     ///
     /// Two records inserted into two different tables must not bleed
     /// across the table boundary on `select <table>` queries.
+    ///
+    /// Wrapped in a 30s tokio timeout because this test has been
+    /// observed to hang intermittently on the GitHub Actions
+    /// `cargo test -p nauka-state` runner (issue surfaced during
+    /// P1.10, sifrah/nauka#200). Locally on Mac and on a fresh
+    /// Hetzner Linux box the same operations complete in <200ms.
+    /// The intermittent hang appears to be a runner-specific
+    /// scheduling pathology — the timeout makes it surface as a
+    /// fast-fail with a clear message instead of stalling the
+    /// build for ~2 hours until cargo's internal kill kicks in.
     #[tokio::test]
     async fn multi_table_isolation() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = EmbeddedDb::open(&dir.path().join("multi.skv"))
-            .await
-            .expect("open");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            multi_table_isolation_inner(),
+        )
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("multi_table_isolation failed: {e}"),
+            Err(_) => panic!(
+                "multi_table_isolation timed out after 30s — \
+                 see the test doc comment for context, or rerun \
+                 the test in isolation with `cargo test -p nauka-state \
+                 embedded::tests::multi_table_isolation -- --nocapture`."
+            ),
+        }
+    }
+
+    async fn multi_table_isolation_inner() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let db = EmbeddedDb::open(&dir.path().join("multi.skv")).await?;
         let client = db.client();
 
         let _: Option<Item> = client
@@ -379,19 +405,17 @@ mod tests {
                 name: "a".into(),
                 count: 1,
             })
-            .await
-            .expect("create table_a");
+            .await?;
         let _: Option<Item> = client
             .create(("table_b", "1"))
             .content(Item {
                 name: "b".into(),
                 count: 2,
             })
-            .await
-            .expect("create table_b");
+            .await?;
 
-        let from_a: Vec<Item> = client.select("table_a").await.expect("select table_a");
-        let from_b: Vec<Item> = client.select("table_b").await.expect("select table_b");
+        let from_a: Vec<Item> = client.select("table_a").await?;
+        let from_b: Vec<Item> = client.select("table_b").await?;
 
         assert_eq!(from_a.len(), 1, "table_a should hold exactly one row");
         assert_eq!(from_b.len(), 1, "table_b should hold exactly one row");
@@ -401,16 +425,14 @@ mod tests {
         // Cross-table sanity: selecting a record by id from `table_a`
         // with the id we wrote to `table_b` returns None — i.e. ids
         // don't bleed across tables.
-        let cross: Option<Item> = client
-            .select(("table_a", "2"))
-            .await
-            .expect("cross-table select by missing id");
+        let cross: Option<Item> = client.select(("table_a", "2")).await?;
         assert!(
             cross.is_none(),
             "table_a should not see records keyed in table_b",
         );
 
-        db.shutdown().await.expect("shutdown");
+        db.shutdown().await?;
+        Ok(())
     }
 
     /// P1.5 — Concurrent reads from clones of the same client.
