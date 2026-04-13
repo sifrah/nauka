@@ -1,6 +1,6 @@
 [package]
 name = "nauka-state"
-description = "State persistence for Nauka — local JSON + distributed TiKV"
+description = "State persistence for Nauka — embedded SurrealDB (SurrealKV) + distributed TiKV"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,7 +19,6 @@ nauka-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-dirs = "5"
 tikv-client = "0.4"
 tokio.workspace = true
 # Force vendored OpenSSL into the build graph: tikv-client (and, when the

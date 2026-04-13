@@ -2901,7 +2901,6 @@ dependencies = [
 name = "nauka-state"
 version = "2.0.0"
 dependencies = [
- "dirs",
  "nauka-core",
  "openssl",
  "serde",
