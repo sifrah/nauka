@@ -5,864 +5,860 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#3 id=3 data-nosnippet>3</a>//! Wraps `surrealdb::Surreal&lt;Db&gt;` with a Nauka-friendly lifecycle: a single
 <a href=#4 id=4 data-nosnippet>4</a>//! `open` constructor that creates the on-disk SurrealKV datastore at a given
 <a href=#5 id=5 data-nosnippet>5</a>//! path and selects the `nauka` / `bootstrap` namespace/database (per ADR
-<a href=#6 id=6 data-nosnippet>6</a>//! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, and
-<a href=#7 id=7 data-nosnippet>7</a>//! an explicit `shutdown` step.
-<a href=#8 id=8 data-nosnippet>8</a>//!
-<a href=#9 id=9 data-nosnippet>9</a>//! This is the production backend for Nauka's bootstrap state. The legacy
-<a href=#10 id=10 data-nosnippet>10</a>//! JSON-file store shipped alongside it during P1.2–P1.10; P1.11
-<a href=#11 id=11 data-nosnippet>11</a>//! (sifrah/nauka#201) migrated every caller to `EmbeddedDb`, and P1.12
-<a href=#12 id=12 data-nosnippet>12</a>//! (sifrah/nauka#202) will delete the legacy code outright.
-<a href=#13 id=13 data-nosnippet>13</a>//!
-<a href=#14 id=14 data-nosnippet>14</a>//! P1.2 (sifrah/nauka#192) introduces only the wrapper struct and its
-<a href=#15 id=15 data-nosnippet>15</a>//! lifecycle. The companion deliverables — error mapping (P1.3,
-<a href=#16 id=16 data-nosnippet>16</a>//! sifrah/nauka#193), default-path helpers (P1.4, sifrah/nauka#194),
-<a href=#17 id=17 data-nosnippet>17</a>//! comprehensive CRUD/persistence tests (P1.5, sifrah/nauka#195), the
-<a href=#18 id=18 data-nosnippet>18</a>//! initial `.surql` schema (P1.6, sifrah/nauka#196), and applying that
-<a href=#19 id=19 data-nosnippet>19</a>//! schema at open time (P1.7, sifrah/nauka#197) — each ship as their own
-<a href=#20 id=20 data-nosnippet>20</a>//! issue.
-<a href=#21 id=21 data-nosnippet>21</a>//!
-<a href=#22 id=22 data-nosnippet>22</a>//! # Example
-<a href=#23 id=23 data-nosnippet>23</a>//!
-<a href=#24 id=24 data-nosnippet>24</a>//! ```no_run
-<a href=#25 id=25 data-nosnippet>25</a>//! # use nauka_state::EmbeddedDb;
-<a href=#26 id=26 data-nosnippet>26</a>//! # use std::path::Path;
-<a href=#27 id=27 data-nosnippet>27</a>//! # async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
-<a href=#28 id=28 data-nosnippet>28</a>//! let db = EmbeddedDb::open(Path::new("/var/lib/nauka/bootstrap.skv")).await?;
-<a href=#29 id=29 data-nosnippet>29</a>//!
-<a href=#30 id=30 data-nosnippet>30</a>//! // Use the underlying SurrealDB SDK directly:
-<a href=#31 id=31 data-nosnippet>31</a>//! let _: Vec&lt;surrealdb::types::Value&gt; = db
-<a href=#32 id=32 data-nosnippet>32</a>//!     .client()
-<a href=#33 id=33 data-nosnippet>33</a>//!     .query("INFO FOR DB")
-<a href=#34 id=34 data-nosnippet>34</a>//!     .await?
-<a href=#35 id=35 data-nosnippet>35</a>//!     .take(0)?;
-<a href=#36 id=36 data-nosnippet>36</a>//!
-<a href=#37 id=37 data-nosnippet>37</a>//! db.shutdown().await?;
-<a href=#38 id=38 data-nosnippet>38</a>//! # Ok(()) }
-<a href=#39 id=39 data-nosnippet>39</a>//! ```
-<a href=#40 id=40 data-nosnippet>40</a>
-<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">use </span>std::fs::{OpenOptions, TryLockError};
-<a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span>std::path::{Path, PathBuf};
-<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>std::time::{Duration, Instant};
-<a href=#44 id=44 data-nosnippet>44</a>
-<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>surrealdb::engine::local::{Db, SurrealKv};
-<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>surrealdb::Surreal;
-<a href=#47 id=47 data-nosnippet>47</a>
-<a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span>crate::{<span class="prelude-ty">Result</span>, StateError, BOOTSTRAP_DB, NAUKA_NS};
-<a href=#49 id=49 data-nosnippet>49</a>
-<a href=#50 id=50 data-nosnippet>50</a><span class="doccomment">/// The bootstrap-state SurrealQL schema, embedded at compile time.
-<a href=#51 id=51 data-nosnippet>51</a>///
-<a href=#52 id=52 data-nosnippet>52</a>/// Defined in `layers/state/schemas/bootstrap.surql` (P1.6, sifrah/nauka#196).
-<a href=#53 id=53 data-nosnippet>53</a>/// `EmbeddedDb::open` applies this on every open. The schema is fully
-<a href=#54 id=54 data-nosnippet>54</a>/// idempotent thanks to `IF NOT EXISTS` on every `DEFINE` statement, so
-<a href=#55 id=55 data-nosnippet>55</a>/// re-applying against an already-initialised database is a no-op.
-<a href=#56 id=56 data-nosnippet>56</a></span><span class="kw">const </span>BOOTSTRAP_SCHEMA: <span class="kw-2">&amp;</span>str = <span class="macro">include_str!</span>(<span class="string">"../schemas/bootstrap.surql"</span>);
-<a href=#57 id=57 data-nosnippet>57</a>
-<a href=#58 id=58 data-nosnippet>58</a><span class="doccomment">/// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
-<a href=#59 id=59 data-nosnippet>59</a>///
-<a href=#60 id=60 data-nosnippet>60</a>/// Cheap to clone: every clone shares the same underlying `Surreal&lt;Db&gt;`
-<a href=#61 id=61 data-nosnippet>61</a>/// connection (which itself uses an `Arc` internally).
-<a href=#62 id=62 data-nosnippet>62</a></span><span class="attr">#[derive(Clone)]
-<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">pub struct </span>EmbeddedDb {
-<a href=#64 id=64 data-nosnippet>64</a>    inner: Surreal&lt;Db&gt;,
-<a href=#65 id=65 data-nosnippet>65</a>    path: PathBuf,
-<a href=#66 id=66 data-nosnippet>66</a>}
-<a href=#67 id=67 data-nosnippet>67</a>
-<a href=#68 id=68 data-nosnippet>68</a><span class="kw">impl </span>EmbeddedDb {
-<a href=#69 id=69 data-nosnippet>69</a>    <span class="doccomment">/// Open (or create) the SurrealKV-backed database at the run-mode-aware
-<a href=#70 id=70 data-nosnippet>70</a>    /// default path provided by [`nauka_core::process::nauka_db_path`]:
-<a href=#71 id=71 data-nosnippet>71</a>    ///
-<a href=#72 id=72 data-nosnippet>72</a>    /// - CLI mode: `~/.nauka/bootstrap.skv`
-<a href=#73 id=73 data-nosnippet>73</a>    /// - Service mode (root): `/var/lib/nauka/bootstrap.skv`
-<a href=#74 id=74 data-nosnippet>74</a>    ///
-<a href=#75 id=75 data-nosnippet>75</a>    /// The parent state directory is created via
-<a href=#76 id=76 data-nosnippet>76</a>    /// [`nauka_core::process::ensure_nauka_state_dir`] (with 0o700 perms),
-<a href=#77 id=77 data-nosnippet>77</a>    /// then the rest of the open path is the same as [`Self::open`].
-<a href=#78 id=78 data-nosnippet>78</a>    </span><span class="kw">pub async fn </span>open_default() -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
-<a href=#79 id=79 data-nosnippet>79</a>        <span class="comment">// Create the state directory with the right perms; the SurrealKV
-<a href=#80 id=80 data-nosnippet>80</a>        // datastore directory itself is created by `Surreal::new::&lt;SurrealKv&gt;`.
-<a href=#81 id=81 data-nosnippet>81</a>        </span><span class="kw">let _ </span>= nauka_core::process::ensure_nauka_state_dir()
-<a href=#82 id=82 data-nosnippet>82</a>            .map_err(|e| StateError::Database(<span class="macro">format!</span>(<span class="string">"ensure state dir: {e}"</span>)))<span class="question-mark">?</span>;
-<a href=#83 id=83 data-nosnippet>83</a>        <span class="kw">let </span>path = nauka_core::process::nauka_db_path();
-<a href=#84 id=84 data-nosnippet>84</a>        <span class="self">Self</span>::open(<span class="kw-2">&amp;</span>path).<span class="kw">await
-<a href=#85 id=85 data-nosnippet>85</a>    </span>}
-<a href=#86 id=86 data-nosnippet>86</a>
-<a href=#87 id=87 data-nosnippet>87</a>    <span class="doccomment">/// Open (or create) the SurrealKV-backed database at `path`, select the
-<a href=#88 id=88 data-nosnippet>88</a>    /// `nauka` / `bootstrap` namespace/database, and apply the embedded
-<a href=#89 id=89 data-nosnippet>89</a>    /// bootstrap schema.
-<a href=#90 id=90 data-nosnippet>90</a>    ///
-<a href=#91 id=91 data-nosnippet>91</a>    /// The parent directory is created if it doesn't exist. On Unix the
-<a href=#92 id=92 data-nosnippet>92</a>    /// parent directory is also chmod-ed to 0o700 (best-effort).
-<a href=#93 id=93 data-nosnippet>93</a>    ///
-<a href=#94 id=94 data-nosnippet>94</a>    /// The bootstrap schema (`schemas/bootstrap.surql`, P1.6) is applied on
-<a href=#95 id=95 data-nosnippet>95</a>    /// every open. It is fully idempotent thanks to `IF NOT EXISTS` on
-<a href=#96 id=96 data-nosnippet>96</a>    /// every `DEFINE` statement, so reopening an existing database is a
-<a href=#97 id=97 data-nosnippet>97</a>    /// no-op for already-defined tables, fields, and indexes — and any
-<a href=#98 id=98 data-nosnippet>98</a>    /// new tables/fields/indexes that have appeared since last open are
-<a href=#99 id=99 data-nosnippet>99</a>    /// added forward-compatibly. P1.7 (sifrah/nauka#197) is the issue that
-<a href=#100 id=100 data-nosnippet>100</a>    /// wires this in.
-<a href=#101 id=101 data-nosnippet>101</a>    ///
-<a href=#102 id=102 data-nosnippet>102</a>    /// For the run-mode-aware default path, use [`Self::open_default`].
-<a href=#103 id=103 data-nosnippet>103</a>    ///
-<a href=#104 id=104 data-nosnippet>104</a>    /// # Errors
-<a href=#105 id=105 data-nosnippet>105</a>    ///
-<a href=#106 id=106 data-nosnippet>106</a>    /// Returns [`StateError::Io`] if the parent directory cannot be created,
-<a href=#107 id=107 data-nosnippet>107</a>    /// or one of [`StateError::NotFound`] / [`StateError::Schema`] /
-<a href=#108 id=108 data-nosnippet>108</a>    /// [`StateError::Database`] (depending on the underlying SurrealDB
-<a href=#109 id=109 data-nosnippet>109</a>    /// failure mode) if SurrealDB cannot open the datastore, switch to the
-<a href=#110 id=110 data-nosnippet>110</a>    /// configured namespace/database, or apply the bootstrap schema. The
-<a href=#111 id=111 data-nosnippet>111</a>    /// classification is done by the `From&lt;surrealdb::Error&gt;` impl in
-<a href=#112 id=112 data-nosnippet>112</a>    /// `lib.rs` (P1.3, sifrah/nauka#193).
-<a href=#113 id=113 data-nosnippet>113</a>    </span><span class="kw">pub async fn </span>open(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
-<a href=#114 id=114 data-nosnippet>114</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(parent) = path.parent() {
-<a href=#115 id=115 data-nosnippet>115</a>            <span class="kw">if </span>!parent.as_os_str().is_empty() {
-<a href=#116 id=116 data-nosnippet>116</a>                std::fs::create_dir_all(parent)<span class="question-mark">?</span>;
-<a href=#117 id=117 data-nosnippet>117</a>                <span class="attr">#[cfg(unix)]
-<a href=#118 id=118 data-nosnippet>118</a>                </span>{
-<a href=#119 id=119 data-nosnippet>119</a>                    <span class="kw">use </span>std::os::unix::fs::PermissionsExt;
-<a href=#120 id=120 data-nosnippet>120</a>                    <span class="comment">// Best-effort 0o700 on the parent (P1.4 perms target).
-<a href=#121 id=121 data-nosnippet>121</a>                    // We don't surface a chmod failure as a hard error: the
-<a href=#122 id=122 data-nosnippet>122</a>                    // dir was created successfully, refusing to start over a
-<a href=#123 id=123 data-nosnippet>123</a>                    // chmod refusal would be obnoxious. Logged via tracing
-<a href=#124 id=124 data-nosnippet>124</a>                    // by nauka_core::process when the helper is used.
-<a href=#125 id=125 data-nosnippet>125</a>                    </span><span class="kw">let _ </span>=
-<a href=#126 id=126 data-nosnippet>126</a>                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(<span class="number">0o700</span>));
-<a href=#127 id=127 data-nosnippet>127</a>                }
-<a href=#128 id=128 data-nosnippet>128</a>            }
-<a href=#129 id=129 data-nosnippet>129</a>        }
-<a href=#130 id=130 data-nosnippet>130</a>
-<a href=#131 id=131 data-nosnippet>131</a>        <span class="comment">// Acquire the SurrealKV datastore with retry-on-lock-contention.
-<a href=#132 id=132 data-nosnippet>132</a>        //
-<a href=#133 id=133 data-nosnippet>133</a>        // # Why this exists
-<a href=#134 id=134 data-nosnippet>134</a>        //
-<a href=#135 id=135 data-nosnippet>135</a>        // SurrealKV takes an OS-level exclusive flock on `&lt;path&gt;/LOCK`
-<a href=#136 id=136 data-nosnippet>136</a>        // whenever a `Datastore` is open. Only one process can hold the
-<a href=#137 id=137 data-nosnippet>137</a>        // flock at a time. In Nauka, that matters because the fabric
-<a href=#138 id=138 data-nosnippet>138</a>        // layer has concurrent consumers of the same `bootstrap.skv`:
-<a href=#139 id=139 data-nosnippet>139</a>        //
-<a href=#140 id=140 data-nosnippet>140</a>        // - Ad-hoc CLI invocations (`nauka hypervisor status`, etc.)
-<a href=#141 id=141 data-nosnippet>141</a>        // - The `nauka-forge` daemon running reconcile cycles
-<a href=#142 id=142 data-nosnippet>142</a>        // - The `nauka-announce` listener
-<a href=#143 id=143 data-nosnippet>143</a>        //
-<a href=#144 id=144 data-nosnippet>144</a>        // Each of them opens the DB for a short span (read state, do
-<a href=#145 id=145 data-nosnippet>145</a>        // work, `shutdown().await`) but their windows overlap, so an
-<a href=#146 id=146 data-nosnippet>146</a>        // open that happens to collide with another process's brief
-<a href=#147 id=147 data-nosnippet>147</a>        // write window would fail with
-<a href=#148 id=148 data-nosnippet>148</a>        // `Other("Database at ... LOCK is already locked by another process")`.
-<a href=#149 id=149 data-nosnippet>149</a>        //
-<a href=#150 id=150 data-nosnippet>150</a>        // Before P1.11 (sifrah/nauka#201), this was masked because every
-<a href=#151 id=151 data-nosnippet>151</a>        // CLI caller used the legacy JSON-file bootstrap backend, which
-<a href=#152 id=152 data-nosnippet>152</a>        // did not take an exclusive flock. P1.11 migrated every caller
-<a href=#153 id=153 data-nosnippet>153</a>        // to `EmbeddedDb`, so the contention became real.
-<a href=#154 id=154 data-nosnippet>154</a>        //
-<a href=#155 id=155 data-nosnippet>155</a>        // The fix: retry the open on "already locked" with exponential
-<a href=#156 id=156 data-nosnippet>156</a>        // backoff up to a 5-second deadline, matching the pattern used
-<a href=#157 id=157 data-nosnippet>157</a>        // by `shutdown` in `wait_for_surrealkv_lock_release`. 5 s is the
-<a href=#158 id=158 data-nosnippet>158</a>        // same "fast timeout" budget used for health checks — long
-<a href=#159 id=159 data-nosnippet>159</a>        // enough to ride out a forge reconcile cycle that briefly holds
-<a href=#160 id=160 data-nosnippet>160</a>        // the lock, short enough that a stuck holder surfaces as a
-<a href=#161 id=161 data-nosnippet>161</a>        // clear error instead of hanging forever.
-<a href=#162 id=162 data-nosnippet>162</a>        </span><span class="kw">let </span>path_str = path.to_string_lossy().into_owned();
-<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span>inner = open_datastore_with_retry(<span class="kw-2">&amp;</span>path_str).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#164 id=164 data-nosnippet>164</a>
-<a href=#165 id=165 data-nosnippet>165</a>        inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#166 id=166 data-nosnippet>166</a>
-<a href=#167 id=167 data-nosnippet>167</a>        <span class="comment">// Apply the bootstrap schema after switching to the right ns/db.
-<a href=#168 id=168 data-nosnippet>168</a>        // DEFINE TABLE / FIELD / INDEX are db-scoped, so use_db must
-<a href=#169 id=169 data-nosnippet>169</a>        // happen first. The schema's IF NOT EXISTS clauses make this
-<a href=#170 id=170 data-nosnippet>170</a>        // safe to run on every open.
-<a href=#171 id=171 data-nosnippet>171</a>        </span>inner.query(BOOTSTRAP_SCHEMA).<span class="kw">await</span><span class="question-mark">?</span>.check()<span class="question-mark">?</span>;
-<a href=#172 id=172 data-nosnippet>172</a>
-<a href=#173 id=173 data-nosnippet>173</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
-<a href=#174 id=174 data-nosnippet>174</a>            inner,
-<a href=#175 id=175 data-nosnippet>175</a>            path: path.to_path_buf(),
-<a href=#176 id=176 data-nosnippet>176</a>        })
-<a href=#177 id=177 data-nosnippet>177</a>    }
-<a href=#178 id=178 data-nosnippet>178</a>
-<a href=#179 id=179 data-nosnippet>179</a>    <span class="doccomment">/// Borrow the underlying SurrealDB SDK client.
-<a href=#180 id=180 data-nosnippet>180</a>    ///
-<a href=#181 id=181 data-nosnippet>181</a>    /// All SurrealQL queries flow through this. The wrapper does not
-<a href=#182 id=182 data-nosnippet>182</a>    /// re-export every SDK method — call sites that need the full SDK
-<a href=#183 id=183 data-nosnippet>183</a>    /// surface go through `db.client().query(...)` etc.
-<a href=#184 id=184 data-nosnippet>184</a>    </span><span class="kw">pub fn </span>client(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Surreal&lt;Db&gt; {
-<a href=#185 id=185 data-nosnippet>185</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.inner
-<a href=#186 id=186 data-nosnippet>186</a>    }
-<a href=#187 id=187 data-nosnippet>187</a>
-<a href=#188 id=188 data-nosnippet>188</a>    <span class="doccomment">/// Path of the on-disk SurrealKV datastore.
-<a href=#189 id=189 data-nosnippet>189</a>    </span><span class="kw">pub fn </span>path(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Path {
-<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.path
-<a href=#191 id=191 data-nosnippet>191</a>    }
-<a href=#192 id=192 data-nosnippet>192</a>
-<a href=#193 id=193 data-nosnippet>193</a>    <span class="doccomment">/// Shut down the wrapper, dropping the SDK client and waiting for the
-<a href=#194 id=194 data-nosnippet>194</a>    /// SurrealDB background router task to finish closing the datastore
-<a href=#195 id=195 data-nosnippet>195</a>    /// so a subsequent `EmbeddedDb::open` at the same path can succeed
-<a href=#196 id=196 data-nosnippet>196</a>    /// — and, critically, so any writes committed through this handle
-<a href=#197 id=197 data-nosnippet>197</a>    /// are durably on disk before we return.
-<a href=#198 id=198 data-nosnippet>198</a>    ///
-<a href=#199 id=199 data-nosnippet>199</a>    /// # Why this function exists
-<a href=#200 id=200 data-nosnippet>200</a>    ///
-<a href=#201 id=201 data-nosnippet>201</a>    /// The SDK's `Surreal&lt;Db&gt;` router runs on a background tokio task
-<a href=#202 id=202 data-nosnippet>202</a>    /// that owns an `Arc&lt;Datastore&gt;`. `drop(Surreal&lt;Db&gt;)` is
-<a href=#203 id=203 data-nosnippet>203</a>    /// fire-and-forget: it closes the route channel, the router task
-<a href=#204 id=204 data-nosnippet>204</a>    /// sees `route_rx.recv()` return `Err`, breaks out of its loop,
-<a href=#205 id=205 data-nosnippet>205</a>    /// and **then** runs `Datastore::shutdown().await` which:
-<a href=#206 id=206 data-nosnippet>206</a>    ///
-<a href=#207 id=207 data-nosnippet>207</a>    /// 1. Shuts down the commit coordinator and WAL background flusher
-<a href=#208 id=208 data-nosnippet>208</a>    /// 2. Calls `Tree::close()` which flushes all memtables to SSTables
-<a href=#209 id=209 data-nosnippet>209</a>    /// 3. Closes the WAL
-<a href=#210 id=210 data-nosnippet>210</a>    /// 4. Drops the `LockFile`, releasing SurrealKV's OS-level exclusive
-<a href=#211 id=211 data-nosnippet>211</a>    ///    flock on `&lt;path&gt;/LOCK`
-<a href=#212 id=212 data-nosnippet>212</a>    ///
-<a href=#213 id=213 data-nosnippet>213</a>    /// None of this is synchronous with `drop(self.inner)`. A caller that
-<a href=#214 id=214 data-nosnippet>214</a>    /// does `shutdown().await; open(same_path).await` races the
-<a href=#215 id=215 data-nosnippet>215</a>    /// background task. Previous versions of this method used
-<a href=#216 id=216 data-nosnippet>216</a>    /// `tokio::time::sleep(50 ms)` as a heuristic — enough on CI Linux,
-<a href=#217 id=217 data-nosnippet>217</a>    /// **not** enough on Mac arm64 under contention, where it manifested
-<a href=#218 id=218 data-nosnippet>218</a>    /// as data loss (`load_async` returning `None` after a round-trip
-<a href=#219 id=219 data-nosnippet>219</a>    /// reopen, reproducible at 77% with `--test-threads=2`). See
-<a href=#220 id=220 data-nosnippet>220</a>    /// sifrah/nauka#255 for the investigation.
-<a href=#221 id=221 data-nosnippet>221</a>    ///
-<a href=#222 id=222 data-nosnippet>222</a>    /// The deterministic signal that step 4 has happened is the release
-<a href=#223 id=223 data-nosnippet>223</a>    /// of the OS-level flock on `&lt;path&gt;/LOCK`. We poll for that release
-<a href=#224 id=224 data-nosnippet>224</a>    /// by trying to acquire the same flock ourselves via
-<a href=#225 id=225 data-nosnippet>225</a>    /// [`std::fs::File::try_lock`]. When `try_lock` succeeds, the
-<a href=#226 id=226 data-nosnippet>226</a>    /// previous `Datastore::shutdown()` chain has definitively run to
-<a href=#227 id=227 data-nosnippet>227</a>    /// completion, which implies every prior commit is durable and the
-<a href=#228 id=228 data-nosnippet>228</a>    /// next open can proceed without a lock-held error.
-<a href=#229 id=229 data-nosnippet>229</a>    ///
-<a href=#230 id=230 data-nosnippet>230</a>    /// # Cost
-<a href=#231 id=231 data-nosnippet>231</a>    ///
-<a href=#232 id=232 data-nosnippet>232</a>    /// Fast path: a single `yield_now` + `try_lock` (~sub-ms). Slow path:
-<a href=#233 id=233 data-nosnippet>233</a>    /// exponential backoff from 1 ms to a 50 ms ceiling, up to a hard
-<a href=#234 id=234 data-nosnippet>234</a>    /// 5-second deadline after which the call returns
-<a href=#235 id=235 data-nosnippet>235</a>    /// [`StateError::Database`]. 5 s is generous relative to the
-<a href=#236 id=236 data-nosnippet>236</a>    /// ~10–100 ms that a real `Datastore::shutdown()` takes even on a
-<a href=#237 id=237 data-nosnippet>237</a>    /// contended runtime, and still well under the "fast timeout" Nauka
-<a href=#238 id=238 data-nosnippet>238</a>    /// convention for health checks.
-<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">pub async fn </span>shutdown(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="comment">// Explicit drop of the inner client. The compiler would do this
-<a href=#241 id=241 data-nosnippet>241</a>        // anyway when `self` goes out of scope, but naming the step
-<a href=#242 id=242 data-nosnippet>242</a>        // makes the handoff to the router task visible.
-<a href=#243 id=243 data-nosnippet>243</a>        </span><span class="kw">let </span>path = <span class="self">self</span>.path.clone();
-<a href=#244 id=244 data-nosnippet>244</a>        drop(<span class="self">self</span>.inner);
+<a href=#6 id=6 data-nosnippet>6</a>//! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, an
+<a href=#7 id=7 data-nosnippet>7</a>//! explicit `shutdown` step that waits for SurrealKV's background router to
+<a href=#8 id=8 data-nosnippet>8</a>//! release its OS-level flock, and automatic application of the bootstrap
+<a href=#9 id=9 data-nosnippet>9</a>//! schema (`schemas/bootstrap.surql`) on every open.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! This is the single source of truth for everything a node needs to read
+<a href=#12 id=12 data-nosnippet>12</a>//! before the cluster is reachable: mesh identity, hypervisor identity, peer
+<a href=#13 id=13 data-nosnippet>13</a>//! list, WireGuard keypair, and the storage region registry. See the crate
+<a href=#14 id=14 data-nosnippet>14</a>//! [`README`](https://github.com/sifrah/nauka/blob/main/layers/state/README.md)
+<a href=#15 id=15 data-nosnippet>15</a>//! for the full guide and on-disk layout.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! # Example
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! ```no_run
+<a href=#20 id=20 data-nosnippet>20</a>//! use nauka_state::EmbeddedDb;
+<a href=#21 id=21 data-nosnippet>21</a>//! use std::path::Path;
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! # async fn example() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+<a href=#24 id=24 data-nosnippet>24</a>//! // Open (or create) the SurrealKV datastore. The bootstrap schema
+<a href=#25 id=25 data-nosnippet>25</a>//! // is applied automatically. Use `EmbeddedDb::open_default()` to
+<a href=#26 id=26 data-nosnippet>26</a>//! // pick up the run-mode-aware default path instead.
+<a href=#27 id=27 data-nosnippet>27</a>//! let db = EmbeddedDb::open(Path::new("/var/lib/nauka/bootstrap.skv")).await?;
+<a href=#28 id=28 data-nosnippet>28</a>//!
+<a href=#29 id=29 data-nosnippet>29</a>//! // Drop down to the SurrealDB SDK for queries.
+<a href=#30 id=30 data-nosnippet>30</a>//! let _: Vec&lt;surrealdb::types::Value&gt; = db
+<a href=#31 id=31 data-nosnippet>31</a>//!     .client()
+<a href=#32 id=32 data-nosnippet>32</a>//!     .query("SELECT * FROM peer")
+<a href=#33 id=33 data-nosnippet>33</a>//!     .await?
+<a href=#34 id=34 data-nosnippet>34</a>//!     .take(0)?;
+<a href=#35 id=35 data-nosnippet>35</a>//!
+<a href=#36 id=36 data-nosnippet>36</a>//! // Shut down explicitly so the SurrealKV flock is released and a
+<a href=#37 id=37 data-nosnippet>37</a>//! // subsequent `EmbeddedDb::open` at the same path can succeed.
+<a href=#38 id=38 data-nosnippet>38</a>//! db.shutdown().await?;
+<a href=#39 id=39 data-nosnippet>39</a>//! # Ok(()) }
+<a href=#40 id=40 data-nosnippet>40</a>//! ```
+<a href=#41 id=41 data-nosnippet>41</a>
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">use </span>std::fs::{OpenOptions, TryLockError};
+<a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>std::path::{Path, PathBuf};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>std::time::{Duration, Instant};
+<a href=#45 id=45 data-nosnippet>45</a>
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>surrealdb::engine::local::{Db, SurrealKv};
+<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span>surrealdb::Surreal;
+<a href=#48 id=48 data-nosnippet>48</a>
+<a href=#49 id=49 data-nosnippet>49</a><span class="kw">use </span>crate::{<span class="prelude-ty">Result</span>, StateError, BOOTSTRAP_DB, NAUKA_NS};
+<a href=#50 id=50 data-nosnippet>50</a>
+<a href=#51 id=51 data-nosnippet>51</a><span class="doccomment">/// The bootstrap-state SurrealQL schema, embedded at compile time.
+<a href=#52 id=52 data-nosnippet>52</a>///
+<a href=#53 id=53 data-nosnippet>53</a>/// Defined in `layers/state/schemas/bootstrap.surql` (P1.6, sifrah/nauka#196).
+<a href=#54 id=54 data-nosnippet>54</a>/// `EmbeddedDb::open` applies this on every open. The schema is fully
+<a href=#55 id=55 data-nosnippet>55</a>/// idempotent thanks to `IF NOT EXISTS` on every `DEFINE` statement, so
+<a href=#56 id=56 data-nosnippet>56</a>/// re-applying against an already-initialised database is a no-op.
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="kw">const </span>BOOTSTRAP_SCHEMA: <span class="kw-2">&amp;</span>str = <span class="macro">include_str!</span>(<span class="string">"../schemas/bootstrap.surql"</span>);
+<a href=#58 id=58 data-nosnippet>58</a>
+<a href=#59 id=59 data-nosnippet>59</a><span class="doccomment">/// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
+<a href=#60 id=60 data-nosnippet>60</a>///
+<a href=#61 id=61 data-nosnippet>61</a>/// Cheap to clone: every clone shares the same underlying `Surreal&lt;Db&gt;`
+<a href=#62 id=62 data-nosnippet>62</a>/// connection (which itself uses an `Arc` internally).
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="attr">#[derive(Clone)]
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="kw">pub struct </span>EmbeddedDb {
+<a href=#65 id=65 data-nosnippet>65</a>    inner: Surreal&lt;Db&gt;,
+<a href=#66 id=66 data-nosnippet>66</a>    path: PathBuf,
+<a href=#67 id=67 data-nosnippet>67</a>}
+<a href=#68 id=68 data-nosnippet>68</a>
+<a href=#69 id=69 data-nosnippet>69</a><span class="kw">impl </span>EmbeddedDb {
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="doccomment">/// Open (or create) the SurrealKV-backed database at the run-mode-aware
+<a href=#71 id=71 data-nosnippet>71</a>    /// default path provided by [`nauka_core::process::nauka_db_path`]:
+<a href=#72 id=72 data-nosnippet>72</a>    ///
+<a href=#73 id=73 data-nosnippet>73</a>    /// - CLI mode: `~/.nauka/bootstrap.skv`
+<a href=#74 id=74 data-nosnippet>74</a>    /// - Service mode (root): `/var/lib/nauka/bootstrap.skv`
+<a href=#75 id=75 data-nosnippet>75</a>    ///
+<a href=#76 id=76 data-nosnippet>76</a>    /// The parent state directory is created via
+<a href=#77 id=77 data-nosnippet>77</a>    /// [`nauka_core::process::ensure_nauka_state_dir`] (with 0o700 perms),
+<a href=#78 id=78 data-nosnippet>78</a>    /// then the rest of the open path is the same as [`Self::open`].
+<a href=#79 id=79 data-nosnippet>79</a>    </span><span class="kw">pub async fn </span>open_default() -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#80 id=80 data-nosnippet>80</a>        <span class="comment">// Create the state directory with the right perms; the SurrealKV
+<a href=#81 id=81 data-nosnippet>81</a>        // datastore directory itself is created by `Surreal::new::&lt;SurrealKv&gt;`.
+<a href=#82 id=82 data-nosnippet>82</a>        </span><span class="kw">let _ </span>= nauka_core::process::ensure_nauka_state_dir()
+<a href=#83 id=83 data-nosnippet>83</a>            .map_err(|e| StateError::Database(<span class="macro">format!</span>(<span class="string">"ensure state dir: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#84 id=84 data-nosnippet>84</a>        <span class="kw">let </span>path = nauka_core::process::nauka_db_path();
+<a href=#85 id=85 data-nosnippet>85</a>        <span class="self">Self</span>::open(<span class="kw-2">&amp;</span>path).<span class="kw">await
+<a href=#86 id=86 data-nosnippet>86</a>    </span>}
+<a href=#87 id=87 data-nosnippet>87</a>
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="doccomment">/// Open (or create) the SurrealKV-backed database at `path`, select the
+<a href=#89 id=89 data-nosnippet>89</a>    /// `nauka` / `bootstrap` namespace/database, and apply the embedded
+<a href=#90 id=90 data-nosnippet>90</a>    /// bootstrap schema.
+<a href=#91 id=91 data-nosnippet>91</a>    ///
+<a href=#92 id=92 data-nosnippet>92</a>    /// The parent directory is created if it doesn't exist. On Unix the
+<a href=#93 id=93 data-nosnippet>93</a>    /// parent directory is also chmod-ed to 0o700 (best-effort).
+<a href=#94 id=94 data-nosnippet>94</a>    ///
+<a href=#95 id=95 data-nosnippet>95</a>    /// The bootstrap schema (`schemas/bootstrap.surql`, P1.6) is applied on
+<a href=#96 id=96 data-nosnippet>96</a>    /// every open. It is fully idempotent thanks to `IF NOT EXISTS` on
+<a href=#97 id=97 data-nosnippet>97</a>    /// every `DEFINE` statement, so reopening an existing database is a
+<a href=#98 id=98 data-nosnippet>98</a>    /// no-op for already-defined tables, fields, and indexes — and any
+<a href=#99 id=99 data-nosnippet>99</a>    /// new tables/fields/indexes that have appeared since last open are
+<a href=#100 id=100 data-nosnippet>100</a>    /// added forward-compatibly. P1.7 (sifrah/nauka#197) is the issue that
+<a href=#101 id=101 data-nosnippet>101</a>    /// wires this in.
+<a href=#102 id=102 data-nosnippet>102</a>    ///
+<a href=#103 id=103 data-nosnippet>103</a>    /// For the run-mode-aware default path, use [`Self::open_default`].
+<a href=#104 id=104 data-nosnippet>104</a>    ///
+<a href=#105 id=105 data-nosnippet>105</a>    /// # Errors
+<a href=#106 id=106 data-nosnippet>106</a>    ///
+<a href=#107 id=107 data-nosnippet>107</a>    /// Returns [`StateError::Io`] if the parent directory cannot be created,
+<a href=#108 id=108 data-nosnippet>108</a>    /// or one of [`StateError::NotFound`] / [`StateError::Schema`] /
+<a href=#109 id=109 data-nosnippet>109</a>    /// [`StateError::Database`] (depending on the underlying SurrealDB
+<a href=#110 id=110 data-nosnippet>110</a>    /// failure mode) if SurrealDB cannot open the datastore, switch to the
+<a href=#111 id=111 data-nosnippet>111</a>    /// configured namespace/database, or apply the bootstrap schema. The
+<a href=#112 id=112 data-nosnippet>112</a>    /// classification is done by the `From&lt;surrealdb::Error&gt;` impl in
+<a href=#113 id=113 data-nosnippet>113</a>    /// `lib.rs` (P1.3, sifrah/nauka#193).
+<a href=#114 id=114 data-nosnippet>114</a>    </span><span class="kw">pub async fn </span>open(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>&gt; {
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(parent) = path.parent() {
+<a href=#116 id=116 data-nosnippet>116</a>            <span class="kw">if </span>!parent.as_os_str().is_empty() {
+<a href=#117 id=117 data-nosnippet>117</a>                std::fs::create_dir_all(parent)<span class="question-mark">?</span>;
+<a href=#118 id=118 data-nosnippet>118</a>                <span class="attr">#[cfg(unix)]
+<a href=#119 id=119 data-nosnippet>119</a>                </span>{
+<a href=#120 id=120 data-nosnippet>120</a>                    <span class="kw">use </span>std::os::unix::fs::PermissionsExt;
+<a href=#121 id=121 data-nosnippet>121</a>                    <span class="comment">// Best-effort 0o700 on the parent (P1.4 perms target).
+<a href=#122 id=122 data-nosnippet>122</a>                    // We don't surface a chmod failure as a hard error: the
+<a href=#123 id=123 data-nosnippet>123</a>                    // dir was created successfully, refusing to start over a
+<a href=#124 id=124 data-nosnippet>124</a>                    // chmod refusal would be obnoxious. Logged via tracing
+<a href=#125 id=125 data-nosnippet>125</a>                    // by nauka_core::process when the helper is used.
+<a href=#126 id=126 data-nosnippet>126</a>                    </span><span class="kw">let _ </span>=
+<a href=#127 id=127 data-nosnippet>127</a>                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(<span class="number">0o700</span>));
+<a href=#128 id=128 data-nosnippet>128</a>                }
+<a href=#129 id=129 data-nosnippet>129</a>            }
+<a href=#130 id=130 data-nosnippet>130</a>        }
+<a href=#131 id=131 data-nosnippet>131</a>
+<a href=#132 id=132 data-nosnippet>132</a>        <span class="comment">// Acquire the SurrealKV datastore with retry-on-lock-contention.
+<a href=#133 id=133 data-nosnippet>133</a>        //
+<a href=#134 id=134 data-nosnippet>134</a>        // # Why this exists
+<a href=#135 id=135 data-nosnippet>135</a>        //
+<a href=#136 id=136 data-nosnippet>136</a>        // SurrealKV takes an OS-level exclusive flock on `&lt;path&gt;/LOCK`
+<a href=#137 id=137 data-nosnippet>137</a>        // whenever a `Datastore` is open. Only one process can hold the
+<a href=#138 id=138 data-nosnippet>138</a>        // flock at a time. In Nauka, that matters because the fabric
+<a href=#139 id=139 data-nosnippet>139</a>        // layer has concurrent consumers of the same `bootstrap.skv`:
+<a href=#140 id=140 data-nosnippet>140</a>        //
+<a href=#141 id=141 data-nosnippet>141</a>        // - Ad-hoc CLI invocations (`nauka hypervisor status`, etc.)
+<a href=#142 id=142 data-nosnippet>142</a>        // - The `nauka-forge` daemon running reconcile cycles
+<a href=#143 id=143 data-nosnippet>143</a>        // - The `nauka-announce` listener
+<a href=#144 id=144 data-nosnippet>144</a>        //
+<a href=#145 id=145 data-nosnippet>145</a>        // Each of them opens the DB for a short span (read state, do
+<a href=#146 id=146 data-nosnippet>146</a>        // work, `shutdown().await`) but their windows overlap, so an
+<a href=#147 id=147 data-nosnippet>147</a>        // open that happens to collide with another process's brief
+<a href=#148 id=148 data-nosnippet>148</a>        // write window would fail with
+<a href=#149 id=149 data-nosnippet>149</a>        // `Other("Database at ... LOCK is already locked by another process")`.
+<a href=#150 id=150 data-nosnippet>150</a>        //
+<a href=#151 id=151 data-nosnippet>151</a>        // The fix: retry the open on "already locked" with exponential
+<a href=#152 id=152 data-nosnippet>152</a>        // backoff up to a 5-second deadline, matching the pattern used
+<a href=#153 id=153 data-nosnippet>153</a>        // by `shutdown` in `wait_for_surrealkv_lock_release`. 5 s is the
+<a href=#154 id=154 data-nosnippet>154</a>        // same "fast timeout" budget used for health checks — long
+<a href=#155 id=155 data-nosnippet>155</a>        // enough to ride out a forge reconcile cycle that briefly holds
+<a href=#156 id=156 data-nosnippet>156</a>        // the lock, short enough that a stuck holder surfaces as a
+<a href=#157 id=157 data-nosnippet>157</a>        // clear error instead of hanging forever.
+<a href=#158 id=158 data-nosnippet>158</a>        </span><span class="kw">let </span>path_str = path.to_string_lossy().into_owned();
+<a href=#159 id=159 data-nosnippet>159</a>        <span class="kw">let </span>inner = open_datastore_with_retry(<span class="kw-2">&amp;</span>path_str).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#160 id=160 data-nosnippet>160</a>
+<a href=#161 id=161 data-nosnippet>161</a>        inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#162 id=162 data-nosnippet>162</a>
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="comment">// Apply the bootstrap schema after switching to the right ns/db.
+<a href=#164 id=164 data-nosnippet>164</a>        // DEFINE TABLE / FIELD / INDEX are db-scoped, so use_db must
+<a href=#165 id=165 data-nosnippet>165</a>        // happen first. The schema's IF NOT EXISTS clauses make this
+<a href=#166 id=166 data-nosnippet>166</a>        // safe to run on every open.
+<a href=#167 id=167 data-nosnippet>167</a>        </span>inner.query(BOOTSTRAP_SCHEMA).<span class="kw">await</span><span class="question-mark">?</span>.check()<span class="question-mark">?</span>;
+<a href=#168 id=168 data-nosnippet>168</a>
+<a href=#169 id=169 data-nosnippet>169</a>        <span class="prelude-val">Ok</span>(<span class="self">Self </span>{
+<a href=#170 id=170 data-nosnippet>170</a>            inner,
+<a href=#171 id=171 data-nosnippet>171</a>            path: path.to_path_buf(),
+<a href=#172 id=172 data-nosnippet>172</a>        })
+<a href=#173 id=173 data-nosnippet>173</a>    }
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="doccomment">/// Borrow the underlying SurrealDB SDK client.
+<a href=#176 id=176 data-nosnippet>176</a>    ///
+<a href=#177 id=177 data-nosnippet>177</a>    /// All SurrealQL queries flow through this. The wrapper does not
+<a href=#178 id=178 data-nosnippet>178</a>    /// re-export every SDK method — call sites that need the full SDK
+<a href=#179 id=179 data-nosnippet>179</a>    /// surface go through `db.client().query(...)` etc.
+<a href=#180 id=180 data-nosnippet>180</a>    </span><span class="kw">pub fn </span>client(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Surreal&lt;Db&gt; {
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.inner
+<a href=#182 id=182 data-nosnippet>182</a>    }
+<a href=#183 id=183 data-nosnippet>183</a>
+<a href=#184 id=184 data-nosnippet>184</a>    <span class="doccomment">/// Path of the on-disk SurrealKV datastore.
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">pub fn </span>path(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>Path {
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.path
+<a href=#187 id=187 data-nosnippet>187</a>    }
+<a href=#188 id=188 data-nosnippet>188</a>
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="doccomment">/// Shut down the wrapper, dropping the SDK client and waiting for the
+<a href=#190 id=190 data-nosnippet>190</a>    /// SurrealDB background router task to finish closing the datastore
+<a href=#191 id=191 data-nosnippet>191</a>    /// so a subsequent `EmbeddedDb::open` at the same path can succeed
+<a href=#192 id=192 data-nosnippet>192</a>    /// — and, critically, so any writes committed through this handle
+<a href=#193 id=193 data-nosnippet>193</a>    /// are durably on disk before we return.
+<a href=#194 id=194 data-nosnippet>194</a>    ///
+<a href=#195 id=195 data-nosnippet>195</a>    /// # Why this function exists
+<a href=#196 id=196 data-nosnippet>196</a>    ///
+<a href=#197 id=197 data-nosnippet>197</a>    /// The SDK's `Surreal&lt;Db&gt;` router runs on a background tokio task
+<a href=#198 id=198 data-nosnippet>198</a>    /// that owns an `Arc&lt;Datastore&gt;`. `drop(Surreal&lt;Db&gt;)` is
+<a href=#199 id=199 data-nosnippet>199</a>    /// fire-and-forget: it closes the route channel, the router task
+<a href=#200 id=200 data-nosnippet>200</a>    /// sees `route_rx.recv()` return `Err`, breaks out of its loop,
+<a href=#201 id=201 data-nosnippet>201</a>    /// and **then** runs `Datastore::shutdown().await` which:
+<a href=#202 id=202 data-nosnippet>202</a>    ///
+<a href=#203 id=203 data-nosnippet>203</a>    /// 1. Shuts down the commit coordinator and WAL background flusher
+<a href=#204 id=204 data-nosnippet>204</a>    /// 2. Calls `Tree::close()` which flushes all memtables to SSTables
+<a href=#205 id=205 data-nosnippet>205</a>    /// 3. Closes the WAL
+<a href=#206 id=206 data-nosnippet>206</a>    /// 4. Drops the `LockFile`, releasing SurrealKV's OS-level exclusive
+<a href=#207 id=207 data-nosnippet>207</a>    ///    flock on `&lt;path&gt;/LOCK`
+<a href=#208 id=208 data-nosnippet>208</a>    ///
+<a href=#209 id=209 data-nosnippet>209</a>    /// None of this is synchronous with `drop(self.inner)`. A caller that
+<a href=#210 id=210 data-nosnippet>210</a>    /// does `shutdown().await; open(same_path).await` races the
+<a href=#211 id=211 data-nosnippet>211</a>    /// background task. Previous versions of this method used
+<a href=#212 id=212 data-nosnippet>212</a>    /// `tokio::time::sleep(50 ms)` as a heuristic — enough on CI Linux,
+<a href=#213 id=213 data-nosnippet>213</a>    /// **not** enough on Mac arm64 under contention, where it manifested
+<a href=#214 id=214 data-nosnippet>214</a>    /// as data loss (`load_async` returning `None` after a round-trip
+<a href=#215 id=215 data-nosnippet>215</a>    /// reopen, reproducible at 77% with `--test-threads=2`). See
+<a href=#216 id=216 data-nosnippet>216</a>    /// sifrah/nauka#255 for the investigation.
+<a href=#217 id=217 data-nosnippet>217</a>    ///
+<a href=#218 id=218 data-nosnippet>218</a>    /// The deterministic signal that step 4 has happened is the release
+<a href=#219 id=219 data-nosnippet>219</a>    /// of the OS-level flock on `&lt;path&gt;/LOCK`. We poll for that release
+<a href=#220 id=220 data-nosnippet>220</a>    /// by trying to acquire the same flock ourselves via
+<a href=#221 id=221 data-nosnippet>221</a>    /// [`std::fs::File::try_lock`]. When `try_lock` succeeds, the
+<a href=#222 id=222 data-nosnippet>222</a>    /// previous `Datastore::shutdown()` chain has definitively run to
+<a href=#223 id=223 data-nosnippet>223</a>    /// completion, which implies every prior commit is durable and the
+<a href=#224 id=224 data-nosnippet>224</a>    /// next open can proceed without a lock-held error.
+<a href=#225 id=225 data-nosnippet>225</a>    ///
+<a href=#226 id=226 data-nosnippet>226</a>    /// # Cost
+<a href=#227 id=227 data-nosnippet>227</a>    ///
+<a href=#228 id=228 data-nosnippet>228</a>    /// Fast path: a single `yield_now` + `try_lock` (~sub-ms). Slow path:
+<a href=#229 id=229 data-nosnippet>229</a>    /// exponential backoff from 1 ms to a 50 ms ceiling, up to a hard
+<a href=#230 id=230 data-nosnippet>230</a>    /// 5-second deadline after which the call returns
+<a href=#231 id=231 data-nosnippet>231</a>    /// [`StateError::Database`]. 5 s is generous relative to the
+<a href=#232 id=232 data-nosnippet>232</a>    /// ~10–100 ms that a real `Datastore::shutdown()` takes even on a
+<a href=#233 id=233 data-nosnippet>233</a>    /// contended runtime, and still well under the "fast timeout" Nauka
+<a href=#234 id=234 data-nosnippet>234</a>    /// convention for health checks.
+<a href=#235 id=235 data-nosnippet>235</a>    </span><span class="kw">pub async fn </span>shutdown(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#236 id=236 data-nosnippet>236</a>        <span class="comment">// Explicit drop of the inner client. The compiler would do this
+<a href=#237 id=237 data-nosnippet>237</a>        // anyway when `self` goes out of scope, but naming the step
+<a href=#238 id=238 data-nosnippet>238</a>        // makes the handoff to the router task visible.
+<a href=#239 id=239 data-nosnippet>239</a>        </span><span class="kw">let </span>path = <span class="self">self</span>.path.clone();
+<a href=#240 id=240 data-nosnippet>240</a>        drop(<span class="self">self</span>.inner);
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a>        wait_for_surrealkv_lock_release(<span class="kw-2">&amp;</span>path).<span class="kw">await
+<a href=#243 id=243 data-nosnippet>243</a>    </span>}
+<a href=#244 id=244 data-nosnippet>244</a>}
 <a href=#245 id=245 data-nosnippet>245</a>
-<a href=#246 id=246 data-nosnippet>246</a>        wait_for_surrealkv_lock_release(<span class="kw-2">&amp;</span>path).<span class="kw">await
-<a href=#247 id=247 data-nosnippet>247</a>    </span>}
-<a href=#248 id=248 data-nosnippet>248</a>}
-<a href=#249 id=249 data-nosnippet>249</a>
-<a href=#250 id=250 data-nosnippet>250</a><span class="doccomment">/// Open the SurrealKV datastore at `path_str`, retrying on flock
-<a href=#251 id=251 data-nosnippet>251</a>/// contention until a 5-second deadline elapses.
-<a href=#252 id=252 data-nosnippet>252</a>///
-<a href=#253 id=253 data-nosnippet>253</a>/// See the rationale block in [`EmbeddedDb::open`] for the full context.
-<a href=#254 id=254 data-nosnippet>254</a>/// The short version: SurrealKV holds a process-exclusive flock while a
-<a href=#255 id=255 data-nosnippet>255</a>/// datastore is open, and Nauka's CLI / forge daemon / announce listener
-<a href=#256 id=256 data-nosnippet>256</a>/// all touch the same `bootstrap.skv`, so brief overlaps are normal. We
-<a href=#257 id=257 data-nosnippet>257</a>/// retry the open rather than surface a hard error for every such
-<a href=#258 id=258 data-nosnippet>258</a>/// overlap.
-<a href=#259 id=259 data-nosnippet>259</a></span><span class="kw">async fn </span>open_datastore_with_retry(path_str: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;Surreal&lt;Db&gt;&gt; {
-<a href=#260 id=260 data-nosnippet>260</a>    <span class="doccomment">/// Upper bound on the total wait. Same "fast timeout" budget as
-<a href=#261 id=261 data-nosnippet>261</a>    /// `shutdown` (see `wait_for_surrealkv_lock_release`). Generous
-<a href=#262 id=262 data-nosnippet>262</a>    /// relative to the real fast-path cost of a forge reconcile cycle
-<a href=#263 id=263 data-nosnippet>263</a>    /// (~10–100 ms of flock-held time) but short enough that a truly
-<a href=#264 id=264 data-nosnippet>264</a>    /// stuck holder surfaces as a clear error instead of a hang.
-<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">const </span>MAX_WAIT: Duration = Duration::from_secs(<span class="number">5</span>);
-<a href=#266 id=266 data-nosnippet>266</a>    <span class="doccomment">/// First retry after an initial miss.
-<a href=#267 id=267 data-nosnippet>267</a>    </span><span class="kw">const </span>MIN_BACKOFF: Duration = Duration::from_millis(<span class="number">5</span>);
-<a href=#268 id=268 data-nosnippet>268</a>    <span class="doccomment">/// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
-<a href=#269 id=269 data-nosnippet>269</a>    </span><span class="kw">const </span>MAX_BACKOFF: Duration = Duration::from_millis(<span class="number">50</span>);
-<a href=#270 id=270 data-nosnippet>270</a>
-<a href=#271 id=271 data-nosnippet>271</a>    <span class="kw">let </span>deadline = Instant::now() + MAX_WAIT;
-<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">let </span><span class="kw-2">mut </span>backoff = MIN_BACKOFF;
-<a href=#273 id=273 data-nosnippet>273</a>
-<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">loop </span>{
-<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">match </span>Surreal::new::&lt;SurrealKv&gt;(path_str).<span class="kw">await </span>{
-<a href=#276 id=276 data-nosnippet>276</a>            <span class="prelude-val">Ok</span>(db) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(db),
-<a href=#277 id=277 data-nosnippet>277</a>            <span class="prelude-val">Err</span>(err) =&gt; {
-<a href=#278 id=278 data-nosnippet>278</a>                <span class="comment">// SurrealKV surfaces flock contention as an "other"
-<a href=#279 id=279 data-nosnippet>279</a>                // backend error with a message containing the literal
-<a href=#280 id=280 data-nosnippet>280</a>                // path to `&lt;datastore&gt;/LOCK`. There's no structured
-<a href=#281 id=281 data-nosnippet>281</a>                // variant we can match on, so fall back to a substring
-<a href=#282 id=282 data-nosnippet>282</a>                // check. If the message shape changes in a future
-<a href=#283 id=283 data-nosnippet>283</a>                // surrealkv release the test
-<a href=#284 id=284 data-nosnippet>284</a>                // `open_retries_on_flock_contention` will flag it.
-<a href=#285 id=285 data-nosnippet>285</a>                </span><span class="kw">let </span>msg = err.to_string();
-<a href=#286 id=286 data-nosnippet>286</a>                <span class="kw">let </span>is_lock_contention = msg.contains(<span class="string">"already locked"</span>);
+<a href=#246 id=246 data-nosnippet>246</a><span class="doccomment">/// Open the SurrealKV datastore at `path_str`, retrying on flock
+<a href=#247 id=247 data-nosnippet>247</a>/// contention until a 5-second deadline elapses.
+<a href=#248 id=248 data-nosnippet>248</a>///
+<a href=#249 id=249 data-nosnippet>249</a>/// See the rationale block in [`EmbeddedDb::open`] for the full context.
+<a href=#250 id=250 data-nosnippet>250</a>/// The short version: SurrealKV holds a process-exclusive flock while a
+<a href=#251 id=251 data-nosnippet>251</a>/// datastore is open, and Nauka's CLI / forge daemon / announce listener
+<a href=#252 id=252 data-nosnippet>252</a>/// all touch the same `bootstrap.skv`, so brief overlaps are normal. We
+<a href=#253 id=253 data-nosnippet>253</a>/// retry the open rather than surface a hard error for every such
+<a href=#254 id=254 data-nosnippet>254</a>/// overlap.
+<a href=#255 id=255 data-nosnippet>255</a></span><span class="kw">async fn </span>open_datastore_with_retry(path_str: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;Surreal&lt;Db&gt;&gt; {
+<a href=#256 id=256 data-nosnippet>256</a>    <span class="doccomment">/// Upper bound on the total wait. Same "fast timeout" budget as
+<a href=#257 id=257 data-nosnippet>257</a>    /// `shutdown` (see `wait_for_surrealkv_lock_release`). Generous
+<a href=#258 id=258 data-nosnippet>258</a>    /// relative to the real fast-path cost of a forge reconcile cycle
+<a href=#259 id=259 data-nosnippet>259</a>    /// (~10–100 ms of flock-held time) but short enough that a truly
+<a href=#260 id=260 data-nosnippet>260</a>    /// stuck holder surfaces as a clear error instead of a hang.
+<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="kw">const </span>MAX_WAIT: Duration = Duration::from_secs(<span class="number">5</span>);
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// First retry after an initial miss.
+<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">const </span>MIN_BACKOFF: Duration = Duration::from_millis(<span class="number">5</span>);
+<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
+<a href=#265 id=265 data-nosnippet>265</a>    </span><span class="kw">const </span>MAX_BACKOFF: Duration = Duration::from_millis(<span class="number">50</span>);
+<a href=#266 id=266 data-nosnippet>266</a>
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="kw">let </span>deadline = Instant::now() + MAX_WAIT;
+<a href=#268 id=268 data-nosnippet>268</a>    <span class="kw">let </span><span class="kw-2">mut </span>backoff = MIN_BACKOFF;
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a>    <span class="kw">loop </span>{
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">match </span>Surreal::new::&lt;SurrealKv&gt;(path_str).<span class="kw">await </span>{
+<a href=#272 id=272 data-nosnippet>272</a>            <span class="prelude-val">Ok</span>(db) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(db),
+<a href=#273 id=273 data-nosnippet>273</a>            <span class="prelude-val">Err</span>(err) =&gt; {
+<a href=#274 id=274 data-nosnippet>274</a>                <span class="comment">// SurrealKV surfaces flock contention as an "other"
+<a href=#275 id=275 data-nosnippet>275</a>                // backend error with a message containing the literal
+<a href=#276 id=276 data-nosnippet>276</a>                // path to `&lt;datastore&gt;/LOCK`. There's no structured
+<a href=#277 id=277 data-nosnippet>277</a>                // variant we can match on, so fall back to a substring
+<a href=#278 id=278 data-nosnippet>278</a>                // check. If the message shape changes in a future
+<a href=#279 id=279 data-nosnippet>279</a>                // surrealkv release the test
+<a href=#280 id=280 data-nosnippet>280</a>                // `open_retries_on_flock_contention` will flag it.
+<a href=#281 id=281 data-nosnippet>281</a>                </span><span class="kw">let </span>msg = err.to_string();
+<a href=#282 id=282 data-nosnippet>282</a>                <span class="kw">let </span>is_lock_contention = msg.contains(<span class="string">"already locked"</span>);
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>                <span class="kw">if </span>!is_lock_contention || Instant::now() &gt;= deadline {
+<a href=#285 id=285 data-nosnippet>285</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(err.into());
+<a href=#286 id=286 data-nosnippet>286</a>                }
 <a href=#287 id=287 data-nosnippet>287</a>
-<a href=#288 id=288 data-nosnippet>288</a>                <span class="kw">if </span>!is_lock_contention || Instant::now() &gt;= deadline {
-<a href=#289 id=289 data-nosnippet>289</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(err.into());
-<a href=#290 id=290 data-nosnippet>290</a>                }
-<a href=#291 id=291 data-nosnippet>291</a>
-<a href=#292 id=292 data-nosnippet>292</a>                tokio::time::sleep(backoff).<span class="kw">await</span>;
-<a href=#293 id=293 data-nosnippet>293</a>                backoff = (backoff * <span class="number">2</span>).min(MAX_BACKOFF);
-<a href=#294 id=294 data-nosnippet>294</a>            }
-<a href=#295 id=295 data-nosnippet>295</a>        }
-<a href=#296 id=296 data-nosnippet>296</a>    }
-<a href=#297 id=297 data-nosnippet>297</a>}
-<a href=#298 id=298 data-nosnippet>298</a>
-<a href=#299 id=299 data-nosnippet>299</a><span class="doccomment">/// Poll until SurrealKV's OS-level exclusive flock on `&lt;path&gt;/LOCK` is
-<a href=#300 id=300 data-nosnippet>300</a>/// released by the previous `Datastore`, or until the 5-second deadline
-<a href=#301 id=301 data-nosnippet>301</a>/// elapses.
-<a href=#302 id=302 data-nosnippet>302</a>///
-<a href=#303 id=303 data-nosnippet>303</a>/// See [`EmbeddedDb::shutdown`] for the full rationale. The short version:
-<a href=#304 id=304 data-nosnippet>304</a>/// the SurrealDB SDK's `Surreal&lt;Db&gt;` router runs its `kvs.shutdown()`
-<a href=#305 id=305 data-nosnippet>305</a>/// chain asynchronously after `drop(Surreal&lt;Db&gt;)`, and the release of
-<a href=#306 id=306 data-nosnippet>306</a>/// the `LockFile` (surrealkv 0.21 / `src/lockfile.rs`) is the last step
-<a href=#307 id=307 data-nosnippet>307</a>/// of that chain. Successfully acquiring the same flock from here proves
-<a href=#308 id=308 data-nosnippet>308</a>/// the chain has run to completion.
-<a href=#309 id=309 data-nosnippet>309</a></span><span class="kw">async fn </span>wait_for_surrealkv_lock_release(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
-<a href=#310 id=310 data-nosnippet>310</a>    <span class="doccomment">/// Upper bound on the total wait. Generous relative to the actual
-<a href=#311 id=311 data-nosnippet>311</a>    /// `Datastore::shutdown()` cost (10–100 ms typical, even on contended
-<a href=#312 id=312 data-nosnippet>312</a>    /// runtimes) but well under the "fast timeout" Nauka convention.
-<a href=#313 id=313 data-nosnippet>313</a>    </span><span class="kw">const </span>MAX_WAIT: Duration = Duration::from_secs(<span class="number">5</span>);
-<a href=#314 id=314 data-nosnippet>314</a>    <span class="doccomment">/// First retry after the fast-path `try_lock` miss.
-<a href=#315 id=315 data-nosnippet>315</a>    </span><span class="kw">const </span>MIN_BACKOFF: Duration = Duration::from_millis(<span class="number">1</span>);
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="doccomment">/// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
-<a href=#317 id=317 data-nosnippet>317</a>    </span><span class="kw">const </span>MAX_BACKOFF: Duration = Duration::from_millis(<span class="number">50</span>);
+<a href=#288 id=288 data-nosnippet>288</a>                tokio::time::sleep(backoff).<span class="kw">await</span>;
+<a href=#289 id=289 data-nosnippet>289</a>                backoff = (backoff * <span class="number">2</span>).min(MAX_BACKOFF);
+<a href=#290 id=290 data-nosnippet>290</a>            }
+<a href=#291 id=291 data-nosnippet>291</a>        }
+<a href=#292 id=292 data-nosnippet>292</a>    }
+<a href=#293 id=293 data-nosnippet>293</a>}
+<a href=#294 id=294 data-nosnippet>294</a>
+<a href=#295 id=295 data-nosnippet>295</a><span class="doccomment">/// Poll until SurrealKV's OS-level exclusive flock on `&lt;path&gt;/LOCK` is
+<a href=#296 id=296 data-nosnippet>296</a>/// released by the previous `Datastore`, or until the 5-second deadline
+<a href=#297 id=297 data-nosnippet>297</a>/// elapses.
+<a href=#298 id=298 data-nosnippet>298</a>///
+<a href=#299 id=299 data-nosnippet>299</a>/// See [`EmbeddedDb::shutdown`] for the full rationale. The short version:
+<a href=#300 id=300 data-nosnippet>300</a>/// the SurrealDB SDK's `Surreal&lt;Db&gt;` router runs its `kvs.shutdown()`
+<a href=#301 id=301 data-nosnippet>301</a>/// chain asynchronously after `drop(Surreal&lt;Db&gt;)`, and the release of
+<a href=#302 id=302 data-nosnippet>302</a>/// the `LockFile` (surrealkv 0.21 / `src/lockfile.rs`) is the last step
+<a href=#303 id=303 data-nosnippet>303</a>/// of that chain. Successfully acquiring the same flock from here proves
+<a href=#304 id=304 data-nosnippet>304</a>/// the chain has run to completion.
+<a href=#305 id=305 data-nosnippet>305</a></span><span class="kw">async fn </span>wait_for_surrealkv_lock_release(path: <span class="kw-2">&amp;</span>Path) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt; {
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// Upper bound on the total wait. Generous relative to the actual
+<a href=#307 id=307 data-nosnippet>307</a>    /// `Datastore::shutdown()` cost (10–100 ms typical, even on contended
+<a href=#308 id=308 data-nosnippet>308</a>    /// runtimes) but well under the "fast timeout" Nauka convention.
+<a href=#309 id=309 data-nosnippet>309</a>    </span><span class="kw">const </span>MAX_WAIT: Duration = Duration::from_secs(<span class="number">5</span>);
+<a href=#310 id=310 data-nosnippet>310</a>    <span class="doccomment">/// First retry after the fast-path `try_lock` miss.
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">const </span>MIN_BACKOFF: Duration = Duration::from_millis(<span class="number">1</span>);
+<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
+<a href=#313 id=313 data-nosnippet>313</a>    </span><span class="kw">const </span>MAX_BACKOFF: Duration = Duration::from_millis(<span class="number">50</span>);
+<a href=#314 id=314 data-nosnippet>314</a>
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="kw">let </span>lock_path = path.join(<span class="string">"LOCK"</span>);
+<a href=#316 id=316 data-nosnippet>316</a>    <span class="kw">let </span>deadline = Instant::now() + MAX_WAIT;
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="kw">let </span><span class="kw-2">mut </span>backoff = MIN_BACKOFF;
 <a href=#318 id=318 data-nosnippet>318</a>
-<a href=#319 id=319 data-nosnippet>319</a>    <span class="kw">let </span>lock_path = path.join(<span class="string">"LOCK"</span>);
-<a href=#320 id=320 data-nosnippet>320</a>    <span class="kw">let </span>deadline = Instant::now() + MAX_WAIT;
-<a href=#321 id=321 data-nosnippet>321</a>    <span class="kw">let </span><span class="kw-2">mut </span>backoff = MIN_BACKOFF;
-<a href=#322 id=322 data-nosnippet>322</a>
-<a href=#323 id=323 data-nosnippet>323</a>    <span class="kw">loop </span>{
-<a href=#324 id=324 data-nosnippet>324</a>        <span class="comment">// Give any already-runnable task (the router exit handler) a
-<a href=#325 id=325 data-nosnippet>325</a>        // chance to make progress before we poll. Cheap in the common
-<a href=#326 id=326 data-nosnippet>326</a>        // case where the router task is already parked.
-<a href=#327 id=327 data-nosnippet>327</a>        </span>tokio::task::yield_now().<span class="kw">await</span>;
-<a href=#328 id=328 data-nosnippet>328</a>
-<a href=#329 id=329 data-nosnippet>329</a>        <span class="comment">// If the LOCK file doesn't exist, the datastore was never
-<a href=#330 id=330 data-nosnippet>330</a>        // initialised far enough to create it (e.g. `open` failed
-<a href=#331 id=331 data-nosnippet>331</a>        // upstream of the LSM tree build). There is nothing to wait
-<a href=#332 id=332 data-nosnippet>332</a>        // for — treat as already released.
-<a href=#333 id=333 data-nosnippet>333</a>        </span><span class="kw">if </span>!lock_path.exists() {
-<a href=#334 id=334 data-nosnippet>334</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#335 id=335 data-nosnippet>335</a>        }
-<a href=#336 id=336 data-nosnippet>336</a>
-<a href=#337 id=337 data-nosnippet>337</a>        <span class="comment">// Try to acquire the OS-level exclusive flock that SurrealKV
-<a href=#338 id=338 data-nosnippet>338</a>        // was holding on the same file. When `try_lock` returns
-<a href=#339 id=339 data-nosnippet>339</a>        // `Ok(())`, the previous datastore's `kvs.shutdown()` chain
-<a href=#340 id=340 data-nosnippet>340</a>        // has definitively run to completion and dropped its
-<a href=#341 id=341 data-nosnippet>341</a>        // `LockFile`; release immediately so a subsequent open() at
-<a href=#342 id=342 data-nosnippet>342</a>        // the same path can acquire it.
-<a href=#343 id=343 data-nosnippet>343</a>        //
-<a href=#344 id=344 data-nosnippet>344</a>        // ENOENT / other `open` errors between the `exists()` check
-<a href=#345 id=345 data-nosnippet>345</a>        // above and this call are benign races: if the error persists
-<a href=#346 id=346 data-nosnippet>346</a>        // the deadline check below will surface it, otherwise the next
-<a href=#347 id=347 data-nosnippet>347</a>        // iteration picks up the real state.
-<a href=#348 id=348 data-nosnippet>348</a>        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(file) = OpenOptions::new().read(<span class="bool-val">true</span>).write(<span class="bool-val">true</span>).open(<span class="kw-2">&amp;</span>lock_path) {
-<a href=#349 id=349 data-nosnippet>349</a>            <span class="kw">match </span>file.try_lock() {
-<a href=#350 id=350 data-nosnippet>350</a>                <span class="prelude-val">Ok</span>(()) =&gt; {
-<a href=#351 id=351 data-nosnippet>351</a>                    <span class="comment">// Success: release our probe lock and return. The
-<a href=#352 id=352 data-nosnippet>352</a>                    // explicit `unlock()` isn't strictly necessary
-<a href=#353 id=353 data-nosnippet>353</a>                    // (dropping `file` closes the fd and releases the
-<a href=#354 id=354 data-nosnippet>354</a>                    // flock) but makes the intent readable.
-<a href=#355 id=355 data-nosnippet>355</a>                    </span><span class="kw">let _ </span>= file.unlock();
-<a href=#356 id=356 data-nosnippet>356</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
-<a href=#357 id=357 data-nosnippet>357</a>                }
-<a href=#358 id=358 data-nosnippet>358</a>                <span class="prelude-val">Err</span>(TryLockError::WouldBlock) =&gt; {
-<a href=#359 id=359 data-nosnippet>359</a>                    <span class="comment">// Router task hasn't reached `LockFile::drop` yet.
-<a href=#360 id=360 data-nosnippet>360</a>                    // Fall through to the backoff sleep.
-<a href=#361 id=361 data-nosnippet>361</a>                </span>}
-<a href=#362 id=362 data-nosnippet>362</a>                <span class="prelude-val">Err</span>(TryLockError::Error(io_err)) =&gt; {
-<a href=#363 id=363 data-nosnippet>363</a>                    <span class="comment">// Real I/O error (not lock contention). Surface it
-<a href=#364 id=364 data-nosnippet>364</a>                    // immediately rather than looping against a broken
-<a href=#365 id=365 data-nosnippet>365</a>                    // filesystem.
-<a href=#366 id=366 data-nosnippet>366</a>                    </span><span class="kw">return </span><span class="prelude-val">Err</span>(io_err.into());
-<a href=#367 id=367 data-nosnippet>367</a>                }
-<a href=#368 id=368 data-nosnippet>368</a>            }
-<a href=#369 id=369 data-nosnippet>369</a>        }
-<a href=#370 id=370 data-nosnippet>370</a>
-<a href=#371 id=371 data-nosnippet>371</a>        <span class="kw">if </span>Instant::now() &gt;= deadline {
-<a href=#372 id=372 data-nosnippet>372</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(StateError::Database(<span class="macro">format!</span>(
-<a href=#373 id=373 data-nosnippet>373</a>                <span class="string">"EmbeddedDb::shutdown timed out after {}s waiting for \
-<a href=#374 id=374 data-nosnippet>374</a>                 SurrealKV LOCK release at {}"</span>,
-<a href=#375 id=375 data-nosnippet>375</a>                MAX_WAIT.as_secs(),
-<a href=#376 id=376 data-nosnippet>376</a>                lock_path.display(),
-<a href=#377 id=377 data-nosnippet>377</a>            )));
-<a href=#378 id=378 data-nosnippet>378</a>        }
-<a href=#379 id=379 data-nosnippet>379</a>
-<a href=#380 id=380 data-nosnippet>380</a>        tokio::time::sleep(backoff).<span class="kw">await</span>;
-<a href=#381 id=381 data-nosnippet>381</a>        backoff = (backoff * <span class="number">2</span>).min(MAX_BACKOFF);
-<a href=#382 id=382 data-nosnippet>382</a>    }
-<a href=#383 id=383 data-nosnippet>383</a>}
-<a href=#384 id=384 data-nosnippet>384</a>
-<a href=#385 id=385 data-nosnippet>385</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>EmbeddedDb {
-<a href=#386 id=386 data-nosnippet>386</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
-<a href=#387 id=387 data-nosnippet>387</a>        f.debug_struct(<span class="string">"EmbeddedDb"</span>)
-<a href=#388 id=388 data-nosnippet>388</a>            .field(<span class="string">"path"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.path)
-<a href=#389 id=389 data-nosnippet>389</a>            .field(<span class="string">"ns"</span>, <span class="kw-2">&amp;</span>NAUKA_NS)
-<a href=#390 id=390 data-nosnippet>390</a>            .field(<span class="string">"db"</span>, <span class="kw-2">&amp;</span>BOOTSTRAP_DB)
-<a href=#391 id=391 data-nosnippet>391</a>            .finish()
-<a href=#392 id=392 data-nosnippet>392</a>    }
-<a href=#393 id=393 data-nosnippet>393</a>}
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="kw">loop </span>{
+<a href=#320 id=320 data-nosnippet>320</a>        <span class="comment">// Give any already-runnable task (the router exit handler) a
+<a href=#321 id=321 data-nosnippet>321</a>        // chance to make progress before we poll. Cheap in the common
+<a href=#322 id=322 data-nosnippet>322</a>        // case where the router task is already parked.
+<a href=#323 id=323 data-nosnippet>323</a>        </span>tokio::task::yield_now().<span class="kw">await</span>;
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="comment">// If the LOCK file doesn't exist, the datastore was never
+<a href=#326 id=326 data-nosnippet>326</a>        // initialised far enough to create it (e.g. `open` failed
+<a href=#327 id=327 data-nosnippet>327</a>        // upstream of the LSM tree build). There is nothing to wait
+<a href=#328 id=328 data-nosnippet>328</a>        // for — treat as already released.
+<a href=#329 id=329 data-nosnippet>329</a>        </span><span class="kw">if </span>!lock_path.exists() {
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#331 id=331 data-nosnippet>331</a>        }
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="comment">// Try to acquire the OS-level exclusive flock that SurrealKV
+<a href=#334 id=334 data-nosnippet>334</a>        // was holding on the same file. When `try_lock` returns
+<a href=#335 id=335 data-nosnippet>335</a>        // `Ok(())`, the previous datastore's `kvs.shutdown()` chain
+<a href=#336 id=336 data-nosnippet>336</a>        // has definitively run to completion and dropped its
+<a href=#337 id=337 data-nosnippet>337</a>        // `LockFile`; release immediately so a subsequent open() at
+<a href=#338 id=338 data-nosnippet>338</a>        // the same path can acquire it.
+<a href=#339 id=339 data-nosnippet>339</a>        //
+<a href=#340 id=340 data-nosnippet>340</a>        // ENOENT / other `open` errors between the `exists()` check
+<a href=#341 id=341 data-nosnippet>341</a>        // above and this call are benign races: if the error persists
+<a href=#342 id=342 data-nosnippet>342</a>        // the deadline check below will surface it, otherwise the next
+<a href=#343 id=343 data-nosnippet>343</a>        // iteration picks up the real state.
+<a href=#344 id=344 data-nosnippet>344</a>        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(file) = OpenOptions::new().read(<span class="bool-val">true</span>).write(<span class="bool-val">true</span>).open(<span class="kw-2">&amp;</span>lock_path) {
+<a href=#345 id=345 data-nosnippet>345</a>            <span class="kw">match </span>file.try_lock() {
+<a href=#346 id=346 data-nosnippet>346</a>                <span class="prelude-val">Ok</span>(()) =&gt; {
+<a href=#347 id=347 data-nosnippet>347</a>                    <span class="comment">// Success: release our probe lock and return. The
+<a href=#348 id=348 data-nosnippet>348</a>                    // explicit `unlock()` isn't strictly necessary
+<a href=#349 id=349 data-nosnippet>349</a>                    // (dropping `file` closes the fd and releases the
+<a href=#350 id=350 data-nosnippet>350</a>                    // flock) but makes the intent readable.
+<a href=#351 id=351 data-nosnippet>351</a>                    </span><span class="kw">let _ </span>= file.unlock();
+<a href=#352 id=352 data-nosnippet>352</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#353 id=353 data-nosnippet>353</a>                }
+<a href=#354 id=354 data-nosnippet>354</a>                <span class="prelude-val">Err</span>(TryLockError::WouldBlock) =&gt; {
+<a href=#355 id=355 data-nosnippet>355</a>                    <span class="comment">// Router task hasn't reached `LockFile::drop` yet.
+<a href=#356 id=356 data-nosnippet>356</a>                    // Fall through to the backoff sleep.
+<a href=#357 id=357 data-nosnippet>357</a>                </span>}
+<a href=#358 id=358 data-nosnippet>358</a>                <span class="prelude-val">Err</span>(TryLockError::Error(io_err)) =&gt; {
+<a href=#359 id=359 data-nosnippet>359</a>                    <span class="comment">// Real I/O error (not lock contention). Surface it
+<a href=#360 id=360 data-nosnippet>360</a>                    // immediately rather than looping against a broken
+<a href=#361 id=361 data-nosnippet>361</a>                    // filesystem.
+<a href=#362 id=362 data-nosnippet>362</a>                    </span><span class="kw">return </span><span class="prelude-val">Err</span>(io_err.into());
+<a href=#363 id=363 data-nosnippet>363</a>                }
+<a href=#364 id=364 data-nosnippet>364</a>            }
+<a href=#365 id=365 data-nosnippet>365</a>        }
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">if </span>Instant::now() &gt;= deadline {
+<a href=#368 id=368 data-nosnippet>368</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(StateError::Database(<span class="macro">format!</span>(
+<a href=#369 id=369 data-nosnippet>369</a>                <span class="string">"EmbeddedDb::shutdown timed out after {}s waiting for \
+<a href=#370 id=370 data-nosnippet>370</a>                 SurrealKV LOCK release at {}"</span>,
+<a href=#371 id=371 data-nosnippet>371</a>                MAX_WAIT.as_secs(),
+<a href=#372 id=372 data-nosnippet>372</a>                lock_path.display(),
+<a href=#373 id=373 data-nosnippet>373</a>            )));
+<a href=#374 id=374 data-nosnippet>374</a>        }
+<a href=#375 id=375 data-nosnippet>375</a>
+<a href=#376 id=376 data-nosnippet>376</a>        tokio::time::sleep(backoff).<span class="kw">await</span>;
+<a href=#377 id=377 data-nosnippet>377</a>        backoff = (backoff * <span class="number">2</span>).min(MAX_BACKOFF);
+<a href=#378 id=378 data-nosnippet>378</a>    }
+<a href=#379 id=379 data-nosnippet>379</a>}
+<a href=#380 id=380 data-nosnippet>380</a>
+<a href=#381 id=381 data-nosnippet>381</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>EmbeddedDb {
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#383 id=383 data-nosnippet>383</a>        f.debug_struct(<span class="string">"EmbeddedDb"</span>)
+<a href=#384 id=384 data-nosnippet>384</a>            .field(<span class="string">"path"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.path)
+<a href=#385 id=385 data-nosnippet>385</a>            .field(<span class="string">"ns"</span>, <span class="kw-2">&amp;</span>NAUKA_NS)
+<a href=#386 id=386 data-nosnippet>386</a>            .field(<span class="string">"db"</span>, <span class="kw-2">&amp;</span>BOOTSTRAP_DB)
+<a href=#387 id=387 data-nosnippet>387</a>            .finish()
+<a href=#388 id=388 data-nosnippet>388</a>    }
+<a href=#389 id=389 data-nosnippet>389</a>}
+<a href=#390 id=390 data-nosnippet>390</a>
+<a href=#391 id=391 data-nosnippet>391</a><span class="attr">#[cfg(test)]
+<a href=#392 id=392 data-nosnippet>392</a></span><span class="kw">mod </span>tests {
+<a href=#393 id=393 data-nosnippet>393</a>    <span class="kw">use </span>surrealdb::types::SurrealValue;
 <a href=#394 id=394 data-nosnippet>394</a>
-<a href=#395 id=395 data-nosnippet>395</a><span class="attr">#[cfg(test)]
-<a href=#396 id=396 data-nosnippet>396</a></span><span class="kw">mod </span>tests {
-<a href=#397 id=397 data-nosnippet>397</a>    <span class="kw">use </span>surrealdb::types::SurrealValue;
-<a href=#398 id=398 data-nosnippet>398</a>
-<a href=#399 id=399 data-nosnippet>399</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
-<a href=#400 id=400 data-nosnippet>400</a>
-<a href=#401 id=401 data-nosnippet>401</a>    <span class="doccomment">/// Tiny test record used by the tests below. Defined inside the
-<a href=#402 id=402 data-nosnippet>402</a>    /// test module so the SurrealValue derive isn't compiled into the
-<a href=#403 id=403 data-nosnippet>403</a>    /// production library.
-<a href=#404 id=404 data-nosnippet>404</a>    </span><span class="attr">#[derive(Debug, Clone, PartialEq, SurrealValue)]
-<a href=#405 id=405 data-nosnippet>405</a>    </span><span class="kw">struct </span>Item {
-<a href=#406 id=406 data-nosnippet>406</a>        name: String,
-<a href=#407 id=407 data-nosnippet>407</a>        count: i32,
-<a href=#408 id=408 data-nosnippet>408</a>    }
-<a href=#409 id=409 data-nosnippet>409</a>
-<a href=#410 id=410 data-nosnippet>410</a>    <span class="doccomment">/// P1.2 smoke test: open the wrapper at a temp path and shut it down.
-<a href=#411 id=411 data-nosnippet>411</a>    </span><span class="attr">#[tokio::test]
-<a href=#412 id=412 data-nosnippet>412</a>    </span><span class="kw">async fn </span>open_and_shutdown_smoke() {
-<a href=#413 id=413 data-nosnippet>413</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"smoke.skv"</span>);
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#396 id=396 data-nosnippet>396</a>
+<a href=#397 id=397 data-nosnippet>397</a>    <span class="doccomment">/// Tiny test record used by the tests below. Defined inside the
+<a href=#398 id=398 data-nosnippet>398</a>    /// test module so the SurrealValue derive isn't compiled into the
+<a href=#399 id=399 data-nosnippet>399</a>    /// production library.
+<a href=#400 id=400 data-nosnippet>400</a>    </span><span class="attr">#[derive(Debug, Clone, PartialEq, SurrealValue)]
+<a href=#401 id=401 data-nosnippet>401</a>    </span><span class="kw">struct </span>Item {
+<a href=#402 id=402 data-nosnippet>402</a>        name: String,
+<a href=#403 id=403 data-nosnippet>403</a>        count: i32,
+<a href=#404 id=404 data-nosnippet>404</a>    }
+<a href=#405 id=405 data-nosnippet>405</a>
+<a href=#406 id=406 data-nosnippet>406</a>    <span class="doccomment">/// P1.2 smoke test: open the wrapper at a temp path and shut it down.
+<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="attr">#[tokio::test]
+<a href=#408 id=408 data-nosnippet>408</a>    </span><span class="kw">async fn </span>open_and_shutdown_smoke() {
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"smoke.skv"</span>);
+<a href=#411 id=411 data-nosnippet>411</a>
+<a href=#412 id=412 data-nosnippet>412</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path)
+<a href=#413 id=413 data-nosnippet>413</a>            .<span class="kw">await
+<a href=#414 id=414 data-nosnippet>414</a>            </span>.expect(<span class="string">"open should succeed at a writable temp path"</span>);
 <a href=#415 id=415 data-nosnippet>415</a>
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path)
-<a href=#417 id=417 data-nosnippet>417</a>            .<span class="kw">await
-<a href=#418 id=418 data-nosnippet>418</a>            </span>.expect(<span class="string">"open should succeed at a writable temp path"</span>);
-<a href=#419 id=419 data-nosnippet>419</a>
-<a href=#420 id=420 data-nosnippet>420</a>        <span class="macro">assert_eq!</span>(db.path(), path);
-<a href=#421 id=421 data-nosnippet>421</a>        <span class="macro">assert!</span>(path.exists(), <span class="string">"datastore path should exist after open"</span>);
-<a href=#422 id=422 data-nosnippet>422</a>
-<a href=#423 id=423 data-nosnippet>423</a>        <span class="kw">let _ </span>= db
-<a href=#424 id=424 data-nosnippet>424</a>            .client()
-<a href=#425 id=425 data-nosnippet>425</a>            .query(<span class="string">"INFO FOR DB"</span>)
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="macro">assert_eq!</span>(db.path(), path);
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert!</span>(path.exists(), <span class="string">"datastore path should exist after open"</span>);
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">let _ </span>= db
+<a href=#420 id=420 data-nosnippet>420</a>            .client()
+<a href=#421 id=421 data-nosnippet>421</a>            .query(<span class="string">"INFO FOR DB"</span>)
+<a href=#422 id=422 data-nosnippet>422</a>            .<span class="kw">await
+<a href=#423 id=423 data-nosnippet>423</a>            </span>.expect(<span class="string">"INFO FOR DB should succeed against the freshly-opened bootstrap db"</span>);
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a>        db.shutdown()
 <a href=#426 id=426 data-nosnippet>426</a>            .<span class="kw">await
-<a href=#427 id=427 data-nosnippet>427</a>            </span>.expect(<span class="string">"INFO FOR DB should succeed against the freshly-opened bootstrap db"</span>);
-<a href=#428 id=428 data-nosnippet>428</a>
-<a href=#429 id=429 data-nosnippet>429</a>        db.shutdown()
-<a href=#430 id=430 data-nosnippet>430</a>            .<span class="kw">await
-<a href=#431 id=431 data-nosnippet>431</a>            </span>.expect(<span class="string">"shutdown should always succeed in P1.2"</span>);
-<a href=#432 id=432 data-nosnippet>432</a>    }
-<a href=#433 id=433 data-nosnippet>433</a>
-<a href=#434 id=434 data-nosnippet>434</a>    <span class="doccomment">/// P1.5 — CRUD round-trip on a single table.
-<a href=#435 id=435 data-nosnippet>435</a>    ///
-<a href=#436 id=436 data-nosnippet>436</a>    /// Covers the full create → select-by-id → update → select → delete →
-<a href=#437 id=437 data-nosnippet>437</a>    /// select-after-delete cycle. Anchors the assumption that the SDK
-<a href=#438 id=438 data-nosnippet>438</a>    /// client returned by `db.client()` behaves the same as it would on
-<a href=#439 id=439 data-nosnippet>439</a>    /// a vanilla `Surreal::new::&lt;SurrealKv&gt;` connection.
-<a href=#440 id=440 data-nosnippet>440</a>    </span><span class="attr">#[tokio::test]
-<a href=#441 id=441 data-nosnippet>441</a>    </span><span class="kw">async fn </span>crud_round_trip() {
-<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"crud.skv"</span>))
-<a href=#444 id=444 data-nosnippet>444</a>            .<span class="kw">await
-<a href=#445 id=445 data-nosnippet>445</a>            </span>.expect(<span class="string">"open"</span>);
-<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>client = db.client();
-<a href=#447 id=447 data-nosnippet>447</a>
-<a href=#448 id=448 data-nosnippet>448</a>        <span class="comment">// Create.
-<a href=#449 id=449 data-nosnippet>449</a>        </span><span class="kw">let </span>created: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#450 id=450 data-nosnippet>450</a>            .create((<span class="string">"items"</span>, <span class="string">"first"</span>))
-<a href=#451 id=451 data-nosnippet>451</a>            .content(Item {
-<a href=#452 id=452 data-nosnippet>452</a>                name: <span class="string">"alpha"</span>.into(),
-<a href=#453 id=453 data-nosnippet>453</a>                count: <span class="number">1</span>,
-<a href=#454 id=454 data-nosnippet>454</a>            })
-<a href=#455 id=455 data-nosnippet>455</a>            .<span class="kw">await
-<a href=#456 id=456 data-nosnippet>456</a>            </span>.expect(<span class="string">"create"</span>);
-<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">let </span>created = created.expect(<span class="string">"create returned None"</span>);
-<a href=#458 id=458 data-nosnippet>458</a>        <span class="macro">assert_eq!</span>(created.name, <span class="string">"alpha"</span>);
-<a href=#459 id=459 data-nosnippet>459</a>        <span class="macro">assert_eq!</span>(created.count, <span class="number">1</span>);
-<a href=#460 id=460 data-nosnippet>460</a>
-<a href=#461 id=461 data-nosnippet>461</a>        <span class="comment">// Select by id.
-<a href=#462 id=462 data-nosnippet>462</a>        </span><span class="kw">let </span>fetched: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#463 id=463 data-nosnippet>463</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
-<a href=#464 id=464 data-nosnippet>464</a>            .<span class="kw">await
-<a href=#465 id=465 data-nosnippet>465</a>            </span>.expect(<span class="string">"select by id"</span>);
-<a href=#466 id=466 data-nosnippet>466</a>        <span class="macro">assert_eq!</span>(
-<a href=#467 id=467 data-nosnippet>467</a>            fetched,
-<a href=#468 id=468 data-nosnippet>468</a>            <span class="prelude-val">Some</span>(Item {
-<a href=#469 id=469 data-nosnippet>469</a>                name: <span class="string">"alpha"</span>.into(),
-<a href=#470 id=470 data-nosnippet>470</a>                count: <span class="number">1</span>,
-<a href=#471 id=471 data-nosnippet>471</a>            }),
-<a href=#472 id=472 data-nosnippet>472</a>        );
-<a href=#473 id=473 data-nosnippet>473</a>
-<a href=#474 id=474 data-nosnippet>474</a>        <span class="comment">// Update via content (full replace).
-<a href=#475 id=475 data-nosnippet>475</a>        </span><span class="kw">let </span>updated: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#476 id=476 data-nosnippet>476</a>            .update((<span class="string">"items"</span>, <span class="string">"first"</span>))
-<a href=#477 id=477 data-nosnippet>477</a>            .content(Item {
-<a href=#478 id=478 data-nosnippet>478</a>                name: <span class="string">"alpha"</span>.into(),
-<a href=#479 id=479 data-nosnippet>479</a>                count: <span class="number">99</span>,
-<a href=#480 id=480 data-nosnippet>480</a>            })
-<a href=#481 id=481 data-nosnippet>481</a>            .<span class="kw">await
-<a href=#482 id=482 data-nosnippet>482</a>            </span>.expect(<span class="string">"update"</span>);
-<a href=#483 id=483 data-nosnippet>483</a>        <span class="macro">assert_eq!</span>(updated.expect(<span class="string">"update returned None"</span>).count, <span class="number">99</span>);
-<a href=#484 id=484 data-nosnippet>484</a>
-<a href=#485 id=485 data-nosnippet>485</a>        <span class="comment">// Re-select to confirm the persisted value.
-<a href=#486 id=486 data-nosnippet>486</a>        </span><span class="kw">let </span>after_update: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#487 id=487 data-nosnippet>487</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
-<a href=#488 id=488 data-nosnippet>488</a>            .<span class="kw">await
-<a href=#489 id=489 data-nosnippet>489</a>            </span>.expect(<span class="string">"select after update"</span>);
-<a href=#490 id=490 data-nosnippet>490</a>        <span class="macro">assert_eq!</span>(after_update.expect(<span class="string">"missing after update"</span>).count, <span class="number">99</span>);
+<a href=#427 id=427 data-nosnippet>427</a>            </span>.expect(<span class="string">"shutdown should always succeed in P1.2"</span>);
+<a href=#428 id=428 data-nosnippet>428</a>    }
+<a href=#429 id=429 data-nosnippet>429</a>
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="doccomment">/// P1.5 — CRUD round-trip on a single table.
+<a href=#431 id=431 data-nosnippet>431</a>    ///
+<a href=#432 id=432 data-nosnippet>432</a>    /// Covers the full create → select-by-id → update → select → delete →
+<a href=#433 id=433 data-nosnippet>433</a>    /// select-after-delete cycle. Anchors the assumption that the SDK
+<a href=#434 id=434 data-nosnippet>434</a>    /// client returned by `db.client()` behaves the same as it would on
+<a href=#435 id=435 data-nosnippet>435</a>    /// a vanilla `Surreal::new::&lt;SurrealKv&gt;` connection.
+<a href=#436 id=436 data-nosnippet>436</a>    </span><span class="attr">#[tokio::test]
+<a href=#437 id=437 data-nosnippet>437</a>    </span><span class="kw">async fn </span>crud_round_trip() {
+<a href=#438 id=438 data-nosnippet>438</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"crud.skv"</span>))
+<a href=#440 id=440 data-nosnippet>440</a>            .<span class="kw">await
+<a href=#441 id=441 data-nosnippet>441</a>            </span>.expect(<span class="string">"open"</span>);
+<a href=#442 id=442 data-nosnippet>442</a>        <span class="kw">let </span>client = db.client();
+<a href=#443 id=443 data-nosnippet>443</a>
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="comment">// Create.
+<a href=#445 id=445 data-nosnippet>445</a>        </span><span class="kw">let </span>created: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#446 id=446 data-nosnippet>446</a>            .create((<span class="string">"items"</span>, <span class="string">"first"</span>))
+<a href=#447 id=447 data-nosnippet>447</a>            .content(Item {
+<a href=#448 id=448 data-nosnippet>448</a>                name: <span class="string">"alpha"</span>.into(),
+<a href=#449 id=449 data-nosnippet>449</a>                count: <span class="number">1</span>,
+<a href=#450 id=450 data-nosnippet>450</a>            })
+<a href=#451 id=451 data-nosnippet>451</a>            .<span class="kw">await
+<a href=#452 id=452 data-nosnippet>452</a>            </span>.expect(<span class="string">"create"</span>);
+<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw">let </span>created = created.expect(<span class="string">"create returned None"</span>);
+<a href=#454 id=454 data-nosnippet>454</a>        <span class="macro">assert_eq!</span>(created.name, <span class="string">"alpha"</span>);
+<a href=#455 id=455 data-nosnippet>455</a>        <span class="macro">assert_eq!</span>(created.count, <span class="number">1</span>);
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="comment">// Select by id.
+<a href=#458 id=458 data-nosnippet>458</a>        </span><span class="kw">let </span>fetched: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#459 id=459 data-nosnippet>459</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
+<a href=#460 id=460 data-nosnippet>460</a>            .<span class="kw">await
+<a href=#461 id=461 data-nosnippet>461</a>            </span>.expect(<span class="string">"select by id"</span>);
+<a href=#462 id=462 data-nosnippet>462</a>        <span class="macro">assert_eq!</span>(
+<a href=#463 id=463 data-nosnippet>463</a>            fetched,
+<a href=#464 id=464 data-nosnippet>464</a>            <span class="prelude-val">Some</span>(Item {
+<a href=#465 id=465 data-nosnippet>465</a>                name: <span class="string">"alpha"</span>.into(),
+<a href=#466 id=466 data-nosnippet>466</a>                count: <span class="number">1</span>,
+<a href=#467 id=467 data-nosnippet>467</a>            }),
+<a href=#468 id=468 data-nosnippet>468</a>        );
+<a href=#469 id=469 data-nosnippet>469</a>
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="comment">// Update via content (full replace).
+<a href=#471 id=471 data-nosnippet>471</a>        </span><span class="kw">let </span>updated: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#472 id=472 data-nosnippet>472</a>            .update((<span class="string">"items"</span>, <span class="string">"first"</span>))
+<a href=#473 id=473 data-nosnippet>473</a>            .content(Item {
+<a href=#474 id=474 data-nosnippet>474</a>                name: <span class="string">"alpha"</span>.into(),
+<a href=#475 id=475 data-nosnippet>475</a>                count: <span class="number">99</span>,
+<a href=#476 id=476 data-nosnippet>476</a>            })
+<a href=#477 id=477 data-nosnippet>477</a>            .<span class="kw">await
+<a href=#478 id=478 data-nosnippet>478</a>            </span>.expect(<span class="string">"update"</span>);
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="macro">assert_eq!</span>(updated.expect(<span class="string">"update returned None"</span>).count, <span class="number">99</span>);
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>        <span class="comment">// Re-select to confirm the persisted value.
+<a href=#482 id=482 data-nosnippet>482</a>        </span><span class="kw">let </span>after_update: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#483 id=483 data-nosnippet>483</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
+<a href=#484 id=484 data-nosnippet>484</a>            .<span class="kw">await
+<a href=#485 id=485 data-nosnippet>485</a>            </span>.expect(<span class="string">"select after update"</span>);
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="macro">assert_eq!</span>(after_update.expect(<span class="string">"missing after update"</span>).count, <span class="number">99</span>);
+<a href=#487 id=487 data-nosnippet>487</a>
+<a href=#488 id=488 data-nosnippet>488</a>        <span class="comment">// Delete.
+<a href=#489 id=489 data-nosnippet>489</a>        </span><span class="kw">let </span>deleted: <span class="prelude-ty">Option</span>&lt;Item&gt; = client.delete((<span class="string">"items"</span>, <span class="string">"first"</span>)).<span class="kw">await</span>.expect(<span class="string">"delete"</span>);
+<a href=#490 id=490 data-nosnippet>490</a>        <span class="macro">assert!</span>(deleted.is_some(), <span class="string">"delete should return the deleted record"</span>);
 <a href=#491 id=491 data-nosnippet>491</a>
-<a href=#492 id=492 data-nosnippet>492</a>        <span class="comment">// Delete.
-<a href=#493 id=493 data-nosnippet>493</a>        </span><span class="kw">let </span>deleted: <span class="prelude-ty">Option</span>&lt;Item&gt; = client.delete((<span class="string">"items"</span>, <span class="string">"first"</span>)).<span class="kw">await</span>.expect(<span class="string">"delete"</span>);
-<a href=#494 id=494 data-nosnippet>494</a>        <span class="macro">assert!</span>(deleted.is_some(), <span class="string">"delete should return the deleted record"</span>);
-<a href=#495 id=495 data-nosnippet>495</a>
-<a href=#496 id=496 data-nosnippet>496</a>        <span class="comment">// Select again — should now be empty.
-<a href=#497 id=497 data-nosnippet>497</a>        </span><span class="kw">let </span>after_delete: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#498 id=498 data-nosnippet>498</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
-<a href=#499 id=499 data-nosnippet>499</a>            .<span class="kw">await
-<a href=#500 id=500 data-nosnippet>500</a>            </span>.expect(<span class="string">"select after delete"</span>);
-<a href=#501 id=501 data-nosnippet>501</a>        <span class="macro">assert!</span>(after_delete.is_none(), <span class="string">"record should be gone after delete"</span>);
-<a href=#502 id=502 data-nosnippet>502</a>
-<a href=#503 id=503 data-nosnippet>503</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
-<a href=#504 id=504 data-nosnippet>504</a>    }
-<a href=#505 id=505 data-nosnippet>505</a>
-<a href=#506 id=506 data-nosnippet>506</a>    <span class="doccomment">/// P1.5 — Persistence: open, write, drop, reopen, read same value.
-<a href=#507 id=507 data-nosnippet>507</a>    ///
-<a href=#508 id=508 data-nosnippet>508</a>    /// Closes the wrapper between writes and reads to confirm the data
-<a href=#509 id=509 data-nosnippet>509</a>    /// actually hit the SurrealKV file on disk and is recovered on
-<a href=#510 id=510 data-nosnippet>510</a>    /// re-open. Without this guarantee the whole P1 path is meaningless.
-<a href=#511 id=511 data-nosnippet>511</a>    </span><span class="attr">#[tokio::test]
-<a href=#512 id=512 data-nosnippet>512</a>    </span><span class="kw">async fn </span>persistence_across_reopen() {
-<a href=#513 id=513 data-nosnippet>513</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"persist.skv"</span>);
-<a href=#515 id=515 data-nosnippet>515</a>
-<a href=#516 id=516 data-nosnippet>516</a>        <span class="comment">// First open: write a record, then explicitly shut down.
-<a href=#517 id=517 data-nosnippet>517</a>        </span>{
-<a href=#518 id=518 data-nosnippet>518</a>            <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #1"</span>);
-<a href=#519 id=519 data-nosnippet>519</a>            <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
-<a href=#520 id=520 data-nosnippet>520</a>                .client()
-<a href=#521 id=521 data-nosnippet>521</a>                .create((<span class="string">"items"</span>, <span class="string">"p"</span>))
-<a href=#522 id=522 data-nosnippet>522</a>                .content(Item {
-<a href=#523 id=523 data-nosnippet>523</a>                    name: <span class="string">"persisted"</span>.into(),
-<a href=#524 id=524 data-nosnippet>524</a>                    count: <span class="number">7</span>,
-<a href=#525 id=525 data-nosnippet>525</a>                })
-<a href=#526 id=526 data-nosnippet>526</a>                .<span class="kw">await
-<a href=#527 id=527 data-nosnippet>527</a>                </span>.expect(<span class="string">"create"</span>);
-<a href=#528 id=528 data-nosnippet>528</a>            db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #1"</span>);
-<a href=#529 id=529 data-nosnippet>529</a>        }
-<a href=#530 id=530 data-nosnippet>530</a>
-<a href=#531 id=531 data-nosnippet>531</a>        <span class="comment">// Second open at the same path: the record should still be there.
-<a href=#532 id=532 data-nosnippet>532</a>        </span>{
-<a href=#533 id=533 data-nosnippet>533</a>            <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #2"</span>);
-<a href=#534 id=534 data-nosnippet>534</a>            <span class="kw">let </span>fetched: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
-<a href=#535 id=535 data-nosnippet>535</a>                .client()
-<a href=#536 id=536 data-nosnippet>536</a>                .select((<span class="string">"items"</span>, <span class="string">"p"</span>))
-<a href=#537 id=537 data-nosnippet>537</a>                .<span class="kw">await
-<a href=#538 id=538 data-nosnippet>538</a>                </span>.expect(<span class="string">"select after reopen"</span>);
-<a href=#539 id=539 data-nosnippet>539</a>            <span class="macro">assert_eq!</span>(
-<a href=#540 id=540 data-nosnippet>540</a>                fetched,
-<a href=#541 id=541 data-nosnippet>541</a>                <span class="prelude-val">Some</span>(Item {
-<a href=#542 id=542 data-nosnippet>542</a>                    name: <span class="string">"persisted"</span>.into(),
-<a href=#543 id=543 data-nosnippet>543</a>                    count: <span class="number">7</span>,
-<a href=#544 id=544 data-nosnippet>544</a>                }),
-<a href=#545 id=545 data-nosnippet>545</a>                <span class="string">"record should survive an explicit shutdown + reopen"</span>,
-<a href=#546 id=546 data-nosnippet>546</a>            );
-<a href=#547 id=547 data-nosnippet>547</a>            db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
-<a href=#548 id=548 data-nosnippet>548</a>        }
-<a href=#549 id=549 data-nosnippet>549</a>    }
-<a href=#550 id=550 data-nosnippet>550</a>
-<a href=#551 id=551 data-nosnippet>551</a>    <span class="doccomment">/// P1.5 — Multi-table isolation.
-<a href=#552 id=552 data-nosnippet>552</a>    ///
-<a href=#553 id=553 data-nosnippet>553</a>    /// Two records inserted into two different tables must not bleed
-<a href=#554 id=554 data-nosnippet>554</a>    /// across the table boundary on `select &lt;table&gt;` queries.
-<a href=#555 id=555 data-nosnippet>555</a>    </span><span class="attr">#[tokio::test]
-<a href=#556 id=556 data-nosnippet>556</a>    </span><span class="kw">async fn </span>multi_table_isolation() {
-<a href=#557 id=557 data-nosnippet>557</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#558 id=558 data-nosnippet>558</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"multi.skv"</span>))
-<a href=#559 id=559 data-nosnippet>559</a>            .<span class="kw">await
-<a href=#560 id=560 data-nosnippet>560</a>            </span>.expect(<span class="string">"open"</span>);
-<a href=#561 id=561 data-nosnippet>561</a>        <span class="kw">let </span>client = db.client();
-<a href=#562 id=562 data-nosnippet>562</a>
-<a href=#563 id=563 data-nosnippet>563</a>        <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#564 id=564 data-nosnippet>564</a>            .create((<span class="string">"table_a"</span>, <span class="string">"1"</span>))
-<a href=#565 id=565 data-nosnippet>565</a>            .content(Item {
-<a href=#566 id=566 data-nosnippet>566</a>                name: <span class="string">"a"</span>.into(),
-<a href=#567 id=567 data-nosnippet>567</a>                count: <span class="number">1</span>,
-<a href=#568 id=568 data-nosnippet>568</a>            })
-<a href=#569 id=569 data-nosnippet>569</a>            .<span class="kw">await
-<a href=#570 id=570 data-nosnippet>570</a>            </span>.expect(<span class="string">"create table_a"</span>);
-<a href=#571 id=571 data-nosnippet>571</a>        <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#572 id=572 data-nosnippet>572</a>            .create((<span class="string">"table_b"</span>, <span class="string">"1"</span>))
-<a href=#573 id=573 data-nosnippet>573</a>            .content(Item {
-<a href=#574 id=574 data-nosnippet>574</a>                name: <span class="string">"b"</span>.into(),
-<a href=#575 id=575 data-nosnippet>575</a>                count: <span class="number">2</span>,
-<a href=#576 id=576 data-nosnippet>576</a>            })
-<a href=#577 id=577 data-nosnippet>577</a>            .<span class="kw">await
-<a href=#578 id=578 data-nosnippet>578</a>            </span>.expect(<span class="string">"create table_b"</span>);
-<a href=#579 id=579 data-nosnippet>579</a>
-<a href=#580 id=580 data-nosnippet>580</a>        <span class="kw">let </span>from_a: Vec&lt;Item&gt; = client.select(<span class="string">"table_a"</span>).<span class="kw">await</span>.expect(<span class="string">"select table_a"</span>);
-<a href=#581 id=581 data-nosnippet>581</a>        <span class="kw">let </span>from_b: Vec&lt;Item&gt; = client.select(<span class="string">"table_b"</span>).<span class="kw">await</span>.expect(<span class="string">"select table_b"</span>);
-<a href=#582 id=582 data-nosnippet>582</a>
-<a href=#583 id=583 data-nosnippet>583</a>        <span class="macro">assert_eq!</span>(from_a.len(), <span class="number">1</span>, <span class="string">"table_a should hold exactly one row"</span>);
-<a href=#584 id=584 data-nosnippet>584</a>        <span class="macro">assert_eq!</span>(from_b.len(), <span class="number">1</span>, <span class="string">"table_b should hold exactly one row"</span>);
-<a href=#585 id=585 data-nosnippet>585</a>        <span class="macro">assert_eq!</span>(from_a[<span class="number">0</span>].name, <span class="string">"a"</span>);
-<a href=#586 id=586 data-nosnippet>586</a>        <span class="macro">assert_eq!</span>(from_b[<span class="number">0</span>].name, <span class="string">"b"</span>);
-<a href=#587 id=587 data-nosnippet>587</a>
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="comment">// Cross-table sanity: selecting a record by id from `table_a`
-<a href=#589 id=589 data-nosnippet>589</a>        // with the id we wrote to `table_b` returns None — i.e. ids
-<a href=#590 id=590 data-nosnippet>590</a>        // don't bleed across tables.
-<a href=#591 id=591 data-nosnippet>591</a>        </span><span class="kw">let </span>cross: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
-<a href=#592 id=592 data-nosnippet>592</a>            .select((<span class="string">"table_a"</span>, <span class="string">"2"</span>))
-<a href=#593 id=593 data-nosnippet>593</a>            .<span class="kw">await
-<a href=#594 id=594 data-nosnippet>594</a>            </span>.expect(<span class="string">"cross-table select"</span>);
-<a href=#595 id=595 data-nosnippet>595</a>        <span class="macro">assert!</span>(
-<a href=#596 id=596 data-nosnippet>596</a>            cross.is_none(),
-<a href=#597 id=597 data-nosnippet>597</a>            <span class="string">"table_a should not see records keyed in table_b"</span>,
-<a href=#598 id=598 data-nosnippet>598</a>        );
-<a href=#599 id=599 data-nosnippet>599</a>
-<a href=#600 id=600 data-nosnippet>600</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
-<a href=#601 id=601 data-nosnippet>601</a>    }
-<a href=#602 id=602 data-nosnippet>602</a>
-<a href=#603 id=603 data-nosnippet>603</a>    <span class="doccomment">/// P1.5 — Concurrent reads from clones of the same client.
-<a href=#604 id=604 data-nosnippet>604</a>    ///
-<a href=#605 id=605 data-nosnippet>605</a>    /// `EmbeddedDb` is `Clone`, and the underlying `Surreal&lt;Db&gt;` shares
-<a href=#606 id=606 data-nosnippet>606</a>    /// state via Arc internally. Multiple readers from clones should see
-<a href=#607 id=607 data-nosnippet>607</a>    /// the same value without races or panics. Spawns 10 tasks reading
-<a href=#608 id=608 data-nosnippet>608</a>    /// the same record concurrently and asserts they all observe the
-<a href=#609 id=609 data-nosnippet>609</a>    /// expected value.
-<a href=#610 id=610 data-nosnippet>610</a>    </span><span class="attr">#[tokio::test]
-<a href=#611 id=611 data-nosnippet>611</a>    </span><span class="kw">async fn </span>concurrent_reads_from_clones() {
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#613 id=613 data-nosnippet>613</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"concurrent.skv"</span>))
-<a href=#614 id=614 data-nosnippet>614</a>            .<span class="kw">await
-<a href=#615 id=615 data-nosnippet>615</a>            </span>.expect(<span class="string">"open"</span>);
-<a href=#616 id=616 data-nosnippet>616</a>
-<a href=#617 id=617 data-nosnippet>617</a>        <span class="comment">// Seed a single shared record.
-<a href=#618 id=618 data-nosnippet>618</a>        </span><span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
-<a href=#619 id=619 data-nosnippet>619</a>            .client()
-<a href=#620 id=620 data-nosnippet>620</a>            .create((<span class="string">"items"</span>, <span class="string">"shared"</span>))
-<a href=#621 id=621 data-nosnippet>621</a>            .content(Item {
-<a href=#622 id=622 data-nosnippet>622</a>                name: <span class="string">"concurrent"</span>.into(),
-<a href=#623 id=623 data-nosnippet>623</a>                count: <span class="number">42</span>,
-<a href=#624 id=624 data-nosnippet>624</a>            })
-<a href=#625 id=625 data-nosnippet>625</a>            .<span class="kw">await
-<a href=#626 id=626 data-nosnippet>626</a>            </span>.expect(<span class="string">"seed"</span>);
-<a href=#627 id=627 data-nosnippet>627</a>
-<a href=#628 id=628 data-nosnippet>628</a>        <span class="comment">// Spawn concurrent readers.
-<a href=#629 id=629 data-nosnippet>629</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>handles = Vec::with_capacity(<span class="number">10</span>);
-<a href=#630 id=630 data-nosnippet>630</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">10u32 </span>{
-<a href=#631 id=631 data-nosnippet>631</a>            <span class="kw">let </span>db_clone = db.clone();
-<a href=#632 id=632 data-nosnippet>632</a>            handles.push(tokio::spawn(<span class="kw">async move </span>{
-<a href=#633 id=633 data-nosnippet>633</a>                <span class="kw">let </span>item: <span class="prelude-ty">Option</span>&lt;Item&gt; = db_clone
-<a href=#634 id=634 data-nosnippet>634</a>                    .client()
-<a href=#635 id=635 data-nosnippet>635</a>                    .select((<span class="string">"items"</span>, <span class="string">"shared"</span>))
-<a href=#636 id=636 data-nosnippet>636</a>                    .<span class="kw">await
-<a href=#637 id=637 data-nosnippet>637</a>                    </span>.expect(<span class="string">"concurrent select"</span>);
-<a href=#638 id=638 data-nosnippet>638</a>                (i, item.expect(<span class="string">"missing on concurrent reader"</span>))
-<a href=#639 id=639 data-nosnippet>639</a>            }));
-<a href=#640 id=640 data-nosnippet>640</a>        }
-<a href=#641 id=641 data-nosnippet>641</a>
-<a href=#642 id=642 data-nosnippet>642</a>        <span class="kw">for </span>h <span class="kw">in </span>handles {
-<a href=#643 id=643 data-nosnippet>643</a>            <span class="kw">let </span>(i, item) = h.<span class="kw">await</span>.expect(<span class="string">"join"</span>);
-<a href=#644 id=644 data-nosnippet>644</a>            <span class="macro">assert_eq!</span>(
-<a href=#645 id=645 data-nosnippet>645</a>                item.count, <span class="number">42</span>,
-<a href=#646 id=646 data-nosnippet>646</a>                <span class="string">"concurrent reader {i} observed wrong value: {item:?}"
-<a href=#647 id=647 data-nosnippet>647</a>            </span>);
-<a href=#648 id=648 data-nosnippet>648</a>        }
-<a href=#649 id=649 data-nosnippet>649</a>
-<a href=#650 id=650 data-nosnippet>650</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
-<a href=#651 id=651 data-nosnippet>651</a>    }
-<a href=#652 id=652 data-nosnippet>652</a>
-<a href=#653 id=653 data-nosnippet>653</a>    <span class="doccomment">/// P1.11 — `EmbeddedDb::open` retries on SurrealKV flock contention.
-<a href=#654 id=654 data-nosnippet>654</a>    ///
-<a href=#655 id=655 data-nosnippet>655</a>    /// Opens the same datastore twice in sequence. The first open is
-<a href=#656 id=656 data-nosnippet>656</a>    /// then shut down (which releases the SurrealKV flock), and we
-<a href=#657 id=657 data-nosnippet>657</a>    /// kick off a parallel open *before* `shutdown` returns. The
-<a href=#658 id=658 data-nosnippet>658</a>    /// parallel open must not fail immediately with "already locked":
-<a href=#659 id=659 data-nosnippet>659</a>    /// the retry loop in `open_datastore_with_retry` should re-try
-<a href=#660 id=660 data-nosnippet>660</a>    /// until the router task's `kvs.shutdown()` chain has released
-<a href=#661 id=661 data-nosnippet>661</a>    /// the flock, then succeed.
-<a href=#662 id=662 data-nosnippet>662</a>    ///
-<a href=#663 id=663 data-nosnippet>663</a>    /// We deliberately DO NOT use `shutdown` on the second handle after
-<a href=#664 id=664 data-nosnippet>664</a>    /// `drop(first)` — the shutdown's probe-lock would race the second
-<a href=#665 id=665 data-nosnippet>665</a>    /// open's flock acquisition and make the test flaky. Only the
-<a href=#666 id=666 data-nosnippet>666</a>    /// second handle is explicitly shut down at the end.
-<a href=#667 id=667 data-nosnippet>667</a>    </span><span class="attr">#[tokio::test]
-<a href=#668 id=668 data-nosnippet>668</a>    </span><span class="kw">async fn </span>open_retries_on_flock_contention() {
-<a href=#669 id=669 data-nosnippet>669</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#670 id=670 data-nosnippet>670</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"contention.skv"</span>);
-<a href=#671 id=671 data-nosnippet>671</a>
-<a href=#672 id=672 data-nosnippet>672</a>        <span class="comment">// First handle — held briefly, then dropped.
-<a href=#673 id=673 data-nosnippet>673</a>        </span><span class="kw">let </span>db_a = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #1"</span>);
-<a href=#674 id=674 data-nosnippet>674</a>
-<a href=#675 id=675 data-nosnippet>675</a>        <span class="comment">// Spawn the second open before db_a is gone; it should spin in
-<a href=#676 id=676 data-nosnippet>676</a>        // the retry loop until db_a's router releases the flock.
-<a href=#677 id=677 data-nosnippet>677</a>        </span><span class="kw">let </span>path_clone = path.clone();
-<a href=#678 id=678 data-nosnippet>678</a>        <span class="kw">let </span>joiner = tokio::spawn(<span class="kw">async move </span>{
-<a href=#679 id=679 data-nosnippet>679</a>            EmbeddedDb::open(<span class="kw-2">&amp;</span>path_clone)
-<a href=#680 id=680 data-nosnippet>680</a>                .<span class="kw">await
-<a href=#681 id=681 data-nosnippet>681</a>                </span>.expect(<span class="string">"second open should succeed after retry"</span>)
-<a href=#682 id=682 data-nosnippet>682</a>        });
-<a href=#683 id=683 data-nosnippet>683</a>
-<a href=#684 id=684 data-nosnippet>684</a>        <span class="comment">// Let the second open spin on the retry loop a bit, then drop
-<a href=#685 id=685 data-nosnippet>685</a>        // db_a (without calling `shutdown` to avoid racing the second
-<a href=#686 id=686 data-nosnippet>686</a>        // open on the probe-lock — see the doc comment above).
-<a href=#687 id=687 data-nosnippet>687</a>        </span>tokio::time::sleep(Duration::from_millis(<span class="number">100</span>)).<span class="kw">await</span>;
-<a href=#688 id=688 data-nosnippet>688</a>        drop(db_a);
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="comment">// Select again — should now be empty.
+<a href=#493 id=493 data-nosnippet>493</a>        </span><span class="kw">let </span>after_delete: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#494 id=494 data-nosnippet>494</a>            .select((<span class="string">"items"</span>, <span class="string">"first"</span>))
+<a href=#495 id=495 data-nosnippet>495</a>            .<span class="kw">await
+<a href=#496 id=496 data-nosnippet>496</a>            </span>.expect(<span class="string">"select after delete"</span>);
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="macro">assert!</span>(after_delete.is_none(), <span class="string">"record should be gone after delete"</span>);
+<a href=#498 id=498 data-nosnippet>498</a>
+<a href=#499 id=499 data-nosnippet>499</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#500 id=500 data-nosnippet>500</a>    }
+<a href=#501 id=501 data-nosnippet>501</a>
+<a href=#502 id=502 data-nosnippet>502</a>    <span class="doccomment">/// P1.5 — Persistence: open, write, drop, reopen, read same value.
+<a href=#503 id=503 data-nosnippet>503</a>    ///
+<a href=#504 id=504 data-nosnippet>504</a>    /// Closes the wrapper between writes and reads to confirm the data
+<a href=#505 id=505 data-nosnippet>505</a>    /// actually hit the SurrealKV file on disk and is recovered on
+<a href=#506 id=506 data-nosnippet>506</a>    /// re-open. Without this guarantee the whole P1 path is meaningless.
+<a href=#507 id=507 data-nosnippet>507</a>    </span><span class="attr">#[tokio::test]
+<a href=#508 id=508 data-nosnippet>508</a>    </span><span class="kw">async fn </span>persistence_across_reopen() {
+<a href=#509 id=509 data-nosnippet>509</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"persist.skv"</span>);
+<a href=#511 id=511 data-nosnippet>511</a>
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="comment">// First open: write a record, then explicitly shut down.
+<a href=#513 id=513 data-nosnippet>513</a>        </span>{
+<a href=#514 id=514 data-nosnippet>514</a>            <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #1"</span>);
+<a href=#515 id=515 data-nosnippet>515</a>            <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
+<a href=#516 id=516 data-nosnippet>516</a>                .client()
+<a href=#517 id=517 data-nosnippet>517</a>                .create((<span class="string">"items"</span>, <span class="string">"p"</span>))
+<a href=#518 id=518 data-nosnippet>518</a>                .content(Item {
+<a href=#519 id=519 data-nosnippet>519</a>                    name: <span class="string">"persisted"</span>.into(),
+<a href=#520 id=520 data-nosnippet>520</a>                    count: <span class="number">7</span>,
+<a href=#521 id=521 data-nosnippet>521</a>                })
+<a href=#522 id=522 data-nosnippet>522</a>                .<span class="kw">await
+<a href=#523 id=523 data-nosnippet>523</a>                </span>.expect(<span class="string">"create"</span>);
+<a href=#524 id=524 data-nosnippet>524</a>            db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #1"</span>);
+<a href=#525 id=525 data-nosnippet>525</a>        }
+<a href=#526 id=526 data-nosnippet>526</a>
+<a href=#527 id=527 data-nosnippet>527</a>        <span class="comment">// Second open at the same path: the record should still be there.
+<a href=#528 id=528 data-nosnippet>528</a>        </span>{
+<a href=#529 id=529 data-nosnippet>529</a>            <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #2"</span>);
+<a href=#530 id=530 data-nosnippet>530</a>            <span class="kw">let </span>fetched: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
+<a href=#531 id=531 data-nosnippet>531</a>                .client()
+<a href=#532 id=532 data-nosnippet>532</a>                .select((<span class="string">"items"</span>, <span class="string">"p"</span>))
+<a href=#533 id=533 data-nosnippet>533</a>                .<span class="kw">await
+<a href=#534 id=534 data-nosnippet>534</a>                </span>.expect(<span class="string">"select after reopen"</span>);
+<a href=#535 id=535 data-nosnippet>535</a>            <span class="macro">assert_eq!</span>(
+<a href=#536 id=536 data-nosnippet>536</a>                fetched,
+<a href=#537 id=537 data-nosnippet>537</a>                <span class="prelude-val">Some</span>(Item {
+<a href=#538 id=538 data-nosnippet>538</a>                    name: <span class="string">"persisted"</span>.into(),
+<a href=#539 id=539 data-nosnippet>539</a>                    count: <span class="number">7</span>,
+<a href=#540 id=540 data-nosnippet>540</a>                }),
+<a href=#541 id=541 data-nosnippet>541</a>                <span class="string">"record should survive an explicit shutdown + reopen"</span>,
+<a href=#542 id=542 data-nosnippet>542</a>            );
+<a href=#543 id=543 data-nosnippet>543</a>            db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
+<a href=#544 id=544 data-nosnippet>544</a>        }
+<a href=#545 id=545 data-nosnippet>545</a>    }
+<a href=#546 id=546 data-nosnippet>546</a>
+<a href=#547 id=547 data-nosnippet>547</a>    <span class="doccomment">/// P1.5 — Multi-table isolation.
+<a href=#548 id=548 data-nosnippet>548</a>    ///
+<a href=#549 id=549 data-nosnippet>549</a>    /// Two records inserted into two different tables must not bleed
+<a href=#550 id=550 data-nosnippet>550</a>    /// across the table boundary on `select &lt;table&gt;` queries.
+<a href=#551 id=551 data-nosnippet>551</a>    </span><span class="attr">#[tokio::test]
+<a href=#552 id=552 data-nosnippet>552</a>    </span><span class="kw">async fn </span>multi_table_isolation() {
+<a href=#553 id=553 data-nosnippet>553</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#554 id=554 data-nosnippet>554</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"multi.skv"</span>))
+<a href=#555 id=555 data-nosnippet>555</a>            .<span class="kw">await
+<a href=#556 id=556 data-nosnippet>556</a>            </span>.expect(<span class="string">"open"</span>);
+<a href=#557 id=557 data-nosnippet>557</a>        <span class="kw">let </span>client = db.client();
+<a href=#558 id=558 data-nosnippet>558</a>
+<a href=#559 id=559 data-nosnippet>559</a>        <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#560 id=560 data-nosnippet>560</a>            .create((<span class="string">"table_a"</span>, <span class="string">"1"</span>))
+<a href=#561 id=561 data-nosnippet>561</a>            .content(Item {
+<a href=#562 id=562 data-nosnippet>562</a>                name: <span class="string">"a"</span>.into(),
+<a href=#563 id=563 data-nosnippet>563</a>                count: <span class="number">1</span>,
+<a href=#564 id=564 data-nosnippet>564</a>            })
+<a href=#565 id=565 data-nosnippet>565</a>            .<span class="kw">await
+<a href=#566 id=566 data-nosnippet>566</a>            </span>.expect(<span class="string">"create table_a"</span>);
+<a href=#567 id=567 data-nosnippet>567</a>        <span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#568 id=568 data-nosnippet>568</a>            .create((<span class="string">"table_b"</span>, <span class="string">"1"</span>))
+<a href=#569 id=569 data-nosnippet>569</a>            .content(Item {
+<a href=#570 id=570 data-nosnippet>570</a>                name: <span class="string">"b"</span>.into(),
+<a href=#571 id=571 data-nosnippet>571</a>                count: <span class="number">2</span>,
+<a href=#572 id=572 data-nosnippet>572</a>            })
+<a href=#573 id=573 data-nosnippet>573</a>            .<span class="kw">await
+<a href=#574 id=574 data-nosnippet>574</a>            </span>.expect(<span class="string">"create table_b"</span>);
+<a href=#575 id=575 data-nosnippet>575</a>
+<a href=#576 id=576 data-nosnippet>576</a>        <span class="kw">let </span>from_a: Vec&lt;Item&gt; = client.select(<span class="string">"table_a"</span>).<span class="kw">await</span>.expect(<span class="string">"select table_a"</span>);
+<a href=#577 id=577 data-nosnippet>577</a>        <span class="kw">let </span>from_b: Vec&lt;Item&gt; = client.select(<span class="string">"table_b"</span>).<span class="kw">await</span>.expect(<span class="string">"select table_b"</span>);
+<a href=#578 id=578 data-nosnippet>578</a>
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="macro">assert_eq!</span>(from_a.len(), <span class="number">1</span>, <span class="string">"table_a should hold exactly one row"</span>);
+<a href=#580 id=580 data-nosnippet>580</a>        <span class="macro">assert_eq!</span>(from_b.len(), <span class="number">1</span>, <span class="string">"table_b should hold exactly one row"</span>);
+<a href=#581 id=581 data-nosnippet>581</a>        <span class="macro">assert_eq!</span>(from_a[<span class="number">0</span>].name, <span class="string">"a"</span>);
+<a href=#582 id=582 data-nosnippet>582</a>        <span class="macro">assert_eq!</span>(from_b[<span class="number">0</span>].name, <span class="string">"b"</span>);
+<a href=#583 id=583 data-nosnippet>583</a>
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="comment">// Cross-table sanity: selecting a record by id from `table_a`
+<a href=#585 id=585 data-nosnippet>585</a>        // with the id we wrote to `table_b` returns None — i.e. ids
+<a href=#586 id=586 data-nosnippet>586</a>        // don't bleed across tables.
+<a href=#587 id=587 data-nosnippet>587</a>        </span><span class="kw">let </span>cross: <span class="prelude-ty">Option</span>&lt;Item&gt; = client
+<a href=#588 id=588 data-nosnippet>588</a>            .select((<span class="string">"table_a"</span>, <span class="string">"2"</span>))
+<a href=#589 id=589 data-nosnippet>589</a>            .<span class="kw">await
+<a href=#590 id=590 data-nosnippet>590</a>            </span>.expect(<span class="string">"cross-table select"</span>);
+<a href=#591 id=591 data-nosnippet>591</a>        <span class="macro">assert!</span>(
+<a href=#592 id=592 data-nosnippet>592</a>            cross.is_none(),
+<a href=#593 id=593 data-nosnippet>593</a>            <span class="string">"table_a should not see records keyed in table_b"</span>,
+<a href=#594 id=594 data-nosnippet>594</a>        );
+<a href=#595 id=595 data-nosnippet>595</a>
+<a href=#596 id=596 data-nosnippet>596</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#597 id=597 data-nosnippet>597</a>    }
+<a href=#598 id=598 data-nosnippet>598</a>
+<a href=#599 id=599 data-nosnippet>599</a>    <span class="doccomment">/// P1.5 — Concurrent reads from clones of the same client.
+<a href=#600 id=600 data-nosnippet>600</a>    ///
+<a href=#601 id=601 data-nosnippet>601</a>    /// `EmbeddedDb` is `Clone`, and the underlying `Surreal&lt;Db&gt;` shares
+<a href=#602 id=602 data-nosnippet>602</a>    /// state via Arc internally. Multiple readers from clones should see
+<a href=#603 id=603 data-nosnippet>603</a>    /// the same value without races or panics. Spawns 10 tasks reading
+<a href=#604 id=604 data-nosnippet>604</a>    /// the same record concurrently and asserts they all observe the
+<a href=#605 id=605 data-nosnippet>605</a>    /// expected value.
+<a href=#606 id=606 data-nosnippet>606</a>    </span><span class="attr">#[tokio::test]
+<a href=#607 id=607 data-nosnippet>607</a>    </span><span class="kw">async fn </span>concurrent_reads_from_clones() {
+<a href=#608 id=608 data-nosnippet>608</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#609 id=609 data-nosnippet>609</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"concurrent.skv"</span>))
+<a href=#610 id=610 data-nosnippet>610</a>            .<span class="kw">await
+<a href=#611 id=611 data-nosnippet>611</a>            </span>.expect(<span class="string">"open"</span>);
+<a href=#612 id=612 data-nosnippet>612</a>
+<a href=#613 id=613 data-nosnippet>613</a>        <span class="comment">// Seed a single shared record.
+<a href=#614 id=614 data-nosnippet>614</a>        </span><span class="kw">let _</span>: <span class="prelude-ty">Option</span>&lt;Item&gt; = db
+<a href=#615 id=615 data-nosnippet>615</a>            .client()
+<a href=#616 id=616 data-nosnippet>616</a>            .create((<span class="string">"items"</span>, <span class="string">"shared"</span>))
+<a href=#617 id=617 data-nosnippet>617</a>            .content(Item {
+<a href=#618 id=618 data-nosnippet>618</a>                name: <span class="string">"concurrent"</span>.into(),
+<a href=#619 id=619 data-nosnippet>619</a>                count: <span class="number">42</span>,
+<a href=#620 id=620 data-nosnippet>620</a>            })
+<a href=#621 id=621 data-nosnippet>621</a>            .<span class="kw">await
+<a href=#622 id=622 data-nosnippet>622</a>            </span>.expect(<span class="string">"seed"</span>);
+<a href=#623 id=623 data-nosnippet>623</a>
+<a href=#624 id=624 data-nosnippet>624</a>        <span class="comment">// Spawn concurrent readers.
+<a href=#625 id=625 data-nosnippet>625</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>handles = Vec::with_capacity(<span class="number">10</span>);
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="number">10u32 </span>{
+<a href=#627 id=627 data-nosnippet>627</a>            <span class="kw">let </span>db_clone = db.clone();
+<a href=#628 id=628 data-nosnippet>628</a>            handles.push(tokio::spawn(<span class="kw">async move </span>{
+<a href=#629 id=629 data-nosnippet>629</a>                <span class="kw">let </span>item: <span class="prelude-ty">Option</span>&lt;Item&gt; = db_clone
+<a href=#630 id=630 data-nosnippet>630</a>                    .client()
+<a href=#631 id=631 data-nosnippet>631</a>                    .select((<span class="string">"items"</span>, <span class="string">"shared"</span>))
+<a href=#632 id=632 data-nosnippet>632</a>                    .<span class="kw">await
+<a href=#633 id=633 data-nosnippet>633</a>                    </span>.expect(<span class="string">"concurrent select"</span>);
+<a href=#634 id=634 data-nosnippet>634</a>                (i, item.expect(<span class="string">"missing on concurrent reader"</span>))
+<a href=#635 id=635 data-nosnippet>635</a>            }));
+<a href=#636 id=636 data-nosnippet>636</a>        }
+<a href=#637 id=637 data-nosnippet>637</a>
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="kw">for </span>h <span class="kw">in </span>handles {
+<a href=#639 id=639 data-nosnippet>639</a>            <span class="kw">let </span>(i, item) = h.<span class="kw">await</span>.expect(<span class="string">"join"</span>);
+<a href=#640 id=640 data-nosnippet>640</a>            <span class="macro">assert_eq!</span>(
+<a href=#641 id=641 data-nosnippet>641</a>                item.count, <span class="number">42</span>,
+<a href=#642 id=642 data-nosnippet>642</a>                <span class="string">"concurrent reader {i} observed wrong value: {item:?}"
+<a href=#643 id=643 data-nosnippet>643</a>            </span>);
+<a href=#644 id=644 data-nosnippet>644</a>        }
+<a href=#645 id=645 data-nosnippet>645</a>
+<a href=#646 id=646 data-nosnippet>646</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#647 id=647 data-nosnippet>647</a>    }
+<a href=#648 id=648 data-nosnippet>648</a>
+<a href=#649 id=649 data-nosnippet>649</a>    <span class="doccomment">/// P1.11 — `EmbeddedDb::open` retries on SurrealKV flock contention.
+<a href=#650 id=650 data-nosnippet>650</a>    ///
+<a href=#651 id=651 data-nosnippet>651</a>    /// Opens the same datastore twice in sequence. The first open is
+<a href=#652 id=652 data-nosnippet>652</a>    /// then shut down (which releases the SurrealKV flock), and we
+<a href=#653 id=653 data-nosnippet>653</a>    /// kick off a parallel open *before* `shutdown` returns. The
+<a href=#654 id=654 data-nosnippet>654</a>    /// parallel open must not fail immediately with "already locked":
+<a href=#655 id=655 data-nosnippet>655</a>    /// the retry loop in `open_datastore_with_retry` should re-try
+<a href=#656 id=656 data-nosnippet>656</a>    /// until the router task's `kvs.shutdown()` chain has released
+<a href=#657 id=657 data-nosnippet>657</a>    /// the flock, then succeed.
+<a href=#658 id=658 data-nosnippet>658</a>    ///
+<a href=#659 id=659 data-nosnippet>659</a>    /// We deliberately DO NOT use `shutdown` on the second handle after
+<a href=#660 id=660 data-nosnippet>660</a>    /// `drop(first)` — the shutdown's probe-lock would race the second
+<a href=#661 id=661 data-nosnippet>661</a>    /// open's flock acquisition and make the test flaky. Only the
+<a href=#662 id=662 data-nosnippet>662</a>    /// second handle is explicitly shut down at the end.
+<a href=#663 id=663 data-nosnippet>663</a>    </span><span class="attr">#[tokio::test]
+<a href=#664 id=664 data-nosnippet>664</a>    </span><span class="kw">async fn </span>open_retries_on_flock_contention() {
+<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">let </span>path = dir.path().join(<span class="string">"contention.skv"</span>);
+<a href=#667 id=667 data-nosnippet>667</a>
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="comment">// First handle — held briefly, then dropped.
+<a href=#669 id=669 data-nosnippet>669</a>        </span><span class="kw">let </span>db_a = EmbeddedDb::open(<span class="kw-2">&amp;</span>path).<span class="kw">await</span>.expect(<span class="string">"open #1"</span>);
+<a href=#670 id=670 data-nosnippet>670</a>
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="comment">// Spawn the second open before db_a is gone; it should spin in
+<a href=#672 id=672 data-nosnippet>672</a>        // the retry loop until db_a's router releases the flock.
+<a href=#673 id=673 data-nosnippet>673</a>        </span><span class="kw">let </span>path_clone = path.clone();
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>joiner = tokio::spawn(<span class="kw">async move </span>{
+<a href=#675 id=675 data-nosnippet>675</a>            EmbeddedDb::open(<span class="kw-2">&amp;</span>path_clone)
+<a href=#676 id=676 data-nosnippet>676</a>                .<span class="kw">await
+<a href=#677 id=677 data-nosnippet>677</a>                </span>.expect(<span class="string">"second open should succeed after retry"</span>)
+<a href=#678 id=678 data-nosnippet>678</a>        });
+<a href=#679 id=679 data-nosnippet>679</a>
+<a href=#680 id=680 data-nosnippet>680</a>        <span class="comment">// Let the second open spin on the retry loop a bit, then drop
+<a href=#681 id=681 data-nosnippet>681</a>        // db_a (without calling `shutdown` to avoid racing the second
+<a href=#682 id=682 data-nosnippet>682</a>        // open on the probe-lock — see the doc comment above).
+<a href=#683 id=683 data-nosnippet>683</a>        </span>tokio::time::sleep(Duration::from_millis(<span class="number">100</span>)).<span class="kw">await</span>;
+<a href=#684 id=684 data-nosnippet>684</a>        drop(db_a);
+<a href=#685 id=685 data-nosnippet>685</a>
+<a href=#686 id=686 data-nosnippet>686</a>        <span class="kw">let </span>db_b = joiner.<span class="kw">await</span>.expect(<span class="string">"join second open"</span>);
+<a href=#687 id=687 data-nosnippet>687</a>        db_b.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
+<a href=#688 id=688 data-nosnippet>688</a>    }
 <a href=#689 id=689 data-nosnippet>689</a>
-<a href=#690 id=690 data-nosnippet>690</a>        <span class="kw">let </span>db_b = joiner.<span class="kw">await</span>.expect(<span class="string">"join second open"</span>);
-<a href=#691 id=691 data-nosnippet>691</a>        db_b.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
-<a href=#692 id=692 data-nosnippet>692</a>    }
-<a href=#693 id=693 data-nosnippet>693</a>
-<a href=#694 id=694 data-nosnippet>694</a>    <span class="doccomment">/// P1.5 — Error path: open at an invalid path returns `StateError`.
-<a href=#695 id=695 data-nosnippet>695</a>    ///
-<a href=#696 id=696 data-nosnippet>696</a>    /// We force the failure by creating a regular file inside the temp
-<a href=#697 id=697 data-nosnippet>697</a>    /// dir and asking SurrealKV to open at a path *under* it. The parent
-<a href=#698 id=698 data-nosnippet>698</a>    /// of `&lt;file&gt;/oops.skv` is a regular file, so `create_dir_all` fails
-<a href=#699 id=699 data-nosnippet>699</a>    /// with `NotADirectory` and `EmbeddedDb::open` surfaces the error
-<a href=#700 id=700 data-nosnippet>700</a>    /// as `StateError::Io` via the `?` operator and the existing
-<a href=#701 id=701 data-nosnippet>701</a>    /// `From&lt;std::io::Error&gt;` impl on `StateError`.
-<a href=#702 id=702 data-nosnippet>702</a>    </span><span class="attr">#[tokio::test]
-<a href=#703 id=703 data-nosnippet>703</a>    </span><span class="kw">async fn </span>open_at_invalid_path_returns_state_error() {
-<a href=#704 id=704 data-nosnippet>704</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#705 id=705 data-nosnippet>705</a>        <span class="kw">let </span>file_as_parent = dir.path().join(<span class="string">"not_a_dir"</span>);
-<a href=#706 id=706 data-nosnippet>706</a>        std::fs::write(<span class="kw-2">&amp;</span>file_as_parent, <span class="string">b"hello"</span>).expect(<span class="string">"write file"</span>);
-<a href=#707 id=707 data-nosnippet>707</a>
-<a href=#708 id=708 data-nosnippet>708</a>        <span class="kw">let </span>bad_path = file_as_parent.join(<span class="string">"oops.skv"</span>);
-<a href=#709 id=709 data-nosnippet>709</a>        <span class="kw">let </span>result = EmbeddedDb::open(<span class="kw-2">&amp;</span>bad_path).<span class="kw">await</span>;
-<a href=#710 id=710 data-nosnippet>710</a>
-<a href=#711 id=711 data-nosnippet>711</a>        <span class="macro">assert!</span>(
-<a href=#712 id=712 data-nosnippet>712</a>            result.is_err(),
-<a href=#713 id=713 data-nosnippet>713</a>            <span class="string">"opening under a regular-file parent should fail"
-<a href=#714 id=714 data-nosnippet>714</a>        </span>);
-<a href=#715 id=715 data-nosnippet>715</a>        <span class="kw">let </span>err = result.unwrap_err();
-<a href=#716 id=716 data-nosnippet>716</a>        <span class="macro">assert!</span>(
-<a href=#717 id=717 data-nosnippet>717</a>            <span class="macro">matches!</span>(err, StateError::Io(<span class="kw">_</span>)),
-<a href=#718 id=718 data-nosnippet>718</a>            <span class="string">"expected StateError::Io, got: {err:?}"
-<a href=#719 id=719 data-nosnippet>719</a>        </span>);
-<a href=#720 id=720 data-nosnippet>720</a>    }
-<a href=#721 id=721 data-nosnippet>721</a>
-<a href=#722 id=722 data-nosnippet>722</a>    <span class="doccomment">/// P1.7 — `EmbeddedDb::open` applies the bootstrap schema automatically.
-<a href=#723 id=723 data-nosnippet>723</a>    ///
-<a href=#724 id=724 data-nosnippet>724</a>    /// Opens a fresh database (no manual schema application) and asserts
-<a href=#725 id=725 data-nosnippet>725</a>    /// that the four bootstrap tables (`mesh`, `hypervisor`, `peer`,
-<a href=#726 id=726 data-nosnippet>726</a>    /// `wg_key`) are reachable. With the schema NOT auto-applied, a
-<a href=#727 id=727 data-nosnippet>727</a>    /// `select` against a never-touched table returns SurrealDB's
-<a href=#728 id=728 data-nosnippet>728</a>    /// `NotFound` error (verified by `multi_table_isolation` in P1.5).
-<a href=#729 id=729 data-nosnippet>729</a>    /// With the schema auto-applied, the table is defined-but-empty and
-<a href=#730 id=730 data-nosnippet>730</a>    /// `select` returns an empty Vec.
-<a href=#731 id=731 data-nosnippet>731</a>    </span><span class="attr">#[tokio::test]
-<a href=#732 id=732 data-nosnippet>732</a>    </span><span class="kw">async fn </span>open_applies_bootstrap_schema_automatically() {
-<a href=#733 id=733 data-nosnippet>733</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#734 id=734 data-nosnippet>734</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"auto_schema.skv"</span>))
-<a href=#735 id=735 data-nosnippet>735</a>            .<span class="kw">await
-<a href=#736 id=736 data-nosnippet>736</a>            </span>.expect(<span class="string">"open should also apply the schema"</span>);
-<a href=#737 id=737 data-nosnippet>737</a>
-<a href=#738 id=738 data-nosnippet>738</a>        <span class="comment">// Each schema-defined table must be reachable on a fresh DB.
-<a href=#739 id=739 data-nosnippet>739</a>        // We use surrealdb::types::Value to avoid forcing a SurrealValue
-<a href=#740 id=740 data-nosnippet>740</a>        // derive on a strongly-typed mirror of every table.
-<a href=#741 id=741 data-nosnippet>741</a>        </span><span class="kw">for </span>table <span class="kw">in </span><span class="kw-2">&amp;</span>[<span class="string">"mesh"</span>, <span class="string">"hypervisor"</span>, <span class="string">"peer"</span>, <span class="string">"wg_key"</span>] {
-<a href=#742 id=742 data-nosnippet>742</a>            <span class="kw">let </span>rows: Vec&lt;surrealdb::types::Value&gt; =
-<a href=#743 id=743 data-nosnippet>743</a>                db.client().select(<span class="kw-2">*</span>table).<span class="kw">await</span>.unwrap_or_else(|e| {
-<a href=#744 id=744 data-nosnippet>744</a>                    <span class="macro">panic!</span>(<span class="string">"select on {table} should succeed (schema not applied?): {e}"</span>)
-<a href=#745 id=745 data-nosnippet>745</a>                });
-<a href=#746 id=746 data-nosnippet>746</a>            <span class="macro">assert!</span>(
-<a href=#747 id=747 data-nosnippet>747</a>                rows.is_empty(),
-<a href=#748 id=748 data-nosnippet>748</a>                <span class="string">"table {table} should be empty on a fresh DB but contained {} rows"</span>,
-<a href=#749 id=749 data-nosnippet>749</a>                rows.len()
-<a href=#750 id=750 data-nosnippet>750</a>            );
-<a href=#751 id=751 data-nosnippet>751</a>        }
-<a href=#752 id=752 data-nosnippet>752</a>
-<a href=#753 id=753 data-nosnippet>753</a>        <span class="comment">// The schema is also idempotent: a second open at the same path
-<a href=#754 id=754 data-nosnippet>754</a>        // (after explicit shutdown) must succeed and the tables must
-<a href=#755 id=755 data-nosnippet>755</a>        // still be defined.
-<a href=#756 id=756 data-nosnippet>756</a>        </span><span class="kw">let </span>path = db.path().to_path_buf();
-<a href=#757 id=757 data-nosnippet>757</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
-<a href=#758 id=758 data-nosnippet>758</a>
-<a href=#759 id=759 data-nosnippet>759</a>        <span class="kw">let </span>db2 = EmbeddedDb::open(<span class="kw-2">&amp;</span>path)
-<a href=#760 id=760 data-nosnippet>760</a>            .<span class="kw">await
-<a href=#761 id=761 data-nosnippet>761</a>            </span>.expect(<span class="string">"reopening an already-initialised DB should succeed"</span>);
-<a href=#762 id=762 data-nosnippet>762</a>        <span class="kw">for </span>table <span class="kw">in </span><span class="kw-2">&amp;</span>[<span class="string">"mesh"</span>, <span class="string">"hypervisor"</span>, <span class="string">"peer"</span>, <span class="string">"wg_key"</span>] {
-<a href=#763 id=763 data-nosnippet>763</a>            <span class="kw">let </span>rows: Vec&lt;surrealdb::types::Value&gt; =
-<a href=#764 id=764 data-nosnippet>764</a>                db2.client().select(<span class="kw-2">*</span>table).<span class="kw">await</span>.unwrap_or_else(|e| {
-<a href=#765 id=765 data-nosnippet>765</a>                    <span class="macro">panic!</span>(<span class="string">"post-reopen select on {table} should succeed: {e}"</span>)
-<a href=#766 id=766 data-nosnippet>766</a>                });
-<a href=#767 id=767 data-nosnippet>767</a>            <span class="macro">assert!</span>(
-<a href=#768 id=768 data-nosnippet>768</a>                rows.is_empty(),
-<a href=#769 id=769 data-nosnippet>769</a>                <span class="string">"table {table} should still be empty after reopen"
-<a href=#770 id=770 data-nosnippet>770</a>            </span>);
-<a href=#771 id=771 data-nosnippet>771</a>        }
-<a href=#772 id=772 data-nosnippet>772</a>        db2.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
-<a href=#773 id=773 data-nosnippet>773</a>    }
-<a href=#774 id=774 data-nosnippet>774</a>
-<a href=#775 id=775 data-nosnippet>775</a>    <span class="doccomment">/// P1.6 — the bootstrap.surql schema must apply cleanly to a fresh
-<a href=#776 id=776 data-nosnippet>776</a>    /// database, must be idempotent (re-applying is a no-op), and must
-<a href=#777 id=777 data-nosnippet>777</a>    /// allow inserting one record into every table it defines.
-<a href=#778 id=778 data-nosnippet>778</a>    ///
-<a href=#779 id=779 data-nosnippet>779</a>    /// After P1.7 (sifrah/nauka#197) `EmbeddedDb::open` applies the schema
-<a href=#780 id=780 data-nosnippet>780</a>    /// automatically, so this test now also covers the
-<a href=#781 id=781 data-nosnippet>781</a>    /// "open + auto-apply + manual re-apply" idempotency contract.
-<a href=#782 id=782 data-nosnippet>782</a>    </span><span class="attr">#[tokio::test]
-<a href=#783 id=783 data-nosnippet>783</a>    </span><span class="kw">async fn </span>bootstrap_schema_applies_cleanly() {
-<a href=#784 id=784 data-nosnippet>784</a>        <span class="kw">const </span>SCHEMA: <span class="kw-2">&amp;</span>str = <span class="macro">include_str!</span>(<span class="string">"../schemas/bootstrap.surql"</span>);
-<a href=#785 id=785 data-nosnippet>785</a>
-<a href=#786 id=786 data-nosnippet>786</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#787 id=787 data-nosnippet>787</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"schema_test.skv"</span>))
-<a href=#788 id=788 data-nosnippet>788</a>            .<span class="kw">await
-<a href=#789 id=789 data-nosnippet>789</a>            </span>.expect(<span class="string">"open"</span>);
-<a href=#790 id=790 data-nosnippet>790</a>
-<a href=#791 id=791 data-nosnippet>791</a>        <span class="comment">// First application — must succeed against an empty database.
-<a href=#792 id=792 data-nosnippet>792</a>        </span>db.client()
-<a href=#793 id=793 data-nosnippet>793</a>            .query(SCHEMA)
-<a href=#794 id=794 data-nosnippet>794</a>            .<span class="kw">await
-<a href=#795 id=795 data-nosnippet>795</a>            </span>.expect(<span class="string">"schema first apply"</span>)
-<a href=#796 id=796 data-nosnippet>796</a>            .check()
-<a href=#797 id=797 data-nosnippet>797</a>            .expect(<span class="string">"schema first apply check"</span>);
-<a href=#798 id=798 data-nosnippet>798</a>
-<a href=#799 id=799 data-nosnippet>799</a>        <span class="comment">// Second application — must be a no-op thanks to IF NOT EXISTS.
-<a href=#800 id=800 data-nosnippet>800</a>        </span>db.client()
-<a href=#801 id=801 data-nosnippet>801</a>            .query(SCHEMA)
-<a href=#802 id=802 data-nosnippet>802</a>            .<span class="kw">await
-<a href=#803 id=803 data-nosnippet>803</a>            </span>.expect(<span class="string">"schema second apply"</span>)
-<a href=#804 id=804 data-nosnippet>804</a>            .check()
-<a href=#805 id=805 data-nosnippet>805</a>            .expect(<span class="string">"schema second apply check"</span>);
-<a href=#806 id=806 data-nosnippet>806</a>
-<a href=#807 id=807 data-nosnippet>807</a>        <span class="comment">// Each table is reachable. Inserting a row exercises the field
-<a href=#808 id=808 data-nosnippet>808</a>        // ASSERTs and confirms the SCHEMAFULL definitions accept the
-<a href=#809 id=809 data-nosnippet>809</a>        // documented shapes. We use SurrealQL's `time::now()` directly so
-<a href=#810 id=810 data-nosnippet>810</a>        // the test doesn't need a chrono dev-dep.
-<a href=#811 id=811 data-nosnippet>811</a>        </span>db.client()
-<a href=#812 id=812 data-nosnippet>812</a>            .query(
-<a href=#813 id=813 data-nosnippet>813</a>                <span class="string">"CREATE mesh:current SET ipv6_ula = $u, secret_hash = $h, \
-<a href=#814 id=814 data-nosnippet>814</a>                 created_at = time::now()"</span>,
-<a href=#815 id=815 data-nosnippet>815</a>            )
-<a href=#816 id=816 data-nosnippet>816</a>            .bind((<span class="string">"u"</span>, <span class="string">"fdc5:8ba:9b14::/48"</span>))
-<a href=#817 id=817 data-nosnippet>817</a>            .bind((<span class="string">"h"</span>, <span class="string">"0123456789abcdef"</span>))
-<a href=#818 id=818 data-nosnippet>818</a>            .<span class="kw">await
-<a href=#819 id=819 data-nosnippet>819</a>            </span>.expect(<span class="string">"insert mesh"</span>)
-<a href=#820 id=820 data-nosnippet>820</a>            .check()
-<a href=#821 id=821 data-nosnippet>821</a>            .expect(<span class="string">"insert mesh check"</span>);
-<a href=#822 id=822 data-nosnippet>822</a>
-<a href=#823 id=823 data-nosnippet>823</a>        <span class="comment">// The record id `hypervisor:hv-01HXXX` IS the ULID — there's no
-<a href=#824 id=824 data-nosnippet>824</a>        // separate `id` field in the schema (see schemas/bootstrap.surql
-<a href=#825 id=825 data-nosnippet>825</a>        // for the rationale). P1.10 will create rows the same way:
-<a href=#826 id=826 data-nosnippet>826</a>        // `CREATE hypervisor:&lt;ulid&gt; SET name = ..., ...`.
-<a href=#827 id=827 data-nosnippet>827</a>        </span>db.client()
-<a href=#828 id=828 data-nosnippet>828</a>            .query(
-<a href=#829 id=829 data-nosnippet>829</a>                <span class="string">"CREATE hypervisor:`hv-01HXXX` SET name = $n, mesh_ipv6 = $m, \
-<a href=#830 id=830 data-nosnippet>830</a>                 public_key = $p, role = $r"</span>,
-<a href=#831 id=831 data-nosnippet>831</a>            )
-<a href=#832 id=832 data-nosnippet>832</a>            .bind((<span class="string">"n"</span>, <span class="string">"node-1"</span>))
-<a href=#833 id=833 data-nosnippet>833</a>            .bind((<span class="string">"m"</span>, <span class="string">"fdc5:8ba:9b14::1"</span>))
-<a href=#834 id=834 data-nosnippet>834</a>            .bind((<span class="string">"p"</span>, <span class="string">"BASE64=="</span>))
-<a href=#835 id=835 data-nosnippet>835</a>            .bind((<span class="string">"r"</span>, <span class="string">"leader"</span>))
-<a href=#836 id=836 data-nosnippet>836</a>            .<span class="kw">await
-<a href=#837 id=837 data-nosnippet>837</a>            </span>.expect(<span class="string">"insert hypervisor"</span>)
-<a href=#838 id=838 data-nosnippet>838</a>            .check()
-<a href=#839 id=839 data-nosnippet>839</a>            .expect(<span class="string">"insert hypervisor check"</span>);
-<a href=#840 id=840 data-nosnippet>840</a>
-<a href=#841 id=841 data-nosnippet>841</a>        db.client()
-<a href=#842 id=842 data-nosnippet>842</a>            .query(
-<a href=#843 id=843 data-nosnippet>843</a>                <span class="string">"CREATE peer:p1 SET mesh_ipv6 = $m, public_key = $p, \
-<a href=#844 id=844 data-nosnippet>844</a>                 endpoint = $e, last_seen = time::now()"</span>,
-<a href=#845 id=845 data-nosnippet>845</a>            )
-<a href=#846 id=846 data-nosnippet>846</a>            .bind((<span class="string">"m"</span>, <span class="string">"fdc5:8ba:9b14::2"</span>))
-<a href=#847 id=847 data-nosnippet>847</a>            .bind((<span class="string">"p"</span>, <span class="string">"PEERKEY=="</span>))
-<a href=#848 id=848 data-nosnippet>848</a>            .bind((<span class="string">"e"</span>, <span class="string">"1.2.3.4:51820"</span>))
-<a href=#849 id=849 data-nosnippet>849</a>            .<span class="kw">await
-<a href=#850 id=850 data-nosnippet>850</a>            </span>.expect(<span class="string">"insert peer"</span>)
-<a href=#851 id=851 data-nosnippet>851</a>            .check()
-<a href=#852 id=852 data-nosnippet>852</a>            .expect(<span class="string">"insert peer check"</span>);
-<a href=#853 id=853 data-nosnippet>853</a>
-<a href=#854 id=854 data-nosnippet>854</a>        db.client()
-<a href=#855 id=855 data-nosnippet>855</a>            .query(<span class="string">"CREATE wg_key:current SET private_key = $k, public_key = $p"</span>)
-<a href=#856 id=856 data-nosnippet>856</a>            .bind((<span class="string">"k"</span>, <span class="string">"PRIVKEY=="</span>))
-<a href=#857 id=857 data-nosnippet>857</a>            .bind((<span class="string">"p"</span>, <span class="string">"PUBKEY=="</span>))
-<a href=#858 id=858 data-nosnippet>858</a>            .<span class="kw">await
-<a href=#859 id=859 data-nosnippet>859</a>            </span>.expect(<span class="string">"insert wg_key"</span>)
-<a href=#860 id=860 data-nosnippet>860</a>            .check()
-<a href=#861 id=861 data-nosnippet>861</a>            .expect(<span class="string">"insert wg_key check"</span>);
-<a href=#862 id=862 data-nosnippet>862</a>
-<a href=#863 id=863 data-nosnippet>863</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
-<a href=#864 id=864 data-nosnippet>864</a>    }
-<a href=#865 id=865 data-nosnippet>865</a>}
+<a href=#690 id=690 data-nosnippet>690</a>    <span class="doccomment">/// P1.5 — Error path: open at an invalid path returns `StateError`.
+<a href=#691 id=691 data-nosnippet>691</a>    ///
+<a href=#692 id=692 data-nosnippet>692</a>    /// We force the failure by creating a regular file inside the temp
+<a href=#693 id=693 data-nosnippet>693</a>    /// dir and asking SurrealKV to open at a path *under* it. The parent
+<a href=#694 id=694 data-nosnippet>694</a>    /// of `&lt;file&gt;/oops.skv` is a regular file, so `create_dir_all` fails
+<a href=#695 id=695 data-nosnippet>695</a>    /// with `NotADirectory` and `EmbeddedDb::open` surfaces the error
+<a href=#696 id=696 data-nosnippet>696</a>    /// as `StateError::Io` via the `?` operator and the existing
+<a href=#697 id=697 data-nosnippet>697</a>    /// `From&lt;std::io::Error&gt;` impl on `StateError`.
+<a href=#698 id=698 data-nosnippet>698</a>    </span><span class="attr">#[tokio::test]
+<a href=#699 id=699 data-nosnippet>699</a>    </span><span class="kw">async fn </span>open_at_invalid_path_returns_state_error() {
+<a href=#700 id=700 data-nosnippet>700</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#701 id=701 data-nosnippet>701</a>        <span class="kw">let </span>file_as_parent = dir.path().join(<span class="string">"not_a_dir"</span>);
+<a href=#702 id=702 data-nosnippet>702</a>        std::fs::write(<span class="kw-2">&amp;</span>file_as_parent, <span class="string">b"hello"</span>).expect(<span class="string">"write file"</span>);
+<a href=#703 id=703 data-nosnippet>703</a>
+<a href=#704 id=704 data-nosnippet>704</a>        <span class="kw">let </span>bad_path = file_as_parent.join(<span class="string">"oops.skv"</span>);
+<a href=#705 id=705 data-nosnippet>705</a>        <span class="kw">let </span>result = EmbeddedDb::open(<span class="kw-2">&amp;</span>bad_path).<span class="kw">await</span>;
+<a href=#706 id=706 data-nosnippet>706</a>
+<a href=#707 id=707 data-nosnippet>707</a>        <span class="macro">assert!</span>(
+<a href=#708 id=708 data-nosnippet>708</a>            result.is_err(),
+<a href=#709 id=709 data-nosnippet>709</a>            <span class="string">"opening under a regular-file parent should fail"
+<a href=#710 id=710 data-nosnippet>710</a>        </span>);
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>err = result.unwrap_err();
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="macro">assert!</span>(
+<a href=#713 id=713 data-nosnippet>713</a>            <span class="macro">matches!</span>(err, StateError::Io(<span class="kw">_</span>)),
+<a href=#714 id=714 data-nosnippet>714</a>            <span class="string">"expected StateError::Io, got: {err:?}"
+<a href=#715 id=715 data-nosnippet>715</a>        </span>);
+<a href=#716 id=716 data-nosnippet>716</a>    }
+<a href=#717 id=717 data-nosnippet>717</a>
+<a href=#718 id=718 data-nosnippet>718</a>    <span class="doccomment">/// P1.7 — `EmbeddedDb::open` applies the bootstrap schema automatically.
+<a href=#719 id=719 data-nosnippet>719</a>    ///
+<a href=#720 id=720 data-nosnippet>720</a>    /// Opens a fresh database (no manual schema application) and asserts
+<a href=#721 id=721 data-nosnippet>721</a>    /// that the four bootstrap tables (`mesh`, `hypervisor`, `peer`,
+<a href=#722 id=722 data-nosnippet>722</a>    /// `wg_key`) are reachable. With the schema NOT auto-applied, a
+<a href=#723 id=723 data-nosnippet>723</a>    /// `select` against a never-touched table returns SurrealDB's
+<a href=#724 id=724 data-nosnippet>724</a>    /// `NotFound` error (verified by `multi_table_isolation` in P1.5).
+<a href=#725 id=725 data-nosnippet>725</a>    /// With the schema auto-applied, the table is defined-but-empty and
+<a href=#726 id=726 data-nosnippet>726</a>    /// `select` returns an empty Vec.
+<a href=#727 id=727 data-nosnippet>727</a>    </span><span class="attr">#[tokio::test]
+<a href=#728 id=728 data-nosnippet>728</a>    </span><span class="kw">async fn </span>open_applies_bootstrap_schema_automatically() {
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#730 id=730 data-nosnippet>730</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"auto_schema.skv"</span>))
+<a href=#731 id=731 data-nosnippet>731</a>            .<span class="kw">await
+<a href=#732 id=732 data-nosnippet>732</a>            </span>.expect(<span class="string">"open should also apply the schema"</span>);
+<a href=#733 id=733 data-nosnippet>733</a>
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="comment">// Each schema-defined table must be reachable on a fresh DB.
+<a href=#735 id=735 data-nosnippet>735</a>        // We use surrealdb::types::Value to avoid forcing a SurrealValue
+<a href=#736 id=736 data-nosnippet>736</a>        // derive on a strongly-typed mirror of every table.
+<a href=#737 id=737 data-nosnippet>737</a>        </span><span class="kw">for </span>table <span class="kw">in </span><span class="kw-2">&amp;</span>[<span class="string">"mesh"</span>, <span class="string">"hypervisor"</span>, <span class="string">"peer"</span>, <span class="string">"wg_key"</span>] {
+<a href=#738 id=738 data-nosnippet>738</a>            <span class="kw">let </span>rows: Vec&lt;surrealdb::types::Value&gt; =
+<a href=#739 id=739 data-nosnippet>739</a>                db.client().select(<span class="kw-2">*</span>table).<span class="kw">await</span>.unwrap_or_else(|e| {
+<a href=#740 id=740 data-nosnippet>740</a>                    <span class="macro">panic!</span>(<span class="string">"select on {table} should succeed (schema not applied?): {e}"</span>)
+<a href=#741 id=741 data-nosnippet>741</a>                });
+<a href=#742 id=742 data-nosnippet>742</a>            <span class="macro">assert!</span>(
+<a href=#743 id=743 data-nosnippet>743</a>                rows.is_empty(),
+<a href=#744 id=744 data-nosnippet>744</a>                <span class="string">"table {table} should be empty on a fresh DB but contained {} rows"</span>,
+<a href=#745 id=745 data-nosnippet>745</a>                rows.len()
+<a href=#746 id=746 data-nosnippet>746</a>            );
+<a href=#747 id=747 data-nosnippet>747</a>        }
+<a href=#748 id=748 data-nosnippet>748</a>
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="comment">// The schema is also idempotent: a second open at the same path
+<a href=#750 id=750 data-nosnippet>750</a>        // (after explicit shutdown) must succeed and the tables must
+<a href=#751 id=751 data-nosnippet>751</a>        // still be defined.
+<a href=#752 id=752 data-nosnippet>752</a>        </span><span class="kw">let </span>path = db.path().to_path_buf();
+<a href=#753 id=753 data-nosnippet>753</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#754 id=754 data-nosnippet>754</a>
+<a href=#755 id=755 data-nosnippet>755</a>        <span class="kw">let </span>db2 = EmbeddedDb::open(<span class="kw-2">&amp;</span>path)
+<a href=#756 id=756 data-nosnippet>756</a>            .<span class="kw">await
+<a href=#757 id=757 data-nosnippet>757</a>            </span>.expect(<span class="string">"reopening an already-initialised DB should succeed"</span>);
+<a href=#758 id=758 data-nosnippet>758</a>        <span class="kw">for </span>table <span class="kw">in </span><span class="kw-2">&amp;</span>[<span class="string">"mesh"</span>, <span class="string">"hypervisor"</span>, <span class="string">"peer"</span>, <span class="string">"wg_key"</span>] {
+<a href=#759 id=759 data-nosnippet>759</a>            <span class="kw">let </span>rows: Vec&lt;surrealdb::types::Value&gt; =
+<a href=#760 id=760 data-nosnippet>760</a>                db2.client().select(<span class="kw-2">*</span>table).<span class="kw">await</span>.unwrap_or_else(|e| {
+<a href=#761 id=761 data-nosnippet>761</a>                    <span class="macro">panic!</span>(<span class="string">"post-reopen select on {table} should succeed: {e}"</span>)
+<a href=#762 id=762 data-nosnippet>762</a>                });
+<a href=#763 id=763 data-nosnippet>763</a>            <span class="macro">assert!</span>(
+<a href=#764 id=764 data-nosnippet>764</a>                rows.is_empty(),
+<a href=#765 id=765 data-nosnippet>765</a>                <span class="string">"table {table} should still be empty after reopen"
+<a href=#766 id=766 data-nosnippet>766</a>            </span>);
+<a href=#767 id=767 data-nosnippet>767</a>        }
+<a href=#768 id=768 data-nosnippet>768</a>        db2.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown #2"</span>);
+<a href=#769 id=769 data-nosnippet>769</a>    }
+<a href=#770 id=770 data-nosnippet>770</a>
+<a href=#771 id=771 data-nosnippet>771</a>    <span class="doccomment">/// P1.6 — the bootstrap.surql schema must apply cleanly to a fresh
+<a href=#772 id=772 data-nosnippet>772</a>    /// database, must be idempotent (re-applying is a no-op), and must
+<a href=#773 id=773 data-nosnippet>773</a>    /// allow inserting one record into every table it defines.
+<a href=#774 id=774 data-nosnippet>774</a>    ///
+<a href=#775 id=775 data-nosnippet>775</a>    /// After P1.7 (sifrah/nauka#197) `EmbeddedDb::open` applies the schema
+<a href=#776 id=776 data-nosnippet>776</a>    /// automatically, so this test now also covers the
+<a href=#777 id=777 data-nosnippet>777</a>    /// "open + auto-apply + manual re-apply" idempotency contract.
+<a href=#778 id=778 data-nosnippet>778</a>    </span><span class="attr">#[tokio::test]
+<a href=#779 id=779 data-nosnippet>779</a>    </span><span class="kw">async fn </span>bootstrap_schema_applies_cleanly() {
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="kw">const </span>SCHEMA: <span class="kw-2">&amp;</span>str = <span class="macro">include_str!</span>(<span class="string">"../schemas/bootstrap.surql"</span>);
+<a href=#781 id=781 data-nosnippet>781</a>
+<a href=#782 id=782 data-nosnippet>782</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#783 id=783 data-nosnippet>783</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"schema_test.skv"</span>))
+<a href=#784 id=784 data-nosnippet>784</a>            .<span class="kw">await
+<a href=#785 id=785 data-nosnippet>785</a>            </span>.expect(<span class="string">"open"</span>);
+<a href=#786 id=786 data-nosnippet>786</a>
+<a href=#787 id=787 data-nosnippet>787</a>        <span class="comment">// First application — must succeed against an empty database.
+<a href=#788 id=788 data-nosnippet>788</a>        </span>db.client()
+<a href=#789 id=789 data-nosnippet>789</a>            .query(SCHEMA)
+<a href=#790 id=790 data-nosnippet>790</a>            .<span class="kw">await
+<a href=#791 id=791 data-nosnippet>791</a>            </span>.expect(<span class="string">"schema first apply"</span>)
+<a href=#792 id=792 data-nosnippet>792</a>            .check()
+<a href=#793 id=793 data-nosnippet>793</a>            .expect(<span class="string">"schema first apply check"</span>);
+<a href=#794 id=794 data-nosnippet>794</a>
+<a href=#795 id=795 data-nosnippet>795</a>        <span class="comment">// Second application — must be a no-op thanks to IF NOT EXISTS.
+<a href=#796 id=796 data-nosnippet>796</a>        </span>db.client()
+<a href=#797 id=797 data-nosnippet>797</a>            .query(SCHEMA)
+<a href=#798 id=798 data-nosnippet>798</a>            .<span class="kw">await
+<a href=#799 id=799 data-nosnippet>799</a>            </span>.expect(<span class="string">"schema second apply"</span>)
+<a href=#800 id=800 data-nosnippet>800</a>            .check()
+<a href=#801 id=801 data-nosnippet>801</a>            .expect(<span class="string">"schema second apply check"</span>);
+<a href=#802 id=802 data-nosnippet>802</a>
+<a href=#803 id=803 data-nosnippet>803</a>        <span class="comment">// Each table is reachable. Inserting a row exercises the field
+<a href=#804 id=804 data-nosnippet>804</a>        // ASSERTs and confirms the SCHEMAFULL definitions accept the
+<a href=#805 id=805 data-nosnippet>805</a>        // documented shapes. We use SurrealQL's `time::now()` directly so
+<a href=#806 id=806 data-nosnippet>806</a>        // the test doesn't need a chrono dev-dep.
+<a href=#807 id=807 data-nosnippet>807</a>        </span>db.client()
+<a href=#808 id=808 data-nosnippet>808</a>            .query(
+<a href=#809 id=809 data-nosnippet>809</a>                <span class="string">"CREATE mesh:current SET ipv6_ula = $u, secret_hash = $h, \
+<a href=#810 id=810 data-nosnippet>810</a>                 created_at = time::now()"</span>,
+<a href=#811 id=811 data-nosnippet>811</a>            )
+<a href=#812 id=812 data-nosnippet>812</a>            .bind((<span class="string">"u"</span>, <span class="string">"fdc5:8ba:9b14::/48"</span>))
+<a href=#813 id=813 data-nosnippet>813</a>            .bind((<span class="string">"h"</span>, <span class="string">"0123456789abcdef"</span>))
+<a href=#814 id=814 data-nosnippet>814</a>            .<span class="kw">await
+<a href=#815 id=815 data-nosnippet>815</a>            </span>.expect(<span class="string">"insert mesh"</span>)
+<a href=#816 id=816 data-nosnippet>816</a>            .check()
+<a href=#817 id=817 data-nosnippet>817</a>            .expect(<span class="string">"insert mesh check"</span>);
+<a href=#818 id=818 data-nosnippet>818</a>
+<a href=#819 id=819 data-nosnippet>819</a>        <span class="comment">// The record id `hypervisor:hv-01HXXX` IS the ULID — there's no
+<a href=#820 id=820 data-nosnippet>820</a>        // separate `id` field in the schema (see schemas/bootstrap.surql
+<a href=#821 id=821 data-nosnippet>821</a>        // for the rationale). P1.10 will create rows the same way:
+<a href=#822 id=822 data-nosnippet>822</a>        // `CREATE hypervisor:&lt;ulid&gt; SET name = ..., ...`.
+<a href=#823 id=823 data-nosnippet>823</a>        </span>db.client()
+<a href=#824 id=824 data-nosnippet>824</a>            .query(
+<a href=#825 id=825 data-nosnippet>825</a>                <span class="string">"CREATE hypervisor:`hv-01HXXX` SET name = $n, mesh_ipv6 = $m, \
+<a href=#826 id=826 data-nosnippet>826</a>                 public_key = $p, role = $r"</span>,
+<a href=#827 id=827 data-nosnippet>827</a>            )
+<a href=#828 id=828 data-nosnippet>828</a>            .bind((<span class="string">"n"</span>, <span class="string">"node-1"</span>))
+<a href=#829 id=829 data-nosnippet>829</a>            .bind((<span class="string">"m"</span>, <span class="string">"fdc5:8ba:9b14::1"</span>))
+<a href=#830 id=830 data-nosnippet>830</a>            .bind((<span class="string">"p"</span>, <span class="string">"BASE64=="</span>))
+<a href=#831 id=831 data-nosnippet>831</a>            .bind((<span class="string">"r"</span>, <span class="string">"leader"</span>))
+<a href=#832 id=832 data-nosnippet>832</a>            .<span class="kw">await
+<a href=#833 id=833 data-nosnippet>833</a>            </span>.expect(<span class="string">"insert hypervisor"</span>)
+<a href=#834 id=834 data-nosnippet>834</a>            .check()
+<a href=#835 id=835 data-nosnippet>835</a>            .expect(<span class="string">"insert hypervisor check"</span>);
+<a href=#836 id=836 data-nosnippet>836</a>
+<a href=#837 id=837 data-nosnippet>837</a>        db.client()
+<a href=#838 id=838 data-nosnippet>838</a>            .query(
+<a href=#839 id=839 data-nosnippet>839</a>                <span class="string">"CREATE peer:p1 SET mesh_ipv6 = $m, public_key = $p, \
+<a href=#840 id=840 data-nosnippet>840</a>                 endpoint = $e, last_seen = time::now()"</span>,
+<a href=#841 id=841 data-nosnippet>841</a>            )
+<a href=#842 id=842 data-nosnippet>842</a>            .bind((<span class="string">"m"</span>, <span class="string">"fdc5:8ba:9b14::2"</span>))
+<a href=#843 id=843 data-nosnippet>843</a>            .bind((<span class="string">"p"</span>, <span class="string">"PEERKEY=="</span>))
+<a href=#844 id=844 data-nosnippet>844</a>            .bind((<span class="string">"e"</span>, <span class="string">"1.2.3.4:51820"</span>))
+<a href=#845 id=845 data-nosnippet>845</a>            .<span class="kw">await
+<a href=#846 id=846 data-nosnippet>846</a>            </span>.expect(<span class="string">"insert peer"</span>)
+<a href=#847 id=847 data-nosnippet>847</a>            .check()
+<a href=#848 id=848 data-nosnippet>848</a>            .expect(<span class="string">"insert peer check"</span>);
+<a href=#849 id=849 data-nosnippet>849</a>
+<a href=#850 id=850 data-nosnippet>850</a>        db.client()
+<a href=#851 id=851 data-nosnippet>851</a>            .query(<span class="string">"CREATE wg_key:current SET private_key = $k, public_key = $p"</span>)
+<a href=#852 id=852 data-nosnippet>852</a>            .bind((<span class="string">"k"</span>, <span class="string">"PRIVKEY=="</span>))
+<a href=#853 id=853 data-nosnippet>853</a>            .bind((<span class="string">"p"</span>, <span class="string">"PUBKEY=="</span>))
+<a href=#854 id=854 data-nosnippet>854</a>            .<span class="kw">await
+<a href=#855 id=855 data-nosnippet>855</a>            </span>.expect(<span class="string">"insert wg_key"</span>)
+<a href=#856 id=856 data-nosnippet>856</a>            .check()
+<a href=#857 id=857 data-nosnippet>857</a>            .expect(<span class="string">"insert wg_key check"</span>);
+<a href=#858 id=858 data-nosnippet>858</a>
+<a href=#859 id=859 data-nosnippet>859</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#860 id=860 data-nosnippet>860</a>    }
+<a href=#861 id=861 data-nosnippet>861</a>}
 </code></pre></div></section></main></body></html>
