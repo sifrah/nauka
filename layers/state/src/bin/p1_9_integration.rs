@@ -99,7 +99,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("expected_count = {}", RECORDS.len());
 
     let db = EmbeddedDb::open(&path).await?;
-    println!("opened         = {}", db.path().display());
+    println!(
+        "opened         = {}",
+        db.surrealkv_path()
+            .expect("SurrealKV handle opened via open() must have a path")
+            .display()
+    );
 
     match phase {
         "seed" => seed(&db).await?,

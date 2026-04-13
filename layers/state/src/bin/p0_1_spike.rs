@@ -133,7 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("default_path   = {}", default_path.display());
 
     let db_b = EmbeddedDb::open_default().await?;
-    println!("opened_path    = {}", db_b.path().display());
+    println!(
+        "opened_path    = {}",
+        db_b.surrealkv_path()
+            .expect("SurrealKV handle opened via open_default must have a path")
+            .display()
+    );
 
     // Live no-side-effects query against the default DB to confirm the
     // round-trip works against the run-mode-resolved location.
