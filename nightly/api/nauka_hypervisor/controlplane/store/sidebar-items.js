@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["prefix_end"],"struct":["ClusterDb"]};
+window.SIDEBAR_ITEMS = {"struct":["ClusterDb","EscapeIdent"]};
