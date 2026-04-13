@@ -87,6 +87,12 @@ jobs:
             os: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: Install cmake (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake || brew upgrade cmake
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
