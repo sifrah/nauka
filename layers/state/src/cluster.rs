@@ -1,9 +1,19 @@
 //! Distributed state backed by TiKV.
 //!
-//! Provides a key/value API over TiKV for distributed, replicated state
-//! across the mesh.
+//! Provides a raw key/value API over a TiKV cluster for shared state that
+//! must be visible across every node in the mesh: orgs, projects, VMs,
+//! VPCs, subnets, volumes, and so on. Values are JSON-serialized; keys
+//! are partitioned by namespace via the compound form `{namespace}/{key}`.
 //!
-//! Keys are prefixed by namespace: `{namespace}/{key}` to partition data.
+//! # Status
+//!
+//! `ClusterDb` is **transitional**. Phase 2 (sifrah/nauka#206 /
+//! sifrah/nauka#220) replaces it with [`EmbeddedDb`](crate::EmbeddedDb)
+//! configured with the SurrealDB SDK's `kv-tikv` backend, after which
+//! both bootstrap and cluster state will go through the same wrapper
+//! and `ClusterDb` will be deleted. New call sites should prefer
+//! SurrealQL-flavoured patterns where possible to make that transition
+//! cheap.
 //!
 //! # Usage
 //!

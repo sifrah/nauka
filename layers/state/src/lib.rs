@@ -1,22 +1,23 @@
 #![allow(clippy::result_large_err)]
 //! State persistence for Nauka.
 //!
-//! Two backends, in the order they appear at a node's lifetime:
+//! Two backends, one local and one distributed, that together cover every
+//! piece of state a Nauka deployment needs. The two never hold the same
+//! data: bootstrap state lives locally on each node, everything else lives
+//! in the cluster store.
 //!
-//! - **`EmbeddedDb`** — embedded SurrealDB on disk via the SurrealKV backend.
-//!   Used for **bootstrap** state that must be readable before any cluster
-//!   exists (mesh identity, hypervisor identity, peers, WireGuard keys,
-//!   storage region registry). This is the single source of truth for
-//!   per-node state.
-//! - **`ClusterDb`** — TiKV-backed distributed raw KV store for shared state
-//!   (orgs, projects, VMs, VPCs, etc.). Will be retired by P2.16
-//!   (sifrah/nauka#220) once the SurrealDB SDK in `kv-tikv` mode (P2.x) takes
-//!   over.
+//! - [`EmbeddedDb`] — embedded SurrealDB on disk via the SurrealKV backend.
+//!   The single source of truth for per-node bootstrap state that must be
+//!   readable before any cluster exists: mesh identity, hypervisor identity,
+//!   peers, WireGuard keys, and the storage region registry.
+//! - [`ClusterDb`] — TiKV-backed distributed raw KV store for shared state
+//!   (orgs, projects, VMs, VPCs, etc.). Transitional: Phase 2
+//!   (sifrah/nauka#206 / sifrah/nauka#220) replaces it with `EmbeddedDb`
+//!   over the SurrealDB SDK's `kv-tikv` backend, after which the two
+//!   stores share the same API.
 //!
-//! A legacy JSON-file bootstrap store shipped alongside `EmbeddedDb`
-//! through P1.2–P1.11. P1.11 (sifrah/nauka#201) migrated every caller
-//! to `EmbeddedDb`, and P1.12 (sifrah/nauka#202) removed the legacy
-//! code and its `dirs` dep from this crate.
+//! See [`README.md`](https://github.com/sifrah/nauka/blob/main/layers/state/README.md)
+//! for the full crate guide.
 //!
 //! # SurrealDB namespace / database conventions
 //!
@@ -31,11 +32,13 @@
 //! # Usage — `EmbeddedDb` (SurrealKV-backed bootstrap state)
 //!
 //! ```no_run
-//! # use nauka_state::EmbeddedDb;
-//! # use std::path::Path;
+//! use nauka_state::EmbeddedDb;
+//! use std::path::Path;
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = EmbeddedDb::open(Path::new("/var/lib/nauka/bootstrap.skv")).await?;
-//! db.client().query("INFO FOR DB").await?;
+//! let _: Vec<surrealdb::types::Value> =
+//!     db.client().query("SELECT * FROM peer").await?.take(0)?;
 //! db.shutdown().await?;
 //! # Ok(()) }
 //! ```

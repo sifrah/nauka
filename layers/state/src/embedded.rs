@@ -3,37 +3,38 @@
 //! Wraps `surrealdb::Surreal<Db>` with a Nauka-friendly lifecycle: a single
 //! `open` constructor that creates the on-disk SurrealKV datastore at a given
 //! path and selects the `nauka` / `bootstrap` namespace/database (per ADR
-//! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, and
-//! an explicit `shutdown` step.
+//! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, an
+//! explicit `shutdown` step that waits for SurrealKV's background router to
+//! release its OS-level flock, and automatic application of the bootstrap
+//! schema (`schemas/bootstrap.surql`) on every open.
 //!
-//! This is the production backend for Nauka's bootstrap state. The legacy
-//! JSON-file store shipped alongside it during P1.2–P1.10; P1.11
-//! (sifrah/nauka#201) migrated every caller to `EmbeddedDb`, and P1.12
-//! (sifrah/nauka#202) will delete the legacy code outright.
-//!
-//! P1.2 (sifrah/nauka#192) introduces only the wrapper struct and its
-//! lifecycle. The companion deliverables — error mapping (P1.3,
-//! sifrah/nauka#193), default-path helpers (P1.4, sifrah/nauka#194),
-//! comprehensive CRUD/persistence tests (P1.5, sifrah/nauka#195), the
-//! initial `.surql` schema (P1.6, sifrah/nauka#196), and applying that
-//! schema at open time (P1.7, sifrah/nauka#197) — each ship as their own
-//! issue.
+//! This is the single source of truth for everything a node needs to read
+//! before the cluster is reachable: mesh identity, hypervisor identity, peer
+//! list, WireGuard keypair, and the storage region registry. See the crate
+//! [`README`](https://github.com/sifrah/nauka/blob/main/layers/state/README.md)
+//! for the full guide and on-disk layout.
 //!
 //! # Example
 //!
 //! ```no_run
-//! # use nauka_state::EmbeddedDb;
-//! # use std::path::Path;
+//! use nauka_state::EmbeddedDb;
+//! use std::path::Path;
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Open (or create) the SurrealKV datastore. The bootstrap schema
+//! // is applied automatically. Use `EmbeddedDb::open_default()` to
+//! // pick up the run-mode-aware default path instead.
 //! let db = EmbeddedDb::open(Path::new("/var/lib/nauka/bootstrap.skv")).await?;
 //!
-//! // Use the underlying SurrealDB SDK directly:
+//! // Drop down to the SurrealDB SDK for queries.
 //! let _: Vec<surrealdb::types::Value> = db
 //!     .client()
-//!     .query("INFO FOR DB")
+//!     .query("SELECT * FROM peer")
 //!     .await?
 //!     .take(0)?;
 //!
+//! // Shut down explicitly so the SurrealKV flock is released and a
+//! // subsequent `EmbeddedDb::open` at the same path can succeed.
 //! db.shutdown().await?;
 //! # Ok(()) }
 //! ```
@@ -146,11 +147,6 @@ impl EmbeddedDb {
         // open that happens to collide with another process's brief
         // write window would fail with
         // `Other("Database at ... LOCK is already locked by another process")`.
-        //
-        // Before P1.11 (sifrah/nauka#201), this was masked because every
-        // CLI caller used the legacy JSON-file bootstrap backend, which
-        // did not take an exclusive flock. P1.11 migrated every caller
-        // to `EmbeddedDb`, so the contention became real.
         //
         // The fix: retry the open on "already locked" with exponential
         // backoff up to a 5-second deadline, matching the pattern used
