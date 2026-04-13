@@ -148,9 +148,9 @@ impl EmbeddedDb {
         // `Other("Database at ... LOCK is already locked by another process")`.
         //
         // Before P1.11 (sifrah/nauka#201), this was masked because every
-        // CLI caller used the JSON-file `LocalDb` backend, which doesn't
-        // use an exclusive flock. P1.11 migrates every caller to
-        // `EmbeddedDb`, so the contention becomes real.
+        // CLI caller used the legacy JSON-file bootstrap backend, which
+        // did not take an exclusive flock. P1.11 migrated every caller
+        // to `EmbeddedDb`, so the contention became real.
         //
         // The fix: retry the open on "already locked" with exponential
         // backoff up to a 5-second deadline, matching the pattern used
