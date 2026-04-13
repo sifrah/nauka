@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_SCHEMA"],"fn":["open_datastore_with_retry","wait_for_surrealkv_lock_release"],"struct":["EmbeddedDb"]};
+window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_SCHEMA"],"enum":["EmbeddedBackend"],"fn":["open_datastore_with_retry","pd_endpoints_for","strip_http_scheme","wait_for_surrealkv_lock_release"],"struct":["EmbeddedDb"]};
