@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["ORG_TABLE"],"fn":["classify_create_error","days_from_civil","iso8601_to_epoch","thing_to_id_string"],"struct":["OrgRow","OrgStore"]};
+window.SIDEBAR_ITEMS = {"constant":["ORG_TABLE"],"struct":["OrgRow","OrgStore"]};

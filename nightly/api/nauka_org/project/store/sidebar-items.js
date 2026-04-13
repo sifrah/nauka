@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_PROJ","NS_PROJ_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX"],"fn":["add_id","load_ids","remove_id"],"struct":["ProjectStore"]};
+window.SIDEBAR_ITEMS = {"constant":["PROJECT_TABLE"],"fn":["classify_create_error_with_org","decode_first"],"struct":["ProjectRow","ProjectStore"]};

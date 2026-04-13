@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["registration"],"mod":["handlers","project","store","types"]};
+window.SIDEBAR_ITEMS = {"fn":["registration"],"mod":["handlers","project","sdk_bridge","store","types"]};
