@@ -44,6 +44,7 @@ use nauka_core::resource::ResourceMeta;
 use nauka_state::EmbeddedDb;
 use serde::Deserialize;
 
+use crate::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 use crate::types::Org;
 
 /// SurrealDB table backing this store. Defined in
@@ -117,10 +118,10 @@ impl OrgStore {
             .await;
         let response = match query_result {
             Ok(r) => r,
-            Err(e) => return Err(classify_create_error(name, &e.to_string())),
+            Err(e) => return Err(classify_create_error("org", name, &e.to_string())),
         };
         if let Err(e) = response.check() {
-            return Err(classify_create_error(name, &e.to_string()));
+            return Err(classify_create_error("org", name, &e.to_string()));
         }
 
         Ok(org)
@@ -218,17 +219,16 @@ impl OrgStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("org '{name_or_id}' not found"))?;
 
-        // Refuse to delete an org that still has projects. The project
-        // store still speaks the legacy raw-KV surface on top of the
-        // same `EmbeddedDb` (P2.10 sifrah/nauka#214 migrates it), so
-        // every project row lives in the `_kv_proj` SCHEMALESS table
-        // as `{ key: <id>, data: <project-json> }`. We count the rows
-        // whose `data.org_name` matches the target org directly via
-        // SurrealQL so this store doesn't need to import `ProjectStore`
-        // (and therefore doesn't need to import the legacy cluster-DB
-        // wrapper type to build one). Once P2.10 lands the query
-        // simplifies to `SELECT count() FROM project WHERE org = $id`.
-        let remaining_projects = self.count_projects_in_org(&org.meta.name).await?;
+        // Refuse to delete an org that still has projects. P2.10
+        // (sifrah/nauka#214) migrated the project store to the native
+        // SurrealDB SDK on top of the SCHEMAFULL `project` table, so
+        // we can count the surviving children with a direct query on
+        // the owning-org id. This store still doesn't import
+        // `ProjectStore` because that would force a circular module
+        // dependency (`ProjectStore::delete` reaches back into
+        // `OrgStore::get` to resolve the parent org) — the inline
+        // query is cheaper.
+        let remaining_projects = self.count_projects_in_org(&org.meta.id).await?;
         if remaining_projects > 0 {
             anyhow::bail!(
                 "org '{}' has {} project(s). Delete them first.",
@@ -249,40 +249,26 @@ impl OrgStore {
         Ok(())
     }
 
-    /// Count the projects currently owned by the org whose
-    /// human-readable name is `org_name`.
+    /// Count the projects currently owned by the org whose record-id
+    /// is `org_id`.
     ///
-    /// Queries the transitional `_kv_proj` SCHEMALESS table (written by
-    /// the legacy project store that is still on the raw-KV surface)
-    /// directly, rather than constructing a `ProjectStore` from a
-    /// cluster-DB wrapper. The table is created via `DEFINE TABLE IF
-    /// NOT EXISTS` so a fresh database (no projects ever written)
-    /// returns zero rows instead of "table does not exist". P2.10
-    /// (sifrah/nauka#214) migrates the project store to a SCHEMAFULL
-    /// `project` table, at which point the query target changes to
-    /// `project` and this helper goes away.
-    async fn count_projects_in_org(&self, org_name: &str) -> anyhow::Result<usize> {
-        // Make sure the legacy `_kv_proj` table exists so the SELECT
-        // below doesn't error on a fresh database. SurrealDB raises
-        // "table does not exist" otherwise; the `IF NOT EXISTS` guard
-        // makes this idempotent.
-        self.db
-            .client()
-            .query("DEFINE TABLE IF NOT EXISTS _kv_proj SCHEMALESS")
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .check()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
+    /// Uses the SCHEMAFULL `project` table that P2.10 migrated to, so
+    /// the query is a single `SELECT name FROM project WHERE org =
+    /// $org`. The `project` table is defined by
+    /// `nauka_state::apply_cluster_schemas` at bootstrap, so a fresh
+    /// database already has the table — no `DEFINE TABLE IF NOT
+    /// EXISTS` dance is needed. If the schema hasn't been applied at
+    /// all (e.g. a pre-bootstrap sanity test), the SurrealDB error
+    /// bubbles up as an `anyhow::Error` and the caller surfaces it.
+    async fn count_projects_in_org(&self, org_id: &str) -> anyhow::Result<usize> {
         let mut response = self
             .db
             .client()
-            .query("SELECT data FROM _kv_proj WHERE data.org_name = $org_name")
-            .bind(("org_name", org_name.to_string()))
+            .query("SELECT name FROM project WHERE org = $org")
+            .bind(("org", org_id.to_string()))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let rows: Vec<serde_json::Value> =
-            response.take("data").map_err(|e| anyhow::anyhow!("{e}"))?;
+        let rows: Vec<serde_json::Value> = response.take(0).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(rows.len())
     }
 }
@@ -313,7 +299,7 @@ struct OrgRow {
 
 impl OrgRow {
     fn into_org(self) -> Org {
-        let id = thing_to_id_string(&self.id);
+        let id = thing_to_id_string("org:", &self.id);
         let labels = self
             .labels
             .and_then(|v| serde_json::from_value(v).ok())
@@ -328,153 +314,6 @@ impl OrgRow {
                 updated_at: iso8601_to_epoch(&self.updated_at),
             },
         }
-    }
-}
-
-/// Pull the inner id string out of a SurrealDB `Thing` rendered as
-/// `serde_json::Value`.
-///
-/// SurrealDB JSON-encodes a `Thing` as one of several shapes depending
-/// on the SDK version and the variant of the inner id:
-///
-/// 1. `"org:01J…"` or `` "org:`01J…`" `` — a flat string when the id
-///    round-tripped through a SurrealQL response that was already
-///    strings-only. SurrealDB wraps the id in backticks when the raw
-///    id contains any character outside the unquoted-identifier set
-///    (`-` in our `org-<ulid>` form is the usual culprit).
-/// 2. `{"tb": "org", "id": "01J…"}` — the structured form for a
-///    `String` id.
-/// 3. `{"tb": "org", "id": {"String": "01J…"}}` — the structured form
-///    when SurrealDB tagged the id variant explicitly.
-///
-/// We accept all three and always return the bare `org-<ulid>` form
-/// (without the `tb:` prefix or any wrapping backticks) because that's
-/// what the rest of Nauka has been carrying around as `Org::meta::id`
-/// since day one.
-fn thing_to_id_string(value: &serde_json::Value) -> String {
-    let trim_backticks = |s: &str| s.trim_start_matches('`').trim_end_matches('`').to_string();
-
-    if let Some(s) = value.as_str() {
-        // Shape 1: flat "org:01J…" string. Strip the `org:` prefix if
-        // present so the result matches the legacy `org-<ulid>` form,
-        // then strip any wrapping backticks that SurrealDB added
-        // because the id contains a hyphen.
-        let without_prefix = s.strip_prefix("org:").unwrap_or(s);
-        return trim_backticks(without_prefix);
-    }
-    if let Some(obj) = value.as_object() {
-        // Shapes 2 and 3 carry the id under the `id` key. Shape 3
-        // wraps the inner id under `String`.
-        if let Some(inner) = obj.get("id") {
-            if let Some(s) = inner.as_str() {
-                return trim_backticks(s);
-            }
-            if let Some(inner_obj) = inner.as_object() {
-                if let Some(s) = inner_obj.get("String").and_then(|v| v.as_str()) {
-                    return trim_backticks(s);
-                }
-            }
-        }
-    }
-    // Fallback: dump the JSON form so the caller at least sees what
-    // SurrealDB actually returned. The `{}` Display for serde_json::Value
-    // is the JSON encoding.
-    value.to_string()
-}
-
-/// Parse an ISO 8601 / RFC 3339 datetime back into Unix-epoch seconds.
-///
-/// SurrealDB renders `datetime` values as strings like
-/// `2024-01-02T03:04:05.123456Z`; we round down to whole seconds because
-/// `ResourceMeta::created_at` is a `u64` with second granularity. Any
-/// parse failure (e.g. an unexpected timezone offset) returns `0` so
-/// the caller still gets a value back — the alternative would be to
-/// fail the whole list/get path on a single malformed row, which is
-/// strictly worse for operators trying to clean up bad data.
-fn iso8601_to_epoch(s: &str) -> u64 {
-    // Stripped-down parser: YYYY-MM-DDTHH:MM:SS… — accepts a trailing
-    // `Z`, an optional fractional seconds part, and an optional
-    // timezone offset (which we ignore — the only writer is
-    // `OrgStore::create` and it always emits `Z`).
-    let bytes = s.as_bytes();
-    if bytes.len() < 19 {
-        return 0;
-    }
-    let year: i64 = std::str::from_utf8(&bytes[0..4])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let month: i64 = std::str::from_utf8(&bytes[5..7])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let day: i64 = std::str::from_utf8(&bytes[8..10])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let hour: i64 = std::str::from_utf8(&bytes[11..13])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let minute: i64 = std::str::from_utf8(&bytes[14..16])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let second: i64 = std::str::from_utf8(&bytes[17..19])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let days = days_from_civil(year, month, day);
-    let total = days * 86400 + hour * 3600 + minute * 60 + second;
-    if total < 0 {
-        0
-    } else {
-        total as u64
-    }
-}
-
-/// Howard Hinnant's "days from civil" algorithm — converts a
-/// `(year, month, day)` triple to a count of days since 1970-01-01.
-///
-/// Lifted directly from the public-domain reference implementation
-/// (<https://howardhinnant.github.io/date_algorithms.html#days_from_civil>).
-/// We use it instead of a `chrono` / `time` dependency to keep
-/// `nauka-org` build-time small and to mirror the existing date math
-/// already in `nauka_core::resource::api_response::days_to_date`, which
-/// goes the other direction.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// Map a SurrealDB error message from `OrgStore::create` into a flat
-/// `anyhow::Error` with a human-friendly message.
-///
-/// The schema's `org_name UNIQUE` index surfaces duplicate names as
-/// `surrealdb::Error::already_exists`, whose `Display` rendering
-/// includes the phrase "already contains" (the substring is stable
-/// across surrealdb-types releases and is what the existing
-/// `From<surrealdb::Error>` impl in `nauka_state::lib.rs` documents as
-/// the `is_already_exists()` signal). We key on that substring rather
-/// than re-introducing a direct `surrealdb` dependency in this crate,
-/// so duplicate-name conflicts still surface as the same
-/// `org '<name>' already exists` message the pre-P2.9 "check then
-/// insert" path returned — and so existing CLI error-message tests
-/// downstream keep passing. Everything else collapses to the
-/// underlying error text verbatim.
-fn classify_create_error(name: &str, err_msg: &str) -> anyhow::Error {
-    let lowered = err_msg.to_lowercase();
-    if lowered.contains("already contains")
-        || lowered.contains("already exists")
-        || lowered.contains("duplicate")
-    {
-        anyhow::anyhow!("org '{name}' already exists")
-    } else {
-        anyhow::anyhow!("{err_msg}")
     }
 }
 
@@ -602,46 +441,43 @@ mod tests {
     }
 
     /// Delete refuses to drop an org that still has a project pointing
-    /// at it via the legacy `_kv_proj` key/value rows.
+    /// at it.
     ///
-    /// We seed the legacy table directly with a row that mimics the
-    /// shape `ProjectStore::create` produces (`{ key: <id>, data: {
-    /// org_name, ... } }`) so the test stays self-contained — it
-    /// doesn't pull in `ProjectStore` (which still goes through the
-    /// legacy cluster-DB wrapper API and would force an awkward
-    /// import dance into this file).
+    /// We seed the SCHEMAFULL `project` table directly (via a `CREATE`
+    /// bypassing `ProjectStore::create`) so this test stays
+    /// self-contained — it doesn't pull in `ProjectStore`, which
+    /// reaches back into `OrgStore::get` to resolve the parent org
+    /// and would force a circular import dance into this file.
     #[tokio::test]
     async fn delete_refuses_when_project_remains() {
         let (_d, store) = temp_store().await;
-        store.create("acme").await.expect("create org");
+        let org = store.create("acme").await.expect("create org");
 
-        // Seed a fake `_kv_proj` row that mirrors the JSON shape the
-        // legacy `ProjectStore::create` writes.
+        // Seed a `project` row directly. The SCHEMAFULL `project`
+        // table is created by `apply_cluster_schemas` in `temp_store`,
+        // so every column has to be populated to satisfy the ASSERT
+        // constraints.
         store
             .db
             .client()
-            .query("DEFINE TABLE IF NOT EXISTS _kv_proj SCHEMALESS")
-            .await
-            .expect("define _kv_proj")
-            .check()
-            .expect("define _kv_proj check");
-        let row_data = serde_json::json!({
-            "id": "proj-fake",
-            "name": "fakeproj",
-            "org_name": "acme",
-        });
-        store
-            .db
-            .client()
-            .query("UPSERT type::record('_kv_proj', 'proj-fake') CONTENT { key: 'proj-fake', data: $data }")
-            .bind(("data", row_data))
+            .query(
+                "CREATE type::record('project', 'project-fake') SET \
+                 name = 'fakeproj', \
+                 status = 'active', \
+                 labels = {}, \
+                 org = $org, \
+                 org_name = 'acme', \
+                 created_at = time::now(), \
+                 updated_at = time::now()",
+            )
+            .bind(("org", org.meta.id.clone()))
             .await
             .expect("seed project row")
             .check()
             .expect("seed project row check");
 
         // Now `delete` should refuse the org — there's a project still
-        // pointing at it via `data.org_name = "acme"`.
+        // pointing at it via `org = <org.meta.id>`.
         let err = store
             .delete("acme")
             .await
@@ -655,18 +491,5 @@ mod tests {
         // The org is still there — the failed delete must not have
         // removed it as a side-effect.
         assert!(store.get("acme").await.unwrap().is_some());
-    }
-
-    #[test]
-    fn iso8601_round_trip_matches_epoch() {
-        // Sanity check the helper pair: epoch → iso → epoch must round
-        // trip exactly. The helper uses second granularity, so any
-        // sub-second part would be lost — but `ResourceMeta::created_at`
-        // is itself second-granularity, so this is the right contract.
-        for &epoch in &[0u64, 1, 86_399, 86_400, 1_700_000_000, 1_775_665_838] {
-            let iso = epoch_to_iso8601(epoch);
-            let back = iso8601_to_epoch(&iso);
-            assert_eq!(back, epoch, "round trip failed for {epoch}: iso={iso}");
-        }
     }
 }

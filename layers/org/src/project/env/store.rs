@@ -28,7 +28,10 @@ impl EnvStore {
         project_name: &str,
         org_name: &str,
     ) -> anyhow::Result<Environment> {
-        let proj_store = project::store::ProjectStore::new(self.db.clone());
+        // P2.10 (sifrah/nauka#214): `ProjectStore::new` takes an
+        // `EmbeddedDb` directly; reach the inner handle via
+        // `ClusterDb::embedded().clone()`.
+        let proj_store = project::store::ProjectStore::new(self.db.embedded().clone());
         let project = proj_store
             .get(project_name, Some(org_name))
             .await?
@@ -69,7 +72,10 @@ impl EnvStore {
 
         let project_name = project_name
             .ok_or_else(|| anyhow::anyhow!("--project required to resolve environment by name"))?;
-        let proj_store = project::store::ProjectStore::new(self.db.clone());
+        // P2.10 (sifrah/nauka#214): `ProjectStore::new` takes an
+        // `EmbeddedDb` directly; reach the inner handle via
+        // `ClusterDb::embedded().clone()`.
+        let proj_store = project::store::ProjectStore::new(self.db.embedded().clone());
         let project = proj_store
             .get(project_name, org_name)
             .await?

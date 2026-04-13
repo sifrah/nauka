@@ -48,7 +48,10 @@ impl VmStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("org '{org_name}' not found"))?;
 
-        let proj_store = nauka_org::project::store::ProjectStore::new(self.db.clone());
+        // P2.10 (sifrah/nauka#214) migrated `ProjectStore` to take an
+        // `EmbeddedDb` directly, same as `OrgStore` above. Reach the
+        // handle through the cluster wrapper's `.embedded().clone()`.
+        let proj_store = nauka_org::project::store::ProjectStore::new(self.db.embedded().clone());
         let project = proj_store
             .get(project_name, Some(org_name))
             .await?
