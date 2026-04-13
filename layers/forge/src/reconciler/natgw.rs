@@ -18,7 +18,7 @@ impl super::Reconciler for NatGwReconciler {
     async fn reconcile(&self, ctx: &ReconcileContext) -> anyhow::Result<ReconcileResult> {
         let mut result = ReconcileResult::new("natgw");
 
-        let store = NatGwStore::new(ctx.db.embedded().clone());
+        let store = NatGwStore::new(ctx.db.clone());
         let all_natgws = store.list(None).await?;
 
         // Filter NAT gateways assigned to this node
@@ -39,7 +39,7 @@ impl super::Reconciler for NatGwReconciler {
         // Ensure each NAT GW is provisioned
         for natgw in &local_natgws {
             // Resolve VPC VNI
-            let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
+            let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
             let vpc = match vpc_store.get(natgw.vpc_id.as_str(), None).await? {
                 Some(v) => v,
                 None => {

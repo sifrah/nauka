@@ -89,7 +89,7 @@ impl super::Reconciler for VmReconciler {
 
         // 1. Get VMs assigned to this node. P2.13 (sifrah/nauka#217)
         // migrated `VmStore` to take an `EmbeddedDb` directly.
-        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.embedded().clone());
+        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.clone());
         let all_vms = vm_store.list(None, None, None).await?;
         let local_vms: Vec<_> = all_vms
             .iter()
@@ -98,10 +98,7 @@ impl super::Reconciler for VmReconciler {
 
         // VMs that should be running (pending = needs starting, running = should be alive).
         // Skip orphaned VMs whose org no longer exists (cascading orphan).
-        // P2.9 (sifrah/nauka#213) migrated `OrgStore` to take an
-        // `EmbeddedDb` directly; we hand it the cluster-DB wrapper's
-        // internal SurrealDB handle via `.embedded().clone()`.
-        let org_store = nauka_org::store::OrgStore::new(ctx.db.embedded().clone());
+        let org_store = nauka_org::store::OrgStore::new(ctx.db.clone());
         let mut should_exist: Vec<_> = Vec::new();
         for vm in &local_vms {
             if !should_vm_exist(&vm.state) {
@@ -148,20 +145,15 @@ impl super::Reconciler for VmReconciler {
                             let ip = vm.private_ip.as_deref().unwrap_or("0.0.0.0");
                             let mac =
                                 nauka_network::vpc::provision::mac_from_ip(ip).unwrap_or_default();
-                            // P2.12 (sifrah/nauka#216): the VPC and
-                            // subnet stores take an `EmbeddedDb`
-                            // directly now; reach the inner handle
-                            // via `ClusterDb::embedded().clone()`.
-                            let subnet_store = nauka_network::vpc::subnet::store::SubnetStore::new(
-                                ctx.db.embedded().clone(),
-                            );
+                            let subnet_store =
+                                nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
                             let gateway = subnet_store
                                 .get(vm.subnet_id.as_str(), None, None)
                                 .await?
                                 .map(|s| s.gateway.clone())
                                 .unwrap_or_else(|| "0.0.0.0".to_string());
                             let vpc_store =
-                                nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
+                                nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
                             let vpc_cidr = vpc_store
                                 .get(vm.vpc_id.as_str(), None)
                                 .await?
@@ -241,16 +233,14 @@ impl super::Reconciler for VmReconciler {
                         let has_tini = std::path::Path::new(&rootfs_dir)
                             .join("usr/bin/tini")
                             .exists();
-                        let subnet_store = nauka_network::vpc::subnet::store::SubnetStore::new(
-                            ctx.db.embedded().clone(),
-                        );
+                        let subnet_store =
+                            nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
                         let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
                         let (gateway, cidr) = match &subnet {
                             Some(s) => (s.gateway.clone(), s.cidr.clone()),
                             None => ("0.0.0.0".to_string(), "0.0.0.0/0".to_string()),
                         };
-                        let vpc_store =
-                            nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
+                        let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
                         let vpc_cidr = vpc_store
                             .get(vm.vpc_id.as_str(), None)
                             .await?
@@ -346,7 +336,7 @@ impl super::Reconciler for VmReconciler {
                 }
 
                 let subnet_store =
-                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.embedded().clone());
+                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
                 let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
 
                 let (gateway, cidr) = match &subnet {
@@ -355,7 +345,7 @@ impl super::Reconciler for VmReconciler {
                 };
 
                 // Resolve VPC CIDR for DNS64/NAT64 setup
-                let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
+                let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
                 let vpc_cidr = vpc_store
                     .get(vm.vpc_id.as_str(), None)
                     .await?
