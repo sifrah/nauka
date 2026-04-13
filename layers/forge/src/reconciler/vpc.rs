@@ -82,8 +82,9 @@ impl super::Reconciler for VpcReconciler {
     async fn reconcile(&self, ctx: &ReconcileContext) -> anyhow::Result<ReconcileResult> {
         let mut result = ReconcileResult::new("vpc");
 
-        // 1. Find which VMs are on this node
-        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.clone());
+        // 1. Find which VMs are on this node. P2.13 (sifrah/nauka#217)
+        // migrated `VmStore` to take an `EmbeddedDb` directly.
+        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.embedded().clone());
         let all_vms = vm_store.list(None, None, None).await?;
         let local_vms: Vec<_> = all_vms
             .iter()
