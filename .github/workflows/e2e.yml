@@ -76,11 +76,22 @@ jobs:
 
       - name: Unit tests
         run: |
-          # Exclude e2e crates from unit test run
+          # Exclude e2e crates from unit test run.
+          #
+          # --test-threads=1 because EmbeddedDb (SurrealKV) tests drive
+          # multiple SurrealDB router tasks concurrently across crates
+          # (nauka-state + nauka-hypervisor + ...). On the 2-vCPU
+          # ubuntu-latest runner the router tasks starve each other
+          # enough to hang `crud_round_trip` despite the per-test
+          # runtime being current_thread — see sifrah/nauka#255 for
+          # the investigation. Running one test at a time inside
+          # each binary gives tokio's cooperative scheduler enough
+          # headroom to make progress on every datastore.
           cargo test --workspace \
             $(find layers -path '*/tests/e2e/Cargo.toml' \
               -exec grep -oP 'name = "\K[^"]+' {} \; \
-              | sed 's/^/--exclude /')
+              | sed 's/^/--exclude /') \
+            -- --test-threads=1
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings

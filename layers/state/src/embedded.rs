@@ -39,7 +39,9 @@
 //! # Ok(()) }
 //! ```
 
+use std::fs::{OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use surrealdb::engine::local::{Db, SurrealKv};
 use surrealdb::Surreal;
@@ -158,40 +160,146 @@ impl EmbeddedDb {
         &self.path
     }
 
-    /// Shut down the wrapper, dropping the SDK client and waiting briefly
-    /// for the SurrealDB background router task to release the on-disk
-    /// LOCK so a subsequent `EmbeddedDb::open` at the same path can
-    /// succeed.
+    /// Shut down the wrapper, dropping the SDK client and waiting for the
+    /// SurrealDB background router task to finish closing the datastore
+    /// so a subsequent `EmbeddedDb::open` at the same path can succeed
+    /// — and, critically, so any writes committed through this handle
+    /// are durably on disk before we return.
     ///
-    /// Why the wait: the SDK's `Surreal<Db>` router runs on a background
-    /// tokio task that holds an `Arc<Datastore>`. The task only exits
-    /// when its route channel closes — i.e. after the last
-    /// `Surreal<Db>` clone is dropped. After it exits, it calls
-    /// `Datastore::shutdown()`, which is what actually flushes SurrealKV
-    /// and removes the LOCK file. All of that happens *asynchronously*
-    /// on the runtime, so without a small wait here a caller that does
-    /// `shutdown().await; open(same_path).await` races against the
-    /// background task and gets `Database is already locked`.
+    /// # Why this function exists
     ///
-    /// 50 ms is empirically enough on every machine we've tested, and
-    /// nothing in Nauka's hot path calls `shutdown` often enough to
-    /// notice. If a future SDK version exposes a synchronous shutdown
-    /// that joins the router task, we should use it instead.
+    /// The SDK's `Surreal<Db>` router runs on a background tokio task
+    /// that owns an `Arc<Datastore>`. `drop(Surreal<Db>)` is
+    /// fire-and-forget: it closes the route channel, the router task
+    /// sees `route_rx.recv()` return `Err`, breaks out of its loop,
+    /// and **then** runs `Datastore::shutdown().await` which:
+    ///
+    /// 1. Shuts down the commit coordinator and WAL background flusher
+    /// 2. Calls `Tree::close()` which flushes all memtables to SSTables
+    /// 3. Closes the WAL
+    /// 4. Drops the `LockFile`, releasing SurrealKV's OS-level exclusive
+    ///    flock on `<path>/LOCK`
+    ///
+    /// None of this is synchronous with `drop(self.inner)`. A caller that
+    /// does `shutdown().await; open(same_path).await` races the
+    /// background task. Previous versions of this method used
+    /// `tokio::time::sleep(50 ms)` as a heuristic — enough on CI Linux,
+    /// **not** enough on Mac arm64 under contention, where it manifested
+    /// as data loss (`load_async` returning `None` after a round-trip
+    /// reopen, reproducible at 77% with `--test-threads=2`). See
+    /// sifrah/nauka#255 for the investigation.
+    ///
+    /// The deterministic signal that step 4 has happened is the release
+    /// of the OS-level flock on `<path>/LOCK`. We poll for that release
+    /// by trying to acquire the same flock ourselves via
+    /// [`std::fs::File::try_lock`]. When `try_lock` succeeds, the
+    /// previous `Datastore::shutdown()` chain has definitively run to
+    /// completion, which implies every prior commit is durable and the
+    /// next open can proceed without a lock-held error.
+    ///
+    /// # Cost
+    ///
+    /// Fast path: a single `yield_now` + `try_lock` (~sub-ms). Slow path:
+    /// exponential backoff from 1 ms to a 50 ms ceiling, up to a hard
+    /// 5-second deadline after which the call returns
+    /// [`StateError::Database`]. 5 s is generous relative to the
+    /// ~10–100 ms that a real `Datastore::shutdown()` takes even on a
+    /// contended runtime, and still well under the "fast timeout" Nauka
+    /// convention for health checks.
     pub async fn shutdown(self) -> Result<()> {
         // Explicit drop of the inner client. The compiler would do this
-        // anyway when `self` goes out of scope, but naming the step makes
-        // the intent visible.
+        // anyway when `self` goes out of scope, but naming the step
+        // makes the handoff to the router task visible.
+        let path = self.path.clone();
         drop(self.inner);
 
-        // Yield once so any task that's already runnable (the router
-        // exit handler) gets a chance to run before we sleep.
+        wait_for_surrealkv_lock_release(&path).await
+    }
+}
+
+/// Poll until SurrealKV's OS-level exclusive flock on `<path>/LOCK` is
+/// released by the previous `Datastore`, or until the 5-second deadline
+/// elapses.
+///
+/// See [`EmbeddedDb::shutdown`] for the full rationale. The short version:
+/// the SurrealDB SDK's `Surreal<Db>` router runs its `kvs.shutdown()`
+/// chain asynchronously after `drop(Surreal<Db>)`, and the release of
+/// the `LockFile` (surrealkv 0.21 / `src/lockfile.rs`) is the last step
+/// of that chain. Successfully acquiring the same flock from here proves
+/// the chain has run to completion.
+async fn wait_for_surrealkv_lock_release(path: &Path) -> Result<()> {
+    /// Upper bound on the total wait. Generous relative to the actual
+    /// `Datastore::shutdown()` cost (10–100 ms typical, even on contended
+    /// runtimes) but well under the "fast timeout" Nauka convention.
+    const MAX_WAIT: Duration = Duration::from_secs(5);
+    /// First retry after the fast-path `try_lock` miss.
+    const MIN_BACKOFF: Duration = Duration::from_millis(1);
+    /// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
+    const MAX_BACKOFF: Duration = Duration::from_millis(50);
+
+    let lock_path = path.join("LOCK");
+    let deadline = Instant::now() + MAX_WAIT;
+    let mut backoff = MIN_BACKOFF;
+
+    loop {
+        // Give any already-runnable task (the router exit handler) a
+        // chance to make progress before we poll. Cheap in the common
+        // case where the router task is already parked.
         tokio::task::yield_now().await;
 
-        // Then a short sleep to cover the kvs.shutdown() flush + LOCK
-        // release latency. See the doc comment above for the rationale.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // If the LOCK file doesn't exist, the datastore was never
+        // initialised far enough to create it (e.g. `open` failed
+        // upstream of the LSM tree build). There is nothing to wait
+        // for — treat as already released.
+        if !lock_path.exists() {
+            return Ok(());
+        }
 
-        Ok(())
+        // Try to acquire the OS-level exclusive flock that SurrealKV
+        // was holding on the same file. When `try_lock` returns
+        // `Ok(())`, the previous datastore's `kvs.shutdown()` chain
+        // has definitively run to completion and dropped its
+        // `LockFile`; release immediately so a subsequent open() at
+        // the same path can acquire it.
+        //
+        // ENOENT / other `open` errors between the `exists()` check
+        // above and this call are benign races: if the error persists
+        // the deadline check below will surface it, otherwise the next
+        // iteration picks up the real state.
+        if let Ok(file) = OpenOptions::new().read(true).write(true).open(&lock_path) {
+            match file.try_lock() {
+                Ok(()) => {
+                    // Success: release our probe lock and return. The
+                    // explicit `unlock()` isn't strictly necessary
+                    // (dropping `file` closes the fd and releases the
+                    // flock) but makes the intent readable.
+                    let _ = file.unlock();
+                    return Ok(());
+                }
+                Err(TryLockError::WouldBlock) => {
+                    // Router task hasn't reached `LockFile::drop` yet.
+                    // Fall through to the backoff sleep.
+                }
+                Err(TryLockError::Error(io_err)) => {
+                    // Real I/O error (not lock contention). Surface it
+                    // immediately rather than looping against a broken
+                    // filesystem.
+                    return Err(io_err.into());
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(StateError::Database(format!(
+                "EmbeddedDb::shutdown timed out after {}s waiting for \
+                 SurrealKV LOCK release at {}",
+                MAX_WAIT.as_secs(),
+                lock_path.display(),
+            )));
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -404,7 +512,7 @@ mod tests {
         let cross: Option<Item> = client
             .select(("table_a", "2"))
             .await
-            .expect("cross-table select by missing id");
+            .expect("cross-table select");
         assert!(
             cross.is_none(),
             "table_a should not see records keyed in table_b",
