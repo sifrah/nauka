@@ -150,9 +150,9 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#148 id=148 data-nosnippet>148</a>        // `Other("Database at ... LOCK is already locked by another process")`.
 <a href=#149 id=149 data-nosnippet>149</a>        //
 <a href=#150 id=150 data-nosnippet>150</a>        // Before P1.11 (sifrah/nauka#201), this was masked because every
-<a href=#151 id=151 data-nosnippet>151</a>        // CLI caller used the JSON-file `LocalDb` backend, which doesn't
-<a href=#152 id=152 data-nosnippet>152</a>        // use an exclusive flock. P1.11 migrates every caller to
-<a href=#153 id=153 data-nosnippet>153</a>        // `EmbeddedDb`, so the contention becomes real.
+<a href=#151 id=151 data-nosnippet>151</a>        // CLI caller used the legacy JSON-file bootstrap backend, which
+<a href=#152 id=152 data-nosnippet>152</a>        // did not take an exclusive flock. P1.11 migrated every caller
+<a href=#153 id=153 data-nosnippet>153</a>        // to `EmbeddedDb`, so the contention became real.
 <a href=#154 id=154 data-nosnippet>154</a>        //
 <a href=#155 id=155 data-nosnippet>155</a>        // The fix: retry the open on "already locked" with exponential
 <a href=#156 id=156 data-nosnippet>156</a>        // backoff up to a 5-second deadline, matching the pattern used
