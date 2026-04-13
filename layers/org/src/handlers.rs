@@ -43,7 +43,13 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = OrgStore::new(nauka_hypervisor::controlplane::connect().await?);
+                // P2.9 (sifrah/nauka#213) migrated `OrgStore` to take an
+                // `EmbeddedDb` directly. We still go through the
+                // cluster-DB connect helper so the same PD-endpoint
+                // discovery / mesh fall-back logic runs, then hand the
+                // store the inner `EmbeddedDb` handle via `.embedded().clone()`.
+                let cluster = nauka_hypervisor::controlplane::connect().await?;
+                let store = OrgStore::new(cluster.embedded().clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;

@@ -22,7 +22,10 @@ impl ProjectStore {
     }
 
     pub async fn create(&self, name: &str, org_name: &str) -> anyhow::Result<Project> {
-        let org_store = crate::store::OrgStore::new(self.db.clone());
+        // P2.9 (sifrah/nauka#213) migrated `OrgStore` to take an
+        // `EmbeddedDb` directly; reach the inner handle via the
+        // cluster-DB wrapper's `.embedded()` accessor.
+        let org_store = crate::store::OrgStore::new(self.db.embedded().clone());
         let org = org_store
             .get(org_name)
             .await?
@@ -58,7 +61,8 @@ impl ProjectStore {
 
         let org_name =
             org_name.ok_or_else(|| anyhow::anyhow!("--org required to resolve project by name"))?;
-        let org_store = crate::store::OrgStore::new(self.db.clone());
+        // P2.9 migration: see the comment in `create()`.
+        let org_store = crate::store::OrgStore::new(self.db.embedded().clone());
         let org = org_store
             .get(org_name)
             .await?
