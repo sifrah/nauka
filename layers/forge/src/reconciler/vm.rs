@@ -97,7 +97,10 @@ impl super::Reconciler for VmReconciler {
 
         // VMs that should be running (pending = needs starting, running = should be alive).
         // Skip orphaned VMs whose org no longer exists (cascading orphan).
-        let org_store = nauka_org::store::OrgStore::new(ctx.db.clone());
+        // P2.9 (sifrah/nauka#213) migrated `OrgStore` to take an
+        // `EmbeddedDb` directly; we hand it the cluster-DB wrapper's
+        // internal SurrealDB handle via `.embedded().clone()`.
+        let org_store = nauka_org::store::OrgStore::new(ctx.db.embedded().clone());
         let mut should_exist: Vec<_> = Vec::new();
         for vm in &local_vms {
             if !should_vm_exist(&vm.state) {

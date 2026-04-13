@@ -39,8 +39,10 @@ impl VpcStore {
         project_id: Option<String>,
         env_id: Option<String>,
     ) -> anyhow::Result<Vpc> {
-        // Resolve org
-        let org_store = nauka_org::store::OrgStore::new(self.db.clone());
+        // Resolve org. P2.9 (sifrah/nauka#213) migrated `OrgStore` to
+        // take an `EmbeddedDb` directly; we hand it the cluster-DB
+        // wrapper's internal SurrealDB handle via `.embedded().clone()`.
+        let org_store = nauka_org::store::OrgStore::new(self.db.embedded().clone());
         let org = org_store
             .get(org_name)
             .await?
@@ -90,7 +92,9 @@ impl VpcStore {
         }
         let org_name =
             org_name.ok_or_else(|| anyhow::anyhow!("--org required to resolve VPC by name"))?;
-        let org_store = nauka_org::store::OrgStore::new(self.db.clone());
+        // P2.9 migration: `OrgStore` now takes an `EmbeddedDb` directly,
+        // see the comment in `create()`.
+        let org_store = nauka_org::store::OrgStore::new(self.db.embedded().clone());
         let org = org_store
             .get(org_name)
             .await?

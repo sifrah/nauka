@@ -35,8 +35,14 @@ impl VmStore {
         region: &str,
         zone: &str,
     ) -> anyhow::Result<Vm> {
-        // Resolve org -> project -> env
-        let org_store = nauka_org::store::OrgStore::new(self.db.clone());
+        // Resolve org -> project -> env. P2.9 (sifrah/nauka#213)
+        // migrated `OrgStore` to the native SurrealDB SDK on top of
+        // `EmbeddedDb`, so we hand it the cluster-DB wrapper's
+        // internal handle via `.embedded().clone()`. The clone is
+        // cheap (Arc-shared `Surreal<Db>` router) and leaves the
+        // legacy `ProjectStore` below on the same underlying
+        // connection until P2.10 ports it over.
+        let org_store = nauka_org::store::OrgStore::new(self.db.embedded().clone());
         let org = org_store
             .get(org_name)
             .await?
