@@ -43,10 +43,10 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">use </span>nauka_core::id::OrgId;
 <a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span>nauka_core::resource::epoch_to_iso8601;
 <a href=#43 id=43 data-nosnippet>43</a><span class="kw">use </span>nauka_core::resource::ResourceMeta;
-<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>nauka_state::EmbeddedDb;
-<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>serde::Deserialize;
-<a href=#46 id=46 data-nosnippet>46</a>
-<a href=#47 id=47 data-nosnippet>47</a><span class="kw">use </span><span class="kw">crate</span>::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
+<a href=#44 id=44 data-nosnippet>44</a><span class="kw">use </span>nauka_state::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
+<a href=#45 id=45 data-nosnippet>45</a><span class="kw">use </span>nauka_state::EmbeddedDb;
+<a href=#46 id=46 data-nosnippet>46</a><span class="kw">use </span>serde::Deserialize;
+<a href=#47 id=47 data-nosnippet>47</a>
 <a href=#48 id=48 data-nosnippet>48</a><span class="kw">use </span><span class="kw">crate</span>::types::Org;
 <a href=#49 id=49 data-nosnippet>49</a>
 <a href=#50 id=50 data-nosnippet>50</a><span class="doccomment">/// SurrealDB table backing this store. Defined in
@@ -120,379 +120,389 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#118 id=118 data-nosnippet>118</a>            .<span class="kw">await</span>;
 <a href=#119 id=119 data-nosnippet>119</a>        <span class="kw">let </span>response = <span class="kw">match </span>query_result {
 <a href=#120 id=120 data-nosnippet>120</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#121 id=121 data-nosnippet>121</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(classify_create_error(<span class="string">"org"</span>, name, <span class="kw-2">&amp;</span>e.to_string())),
-<a href=#122 id=122 data-nosnippet>122</a>        };
-<a href=#123 id=123 data-nosnippet>123</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = response.check() {
-<a href=#124 id=124 data-nosnippet>124</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(classify_create_error(<span class="string">"org"</span>, name, <span class="kw-2">&amp;</span>e.to_string()));
-<a href=#125 id=125 data-nosnippet>125</a>        }
-<a href=#126 id=126 data-nosnippet>126</a>
-<a href=#127 id=127 data-nosnippet>127</a>        <span class="prelude-val">Ok</span>(org)
-<a href=#128 id=128 data-nosnippet>128</a>    }
-<a href=#129 id=129 data-nosnippet>129</a>
-<a href=#130 id=130 data-nosnippet>130</a>    <span class="doccomment">/// Look up an org by id (when the input looks like an `OrgId`)
-<a href=#131 id=131 data-nosnippet>131</a>    /// or by human name (otherwise).
-<a href=#132 id=132 data-nosnippet>132</a>    ///
-<a href=#133 id=133 data-nosnippet>133</a>    /// The id path is a direct record-id `SELECT`; the name path uses
-<a href=#134 id=134 data-nosnippet>134</a>    /// the schema's unique `org_name` index for an O(1) lookup. Both
-<a href=#135 id=135 data-nosnippet>135</a>    /// paths return `Ok(None)` when no row matches — neither one is
-<a href=#136 id=136 data-nosnippet>136</a>    /// an error.
-<a href=#137 id=137 data-nosnippet>137</a>    </span><span class="kw">pub async fn </span>get(<span class="kw-2">&amp;</span><span class="self">self</span>, name_or_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
-<a href=#138 id=138 data-nosnippet>138</a>        <span class="kw">if </span>OrgId::looks_like_id(name_or_id) {
-<a href=#139 id=139 data-nosnippet>139</a>            <span class="self">self</span>.get_by_id(name_or_id).<span class="kw">await
-<a href=#140 id=140 data-nosnippet>140</a>        </span>} <span class="kw">else </span>{
-<a href=#141 id=141 data-nosnippet>141</a>            <span class="self">self</span>.get_by_name(name_or_id).<span class="kw">await
-<a href=#142 id=142 data-nosnippet>142</a>        </span>}
-<a href=#143 id=143 data-nosnippet>143</a>    }
-<a href=#144 id=144 data-nosnippet>144</a>
-<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">async fn </span>get_by_id(<span class="kw-2">&amp;</span><span class="self">self</span>, id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
-<a href=#146 id=146 data-nosnippet>146</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
-<a href=#147 id=147 data-nosnippet>147</a>            </span>.db
-<a href=#148 id=148 data-nosnippet>148</a>            .client()
-<a href=#149 id=149 data-nosnippet>149</a>            .query(<span class="string">"SELECT * FROM type::record($tbl, $id)"</span>)
-<a href=#150 id=150 data-nosnippet>150</a>            .bind((<span class="string">"tbl"</span>, ORG_TABLE))
-<a href=#151 id=151 data-nosnippet>151</a>            .bind((<span class="string">"id"</span>, id.to_string()))
-<a href=#152 id=152 data-nosnippet>152</a>            .<span class="kw">await
-<a href=#153 id=153 data-nosnippet>153</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#154 id=154 data-nosnippet>154</a>        <span class="comment">// Round-trip through `serde_json::Value` so callers don't have
-<a href=#155 id=155 data-nosnippet>155</a>        // to derive `SurrealValue` on `OrgRow`. See the rationale on
-<a href=#156 id=156 data-nosnippet>156</a>        // [`OrgRow`] and the `FabricState::load` JSON-bridge pattern.
-<a href=#157 id=157 data-nosnippet>157</a>        </span><span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#158 id=158 data-nosnippet>158</a>        <span class="kw">match </span>raw.into_iter().next() {
-<a href=#159 id=159 data-nosnippet>159</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#160 id=160 data-nosnippet>160</a>            <span class="prelude-val">Some</span>(v) =&gt; {
-<a href=#161 id=161 data-nosnippet>161</a>                <span class="kw">let </span>row: OrgRow = serde_json::from_value(v)
-<a href=#162 id=162 data-nosnippet>162</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#163 id=163 data-nosnippet>163</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(row.into_org()))
-<a href=#164 id=164 data-nosnippet>164</a>            }
-<a href=#165 id=165 data-nosnippet>165</a>        }
-<a href=#166 id=166 data-nosnippet>166</a>    }
-<a href=#167 id=167 data-nosnippet>167</a>
-<a href=#168 id=168 data-nosnippet>168</a>    <span class="kw">async fn </span>get_by_name(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
-<a href=#169 id=169 data-nosnippet>169</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
-<a href=#170 id=170 data-nosnippet>170</a>            </span>.db
-<a href=#171 id=171 data-nosnippet>171</a>            .client()
-<a href=#172 id=172 data-nosnippet>172</a>            .query(<span class="string">"SELECT * FROM org WHERE name = $name LIMIT 1"</span>)
-<a href=#173 id=173 data-nosnippet>173</a>            .bind((<span class="string">"name"</span>, name.to_string()))
-<a href=#174 id=174 data-nosnippet>174</a>            .<span class="kw">await
-<a href=#175 id=175 data-nosnippet>175</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#176 id=176 data-nosnippet>176</a>        <span class="comment">// Same JSON-bridge as `get_by_id` — see the comment there and
-<a href=#177 id=177 data-nosnippet>177</a>        // the rationale block on [`OrgRow`].
-<a href=#178 id=178 data-nosnippet>178</a>        </span><span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#179 id=179 data-nosnippet>179</a>        <span class="kw">match </span>raw.into_iter().next() {
-<a href=#180 id=180 data-nosnippet>180</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#181 id=181 data-nosnippet>181</a>            <span class="prelude-val">Some</span>(v) =&gt; {
-<a href=#182 id=182 data-nosnippet>182</a>                <span class="kw">let </span>row: OrgRow = serde_json::from_value(v)
-<a href=#183 id=183 data-nosnippet>183</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))<span class="question-mark">?</span>;
-<a href=#184 id=184 data-nosnippet>184</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(row.into_org()))
-<a href=#185 id=185 data-nosnippet>185</a>            }
-<a href=#186 id=186 data-nosnippet>186</a>        }
-<a href=#187 id=187 data-nosnippet>187</a>    }
-<a href=#188 id=188 data-nosnippet>188</a>
-<a href=#189 id=189 data-nosnippet>189</a>    <span class="doccomment">/// List every org in the cluster, in unspecified order.
-<a href=#190 id=190 data-nosnippet>190</a>    ///
-<a href=#191 id=191 data-nosnippet>191</a>    /// The SCHEMAFULL `org` table is the source of truth — the legacy
-<a href=#192 id=192 data-nosnippet>192</a>    /// `_reg_v2` sidecar registry the previous version of this file
-<a href=#193 id=193 data-nosnippet>193</a>    /// maintained is gone with P2.9.
-<a href=#194 id=194 data-nosnippet>194</a>    </span><span class="kw">pub async fn </span>list(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; anyhow::Result&lt;Vec&lt;Org&gt;&gt; {
-<a href=#195 id=195 data-nosnippet>195</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
-<a href=#196 id=196 data-nosnippet>196</a>            </span>.db
-<a href=#197 id=197 data-nosnippet>197</a>            .client()
-<a href=#198 id=198 data-nosnippet>198</a>            .query(<span class="string">"SELECT * FROM org"</span>)
-<a href=#199 id=199 data-nosnippet>199</a>            .<span class="kw">await
-<a href=#200 id=200 data-nosnippet>200</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#201 id=201 data-nosnippet>201</a>        <span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#202 id=202 data-nosnippet>202</a>        <span class="kw">let </span>orgs: <span class="prelude-ty">Result</span>&lt;Vec&lt;Org&gt;, <span class="kw">_</span>&gt; = raw
-<a href=#203 id=203 data-nosnippet>203</a>            .into_iter()
-<a href=#204 id=204 data-nosnippet>204</a>            .map(|v| {
-<a href=#205 id=205 data-nosnippet>205</a>                serde_json::from_value::&lt;OrgRow&gt;(v)
-<a href=#206 id=206 data-nosnippet>206</a>                    .map(OrgRow::into_org)
-<a href=#207 id=207 data-nosnippet>207</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))
-<a href=#208 id=208 data-nosnippet>208</a>            })
-<a href=#209 id=209 data-nosnippet>209</a>            .collect();
-<a href=#210 id=210 data-nosnippet>210</a>        orgs
-<a href=#211 id=211 data-nosnippet>211</a>    }
-<a href=#212 id=212 data-nosnippet>212</a>
-<a href=#213 id=213 data-nosnippet>213</a>    <span class="doccomment">/// Delete an org by name or id. Refuses to delete an org that
-<a href=#214 id=214 data-nosnippet>214</a>    /// still owns any project — the caller must remove the children
-<a href=#215 id=215 data-nosnippet>215</a>    /// first.
-<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub async fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, name_or_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;()&gt; {
-<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">let </span>org = <span class="self">self
-<a href=#218 id=218 data-nosnippet>218</a>            </span>.get(name_or_id)
-<a href=#219 id=219 data-nosnippet>219</a>            .<span class="kw">await</span><span class="question-mark">?
-<a href=#220 id=220 data-nosnippet>220</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"org '{name_or_id}' not found"</span>))<span class="question-mark">?</span>;
-<a href=#221 id=221 data-nosnippet>221</a>
-<a href=#222 id=222 data-nosnippet>222</a>        <span class="comment">// Refuse to delete an org that still has projects. P2.10
-<a href=#223 id=223 data-nosnippet>223</a>        // (sifrah/nauka#214) migrated the project store to the native
-<a href=#224 id=224 data-nosnippet>224</a>        // SurrealDB SDK on top of the SCHEMAFULL `project` table, so
-<a href=#225 id=225 data-nosnippet>225</a>        // we can count the surviving children with a direct query on
-<a href=#226 id=226 data-nosnippet>226</a>        // the owning-org id. This store still doesn't import
-<a href=#227 id=227 data-nosnippet>227</a>        // `ProjectStore` because that would force a circular module
-<a href=#228 id=228 data-nosnippet>228</a>        // dependency (`ProjectStore::delete` reaches back into
-<a href=#229 id=229 data-nosnippet>229</a>        // `OrgStore::get` to resolve the parent org) — the inline
-<a href=#230 id=230 data-nosnippet>230</a>        // query is cheaper.
-<a href=#231 id=231 data-nosnippet>231</a>        </span><span class="kw">let </span>remaining_projects = <span class="self">self</span>.count_projects_in_org(<span class="kw-2">&amp;</span>org.meta.id).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#232 id=232 data-nosnippet>232</a>        <span class="kw">if </span>remaining_projects &gt; <span class="number">0 </span>{
-<a href=#233 id=233 data-nosnippet>233</a>            <span class="macro">anyhow::bail!</span>(
-<a href=#234 id=234 data-nosnippet>234</a>                <span class="string">"org '{}' has {} project(s). Delete them first."</span>,
-<a href=#235 id=235 data-nosnippet>235</a>                org.meta.name,
-<a href=#236 id=236 data-nosnippet>236</a>                remaining_projects
-<a href=#237 id=237 data-nosnippet>237</a>            );
-<a href=#238 id=238 data-nosnippet>238</a>        }
-<a href=#239 id=239 data-nosnippet>239</a>
-<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#241 id=241 data-nosnippet>241</a>            </span>.db
-<a href=#242 id=242 data-nosnippet>242</a>            .client()
-<a href=#243 id=243 data-nosnippet>243</a>            .query(<span class="string">"DELETE type::record($tbl, $id)"</span>)
-<a href=#244 id=244 data-nosnippet>244</a>            .bind((<span class="string">"tbl"</span>, ORG_TABLE))
-<a href=#245 id=245 data-nosnippet>245</a>            .bind((<span class="string">"id"</span>, org.meta.id.clone()))
-<a href=#246 id=246 data-nosnippet>246</a>            .<span class="kw">await
-<a href=#247 id=247 data-nosnippet>247</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#248 id=248 data-nosnippet>248</a>        result.check().map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#249 id=249 data-nosnippet>249</a>        <span class="prelude-val">Ok</span>(())
-<a href=#250 id=250 data-nosnippet>250</a>    }
-<a href=#251 id=251 data-nosnippet>251</a>
-<a href=#252 id=252 data-nosnippet>252</a>    <span class="doccomment">/// Count the projects currently owned by the org whose record-id
-<a href=#253 id=253 data-nosnippet>253</a>    /// is `org_id`.
-<a href=#254 id=254 data-nosnippet>254</a>    ///
-<a href=#255 id=255 data-nosnippet>255</a>    /// Uses the SCHEMAFULL `project` table that P2.10 migrated to, so
-<a href=#256 id=256 data-nosnippet>256</a>    /// the query is a single `SELECT name FROM project WHERE org =
-<a href=#257 id=257 data-nosnippet>257</a>    /// $org`. The `project` table is defined by
-<a href=#258 id=258 data-nosnippet>258</a>    /// `nauka_state::apply_cluster_schemas` at bootstrap, so a fresh
-<a href=#259 id=259 data-nosnippet>259</a>    /// database already has the table — no `DEFINE TABLE IF NOT
-<a href=#260 id=260 data-nosnippet>260</a>    /// EXISTS` dance is needed. If the schema hasn't been applied at
-<a href=#261 id=261 data-nosnippet>261</a>    /// all (e.g. a pre-bootstrap sanity test), the SurrealDB error
-<a href=#262 id=262 data-nosnippet>262</a>    /// bubbles up as an `anyhow::Error` and the caller surfaces it.
-<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">async fn </span>count_projects_in_org(<span class="kw-2">&amp;</span><span class="self">self</span>, org_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;usize&gt; {
-<a href=#264 id=264 data-nosnippet>264</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
-<a href=#265 id=265 data-nosnippet>265</a>            </span>.db
-<a href=#266 id=266 data-nosnippet>266</a>            .client()
-<a href=#267 id=267 data-nosnippet>267</a>            .query(<span class="string">"SELECT name FROM project WHERE org = $org"</span>)
-<a href=#268 id=268 data-nosnippet>268</a>            .bind((<span class="string">"org"</span>, org_id.to_string()))
-<a href=#269 id=269 data-nosnippet>269</a>            .<span class="kw">await
-<a href=#270 id=270 data-nosnippet>270</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#271 id=271 data-nosnippet>271</a>        <span class="kw">let </span>rows: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
-<a href=#272 id=272 data-nosnippet>272</a>        <span class="prelude-val">Ok</span>(rows.len())
-<a href=#273 id=273 data-nosnippet>273</a>    }
-<a href=#274 id=274 data-nosnippet>274</a>}
-<a href=#275 id=275 data-nosnippet>275</a>
-<a href=#276 id=276 data-nosnippet>276</a><span class="doccomment">/// Row shape returned by `SELECT * FROM org`. Mirrors the SCHEMAFULL
-<a href=#277 id=277 data-nosnippet>277</a>/// `org` table's column set with one ergonomic conversion: SurrealDB
-<a href=#278 id=278 data-nosnippet>278</a>/// hands the record id back as a typed `Thing` (table + id), which
-<a href=#279 id=279 data-nosnippet>279</a>/// serde_json renders as `{"tb": "org", "id": {"String": "..."}}`. We
-<a href=#280 id=280 data-nosnippet>280</a>/// bridge through `serde_json::Value` and pull the inner string out in
-<a href=#281 id=281 data-nosnippet>281</a>/// [`OrgRow::into_org`] so callers see the same flat `org-&lt;ulid&gt;` id
-<a href=#282 id=282 data-nosnippet>282</a>/// string that they always have.
-<a href=#283 id=283 data-nosnippet>283</a>///
-<a href=#284 id=284 data-nosnippet>284</a>/// `created_at` / `updated_at` arrive as RFC 3339 / ISO 8601 strings
-<a href=#285 id=285 data-nosnippet>285</a>/// from SurrealDB; we parse them back into Unix-epoch seconds with
-<a href=#286 id=286 data-nosnippet>286</a>/// [`iso8601_to_epoch`] so the resulting [`Org`] is bit-identical to
-<a href=#287 id=287 data-nosnippet>287</a>/// what `OrgStore::create` originally produced.
-<a href=#288 id=288 data-nosnippet>288</a></span><span class="attr">#[derive(Debug, Deserialize)]
-<a href=#289 id=289 data-nosnippet>289</a></span><span class="kw">struct </span>OrgRow {
-<a href=#290 id=290 data-nosnippet>290</a>    id: serde_json::Value,
-<a href=#291 id=291 data-nosnippet>291</a>    name: String,
-<a href=#292 id=292 data-nosnippet>292</a>    <span class="attr">#[serde(default)]
-<a href=#293 id=293 data-nosnippet>293</a>    </span>status: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#294 id=294 data-nosnippet>294</a>    <span class="attr">#[serde(default)]
-<a href=#295 id=295 data-nosnippet>295</a>    </span>labels: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
-<a href=#296 id=296 data-nosnippet>296</a>    created_at: String,
-<a href=#297 id=297 data-nosnippet>297</a>    updated_at: String,
-<a href=#298 id=298 data-nosnippet>298</a>}
-<a href=#299 id=299 data-nosnippet>299</a>
-<a href=#300 id=300 data-nosnippet>300</a><span class="kw">impl </span>OrgRow {
-<a href=#301 id=301 data-nosnippet>301</a>    <span class="kw">fn </span>into_org(<span class="self">self</span>) -&gt; Org {
-<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>id = thing_to_id_string(<span class="string">"org:"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.id);
-<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span>labels = <span class="self">self
-<a href=#304 id=304 data-nosnippet>304</a>            </span>.labels
-<a href=#305 id=305 data-nosnippet>305</a>            .and_then(|v| serde_json::from_value(v).ok())
-<a href=#306 id=306 data-nosnippet>306</a>            .unwrap_or_default();
-<a href=#307 id=307 data-nosnippet>307</a>        Org {
-<a href=#308 id=308 data-nosnippet>308</a>            meta: ResourceMeta {
-<a href=#309 id=309 data-nosnippet>309</a>                id,
-<a href=#310 id=310 data-nosnippet>310</a>                name: <span class="self">self</span>.name,
-<a href=#311 id=311 data-nosnippet>311</a>                status: <span class="self">self</span>.status.unwrap_or_else(|| <span class="string">"active"</span>.to_string()),
-<a href=#312 id=312 data-nosnippet>312</a>                labels,
-<a href=#313 id=313 data-nosnippet>313</a>                created_at: iso8601_to_epoch(<span class="kw-2">&amp;</span><span class="self">self</span>.created_at),
-<a href=#314 id=314 data-nosnippet>314</a>                updated_at: iso8601_to_epoch(<span class="kw-2">&amp;</span><span class="self">self</span>.updated_at),
-<a href=#315 id=315 data-nosnippet>315</a>            },
-<a href=#316 id=316 data-nosnippet>316</a>        }
-<a href=#317 id=317 data-nosnippet>317</a>    }
-<a href=#318 id=318 data-nosnippet>318</a>}
-<a href=#319 id=319 data-nosnippet>319</a>
-<a href=#320 id=320 data-nosnippet>320</a><span class="attr">#[cfg(test)]
-<a href=#321 id=321 data-nosnippet>321</a></span><span class="kw">mod </span>tests {
-<a href=#322 id=322 data-nosnippet>322</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
-<a href=#323 id=323 data-nosnippet>323</a>
-<a href=#324 id=324 data-nosnippet>324</a>    <span class="doccomment">/// Build an in-process `OrgStore` backed by a fresh SurrealKV
-<a href=#325 id=325 data-nosnippet>325</a>    /// datastore at a temporary path, with the `org` schema applied.
-<a href=#326 id=326 data-nosnippet>326</a>    ///
-<a href=#327 id=327 data-nosnippet>327</a>    /// The tempdir handle has to live as long as the store, so we
-<a href=#328 id=328 data-nosnippet>328</a>    /// return it together. SurrealDB's SCHEMAFULL semantics are
-<a href=#329 id=329 data-nosnippet>329</a>    /// identical across SurrealKv and TiKv (the Phase-2 contract is
-<a href=#330 id=330 data-nosnippet>330</a>    /// that one `EmbeddedDb` wrapper fronts both, with the same SDK
-<a href=#331 id=331 data-nosnippet>331</a>    /// surface), so this is a faithful rehearsal of production cluster
-<a href=#332 id=332 data-nosnippet>332</a>    /// state without needing a live TiKV cluster on the test host.
-<a href=#333 id=333 data-nosnippet>333</a>    </span><span class="kw">async fn </span>temp_store() -&gt; (tempfile::TempDir, OrgStore) {
-<a href=#334 id=334 data-nosnippet>334</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
-<a href=#335 id=335 data-nosnippet>335</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"orgs.skv"</span>))
-<a href=#336 id=336 data-nosnippet>336</a>            .<span class="kw">await
-<a href=#337 id=337 data-nosnippet>337</a>            </span>.expect(<span class="string">"open EmbeddedDb at temp path"</span>);
-<a href=#338 id=338 data-nosnippet>338</a>        <span class="comment">// Apply the cluster schema bundle so the SCHEMAFULL `org` table
-<a href=#339 id=339 data-nosnippet>339</a>        // (and every parent/child it depends on) is live before the
-<a href=#340 id=340 data-nosnippet>340</a>        // store touches it.
-<a href=#341 id=341 data-nosnippet>341</a>        </span>nauka_state::apply_cluster_schemas(<span class="kw-2">&amp;</span>db)
-<a href=#342 id=342 data-nosnippet>342</a>            .<span class="kw">await
-<a href=#343 id=343 data-nosnippet>343</a>            </span>.expect(<span class="string">"apply cluster schemas"</span>);
-<a href=#344 id=344 data-nosnippet>344</a>        (dir, OrgStore::new(db))
-<a href=#345 id=345 data-nosnippet>345</a>    }
-<a href=#346 id=346 data-nosnippet>346</a>
-<a href=#347 id=347 data-nosnippet>347</a>    <span class="attr">#[tokio::test]
-<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">async fn </span>create_then_get_by_name() {
-<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">let </span>created = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
-<a href=#351 id=351 data-nosnippet>351</a>        <span class="macro">assert_eq!</span>(created.meta.name, <span class="string">"acme"</span>);
-<a href=#352 id=352 data-nosnippet>352</a>        <span class="macro">assert!</span>(created.meta.id.starts_with(<span class="string">"org-"</span>));
-<a href=#353 id=353 data-nosnippet>353</a>
-<a href=#354 id=354 data-nosnippet>354</a>        <span class="kw">let </span>got = store
-<a href=#355 id=355 data-nosnippet>355</a>            .get(<span class="string">"acme"</span>)
-<a href=#356 id=356 data-nosnippet>356</a>            .<span class="kw">await
-<a href=#357 id=357 data-nosnippet>357</a>            </span>.expect(<span class="string">"get by name"</span>)
-<a href=#358 id=358 data-nosnippet>358</a>            .expect(<span class="string">"missing"</span>);
-<a href=#359 id=359 data-nosnippet>359</a>        <span class="macro">assert_eq!</span>(got.meta.name, <span class="string">"acme"</span>);
-<a href=#360 id=360 data-nosnippet>360</a>        <span class="macro">assert_eq!</span>(got.meta.id, created.meta.id);
-<a href=#361 id=361 data-nosnippet>361</a>        <span class="macro">assert_eq!</span>(got.meta.status, <span class="string">"active"</span>);
-<a href=#362 id=362 data-nosnippet>362</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#122 id=122 data-nosnippet>122</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="macro">anyhow::anyhow!</span>(classify_create_error(
+<a href=#123 id=123 data-nosnippet>123</a>                    <span class="string">"org"</span>,
+<a href=#124 id=124 data-nosnippet>124</a>                    name,
+<a href=#125 id=125 data-nosnippet>125</a>                    <span class="kw-2">&amp;</span>e.to_string()
+<a href=#126 id=126 data-nosnippet>126</a>                )))
+<a href=#127 id=127 data-nosnippet>127</a>            }
+<a href=#128 id=128 data-nosnippet>128</a>        };
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = response.check() {
+<a href=#130 id=130 data-nosnippet>130</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(<span class="macro">anyhow::anyhow!</span>(classify_create_error(
+<a href=#131 id=131 data-nosnippet>131</a>                <span class="string">"org"</span>,
+<a href=#132 id=132 data-nosnippet>132</a>                name,
+<a href=#133 id=133 data-nosnippet>133</a>                <span class="kw-2">&amp;</span>e.to_string()
+<a href=#134 id=134 data-nosnippet>134</a>            )));
+<a href=#135 id=135 data-nosnippet>135</a>        }
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="prelude-val">Ok</span>(org)
+<a href=#138 id=138 data-nosnippet>138</a>    }
+<a href=#139 id=139 data-nosnippet>139</a>
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="doccomment">/// Look up an org by id (when the input looks like an `OrgId`)
+<a href=#141 id=141 data-nosnippet>141</a>    /// or by human name (otherwise).
+<a href=#142 id=142 data-nosnippet>142</a>    ///
+<a href=#143 id=143 data-nosnippet>143</a>    /// The id path is a direct record-id `SELECT`; the name path uses
+<a href=#144 id=144 data-nosnippet>144</a>    /// the schema's unique `org_name` index for an O(1) lookup. Both
+<a href=#145 id=145 data-nosnippet>145</a>    /// paths return `Ok(None)` when no row matches — neither one is
+<a href=#146 id=146 data-nosnippet>146</a>    /// an error.
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="kw">pub async fn </span>get(<span class="kw-2">&amp;</span><span class="self">self</span>, name_or_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
+<a href=#148 id=148 data-nosnippet>148</a>        <span class="kw">if </span>OrgId::looks_like_id(name_or_id) {
+<a href=#149 id=149 data-nosnippet>149</a>            <span class="self">self</span>.get_by_id(name_or_id).<span class="kw">await
+<a href=#150 id=150 data-nosnippet>150</a>        </span>} <span class="kw">else </span>{
+<a href=#151 id=151 data-nosnippet>151</a>            <span class="self">self</span>.get_by_name(name_or_id).<span class="kw">await
+<a href=#152 id=152 data-nosnippet>152</a>        </span>}
+<a href=#153 id=153 data-nosnippet>153</a>    }
+<a href=#154 id=154 data-nosnippet>154</a>
+<a href=#155 id=155 data-nosnippet>155</a>    <span class="kw">async fn </span>get_by_id(<span class="kw-2">&amp;</span><span class="self">self</span>, id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
+<a href=#157 id=157 data-nosnippet>157</a>            </span>.db
+<a href=#158 id=158 data-nosnippet>158</a>            .client()
+<a href=#159 id=159 data-nosnippet>159</a>            .query(<span class="string">"SELECT * FROM type::record($tbl, $id)"</span>)
+<a href=#160 id=160 data-nosnippet>160</a>            .bind((<span class="string">"tbl"</span>, ORG_TABLE))
+<a href=#161 id=161 data-nosnippet>161</a>            .bind((<span class="string">"id"</span>, id.to_string()))
+<a href=#162 id=162 data-nosnippet>162</a>            .<span class="kw">await
+<a href=#163 id=163 data-nosnippet>163</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#164 id=164 data-nosnippet>164</a>        <span class="comment">// Round-trip through `serde_json::Value` so callers don't have
+<a href=#165 id=165 data-nosnippet>165</a>        // to derive `SurrealValue` on `OrgRow`. See the rationale on
+<a href=#166 id=166 data-nosnippet>166</a>        // [`OrgRow`] and the `FabricState::load` JSON-bridge pattern.
+<a href=#167 id=167 data-nosnippet>167</a>        </span><span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">match </span>raw.into_iter().next() {
+<a href=#169 id=169 data-nosnippet>169</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#170 id=170 data-nosnippet>170</a>            <span class="prelude-val">Some</span>(v) =&gt; {
+<a href=#171 id=171 data-nosnippet>171</a>                <span class="kw">let </span>row: OrgRow = serde_json::from_value(v)
+<a href=#172 id=172 data-nosnippet>172</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#173 id=173 data-nosnippet>173</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(row.into_org()))
+<a href=#174 id=174 data-nosnippet>174</a>            }
+<a href=#175 id=175 data-nosnippet>175</a>        }
+<a href=#176 id=176 data-nosnippet>176</a>    }
+<a href=#177 id=177 data-nosnippet>177</a>
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="kw">async fn </span>get_by_name(<span class="kw-2">&amp;</span><span class="self">self</span>, name: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;<span class="prelude-ty">Option</span>&lt;Org&gt;&gt; {
+<a href=#179 id=179 data-nosnippet>179</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
+<a href=#180 id=180 data-nosnippet>180</a>            </span>.db
+<a href=#181 id=181 data-nosnippet>181</a>            .client()
+<a href=#182 id=182 data-nosnippet>182</a>            .query(<span class="string">"SELECT * FROM org WHERE name = $name LIMIT 1"</span>)
+<a href=#183 id=183 data-nosnippet>183</a>            .bind((<span class="string">"name"</span>, name.to_string()))
+<a href=#184 id=184 data-nosnippet>184</a>            .<span class="kw">await
+<a href=#185 id=185 data-nosnippet>185</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="comment">// Same JSON-bridge as `get_by_id` — see the comment there and
+<a href=#187 id=187 data-nosnippet>187</a>        // the rationale block on [`OrgRow`].
+<a href=#188 id=188 data-nosnippet>188</a>        </span><span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">match </span>raw.into_iter().next() {
+<a href=#190 id=190 data-nosnippet>190</a>            <span class="prelude-val">None </span>=&gt; <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#191 id=191 data-nosnippet>191</a>            <span class="prelude-val">Some</span>(v) =&gt; {
+<a href=#192 id=192 data-nosnippet>192</a>                <span class="kw">let </span>row: OrgRow = serde_json::from_value(v)
+<a href=#193 id=193 data-nosnippet>193</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))<span class="question-mark">?</span>;
+<a href=#194 id=194 data-nosnippet>194</a>                <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(row.into_org()))
+<a href=#195 id=195 data-nosnippet>195</a>            }
+<a href=#196 id=196 data-nosnippet>196</a>        }
+<a href=#197 id=197 data-nosnippet>197</a>    }
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="doccomment">/// List every org in the cluster, in unspecified order.
+<a href=#200 id=200 data-nosnippet>200</a>    ///
+<a href=#201 id=201 data-nosnippet>201</a>    /// The SCHEMAFULL `org` table is the source of truth — the legacy
+<a href=#202 id=202 data-nosnippet>202</a>    /// `_reg_v2` sidecar registry the previous version of this file
+<a href=#203 id=203 data-nosnippet>203</a>    /// maintained is gone with P2.9.
+<a href=#204 id=204 data-nosnippet>204</a>    </span><span class="kw">pub async fn </span>list(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; anyhow::Result&lt;Vec&lt;Org&gt;&gt; {
+<a href=#205 id=205 data-nosnippet>205</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
+<a href=#206 id=206 data-nosnippet>206</a>            </span>.db
+<a href=#207 id=207 data-nosnippet>207</a>            .client()
+<a href=#208 id=208 data-nosnippet>208</a>            .query(<span class="string">"SELECT * FROM org"</span>)
+<a href=#209 id=209 data-nosnippet>209</a>            .<span class="kw">await
+<a href=#210 id=210 data-nosnippet>210</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">let </span>raw: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="kw">let </span>orgs: <span class="prelude-ty">Result</span>&lt;Vec&lt;Org&gt;, <span class="kw">_</span>&gt; = raw
+<a href=#213 id=213 data-nosnippet>213</a>            .into_iter()
+<a href=#214 id=214 data-nosnippet>214</a>            .map(|v| {
+<a href=#215 id=215 data-nosnippet>215</a>                serde_json::from_value::&lt;OrgRow&gt;(v)
+<a href=#216 id=216 data-nosnippet>216</a>                    .map(OrgRow::into_org)
+<a href=#217 id=217 data-nosnippet>217</a>                    .map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"deserialise org row: {e}"</span>))
+<a href=#218 id=218 data-nosnippet>218</a>            })
+<a href=#219 id=219 data-nosnippet>219</a>            .collect();
+<a href=#220 id=220 data-nosnippet>220</a>        orgs
+<a href=#221 id=221 data-nosnippet>221</a>    }
+<a href=#222 id=222 data-nosnippet>222</a>
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="doccomment">/// Delete an org by name or id. Refuses to delete an org that
+<a href=#224 id=224 data-nosnippet>224</a>    /// still owns any project — the caller must remove the children
+<a href=#225 id=225 data-nosnippet>225</a>    /// first.
+<a href=#226 id=226 data-nosnippet>226</a>    </span><span class="kw">pub async fn </span>delete(<span class="kw-2">&amp;</span><span class="self">self</span>, name_or_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;()&gt; {
+<a href=#227 id=227 data-nosnippet>227</a>        <span class="kw">let </span>org = <span class="self">self
+<a href=#228 id=228 data-nosnippet>228</a>            </span>.get(name_or_id)
+<a href=#229 id=229 data-nosnippet>229</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#230 id=230 data-nosnippet>230</a>            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"org '{name_or_id}' not found"</span>))<span class="question-mark">?</span>;
+<a href=#231 id=231 data-nosnippet>231</a>
+<a href=#232 id=232 data-nosnippet>232</a>        <span class="comment">// Refuse to delete an org that still has projects. P2.10
+<a href=#233 id=233 data-nosnippet>233</a>        // (sifrah/nauka#214) migrated the project store to the native
+<a href=#234 id=234 data-nosnippet>234</a>        // SurrealDB SDK on top of the SCHEMAFULL `project` table, so
+<a href=#235 id=235 data-nosnippet>235</a>        // we can count the surviving children with a direct query on
+<a href=#236 id=236 data-nosnippet>236</a>        // the owning-org id. This store still doesn't import
+<a href=#237 id=237 data-nosnippet>237</a>        // `ProjectStore` because that would force a circular module
+<a href=#238 id=238 data-nosnippet>238</a>        // dependency (`ProjectStore::delete` reaches back into
+<a href=#239 id=239 data-nosnippet>239</a>        // `OrgStore::get` to resolve the parent org) — the inline
+<a href=#240 id=240 data-nosnippet>240</a>        // query is cheaper.
+<a href=#241 id=241 data-nosnippet>241</a>        </span><span class="kw">let </span>remaining_projects = <span class="self">self</span>.count_projects_in_org(<span class="kw-2">&amp;</span>org.meta.id).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">if </span>remaining_projects &gt; <span class="number">0 </span>{
+<a href=#243 id=243 data-nosnippet>243</a>            <span class="macro">anyhow::bail!</span>(
+<a href=#244 id=244 data-nosnippet>244</a>                <span class="string">"org '{}' has {} project(s). Delete them first."</span>,
+<a href=#245 id=245 data-nosnippet>245</a>                org.meta.name,
+<a href=#246 id=246 data-nosnippet>246</a>                remaining_projects
+<a href=#247 id=247 data-nosnippet>247</a>            );
+<a href=#248 id=248 data-nosnippet>248</a>        }
+<a href=#249 id=249 data-nosnippet>249</a>
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#251 id=251 data-nosnippet>251</a>            </span>.db
+<a href=#252 id=252 data-nosnippet>252</a>            .client()
+<a href=#253 id=253 data-nosnippet>253</a>            .query(<span class="string">"DELETE type::record($tbl, $id)"</span>)
+<a href=#254 id=254 data-nosnippet>254</a>            .bind((<span class="string">"tbl"</span>, ORG_TABLE))
+<a href=#255 id=255 data-nosnippet>255</a>            .bind((<span class="string">"id"</span>, org.meta.id.clone()))
+<a href=#256 id=256 data-nosnippet>256</a>            .<span class="kw">await
+<a href=#257 id=257 data-nosnippet>257</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#258 id=258 data-nosnippet>258</a>        result.check().map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="prelude-val">Ok</span>(())
+<a href=#260 id=260 data-nosnippet>260</a>    }
+<a href=#261 id=261 data-nosnippet>261</a>
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// Count the projects currently owned by the org whose record-id
+<a href=#263 id=263 data-nosnippet>263</a>    /// is `org_id`.
+<a href=#264 id=264 data-nosnippet>264</a>    ///
+<a href=#265 id=265 data-nosnippet>265</a>    /// Uses the SCHEMAFULL `project` table that P2.10 migrated to, so
+<a href=#266 id=266 data-nosnippet>266</a>    /// the query is a single `SELECT name FROM project WHERE org =
+<a href=#267 id=267 data-nosnippet>267</a>    /// $org`. The `project` table is defined by
+<a href=#268 id=268 data-nosnippet>268</a>    /// `nauka_state::apply_cluster_schemas` at bootstrap, so a fresh
+<a href=#269 id=269 data-nosnippet>269</a>    /// database already has the table — no `DEFINE TABLE IF NOT
+<a href=#270 id=270 data-nosnippet>270</a>    /// EXISTS` dance is needed. If the schema hasn't been applied at
+<a href=#271 id=271 data-nosnippet>271</a>    /// all (e.g. a pre-bootstrap sanity test), the SurrealDB error
+<a href=#272 id=272 data-nosnippet>272</a>    /// bubbles up as an `anyhow::Error` and the caller surfaces it.
+<a href=#273 id=273 data-nosnippet>273</a>    </span><span class="kw">async fn </span>count_projects_in_org(<span class="kw-2">&amp;</span><span class="self">self</span>, org_id: <span class="kw-2">&amp;</span>str) -&gt; anyhow::Result&lt;usize&gt; {
+<a href=#274 id=274 data-nosnippet>274</a>        <span class="kw">let </span><span class="kw-2">mut </span>response = <span class="self">self
+<a href=#275 id=275 data-nosnippet>275</a>            </span>.db
+<a href=#276 id=276 data-nosnippet>276</a>            .client()
+<a href=#277 id=277 data-nosnippet>277</a>            .query(<span class="string">"SELECT name FROM project WHERE org = $org"</span>)
+<a href=#278 id=278 data-nosnippet>278</a>            .bind((<span class="string">"org"</span>, org_id.to_string()))
+<a href=#279 id=279 data-nosnippet>279</a>            .<span class="kw">await
+<a href=#280 id=280 data-nosnippet>280</a>            </span>.map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#281 id=281 data-nosnippet>281</a>        <span class="kw">let </span>rows: Vec&lt;serde_json::Value&gt; = response.take(<span class="number">0</span>).map_err(|e| <span class="macro">anyhow::anyhow!</span>(<span class="string">"{e}"</span>))<span class="question-mark">?</span>;
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="prelude-val">Ok</span>(rows.len())
+<a href=#283 id=283 data-nosnippet>283</a>    }
+<a href=#284 id=284 data-nosnippet>284</a>}
+<a href=#285 id=285 data-nosnippet>285</a>
+<a href=#286 id=286 data-nosnippet>286</a><span class="doccomment">/// Row shape returned by `SELECT * FROM org`. Mirrors the SCHEMAFULL
+<a href=#287 id=287 data-nosnippet>287</a>/// `org` table's column set with one ergonomic conversion: SurrealDB
+<a href=#288 id=288 data-nosnippet>288</a>/// hands the record id back as a typed `Thing` (table + id), which
+<a href=#289 id=289 data-nosnippet>289</a>/// serde_json renders as `{"tb": "org", "id": {"String": "..."}}`. We
+<a href=#290 id=290 data-nosnippet>290</a>/// bridge through `serde_json::Value` and pull the inner string out in
+<a href=#291 id=291 data-nosnippet>291</a>/// [`OrgRow::into_org`] so callers see the same flat `org-&lt;ulid&gt;` id
+<a href=#292 id=292 data-nosnippet>292</a>/// string that they always have.
+<a href=#293 id=293 data-nosnippet>293</a>///
+<a href=#294 id=294 data-nosnippet>294</a>/// `created_at` / `updated_at` arrive as RFC 3339 / ISO 8601 strings
+<a href=#295 id=295 data-nosnippet>295</a>/// from SurrealDB; we parse them back into Unix-epoch seconds with
+<a href=#296 id=296 data-nosnippet>296</a>/// [`iso8601_to_epoch`] so the resulting [`Org`] is bit-identical to
+<a href=#297 id=297 data-nosnippet>297</a>/// what `OrgStore::create` originally produced.
+<a href=#298 id=298 data-nosnippet>298</a></span><span class="attr">#[derive(Debug, Deserialize)]
+<a href=#299 id=299 data-nosnippet>299</a></span><span class="kw">struct </span>OrgRow {
+<a href=#300 id=300 data-nosnippet>300</a>    id: serde_json::Value,
+<a href=#301 id=301 data-nosnippet>301</a>    name: String,
+<a href=#302 id=302 data-nosnippet>302</a>    <span class="attr">#[serde(default)]
+<a href=#303 id=303 data-nosnippet>303</a>    </span>status: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#304 id=304 data-nosnippet>304</a>    <span class="attr">#[serde(default)]
+<a href=#305 id=305 data-nosnippet>305</a>    </span>labels: <span class="prelude-ty">Option</span>&lt;serde_json::Value&gt;,
+<a href=#306 id=306 data-nosnippet>306</a>    created_at: String,
+<a href=#307 id=307 data-nosnippet>307</a>    updated_at: String,
+<a href=#308 id=308 data-nosnippet>308</a>}
+<a href=#309 id=309 data-nosnippet>309</a>
+<a href=#310 id=310 data-nosnippet>310</a><span class="kw">impl </span>OrgRow {
+<a href=#311 id=311 data-nosnippet>311</a>    <span class="kw">fn </span>into_org(<span class="self">self</span>) -&gt; Org {
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw">let </span>id = thing_to_id_string(<span class="string">"org:"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.id);
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">let </span>labels = <span class="self">self
+<a href=#314 id=314 data-nosnippet>314</a>            </span>.labels
+<a href=#315 id=315 data-nosnippet>315</a>            .and_then(|v| serde_json::from_value(v).ok())
+<a href=#316 id=316 data-nosnippet>316</a>            .unwrap_or_default();
+<a href=#317 id=317 data-nosnippet>317</a>        Org {
+<a href=#318 id=318 data-nosnippet>318</a>            meta: ResourceMeta {
+<a href=#319 id=319 data-nosnippet>319</a>                id,
+<a href=#320 id=320 data-nosnippet>320</a>                name: <span class="self">self</span>.name,
+<a href=#321 id=321 data-nosnippet>321</a>                status: <span class="self">self</span>.status.unwrap_or_else(|| <span class="string">"active"</span>.to_string()),
+<a href=#322 id=322 data-nosnippet>322</a>                labels,
+<a href=#323 id=323 data-nosnippet>323</a>                created_at: iso8601_to_epoch(<span class="kw-2">&amp;</span><span class="self">self</span>.created_at),
+<a href=#324 id=324 data-nosnippet>324</a>                updated_at: iso8601_to_epoch(<span class="kw-2">&amp;</span><span class="self">self</span>.updated_at),
+<a href=#325 id=325 data-nosnippet>325</a>            },
+<a href=#326 id=326 data-nosnippet>326</a>        }
+<a href=#327 id=327 data-nosnippet>327</a>    }
+<a href=#328 id=328 data-nosnippet>328</a>}
+<a href=#329 id=329 data-nosnippet>329</a>
+<a href=#330 id=330 data-nosnippet>330</a><span class="attr">#[cfg(test)]
+<a href=#331 id=331 data-nosnippet>331</a></span><span class="kw">mod </span>tests {
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#333 id=333 data-nosnippet>333</a>
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="doccomment">/// Build an in-process `OrgStore` backed by a fresh SurrealKV
+<a href=#335 id=335 data-nosnippet>335</a>    /// datastore at a temporary path, with the `org` schema applied.
+<a href=#336 id=336 data-nosnippet>336</a>    ///
+<a href=#337 id=337 data-nosnippet>337</a>    /// The tempdir handle has to live as long as the store, so we
+<a href=#338 id=338 data-nosnippet>338</a>    /// return it together. SurrealDB's SCHEMAFULL semantics are
+<a href=#339 id=339 data-nosnippet>339</a>    /// identical across SurrealKv and TiKv (the Phase-2 contract is
+<a href=#340 id=340 data-nosnippet>340</a>    /// that one `EmbeddedDb` wrapper fronts both, with the same SDK
+<a href=#341 id=341 data-nosnippet>341</a>    /// surface), so this is a faithful rehearsal of production cluster
+<a href=#342 id=342 data-nosnippet>342</a>    /// state without needing a live TiKV cluster on the test host.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">async fn </span>temp_store() -&gt; (tempfile::TempDir, OrgStore) {
+<a href=#344 id=344 data-nosnippet>344</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#345 id=345 data-nosnippet>345</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"orgs.skv"</span>))
+<a href=#346 id=346 data-nosnippet>346</a>            .<span class="kw">await
+<a href=#347 id=347 data-nosnippet>347</a>            </span>.expect(<span class="string">"open EmbeddedDb at temp path"</span>);
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="comment">// Apply the cluster schema bundle so the SCHEMAFULL `org` table
+<a href=#349 id=349 data-nosnippet>349</a>        // (and every parent/child it depends on) is live before the
+<a href=#350 id=350 data-nosnippet>350</a>        // store touches it.
+<a href=#351 id=351 data-nosnippet>351</a>        </span>nauka_state::apply_cluster_schemas(<span class="kw-2">&amp;</span>db)
+<a href=#352 id=352 data-nosnippet>352</a>            .<span class="kw">await
+<a href=#353 id=353 data-nosnippet>353</a>            </span>.expect(<span class="string">"apply cluster schemas"</span>);
+<a href=#354 id=354 data-nosnippet>354</a>        (dir, OrgStore::new(db))
+<a href=#355 id=355 data-nosnippet>355</a>    }
+<a href=#356 id=356 data-nosnippet>356</a>
+<a href=#357 id=357 data-nosnippet>357</a>    <span class="attr">#[tokio::test]
+<a href=#358 id=358 data-nosnippet>358</a>    </span><span class="kw">async fn </span>create_then_get_by_name() {
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#360 id=360 data-nosnippet>360</a>        <span class="kw">let </span>created = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="macro">assert_eq!</span>(created.meta.name, <span class="string">"acme"</span>);
+<a href=#362 id=362 data-nosnippet>362</a>        <span class="macro">assert!</span>(created.meta.id.starts_with(<span class="string">"org-"</span>));
 <a href=#363 id=363 data-nosnippet>363</a>
-<a href=#364 id=364 data-nosnippet>364</a>    <span class="attr">#[tokio::test]
-<a href=#365 id=365 data-nosnippet>365</a>    </span><span class="kw">async fn </span>create_then_get_by_id() {
-<a href=#366 id=366 data-nosnippet>366</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">let </span>created = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
-<a href=#368 id=368 data-nosnippet>368</a>
-<a href=#369 id=369 data-nosnippet>369</a>        <span class="kw">let </span>got = store
-<a href=#370 id=370 data-nosnippet>370</a>            .get(<span class="kw-2">&amp;</span>created.meta.id)
-<a href=#371 id=371 data-nosnippet>371</a>            .<span class="kw">await
-<a href=#372 id=372 data-nosnippet>372</a>            </span>.expect(<span class="string">"get by id"</span>)
-<a href=#373 id=373 data-nosnippet>373</a>            .expect(<span class="string">"missing"</span>);
-<a href=#374 id=374 data-nosnippet>374</a>        <span class="macro">assert_eq!</span>(got.meta.id, created.meta.id);
-<a href=#375 id=375 data-nosnippet>375</a>        <span class="macro">assert_eq!</span>(got.meta.name, <span class="string">"acme"</span>);
-<a href=#376 id=376 data-nosnippet>376</a>    }
-<a href=#377 id=377 data-nosnippet>377</a>
-<a href=#378 id=378 data-nosnippet>378</a>    <span class="attr">#[tokio::test]
-<a href=#379 id=379 data-nosnippet>379</a>    </span><span class="kw">async fn </span>create_duplicate_name_is_rejected() {
-<a href=#380 id=380 data-nosnippet>380</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#381 id=381 data-nosnippet>381</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"first create"</span>);
-<a href=#382 id=382 data-nosnippet>382</a>        <span class="kw">let </span>err = store
-<a href=#383 id=383 data-nosnippet>383</a>            .create(<span class="string">"acme"</span>)
-<a href=#384 id=384 data-nosnippet>384</a>            .<span class="kw">await
-<a href=#385 id=385 data-nosnippet>385</a>            </span>.expect_err(<span class="string">"duplicate name should fail"</span>);
-<a href=#386 id=386 data-nosnippet>386</a>        <span class="macro">assert!</span>(
-<a href=#387 id=387 data-nosnippet>387</a>            err.to_string().contains(<span class="string">"already exists"</span>),
-<a href=#388 id=388 data-nosnippet>388</a>            <span class="string">"expected duplicate error, got: {err}"</span>,
-<a href=#389 id=389 data-nosnippet>389</a>        );
-<a href=#390 id=390 data-nosnippet>390</a>    }
-<a href=#391 id=391 data-nosnippet>391</a>
-<a href=#392 id=392 data-nosnippet>392</a>    <span class="attr">#[tokio::test]
-<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="kw">async fn </span>list_returns_all_orgs() {
-<a href=#394 id=394 data-nosnippet>394</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#395 id=395 data-nosnippet>395</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap();
-<a href=#396 id=396 data-nosnippet>396</a>        store.create(<span class="string">"globex"</span>).<span class="kw">await</span>.unwrap();
-<a href=#397 id=397 data-nosnippet>397</a>        store.create(<span class="string">"initech"</span>).<span class="kw">await</span>.unwrap();
-<a href=#398 id=398 data-nosnippet>398</a>
-<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">let </span>orgs = store.list().<span class="kw">await</span>.expect(<span class="string">"list"</span>);
-<a href=#400 id=400 data-nosnippet>400</a>        <span class="macro">assert_eq!</span>(orgs.len(), <span class="number">3</span>);
-<a href=#401 id=401 data-nosnippet>401</a>        <span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = orgs.iter().map(|o| o.meta.name.as_str()).collect();
-<a href=#402 id=402 data-nosnippet>402</a>        names.sort();
-<a href=#403 id=403 data-nosnippet>403</a>        <span class="macro">assert_eq!</span>(names, <span class="macro">vec!</span>[<span class="string">"acme"</span>, <span class="string">"globex"</span>, <span class="string">"initech"</span>]);
-<a href=#404 id=404 data-nosnippet>404</a>    }
-<a href=#405 id=405 data-nosnippet>405</a>
-<a href=#406 id=406 data-nosnippet>406</a>    <span class="attr">#[tokio::test]
-<a href=#407 id=407 data-nosnippet>407</a>    </span><span class="kw">async fn </span>list_empty_returns_empty() {
-<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span>got = store
+<a href=#365 id=365 data-nosnippet>365</a>            .get(<span class="string">"acme"</span>)
+<a href=#366 id=366 data-nosnippet>366</a>            .<span class="kw">await
+<a href=#367 id=367 data-nosnippet>367</a>            </span>.expect(<span class="string">"get by name"</span>)
+<a href=#368 id=368 data-nosnippet>368</a>            .expect(<span class="string">"missing"</span>);
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="macro">assert_eq!</span>(got.meta.name, <span class="string">"acme"</span>);
+<a href=#370 id=370 data-nosnippet>370</a>        <span class="macro">assert_eq!</span>(got.meta.id, created.meta.id);
+<a href=#371 id=371 data-nosnippet>371</a>        <span class="macro">assert_eq!</span>(got.meta.status, <span class="string">"active"</span>);
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="attr">#[tokio::test]
+<a href=#375 id=375 data-nosnippet>375</a>    </span><span class="kw">async fn </span>create_then_get_by_id() {
+<a href=#376 id=376 data-nosnippet>376</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span>created = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
+<a href=#378 id=378 data-nosnippet>378</a>
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="kw">let </span>got = store
+<a href=#380 id=380 data-nosnippet>380</a>            .get(<span class="kw-2">&amp;</span>created.meta.id)
+<a href=#381 id=381 data-nosnippet>381</a>            .<span class="kw">await
+<a href=#382 id=382 data-nosnippet>382</a>            </span>.expect(<span class="string">"get by id"</span>)
+<a href=#383 id=383 data-nosnippet>383</a>            .expect(<span class="string">"missing"</span>);
+<a href=#384 id=384 data-nosnippet>384</a>        <span class="macro">assert_eq!</span>(got.meta.id, created.meta.id);
+<a href=#385 id=385 data-nosnippet>385</a>        <span class="macro">assert_eq!</span>(got.meta.name, <span class="string">"acme"</span>);
+<a href=#386 id=386 data-nosnippet>386</a>    }
+<a href=#387 id=387 data-nosnippet>387</a>
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="attr">#[tokio::test]
+<a href=#389 id=389 data-nosnippet>389</a>    </span><span class="kw">async fn </span>create_duplicate_name_is_rejected() {
+<a href=#390 id=390 data-nosnippet>390</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#391 id=391 data-nosnippet>391</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"first create"</span>);
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="kw">let </span>err = store
+<a href=#393 id=393 data-nosnippet>393</a>            .create(<span class="string">"acme"</span>)
+<a href=#394 id=394 data-nosnippet>394</a>            .<span class="kw">await
+<a href=#395 id=395 data-nosnippet>395</a>            </span>.expect_err(<span class="string">"duplicate name should fail"</span>);
+<a href=#396 id=396 data-nosnippet>396</a>        <span class="macro">assert!</span>(
+<a href=#397 id=397 data-nosnippet>397</a>            err.to_string().contains(<span class="string">"already exists"</span>),
+<a href=#398 id=398 data-nosnippet>398</a>            <span class="string">"expected duplicate error, got: {err}"</span>,
+<a href=#399 id=399 data-nosnippet>399</a>        );
+<a href=#400 id=400 data-nosnippet>400</a>    }
+<a href=#401 id=401 data-nosnippet>401</a>
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="attr">#[tokio::test]
+<a href=#403 id=403 data-nosnippet>403</a>    </span><span class="kw">async fn </span>list_returns_all_orgs() {
+<a href=#404 id=404 data-nosnippet>404</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#405 id=405 data-nosnippet>405</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap();
+<a href=#406 id=406 data-nosnippet>406</a>        store.create(<span class="string">"globex"</span>).<span class="kw">await</span>.unwrap();
+<a href=#407 id=407 data-nosnippet>407</a>        store.create(<span class="string">"initech"</span>).<span class="kw">await</span>.unwrap();
+<a href=#408 id=408 data-nosnippet>408</a>
 <a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">let </span>orgs = store.list().<span class="kw">await</span>.expect(<span class="string">"list"</span>);
-<a href=#410 id=410 data-nosnippet>410</a>        <span class="macro">assert!</span>(orgs.is_empty());
-<a href=#411 id=411 data-nosnippet>411</a>    }
-<a href=#412 id=412 data-nosnippet>412</a>
-<a href=#413 id=413 data-nosnippet>413</a>    <span class="attr">#[tokio::test]
-<a href=#414 id=414 data-nosnippet>414</a>    </span><span class="kw">async fn </span>get_missing_returns_none() {
-<a href=#415 id=415 data-nosnippet>415</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="macro">assert!</span>(store.get(<span class="string">"does-not-exist"</span>).<span class="kw">await</span>.unwrap().is_none());
-<a href=#417 id=417 data-nosnippet>417</a>        <span class="macro">assert!</span>(store
-<a href=#418 id=418 data-nosnippet>418</a>            .get(<span class="string">"org-01J00000000000000000000000"</span>)
-<a href=#419 id=419 data-nosnippet>419</a>            .<span class="kw">await
-<a href=#420 id=420 data-nosnippet>420</a>            </span>.unwrap()
-<a href=#421 id=421 data-nosnippet>421</a>            .is_none());
-<a href=#422 id=422 data-nosnippet>422</a>    }
-<a href=#423 id=423 data-nosnippet>423</a>
-<a href=#424 id=424 data-nosnippet>424</a>    <span class="attr">#[tokio::test]
-<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="kw">async fn </span>delete_removes_org() {
-<a href=#426 id=426 data-nosnippet>426</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#427 id=427 data-nosnippet>427</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap();
-<a href=#428 id=428 data-nosnippet>428</a>        store.delete(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"delete"</span>);
-<a href=#429 id=429 data-nosnippet>429</a>        <span class="macro">assert!</span>(store.get(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap().is_none());
-<a href=#430 id=430 data-nosnippet>430</a>        <span class="macro">assert!</span>(store.list().<span class="kw">await</span>.unwrap().is_empty());
-<a href=#431 id=431 data-nosnippet>431</a>    }
-<a href=#432 id=432 data-nosnippet>432</a>
-<a href=#433 id=433 data-nosnippet>433</a>    <span class="attr">#[tokio::test]
-<a href=#434 id=434 data-nosnippet>434</a>    </span><span class="kw">async fn </span>delete_missing_org_errors() {
-<a href=#435 id=435 data-nosnippet>435</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#436 id=436 data-nosnippet>436</a>        <span class="kw">let </span>err = store
-<a href=#437 id=437 data-nosnippet>437</a>            .delete(<span class="string">"does-not-exist"</span>)
-<a href=#438 id=438 data-nosnippet>438</a>            .<span class="kw">await
-<a href=#439 id=439 data-nosnippet>439</a>            </span>.expect_err(<span class="string">"missing org should fail"</span>);
-<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"not found"</span>), <span class="string">"got: {err}"</span>);
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="macro">assert_eq!</span>(orgs.len(), <span class="number">3</span>);
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span><span class="kw-2">mut </span>names: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = orgs.iter().map(|o| o.meta.name.as_str()).collect();
+<a href=#412 id=412 data-nosnippet>412</a>        names.sort();
+<a href=#413 id=413 data-nosnippet>413</a>        <span class="macro">assert_eq!</span>(names, <span class="macro">vec!</span>[<span class="string">"acme"</span>, <span class="string">"globex"</span>, <span class="string">"initech"</span>]);
+<a href=#414 id=414 data-nosnippet>414</a>    }
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>    <span class="attr">#[tokio::test]
+<a href=#417 id=417 data-nosnippet>417</a>    </span><span class="kw">async fn </span>list_empty_returns_empty() {
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#419 id=419 data-nosnippet>419</a>        <span class="kw">let </span>orgs = store.list().<span class="kw">await</span>.expect(<span class="string">"list"</span>);
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="macro">assert!</span>(orgs.is_empty());
+<a href=#421 id=421 data-nosnippet>421</a>    }
+<a href=#422 id=422 data-nosnippet>422</a>
+<a href=#423 id=423 data-nosnippet>423</a>    <span class="attr">#[tokio::test]
+<a href=#424 id=424 data-nosnippet>424</a>    </span><span class="kw">async fn </span>get_missing_returns_none() {
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="macro">assert!</span>(store.get(<span class="string">"does-not-exist"</span>).<span class="kw">await</span>.unwrap().is_none());
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="macro">assert!</span>(store
+<a href=#428 id=428 data-nosnippet>428</a>            .get(<span class="string">"org-01J00000000000000000000000"</span>)
+<a href=#429 id=429 data-nosnippet>429</a>            .<span class="kw">await
+<a href=#430 id=430 data-nosnippet>430</a>            </span>.unwrap()
+<a href=#431 id=431 data-nosnippet>431</a>            .is_none());
+<a href=#432 id=432 data-nosnippet>432</a>    }
+<a href=#433 id=433 data-nosnippet>433</a>
+<a href=#434 id=434 data-nosnippet>434</a>    <span class="attr">#[tokio::test]
+<a href=#435 id=435 data-nosnippet>435</a>    </span><span class="kw">async fn </span>delete_removes_org() {
+<a href=#436 id=436 data-nosnippet>436</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#437 id=437 data-nosnippet>437</a>        store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap();
+<a href=#438 id=438 data-nosnippet>438</a>        store.delete(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"delete"</span>);
+<a href=#439 id=439 data-nosnippet>439</a>        <span class="macro">assert!</span>(store.get(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap().is_none());
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="macro">assert!</span>(store.list().<span class="kw">await</span>.unwrap().is_empty());
 <a href=#441 id=441 data-nosnippet>441</a>    }
 <a href=#442 id=442 data-nosnippet>442</a>
-<a href=#443 id=443 data-nosnippet>443</a>    <span class="doccomment">/// Delete refuses to drop an org that still has a project pointing
-<a href=#444 id=444 data-nosnippet>444</a>    /// at it.
-<a href=#445 id=445 data-nosnippet>445</a>    ///
-<a href=#446 id=446 data-nosnippet>446</a>    /// We seed the SCHEMAFULL `project` table directly (via a `CREATE`
-<a href=#447 id=447 data-nosnippet>447</a>    /// bypassing `ProjectStore::create`) so this test stays
-<a href=#448 id=448 data-nosnippet>448</a>    /// self-contained — it doesn't pull in `ProjectStore`, which
-<a href=#449 id=449 data-nosnippet>449</a>    /// reaches back into `OrgStore::get` to resolve the parent org
-<a href=#450 id=450 data-nosnippet>450</a>    /// and would force a circular import dance into this file.
-<a href=#451 id=451 data-nosnippet>451</a>    </span><span class="attr">#[tokio::test]
-<a href=#452 id=452 data-nosnippet>452</a>    </span><span class="kw">async fn </span>delete_refuses_when_project_remains() {
-<a href=#453 id=453 data-nosnippet>453</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
-<a href=#454 id=454 data-nosnippet>454</a>        <span class="kw">let </span>org = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
-<a href=#455 id=455 data-nosnippet>455</a>
-<a href=#456 id=456 data-nosnippet>456</a>        <span class="comment">// Seed a `project` row directly. The SCHEMAFULL `project`
-<a href=#457 id=457 data-nosnippet>457</a>        // table is created by `apply_cluster_schemas` in `temp_store`,
-<a href=#458 id=458 data-nosnippet>458</a>        // so every column has to be populated to satisfy the ASSERT
-<a href=#459 id=459 data-nosnippet>459</a>        // constraints.
-<a href=#460 id=460 data-nosnippet>460</a>        </span>store
-<a href=#461 id=461 data-nosnippet>461</a>            .db
-<a href=#462 id=462 data-nosnippet>462</a>            .client()
-<a href=#463 id=463 data-nosnippet>463</a>            .query(
-<a href=#464 id=464 data-nosnippet>464</a>                <span class="string">"CREATE type::record('project', 'project-fake') SET \
-<a href=#465 id=465 data-nosnippet>465</a>                 name = 'fakeproj', \
-<a href=#466 id=466 data-nosnippet>466</a>                 status = 'active', \
-<a href=#467 id=467 data-nosnippet>467</a>                 labels = {}, \
-<a href=#468 id=468 data-nosnippet>468</a>                 org = $org, \
-<a href=#469 id=469 data-nosnippet>469</a>                 org_name = 'acme', \
-<a href=#470 id=470 data-nosnippet>470</a>                 created_at = time::now(), \
-<a href=#471 id=471 data-nosnippet>471</a>                 updated_at = time::now()"</span>,
-<a href=#472 id=472 data-nosnippet>472</a>            )
-<a href=#473 id=473 data-nosnippet>473</a>            .bind((<span class="string">"org"</span>, org.meta.id.clone()))
-<a href=#474 id=474 data-nosnippet>474</a>            .<span class="kw">await
-<a href=#475 id=475 data-nosnippet>475</a>            </span>.expect(<span class="string">"seed project row"</span>)
-<a href=#476 id=476 data-nosnippet>476</a>            .check()
-<a href=#477 id=477 data-nosnippet>477</a>            .expect(<span class="string">"seed project row check"</span>);
-<a href=#478 id=478 data-nosnippet>478</a>
-<a href=#479 id=479 data-nosnippet>479</a>        <span class="comment">// Now `delete` should refuse the org — there's a project still
-<a href=#480 id=480 data-nosnippet>480</a>        // pointing at it via `org = &lt;org.meta.id&gt;`.
-<a href=#481 id=481 data-nosnippet>481</a>        </span><span class="kw">let </span>err = store
-<a href=#482 id=482 data-nosnippet>482</a>            .delete(<span class="string">"acme"</span>)
-<a href=#483 id=483 data-nosnippet>483</a>            .<span class="kw">await
-<a href=#484 id=484 data-nosnippet>484</a>            </span>.expect_err(<span class="string">"delete should refuse while a project still exists"</span>);
-<a href=#485 id=485 data-nosnippet>485</a>        <span class="kw">let </span>msg = err.to_string();
-<a href=#486 id=486 data-nosnippet>486</a>        <span class="macro">assert!</span>(
-<a href=#487 id=487 data-nosnippet>487</a>            msg.contains(<span class="string">"project"</span>) &amp;&amp; msg.contains(<span class="string">"Delete them first"</span>),
-<a href=#488 id=488 data-nosnippet>488</a>            <span class="string">"expected 'has N project(s). Delete them first' message, got: {msg}"</span>,
-<a href=#489 id=489 data-nosnippet>489</a>        );
-<a href=#490 id=490 data-nosnippet>490</a>
-<a href=#491 id=491 data-nosnippet>491</a>        <span class="comment">// The org is still there — the failed delete must not have
-<a href=#492 id=492 data-nosnippet>492</a>        // removed it as a side-effect.
-<a href=#493 id=493 data-nosnippet>493</a>        </span><span class="macro">assert!</span>(store.get(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap().is_some());
-<a href=#494 id=494 data-nosnippet>494</a>    }
-<a href=#495 id=495 data-nosnippet>495</a>}
+<a href=#443 id=443 data-nosnippet>443</a>    <span class="attr">#[tokio::test]
+<a href=#444 id=444 data-nosnippet>444</a>    </span><span class="kw">async fn </span>delete_missing_org_errors() {
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="kw">let </span>err = store
+<a href=#447 id=447 data-nosnippet>447</a>            .delete(<span class="string">"does-not-exist"</span>)
+<a href=#448 id=448 data-nosnippet>448</a>            .<span class="kw">await
+<a href=#449 id=449 data-nosnippet>449</a>            </span>.expect_err(<span class="string">"missing org should fail"</span>);
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="macro">assert!</span>(err.to_string().contains(<span class="string">"not found"</span>), <span class="string">"got: {err}"</span>);
+<a href=#451 id=451 data-nosnippet>451</a>    }
+<a href=#452 id=452 data-nosnippet>452</a>
+<a href=#453 id=453 data-nosnippet>453</a>    <span class="doccomment">/// Delete refuses to drop an org that still has a project pointing
+<a href=#454 id=454 data-nosnippet>454</a>    /// at it.
+<a href=#455 id=455 data-nosnippet>455</a>    ///
+<a href=#456 id=456 data-nosnippet>456</a>    /// We seed the SCHEMAFULL `project` table directly (via a `CREATE`
+<a href=#457 id=457 data-nosnippet>457</a>    /// bypassing `ProjectStore::create`) so this test stays
+<a href=#458 id=458 data-nosnippet>458</a>    /// self-contained — it doesn't pull in `ProjectStore`, which
+<a href=#459 id=459 data-nosnippet>459</a>    /// reaches back into `OrgStore::get` to resolve the parent org
+<a href=#460 id=460 data-nosnippet>460</a>    /// and would force a circular import dance into this file.
+<a href=#461 id=461 data-nosnippet>461</a>    </span><span class="attr">#[tokio::test]
+<a href=#462 id=462 data-nosnippet>462</a>    </span><span class="kw">async fn </span>delete_refuses_when_project_remains() {
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span>(_d, store) = temp_store().<span class="kw">await</span>;
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="kw">let </span>org = store.create(<span class="string">"acme"</span>).<span class="kw">await</span>.expect(<span class="string">"create org"</span>);
+<a href=#465 id=465 data-nosnippet>465</a>
+<a href=#466 id=466 data-nosnippet>466</a>        <span class="comment">// Seed a `project` row directly. The SCHEMAFULL `project`
+<a href=#467 id=467 data-nosnippet>467</a>        // table is created by `apply_cluster_schemas` in `temp_store`,
+<a href=#468 id=468 data-nosnippet>468</a>        // so every column has to be populated to satisfy the ASSERT
+<a href=#469 id=469 data-nosnippet>469</a>        // constraints.
+<a href=#470 id=470 data-nosnippet>470</a>        </span>store
+<a href=#471 id=471 data-nosnippet>471</a>            .db
+<a href=#472 id=472 data-nosnippet>472</a>            .client()
+<a href=#473 id=473 data-nosnippet>473</a>            .query(
+<a href=#474 id=474 data-nosnippet>474</a>                <span class="string">"CREATE type::record('project', 'project-fake') SET \
+<a href=#475 id=475 data-nosnippet>475</a>                 name = 'fakeproj', \
+<a href=#476 id=476 data-nosnippet>476</a>                 status = 'active', \
+<a href=#477 id=477 data-nosnippet>477</a>                 labels = {}, \
+<a href=#478 id=478 data-nosnippet>478</a>                 org = $org, \
+<a href=#479 id=479 data-nosnippet>479</a>                 org_name = 'acme', \
+<a href=#480 id=480 data-nosnippet>480</a>                 created_at = time::now(), \
+<a href=#481 id=481 data-nosnippet>481</a>                 updated_at = time::now()"</span>,
+<a href=#482 id=482 data-nosnippet>482</a>            )
+<a href=#483 id=483 data-nosnippet>483</a>            .bind((<span class="string">"org"</span>, org.meta.id.clone()))
+<a href=#484 id=484 data-nosnippet>484</a>            .<span class="kw">await
+<a href=#485 id=485 data-nosnippet>485</a>            </span>.expect(<span class="string">"seed project row"</span>)
+<a href=#486 id=486 data-nosnippet>486</a>            .check()
+<a href=#487 id=487 data-nosnippet>487</a>            .expect(<span class="string">"seed project row check"</span>);
+<a href=#488 id=488 data-nosnippet>488</a>
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="comment">// Now `delete` should refuse the org — there's a project still
+<a href=#490 id=490 data-nosnippet>490</a>        // pointing at it via `org = &lt;org.meta.id&gt;`.
+<a href=#491 id=491 data-nosnippet>491</a>        </span><span class="kw">let </span>err = store
+<a href=#492 id=492 data-nosnippet>492</a>            .delete(<span class="string">"acme"</span>)
+<a href=#493 id=493 data-nosnippet>493</a>            .<span class="kw">await
+<a href=#494 id=494 data-nosnippet>494</a>            </span>.expect_err(<span class="string">"delete should refuse while a project still exists"</span>);
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="kw">let </span>msg = err.to_string();
+<a href=#496 id=496 data-nosnippet>496</a>        <span class="macro">assert!</span>(
+<a href=#497 id=497 data-nosnippet>497</a>            msg.contains(<span class="string">"project"</span>) &amp;&amp; msg.contains(<span class="string">"Delete them first"</span>),
+<a href=#498 id=498 data-nosnippet>498</a>            <span class="string">"expected 'has N project(s). Delete them first' message, got: {msg}"</span>,
+<a href=#499 id=499 data-nosnippet>499</a>        );
+<a href=#500 id=500 data-nosnippet>500</a>
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="comment">// The org is still there — the failed delete must not have
+<a href=#502 id=502 data-nosnippet>502</a>        // removed it as a side-effect.
+<a href=#503 id=503 data-nosnippet>503</a>        </span><span class="macro">assert!</span>(store.get(<span class="string">"acme"</span>).<span class="kw">await</span>.unwrap().is_some());
+<a href=#504 id=504 data-nosnippet>504</a>    }
+<a href=#505 id=505 data-nosnippet>505</a>}
 </code></pre></div></section></main></body></html>

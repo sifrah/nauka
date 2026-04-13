@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_IPAM"],"fn":["allocate","get_allocation","release"],"struct":["Allocation","Allocations"]};
+window.SIDEBAR_ITEMS = {"constant":["IPAM_TABLE"],"fn":["allocate","ensure_table","get_allocation","load","release","save"],"struct":["Allocation","Allocations"]};

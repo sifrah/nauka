@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_NATGW_IPV6"],"fn":["allocate","derive_ipv6","load","release","save"],"struct":["Ipv6Allocation","Ipv6Allocations"]};
+window.SIDEBAR_ITEMS = {"constant":["IPV6_ALLOC_TABLE"],"fn":["allocate","derive_ipv6","ensure_table","load","release","save"],"struct":["Ipv6Allocation","Ipv6Allocations"]};

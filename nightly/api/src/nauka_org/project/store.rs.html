@@ -39,7 +39,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#37 id=37 data-nosnippet>37</a><span class="kw">use </span>nauka_state::EmbeddedDb;
 <a href=#38 id=38 data-nosnippet>38</a><span class="kw">use </span>serde::Deserialize;
 <a href=#39 id=39 data-nosnippet>39</a>
-<a href=#40 id=40 data-nosnippet>40</a><span class="kw">use </span><span class="kw">crate</span>::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
+<a href=#40 id=40 data-nosnippet>40</a><span class="kw">use </span>nauka_state::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 <a href=#41 id=41 data-nosnippet>41</a>
 <a href=#42 id=42 data-nosnippet>42</a><span class="kw">use </span><span class="kw">super</span>::types::Project;
 <a href=#43 id=43 data-nosnippet>43</a>
@@ -296,7 +296,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#294 id=294 data-nosnippet>294</a>/// serde_json renders as one of several shapes; we bridge through
 <a href=#295 id=295 data-nosnippet>295</a>/// `serde_json::Value` and pull the inner string out in
 <a href=#296 id=296 data-nosnippet>296</a>/// [`ProjectRow::into_project`] via
-<a href=#297 id=297 data-nosnippet>297</a>/// [`crate::sdk_bridge::thing_to_id_string`].
+<a href=#297 id=297 data-nosnippet>297</a>/// [`nauka_state::sdk_bridge::thing_to_id_string`].
 <a href=#298 id=298 data-nosnippet>298</a></span><span class="attr">#[derive(Debug, Deserialize)]
 <a href=#299 id=299 data-nosnippet>299</a></span><span class="kw">struct </span>ProjectRow {
 <a href=#300 id=300 data-nosnippet>300</a>    id: serde_json::Value,
@@ -346,7 +346,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#344 id=344 data-nosnippet>344</a>    }
 <a href=#345 id=345 data-nosnippet>345</a>}
 <a href=#346 id=346 data-nosnippet>346</a>
-<a href=#347 id=347 data-nosnippet>347</a><span class="doccomment">/// Wrap [`crate::sdk_bridge::classify_create_error`] so the user-facing
+<a href=#347 id=347 data-nosnippet>347</a><span class="doccomment">/// Wrap [`nauka_state::sdk_bridge::classify_create_error`] so the user-facing
 <a href=#348 id=348 data-nosnippet>348</a>/// duplicate message includes the owning org. The composite unique
 <a href=#349 id=349 data-nosnippet>349</a>/// index on `(org, name)` rejects `(org_a, "web")` + `(org_a, "web")`
 <a href=#350 id=350 data-nosnippet>350</a>/// but allows `(org_a, "web")` + `(org_b, "web")`, so the error
@@ -362,7 +362,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#360 id=360 data-nosnippet>360</a>    } <span class="kw">else </span>{
 <a href=#361 id=361 data-nosnippet>361</a>        <span class="comment">// Fall back to the shared helper for anything that isn't a
 <a href=#362 id=362 data-nosnippet>362</a>        // duplicate — it preserves the raw error text.
-<a href=#363 id=363 data-nosnippet>363</a>        </span>classify_create_error(<span class="string">"project"</span>, name, err_msg)
+<a href=#363 id=363 data-nosnippet>363</a>        </span><span class="macro">anyhow::anyhow!</span>(classify_create_error(<span class="string">"project"</span>, name, err_msg))
 <a href=#364 id=364 data-nosnippet>364</a>    }
 <a href=#365 id=365 data-nosnippet>365</a>}
 <a href=#366 id=366 data-nosnippet>366</a>

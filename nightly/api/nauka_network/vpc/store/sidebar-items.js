@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_VPC","NS_VPC_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX","VNI_COUNTER","VNI_START"],"fn":["add_id","load_ids","remove_id"],"struct":["VpcStore"]};
+window.SIDEBAR_ITEMS = {"constant":["VNI_RETRY_LIMIT","VNI_START","VPC_TABLE"],"fn":["decode_first"],"struct":["VpcRow","VpcStore"]};
