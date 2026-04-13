@@ -59,7 +59,10 @@ impl VmStore {
                 anyhow::anyhow!("project '{project_name}' not found in org '{org_name}'")
             })?;
 
-        let env_store = nauka_org::project::env::store::EnvStore::new(self.db.clone());
+        // P2.11 (sifrah/nauka#215): `EnvStore::new` takes an
+        // `EmbeddedDb` directly, same pattern as `OrgStore` /
+        // `ProjectStore` above.
+        let env_store = nauka_org::project::env::store::EnvStore::new(self.db.embedded().clone());
         let env = env_store
             .get(env_name, Some(project_name), Some(org_name))
             .await?
@@ -151,7 +154,10 @@ impl VmStore {
         let env_name =
             env_name.ok_or_else(|| anyhow::anyhow!("--env required to resolve VM by name"))?;
 
-        let env_store = nauka_org::project::env::store::EnvStore::new(self.db.clone());
+        // P2.11 (sifrah/nauka#215): `EnvStore::new` takes an
+        // `EmbeddedDb` directly; reach the inner handle via
+        // `ClusterDb::embedded().clone()`.
+        let env_store = nauka_org::project::env::store::EnvStore::new(self.db.embedded().clone());
         let env = env_store
             .get(env_name, Some(project_name), Some(org_name))
             .await?
