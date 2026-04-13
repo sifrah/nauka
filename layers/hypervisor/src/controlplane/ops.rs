@@ -17,8 +17,15 @@ use super::service::{self, PdConfig, TikvConfig};
 
 /// Bootstrap a new single-node TiKV cluster.
 ///
-/// Uses `steps` to report progress (consumes 4 steps).
-pub fn bootstrap(
+/// Uses `steps` to report progress (consumes 5 steps).
+///
+/// The fifth step — "Applying cluster schemas" — was added in P2.7
+/// (sifrah/nauka#211) per ADR 0004 (sifrah/nauka#210): the bootstrap
+/// node applies the cluster `.surql` schemas to TiKV exactly once,
+/// after PD/TiKV are healthy and before the storage region config is
+/// published. Joining nodes do NOT apply the schemas — they assume
+/// the cluster already has them.
+pub async fn bootstrap(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
     steps: &ui::Steps,
@@ -61,12 +68,55 @@ pub fn bootstrap(
 
     steps.inc();
 
+    // ── Step 5: Apply cluster schemas (P2.7, sifrah/nauka#211) ──────
+    //
+    // Per ADR 0004 (sifrah/nauka#210), the bootstrap node applies the
+    // cluster `.surql` schemas exactly once, after PD/TiKV are up and
+    // before the storage region config is published. Idempotent thanks
+    // to `IF NOT EXISTS` on every `DEFINE`, so a re-run during a retry
+    // is safe. The schemas live in nauka-state via `include_str!`, so
+    // there is no runtime filesystem dependency on the source tree.
+    //
+    // The PD endpoint list is built the same way `controlplane::connect`
+    // builds it — `pd_endpoints_for` produces the canonical
+    // `http://[<ipv6>]:<port>` strings that `EmbeddedDb::open_tikv`
+    // expects. On a single-node bootstrap there is exactly one address
+    // (the local mesh IPv6), so the slice is a one-element window onto
+    // `mesh_ipv6`.
+    steps.set("Applying cluster schemas");
+    let pd_addresses = std::slice::from_ref(mesh_ipv6);
+    let pd_endpoints = nauka_state::pd_endpoints_for(pd_addresses, super::PD_CLIENT_PORT);
+    let pd_refs: Vec<&str> = pd_endpoints.iter().map(String::as_str).collect();
+    let cluster_db = nauka_state::EmbeddedDb::open_tikv(&pd_refs)
+        .await
+        .map_err(|e| NaukaError::internal(format!("connect TiKV for schema apply: {e}")))?;
+    nauka_state::apply_cluster_schemas(&cluster_db)
+        .await
+        .map_err(|e| NaukaError::internal(format!("apply cluster schemas: {e}")))?;
+    // Drop the EmbeddedDb so the SDK client gets cleaned up before
+    // bootstrap returns; the next caller will reconnect via
+    // `controlplane::connect()`. The TiKV branch of `shutdown` is a
+    // no-op on the local filesystem — the router drains its in-flight
+    // gRPC calls as the `Surreal<Db>` is dropped — so any failure here
+    // is not actionable for the bootstrap flow and we swallow it.
+    let _ = cluster_db.shutdown().await;
+    steps.inc();
+
     Ok(())
 }
 
 /// Join an existing TiKV cluster.
 ///
 /// Uses `steps` to report progress (consumes 4 steps).
+///
+/// Schema handling — per ADR 0004 (sifrah/nauka#210) joining nodes do
+/// **not** apply the cluster `.surql` schemas. They assume the
+/// bootstrap node (the one that ran `nauka hypervisor init`) already
+/// applied them as part of its own bootstrap, and they read/write
+/// the existing tables on the shared TiKV cluster through the
+/// already-deployed schema. Running DDL from every joining node would
+/// be wasteful, racey under partial partitions, and hostile to future
+/// data-backfill migrations — see the ADR for the full rationale.
 ///
 /// PD scaling strategy — **never run an even number of PD members**
 /// (even counts have no fault-tolerance advantage and risk split-brain):

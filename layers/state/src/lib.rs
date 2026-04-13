@@ -45,9 +45,11 @@
 
 pub mod cluster;
 pub mod embedded;
+pub mod schema;
 
 pub use cluster::ClusterDb;
 pub use embedded::{pd_endpoints_for, EmbeddedDb};
+pub use schema::apply_cluster_schemas;
 
 // ═══════════════════════════════════════════════════
 // SurrealDB namespace / database constants (ADR 0003)
