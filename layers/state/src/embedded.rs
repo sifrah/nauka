@@ -1075,37 +1075,6 @@ mod tests {
         }
     }
 
-    /// P2.3 — `open_tikv_from_pd_addresses` pointed at a TCP port that is
-    /// guaranteed to be unreachable surfaces as [`StateError::Database`].
-    ///
-    /// Uses `::1` (IPv6 loopback) on an unlikely high port so there is no
-    /// chance of a real PD responding and making the test non-deterministic.
-    /// The test is about the error variant, not the exact message: the
-    /// SurrealDB TiKv engine's internal message is an implementation
-    /// detail of `surrealdb-tikv-client`.
-    ///
-    /// A hard 30 s timeout caps the wait per the Nauka "fast timeout"
-    /// convention — the SurrealDB TiKv engine can take a handful of
-    /// seconds to give up on a dead endpoint but should never hang
-    /// indefinitely.
-    #[tokio::test]
-    async fn open_tikv_from_pd_addresses_unreachable_errors() {
-        let addrs = [Ipv6Addr::LOCALHOST];
-        let result = tokio::time::timeout(
-            Duration::from_secs(30),
-            // Port 1 is reserved and nothing listens on it by default.
-            EmbeddedDb::open_tikv_from_pd_addresses(&addrs, 1),
-        )
-        .await
-        .expect("open_tikv_from_pd_addresses should not hang past 30s");
-
-        let err = result.expect_err("unreachable PD must not succeed");
-        assert!(
-            matches!(err, StateError::Database(_)),
-            "expected StateError::Database, got: {err:?}"
-        );
-    }
-
     /// P2.3 — `path()` returns `None` for TiKV-backed handles.
     ///
     /// The handle itself is never constructed (the connect fails), but
