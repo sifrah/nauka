@@ -1,14 +1,30 @@
-//! Control plane — TiKV distributed KV store.
+//! Control plane — distributed cluster state.
 //!
-//! Manages PD + TiKV as systemd services and exposes `ClusterDb`
-//! for distributed state (VMs, VPCs, users, etc.).
+//! Manages PD + TiKV as systemd services and exposes [`ClusterDb`] for
+//! distributed state (orgs, projects, envs, vpcs, subnets, vms, ...).
 //! All traffic flows over the encrypted WireGuard mesh.
 //!
 //! # Sub-modules
 //!
 //! - `service`: Low-level systemd management (install, start, stop, reload, status)
 //! - `ops`: High-level orchestration (bootstrap, join, leave)
-//! - `store`: `ClusterDb` — async TiKV client
+//! - `store`: [`ClusterDb`] — thin wrapper around
+//!   [`nauka_state::EmbeddedDb`] on the SurrealDB TiKv backend
+//!
+//! # P2.8 — `ClusterDb` is now a wrapper around `EmbeddedDb<TiKv>`
+//!
+//! P2.8 (sifrah/nauka#212) swapped the underlying transport on
+//! [`ClusterDb`] from the direct `tikv-client::RawClient` to
+//! [`nauka_state::EmbeddedDb::open_tikv`]. The legacy raw-KV surface
+//! (`put`/`get`/`delete`/`list`/`scan_keys`/`exists`/`batch_put`) is
+//! still there — it bridges through a `data`-wrapped JSON record
+//! shape — so every caller (`layers/org`, `layers/network`,
+//! `layers/compute`) still compiles unchanged.
+//!
+//! New code should go through `ClusterDb::embedded()` to reach the
+//! native SurrealDB SDK directly. The legacy wrapper methods exist
+//! only to keep the in-flight cascade (P2.9–P2.14 / sifrah/nauka#213–#218)
+//! compiling. P2.16 (sifrah/nauka#220) deletes the wrapper entirely.
 
 pub mod backup;
 pub mod ops;
@@ -34,20 +50,26 @@ pub const TIKV_STATUS_PORT: u16 = 20180;
 
 pub use store::ClusterDb;
 
-/// Connect to the TiKV cluster using PD endpoints from local fabric state.
+/// Connect to the cluster-side SurrealDB (TiKv backend) using PD
+/// endpoints from local fabric state.
 ///
-/// This is the standard way for any layer to get a ClusterDb connection.
-/// Reads the local hypervisor state to discover PD endpoints on the mesh.
+/// This is the standard way for any layer to get a [`ClusterDb`]
+/// connection. Reads the local hypervisor state to discover PD
+/// endpoints on the mesh, then hands them to
+/// [`ClusterDb::connect_from_addresses`], which in turn drives
+/// [`nauka_state::EmbeddedDb::open_tikv`].
 ///
-/// P2.3 (sifrah/nauka#207) replaced the per-call `format!` ladder with
-/// the shared [`crate::fabric::state::FabricState::pd_endpoints`] +
-/// [`nauka_state::pd_endpoints_for`] helpers so every Phase-2 call site
-/// lands on the same PD list shape — and so `EmbeddedDb::open_tikv`
-/// (P2.2) and `ClusterDb::connect` both see the exact same endpoints.
+/// P2.3 (sifrah/nauka#207) replaced the per-call `format!` ladder
+/// with the shared [`crate::fabric::state::FabricState::pd_endpoints`]
+/// and [`nauka_state::pd_endpoints_for`] helpers so every Phase-2
+/// call site lands on the same PD list shape. P2.8 (sifrah/nauka#212)
+/// then routed the final `ClusterDb::connect` through `EmbeddedDb`
+/// so bootstrap (SurrealKV) and cluster (TiKv) state both go through
+/// one wrapper.
 pub async fn connect() -> anyhow::Result<ClusterDb> {
-    let db = nauka_state::EmbeddedDb::open_default().await?;
+    let local_db = nauka_state::EmbeddedDb::open_default().await?;
 
-    let state = crate::fabric::state::FabricState::load(&db)
+    let state = crate::fabric::state::FabricState::load(&local_db)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| {
@@ -57,16 +79,17 @@ pub async fn connect() -> anyhow::Result<ClusterDb> {
                  \x20 nauka hypervisor init"
             )
         })?;
-    // Explicit shutdown so the SurrealKV flock is released before the caller
-    // issues its next `connect()` or local-state read.
-    db.shutdown().await?;
+    // Explicit shutdown so the SurrealKV flock is released before the
+    // caller issues its next `connect()` or local-state read. The
+    // cluster-side `ClusterDb` we return is a separate handle against
+    // TiKv — it does not touch the local `bootstrap.skv` datastore.
+    local_db.shutdown().await?;
 
     // Self first, peers after. The self-first contract matters for
     // single-node clusters (nothing in peers) and for always routing
     // through the cheapest hop when multiple PDs are live.
     let mesh_addrs = state.pd_endpoints();
-    let endpoints = nauka_state::pd_endpoints_for(&mesh_addrs, PD_CLIENT_PORT);
-    let refs: Vec<&str> = endpoints.iter().map(|s| s.as_str()).collect();
-
-    ClusterDb::connect(&refs).await.map_err(Into::into)
+    ClusterDb::connect_from_addresses(&mesh_addrs, PD_CLIENT_PORT)
+        .await
+        .map_err(Into::into)
 }

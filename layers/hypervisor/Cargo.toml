@@ -18,7 +18,13 @@ anyhow.workspace = true
 base64 = "0.22"
 hostname = "0.4"
 dirs = "5"
-tikv-client = "0.4"
+# P2.8 (sifrah/nauka#212): `tikv-client` is no longer a direct dep —
+# `ClusterDb` now routes through `nauka_state::EmbeddedDb::open_tikv`,
+# which pulls the TiKv driver in transitively via
+# `surrealdb-tikv-client` (enabled by the `kv-tikv` feature on the
+# `surrealdb` crate in `layers/state/Cargo.toml`). The crate is still
+# in the dep graph; we just stopped depending on it from this
+# manifest so call sites have a single sanctioned path to TiKV.
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.13"
