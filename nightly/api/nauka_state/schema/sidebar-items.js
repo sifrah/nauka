@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLUSTER_SCHEMAS"],"fn":["apply_cluster_schemas"]};

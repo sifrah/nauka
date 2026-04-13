@@ -5,7 +5,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 Reads the local hypervisor state to discover PD endpoints on the mesh.</p>
 <p>P2.3 (sifrah/nauka#207) replaced the per-call <code>format!</code> ladder with
 the shared <a href="../fabric/state/struct.FabricState.html#method.pd_endpoints" title="method nauka_hypervisor::fabric::state::FabricState::pd_endpoints"><code>crate::fabric::state::FabricState::pd_endpoints</code></a> +
-[<code>nauka_state::pd_endpoints_for</code>] helpers so every Phase-2 call site
+<a href="../../nauka_state/embedded/fn.pd_endpoints_for.html" title="fn nauka_state::embedded::pd_endpoints_for"><code>nauka_state::pd_endpoints_for</code></a> helpers so every Phase-2 call site
 lands on the same PD list shape — and so <code>EmbeddedDb::open_tikv</code>
 (P2.2) and <code>ClusterDb::connect</code> both see the exact same endpoints.</p>
 </div></details></section></div></main></body></html>

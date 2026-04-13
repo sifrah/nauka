@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_DB","CLUSTER_DB","NAUKA_NS"],"enum":["StateError"],"mod":["cluster","embedded"],"type":["Result"]};
+window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_DB","CLUSTER_DB","NAUKA_NS"],"enum":["StateError"],"mod":["cluster","embedded","schema"],"type":["Result"]};
