@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_ENV","NS_ENV_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX"],"fn":["add_id","load_ids","remove_id"],"struct":["EnvStore"]};
+window.SIDEBAR_ITEMS = {"constant":["ENV_TABLE"],"fn":["classify_create_error_with_project","decode_first"],"struct":["EnvRow","EnvStore"]};
