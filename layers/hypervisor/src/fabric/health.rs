@@ -6,10 +6,11 @@
 //!
 //! Designed to run as a background tokio task during `peering` or future daemon mode.
 
+use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nauka_core::error::NaukaError;
-use nauka_state::LayerDb;
+use nauka_state::EmbeddedDb;
 
 use super::state::FabricState;
 use super::wg;
@@ -44,11 +45,14 @@ pub struct HealthCheckResult {
 ///
 /// Reads WireGuard handshake timestamps, compares against threshold,
 /// updates peer status in state, and persists if anything changed.
-pub fn check_once(
-    db: &LayerDb,
+pub async fn check_once(
+    db: &EmbeddedDb,
     stale_threshold_secs: u64,
 ) -> Result<HealthCheckResult, NaukaError> {
-    let mut state = match FabricState::load(db).map_err(|e| NaukaError::internal(e.to_string()))? {
+    let mut state = match FabricState::load(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+    {
         Some(s) => s,
         None => return Err(NaukaError::precondition("not initialized")),
     };
@@ -134,6 +138,7 @@ pub fn check_once(
     if changed > 0 {
         state
             .save(db)
+            .await
             .map_err(|e| NaukaError::internal(e.to_string()))?;
     }
 
@@ -148,17 +153,17 @@ pub fn check_once(
 /// Run the health check loop. Blocks until cancelled.
 ///
 /// Opens a fresh DB connection each sweep to avoid holding the lock.
-pub async fn run_loop(
-    db_opener: impl Fn() -> Result<LayerDb, NaukaError>,
-    interval_secs: u64,
-    stale_threshold_secs: u64,
-) {
+pub async fn run_loop<F, Fut>(db_opener: F, interval_secs: u64, stale_threshold_secs: u64)
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
+{
     let interval = Duration::from_secs(interval_secs);
 
     loop {
         tokio::time::sleep(interval).await;
 
-        let db = match db_opener() {
+        let db = match db_opener().await {
             Ok(db) => db,
             Err(e) => {
                 tracing::warn!(error = %e, "health check: failed to open DB");
@@ -166,7 +171,7 @@ pub async fn run_loop(
             }
         };
 
-        match check_once(&db, stale_threshold_secs) {
+        match check_once(&db, stale_threshold_secs).await {
             Ok(result) => {
                 if result.changed > 0 {
                     tracing::info!(
@@ -183,7 +188,9 @@ pub async fn run_loop(
             }
         }
 
-        // DB dropped here — lock released
+        // Explicit shutdown to release the SurrealKV flock before the next
+        // iteration opens a new handle.
+        let _ = db.shutdown().await;
     }
 }
 
@@ -212,18 +219,25 @@ mod tests {
         const _: () = assert!(DEFAULT_STALE_THRESHOLD_SECS > DEFAULT_INTERVAL_SECS);
     }
 
-    #[test]
-    fn check_once_no_state() {
+    async fn temp_embedded() -> (tempfile::TempDir, EmbeddedDb) {
         let dir = tempfile::tempdir().unwrap();
-        let db = LayerDb::open_at(&dir.path().join("test.redb")).unwrap();
-        let result = check_once(&db, 300);
-        assert!(result.is_err()); // not initialized
+        let db = EmbeddedDb::open(&dir.path().join("test.skv"))
+            .await
+            .unwrap();
+        (dir, db)
     }
 
-    #[test]
-    fn check_once_no_peers() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = LayerDb::open_at(&dir.path().join("test.redb")).unwrap();
+    #[tokio::test]
+    async fn check_once_no_state() {
+        let (_d, db) = temp_embedded().await;
+        let result = check_once(&db, 300).await;
+        assert!(result.is_err()); // not initialized
+        db.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn check_once_no_peers() {
+        let (_d, db) = temp_embedded().await;
 
         // Create state with no peers
         let (mesh, secret) = super::super::mesh::create_mesh();
@@ -249,18 +263,19 @@ mod tests {
             node_state: super::super::state::NodeState::default(),
             max_pd_members: 3,
         };
-        state.save(&db).unwrap();
+        state.save(&db).await.unwrap();
 
-        let result = check_once(&db, 300).unwrap();
+        let result = check_once(&db, 300).await.unwrap();
         assert_eq!(result.total, 0);
         assert_eq!(result.active, 0);
         assert_eq!(result.changed, 0);
+
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn check_once_with_peers_no_wg() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = LayerDb::open_at(&dir.path().join("test.redb")).unwrap();
+    #[tokio::test]
+    async fn check_once_with_peers_no_wg() {
+        let (_d, db) = temp_embedded().await;
 
         let (mesh, secret) = super::super::mesh::create_mesh();
         let hv =
@@ -298,11 +313,13 @@ mod tests {
             node_state: super::super::state::NodeState::default(),
             max_pd_members: 3,
         };
-        state.save(&db).unwrap();
+        state.save(&db).await.unwrap();
 
         // WG not running → get_peer_handshakes fails → all unreachable, changed=0
-        let result = check_once(&db, 300).unwrap();
+        let result = check_once(&db, 300).await.unwrap();
         assert_eq!(result.total, 1);
         assert_eq!(result.unreachable, 1);
+
+        db.shutdown().await.unwrap();
     }
 }

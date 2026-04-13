@@ -15,15 +15,17 @@ use nauka_hypervisor::fabric::peering::{JoinRequest, JoinResponse};
 use nauka_hypervisor::fabric::peering_client;
 use nauka_hypervisor::fabric::peering_server;
 use nauka_hypervisor::fabric::state::FabricState;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
-fn temp_db() -> (tempfile::TempDir, LocalDb) {
+async fn temp_db() -> (tempfile::TempDir, EmbeddedDb) {
     let dir = tempfile::tempdir().unwrap();
-    let db = LocalDb::open_at(&dir.path().join("test.json")).unwrap();
+    let db = EmbeddedDb::open(&dir.path().join("test.skv"))
+        .await
+        .unwrap();
     (dir, db)
 }
 
-fn init_node(db: &LocalDb, name: &str) -> (FabricState, String) {
+async fn init_node(db: &EmbeddedDb, name: &str) -> (FabricState, String) {
     let (mesh_id, secret) = mesh::create_mesh();
     let hv = mesh::create_hypervisor(&mesh::CreateHypervisorConfig {
         name,
@@ -50,7 +52,7 @@ fn init_node(db: &LocalDb, name: &str) -> (FabricState, String) {
         node_state: nauka_hypervisor::fabric::NodeState::default(),
         max_pd_members: 3,
     };
-    state.save(db).unwrap();
+    state.save(db).await.unwrap();
 
     (state, pin)
 }
@@ -61,8 +63,8 @@ async fn peering_join_flow() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // === Node A: init ===
-    let (_dir_a, db_a) = temp_db();
-    let (state_a, pin) = init_node(&db_a, "node-a");
+    let (_dir_a, db_a) = temp_db().await;
+    let (state_a, pin) = init_node(&db_a, "node-a").await;
 
     // === Node A: start peering server ===
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,7 +85,7 @@ async fn peering_join_flow() {
         assert_eq!(req.pin, Some(pin_clone.clone()));
 
         // Load state and build response
-        let state = FabricState::load(&db_a_clone).unwrap().unwrap();
+        let state = FabricState::load(&db_a_clone).await.unwrap().unwrap();
 
         let resp = JoinResponse::accepted(
             &state.secret,
@@ -141,14 +143,16 @@ async fn peering_join_flow() {
     assert_eq!(resp.mesh_id.unwrap(), state_a.mesh.id.as_str());
 
     server.await.unwrap();
+
+    db_a.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn peering_wrong_pin_rejected() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let (_dir_a, db_a) = temp_db();
-    let (_state_a, _pin) = init_node(&db_a, "node-a");
+    let (_dir_a, db_a) = temp_db().await;
+    let (_state_a, _pin) = init_node(&db_a, "node-a").await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -183,6 +187,8 @@ async fn peering_wrong_pin_rejected() {
     assert!(result.is_err());
 
     server.await.unwrap();
+
+    db_a.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -233,24 +239,26 @@ fn mock_backend_full_lifecycle() {
     backend.teardown().unwrap();
 }
 
-#[test]
-fn state_persistence_roundtrip() {
-    let (_dir, db) = temp_db();
+#[tokio::test]
+async fn state_persistence_roundtrip() {
+    let (_dir, db) = temp_db().await;
 
     // Init
-    let (state, _pin) = init_node(&db, "test-node");
+    let (state, _pin) = init_node(&db, "test-node").await;
     assert_eq!(state.hypervisor.name, "test-node");
     assert_eq!(state.network_mode, NetworkMode::Mock);
 
     // Load
-    let loaded = FabricState::load(&db).unwrap().unwrap();
+    let loaded = FabricState::load(&db).await.unwrap().unwrap();
     assert_eq!(loaded.hypervisor.name, "test-node");
     assert_eq!(loaded.mesh.id.as_str(), state.mesh.id.as_str());
     assert_eq!(loaded.network_mode, NetworkMode::Mock);
 
     // Delete
-    FabricState::delete(&db).unwrap();
-    assert!(FabricState::load(&db).unwrap().is_none());
+    FabricState::delete(&db).await.unwrap();
+    assert!(FabricState::load(&db).await.unwrap().is_none());
+
+    db.shutdown().await.unwrap();
 }
 
 #[test]

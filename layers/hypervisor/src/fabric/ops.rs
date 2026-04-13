@@ -5,13 +5,31 @@
 
 use nauka_core::error::NaukaError;
 use nauka_core::ui;
-use nauka_state::LayerDb;
+use nauka_state::EmbeddedDb;
 
 use super::mesh::{self, HypervisorIdentity, MeshIdentity};
 use super::peer::PeerList;
 use super::service;
 use super::state::FabricState;
 use super::wg;
+
+/// Open the SurrealKV-backed [`EmbeddedDb`] at the run-mode-aware default
+/// path.
+///
+/// Shared helper used by every per-request DB opener in the fabric layer
+/// (peering listener, announce listener, health loop, reconciler). Each
+/// caller opens, does one pass, and drops the handle — the SurrealKV
+/// flock is released between passes so `leave` / external tools can
+/// also touch the file.
+///
+/// Exposed as an `async fn` (not an opaque helper) so listeners that take
+/// an `impl Fn() -> impl Future<Output = Result<EmbeddedDb, NaukaError>>`
+/// opener can pass `open_db` directly.
+pub(crate) async fn open_db() -> Result<EmbeddedDb, NaukaError> {
+    EmbeddedDb::open_default()
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))
+}
 
 /// Result of a successful fabric init.
 pub struct InitResult {
@@ -38,8 +56,8 @@ pub struct InitConfig<'a> {
 /// Initialize a new mesh.
 ///
 /// Uses `steps` to report progress (consumes 2 steps).
-pub fn init(
-    db: &LayerDb,
+pub async fn init(
+    db: &EmbeddedDb,
     cfg: &InitConfig<'_>,
     steps: &ui::Steps,
 ) -> Result<InitResult, NaukaError> {
@@ -50,7 +68,10 @@ pub fn init(
     );
 
     // Check not already initialized
-    if FabricState::exists(db).map_err(|e| NaukaError::internal(e.to_string()))? {
+    if FabricState::exists(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+    {
         return Err(NaukaError::conflict(
             "hypervisor",
             cfg.node_name,
@@ -95,6 +116,7 @@ pub fn init(
     };
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
     steps.inc();
 
@@ -137,21 +159,10 @@ pub async fn listen_for_peers(
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    let db_opener = || {
-        let dir = nauka_core::process::nauka_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        nauka_state::LayerDb::open("hypervisor").map_err(|e| NaukaError::internal(e.to_string()))
-    };
-
     // Start health check loop in background
-    let health_db_opener = || {
-        let dir = nauka_core::process::nauka_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        nauka_state::LayerDb::open("hypervisor").map_err(|e| NaukaError::internal(e.to_string()))
-    };
     tokio::spawn(async move {
         super::health::run_loop(
-            health_db_opener,
+            open_db,
             super::health::DEFAULT_INTERVAL_SECS,
             super::health::DEFAULT_STALE_THRESHOLD_SECS,
         )
@@ -163,13 +174,8 @@ pub async fn listen_for_peers(
     let announce_addr: std::net::SocketAddr = format!("[::]:{announce_port}")
         .parse()
         .map_err(|_| NaukaError::internal("invalid announce bind address"))?;
-    let announce_db_opener = || {
-        let dir = nauka_core::process::nauka_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        nauka_state::LayerDb::open("hypervisor").map_err(|e| NaukaError::internal(e.to_string()))
-    };
     tokio::spawn(async move {
-        if let Err(e) = super::announce::listen(announce_db_opener, announce_addr).await {
+        if let Err(e) = super::announce::listen(open_db, announce_addr).await {
             tracing::warn!(error = %e, "announce listener stopped");
         }
     });
@@ -189,7 +195,7 @@ pub async fn listen_for_peers(
     });
 
     // Main peering listener (blocks)
-    super::peering_server::listen(db_opener, pin, bind_addr, timeout, 0).await
+    super::peering_server::listen(open_db, pin, bind_addr, timeout, 0).await
 }
 
 /// Reconciliation interval in seconds (matches the sleep in the spawned task).
@@ -204,15 +210,11 @@ const RECONCILE_INTERVAL_SECS: u64 = 30;
 ///
 /// Idempotent — known peers are skipped by the announce handler.
 async fn reconcile_mesh(wg_port: u16) {
-    let db = {
-        let dir = nauka_core::process::nauka_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        match nauka_state::LayerDb::open("hypervisor") {
-            Ok(db) => db,
-            Err(_) => return,
-        }
+    let db = match open_db().await {
+        Ok(db) => db,
+        Err(_) => return,
     };
-    let state = match FabricState::load(&db).ok().flatten() {
+    let state = match FabricState::load(&db).await.ok().flatten() {
         Some(s) => s,
         None => return,
     };
@@ -296,12 +298,15 @@ pub struct JoinConfig<'a> {
 ///
 /// Uses `steps` to report progress (consumes 2 steps).
 pub async fn join(
-    db: &LayerDb,
+    db: &EmbeddedDb,
     cfg: &JoinConfig<'_>,
     steps: &ui::Steps,
 ) -> Result<JoinResult, NaukaError> {
     // Check not already initialized
-    if FabricState::exists(db).map_err(|e| NaukaError::internal(e.to_string()))? {
+    if FabricState::exists(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+    {
         return Err(NaukaError::conflict(
             "hypervisor",
             cfg.node_name,
@@ -459,6 +464,7 @@ pub async fn join(
     };
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
     steps.inc();
 
@@ -488,8 +494,9 @@ pub struct StatusResult {
     pub tx_bytes: u64,
 }
 
-pub fn status(db: &LayerDb) -> Result<StatusResult, NaukaError> {
+pub async fn status(db: &EmbeddedDb) -> Result<StatusResult, NaukaError> {
     let state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| {
             NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
@@ -540,8 +547,9 @@ pub fn status(db: &LayerDb) -> Result<StatusResult, NaukaError> {
 }
 
 /// Start the fabric network service.
-pub fn start(db: &LayerDb) -> Result<(), NaukaError> {
+pub async fn start(db: &EmbeddedDb) -> Result<(), NaukaError> {
     let state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| {
             NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
@@ -587,8 +595,11 @@ fn has_mesh_ipv6(expected: &std::net::Ipv6Addr) -> bool {
 }
 
 /// Stop the fabric network service.
-pub fn stop(db: &LayerDb) -> Result<(), NaukaError> {
-    let state = match FabricState::load(db).map_err(|e| NaukaError::internal(e.to_string()))? {
+pub async fn stop(db: &EmbeddedDb) -> Result<(), NaukaError> {
+    let state = match FabricState::load(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+    {
         Some(s) => s,
         None => return Ok(()), // not initialized, nothing to stop
     };
@@ -607,8 +618,9 @@ pub struct UpdateConfig {
 }
 
 /// Update mutable hypervisor fields on a live node.
-pub fn update(db: &LayerDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, NaukaError> {
+pub async fn update(db: &EmbeddedDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, NaukaError> {
     let mut state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| {
             NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
@@ -652,6 +664,7 @@ pub fn update(db: &LayerDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, Na
 
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     tracing::info!(node = state.hypervisor.name.as_str(), "hypervisor updated");
@@ -661,8 +674,9 @@ pub fn update(db: &LayerDb, cfg: &UpdateConfig) -> Result<HypervisorIdentity, Na
 
 /// Set node scheduling state to draining (maintenance mode).
 /// Persists the state and broadcasts the change to all peers.
-pub async fn drain(db: &LayerDb) -> Result<(), NaukaError> {
+pub async fn drain(db: &EmbeddedDb) -> Result<(), NaukaError> {
     let mut state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| {
             NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
@@ -679,6 +693,7 @@ pub async fn drain(db: &LayerDb) -> Result<(), NaukaError> {
     state.node_state = super::state::NodeState::Draining;
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     tracing::info!(
@@ -703,8 +718,9 @@ pub async fn drain(db: &LayerDb) -> Result<(), NaukaError> {
 
 /// Set node scheduling state back to available (exit maintenance mode).
 /// Persists the state and broadcasts the change to all peers.
-pub async fn enable(db: &LayerDb) -> Result<(), NaukaError> {
+pub async fn enable(db: &EmbeddedDb) -> Result<(), NaukaError> {
     let mut state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| {
             NaukaError::precondition("not initialized. Run 'nauka hypervisor init' first.")
@@ -721,6 +737,7 @@ pub async fn enable(db: &LayerDb) -> Result<(), NaukaError> {
     state.node_state = super::state::NodeState::Available;
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     tracing::info!(
@@ -749,10 +766,10 @@ const LEAVE_BROADCAST_ATTEMPTS: usize = 4;
 const LEAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Leave the cluster — notify peers, uninstall service, remove state.
-pub async fn leave(db: &LayerDb) -> Result<(), NaukaError> {
+pub async fn leave(db: &EmbeddedDb) -> Result<(), NaukaError> {
     // Notify peers before tearing down (best-effort, over mesh).
     // Retry once so transient failures don't leave peers thinking we're still around.
-    if let Some(state) = FabricState::load(db).ok().flatten() {
+    if let Some(state) = FabricState::load(db).await.ok().flatten() {
         if !state.peers.is_empty() {
             let peers: Vec<_> = state.peers.peers.clone();
             let remaining = peers.clone();
@@ -790,7 +807,9 @@ pub async fn leave(db: &LayerDb) -> Result<(), NaukaError> {
     }
 
     // Delete state
-    FabricState::delete(db).map_err(|e| NaukaError::internal(e.to_string()))?;
+    FabricState::delete(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     Ok(())
 }

@@ -131,20 +131,26 @@ async fn serve(matches: &clap::ArgMatches) -> Result<()> {
         addr.parse()
             .map_err(|_| anyhow::anyhow!("invalid bind address: {addr}"))?
     } else {
-        // Try to get mesh IPv6 from fabric state
-        let mesh_bind = nauka_state::LocalDb::open("hypervisor")
-            .ok()
-            .and_then(|db| {
-                nauka_hypervisor::fabric::state::FabricState::load(&db)
+        // Try to get mesh IPv6 from fabric state. We open/close the
+        // EmbeddedDb inline so the SurrealKV flock doesn't stay held for
+        // the lifetime of the API server.
+        let mesh_bind = match nauka_state::EmbeddedDb::open_default().await {
+            Ok(db) => {
+                let state = nauka_hypervisor::fabric::state::FabricState::load(&db)
+                    .await
                     .ok()
-                    .flatten()
-            })
-            .map(|state| {
-                format!("[{}]:{}", state.hypervisor.mesh_ipv6, port)
-                    .parse::<std::net::SocketAddr>()
-                    .unwrap_or_else(|_| format!("0.0.0.0:{port}").parse().unwrap())
-            })
-            .unwrap_or_else(|| format!("0.0.0.0:{port}").parse().unwrap());
+                    .flatten();
+                let _ = db.shutdown().await;
+                state
+                    .map(|s| {
+                        format!("[{}]:{}", s.hypervisor.mesh_ipv6, port)
+                            .parse::<std::net::SocketAddr>()
+                            .unwrap_or_else(|_| format!("0.0.0.0:{port}").parse().unwrap())
+                    })
+                    .unwrap_or_else(|| format!("0.0.0.0:{port}").parse().unwrap())
+            }
+            Err(_) => format!("0.0.0.0:{port}").parse().unwrap(),
+        };
         mesh_bind
     };
 

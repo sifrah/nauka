@@ -112,7 +112,7 @@ impl VmStore {
             region: region.to_string(),
             zone: zone.to_string(),
             private_ip: Some(private_ip),
-            hypervisor_id: Some(crate::scheduler::schedule(region, zone)?),
+            hypervisor_id: Some(crate::scheduler::schedule(region, zone).await?),
             state: VmState::Pending,
         };
 

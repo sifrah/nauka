@@ -2,7 +2,7 @@
 
 use nauka_hypervisor::controlplane;
 use nauka_hypervisor::fabric;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
 use crate::reconciler;
 use crate::types::ReconcileContext;
@@ -28,7 +28,7 @@ pub async fn run() -> anyhow::Result<()> {
 
         // Post-reconcile: health checks every 60s (every other cycle).
         // Runs outside run_cycle so health is reported even when TiKV is down.
-        run_health_if_due(cycle);
+        run_health_if_due(cycle).await;
 
         tokio::time::sleep(std::time::Duration::from_secs(RECONCILE_INTERVAL_SECS)).await;
     }
@@ -45,16 +45,19 @@ pub async fn run_once() -> anyhow::Result<String> {
 /// Run health checks if this cycle is eligible.
 ///
 /// Loads mesh_ipv6 from local state so it works even when TiKV is down.
-fn run_health_if_due(cycle: u64) {
-    let local_db = match LocalDb::open("hypervisor") {
+async fn run_health_if_due(cycle: u64) {
+    let local_db = match EmbeddedDb::open_default().await {
         Ok(db) => db,
         Err(_) => return,
     };
-    let state = match fabric::state::FabricState::load(&local_db) {
+    let state = match fabric::state::FabricState::load(&local_db).await {
         Ok(Some(s)) => s,
         _ => return,
     };
-    reconciler::health::run_if_due(cycle, &state.hypervisor.mesh_ipv6);
+    // Release the flock before the health helper does its own on-disk
+    // lookups.
+    let _ = local_db.shutdown().await;
+    reconciler::health::run_if_due(cycle, &state.hypervisor.mesh_ipv6).await;
 }
 
 /// Execute one reconciliation cycle.
@@ -62,8 +65,16 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
     // Pre-flight: recover PD/TiKV if they crashed after a data wipe.
     // This must run before connect() since PD/TiKV being down would fail the connection.
     {
-        let local_db = LocalDb::open("hypervisor")?;
-        if let Ok(Some(state)) = fabric::state::FabricState::load(&local_db) {
+        let local_db = EmbeddedDb::open_default().await?;
+        let pre_state = fabric::state::FabricState::load(&local_db)
+            .await
+            .ok()
+            .flatten();
+        // Drop our handle now so `controlplane::connect()` (which opens its
+        // own EmbeddedDb to read PD endpoints) doesn't contend on the flock.
+        let _ = local_db.shutdown().await;
+
+        if let Some(state) = pre_state {
             let peer_ipv6s: Vec<std::net::Ipv6Addr> =
                 state.peers.peers.iter().map(|p| p.mesh_ipv6).collect();
 
@@ -105,10 +116,12 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
     let db = controlplane::connect().await?;
 
     // Load this node's identity
-    let local_db = LocalDb::open("hypervisor")?;
+    let local_db = EmbeddedDb::open_default().await?;
     let state = fabric::state::FabricState::load(&local_db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("not initialized"))?;
+    let _ = local_db.shutdown().await;
 
     let runtime = if state.hypervisor.runtime == "container" {
         nauka_compute::runtime::RuntimeMode::Container

@@ -11,6 +11,7 @@ use std::net::Ipv6Addr;
 
 use nauka_core::error::NaukaError;
 use nauka_core::ui;
+use nauka_state::EmbeddedDb;
 
 use super::service::{self, PdConfig, TikvConfig};
 
@@ -314,7 +315,7 @@ pub fn restart() -> Result<(), NaukaError> {
 /// **Idempotent**: each step checks whether it has already been completed
 /// (e.g., store already tombstoned, PD member already removed) and skips
 /// accordingly. Safe to call again after a crash mid-leave.
-pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
+pub async fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
     let pd_url = format!("http://[{}]:{}", mesh_ipv6, super::PD_CLIENT_PORT);
     let our_addr = format!("[{}]:{}", mesh_ipv6, super::TIKV_PORT);
 
@@ -331,15 +332,9 @@ pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
         let remaining = if active > 0 { active - 1 } else { 0 };
         if remaining > 0 {
             // Load max_pd_members from state, fall back to default
-            let max_pd = if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
-                crate::fabric::state::FabricState::load(&db)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.max_pd_members)
-                    .unwrap_or(super::DEFAULT_MAX_PD_MEMBERS)
-            } else {
-                super::DEFAULT_MAX_PD_MEMBERS
-            };
+            let max_pd = load_max_pd_members()
+                .await
+                .unwrap_or(super::DEFAULT_MAX_PD_MEMBERS);
             let target = remaining.min(max_pd);
             let _ = service::adjust_max_replicas(&pd_url, target);
         }
@@ -351,19 +346,46 @@ pub fn leave_with_mesh(mesh_ipv6: &Ipv6Addr) -> Result<(), NaukaError> {
     }
 
     // 5. Deregister PD member — idempotent: skip if already removed
-    deregister_pd_member_idempotent(mesh_ipv6, &pd_url);
+    deregister_pd_member_idempotent(mesh_ipv6, &pd_url).await;
 
     service::uninstall()
+}
+
+/// Load `max_pd_members` from the local fabric state, if available.
+async fn load_max_pd_members() -> Option<usize> {
+    let db = EmbeddedDb::open_default().await.ok()?;
+    let state = crate::fabric::state::FabricState::load(&db)
+        .await
+        .ok()
+        .flatten();
+    let _ = db.shutdown().await;
+    state.map(|s| s.max_pd_members)
+}
+
+/// Read the local peer list from the fabric state (best-effort, empty on error).
+async fn load_peer_ipv6s() -> Vec<Ipv6Addr> {
+    let db = match EmbeddedDb::open_default().await {
+        Ok(db) => db,
+        Err(_) => return Vec::new(),
+    };
+    let state = crate::fabric::state::FabricState::load(&db)
+        .await
+        .ok()
+        .flatten();
+    let _ = db.shutdown().await;
+    state
+        .map(|s| s.peers.peers.iter().map(|p| p.mesh_ipv6).collect())
+        .unwrap_or_default()
 }
 
 /// Deregister PD member with idempotent handling.
 /// Tries local PD first, then falls back to remote peers.
 /// If the member is already gone, treats as success.
-fn deregister_pd_member_idempotent(mesh_ipv6: &Ipv6Addr, pd_url: &str) {
+async fn deregister_pd_member_idempotent(mesh_ipv6: &Ipv6Addr, pd_url: &str) {
     // Check if our PD member even exists before trying to remove it
     if !service::pd_member_exists(mesh_ipv6, pd_url) {
         // Try remote PDs — maybe local PD is already down
-        let found_remotely = try_remote_pd_member_check(mesh_ipv6);
+        let found_remotely = try_remote_pd_member_check(mesh_ipv6).await;
         if !found_remotely {
             tracing::info!("PD member already removed, skipping deregistration");
             return;
@@ -374,29 +396,20 @@ fn deregister_pd_member_idempotent(mesh_ipv6: &Ipv6Addr, pd_url: &str) {
 
     if !local_ok {
         // Local PD is down — try to deregister via a remote PD.
-        if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
-            if let Some(state) = crate::fabric::state::FabricState::load(&db).ok().flatten() {
-                for peer in &state.peers.peers {
-                    let remote_url =
-                        format!("http://[{}]:{}", peer.mesh_ipv6, super::PD_CLIENT_PORT);
-                    tracing::info!(%remote_url, "leave: trying remote PD for member deregistration");
-                    rollback_pd_member(mesh_ipv6, &remote_url);
-                }
-            }
+        for peer_ipv6 in load_peer_ipv6s().await {
+            let remote_url = format!("http://[{}]:{}", peer_ipv6, super::PD_CLIENT_PORT);
+            tracing::info!(%remote_url, "leave: trying remote PD for member deregistration");
+            rollback_pd_member(mesh_ipv6, &remote_url);
         }
     }
 }
 
 /// Check if our PD member exists via any remote peer's PD.
-fn try_remote_pd_member_check(mesh_ipv6: &Ipv6Addr) -> bool {
-    if let Ok(db) = nauka_state::LocalDb::open("hypervisor") {
-        if let Some(state) = crate::fabric::state::FabricState::load(&db).ok().flatten() {
-            for peer in &state.peers.peers {
-                let remote_url = format!("http://[{}]:{}", peer.mesh_ipv6, super::PD_CLIENT_PORT);
-                if service::pd_member_exists(mesh_ipv6, &remote_url) {
-                    return true;
-                }
-            }
+async fn try_remote_pd_member_check(mesh_ipv6: &Ipv6Addr) -> bool {
+    for peer_ipv6 in load_peer_ipv6s().await {
+        let remote_url = format!("http://[{}]:{}", peer_ipv6, super::PD_CLIENT_PORT);
+        if service::pd_member_exists(mesh_ipv6, &remote_url) {
+            return true;
         }
     }
     false

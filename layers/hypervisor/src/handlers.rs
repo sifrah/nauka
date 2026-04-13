@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use nauka_core::resource::*;
-use nauka_state::LayerDb;
+use nauka_state::EmbeddedDb;
 
 use nauka_core::ui;
 
@@ -410,7 +410,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         detected
     });
 
-    let db = open_db()?;
+    let db = open_db().await?;
     let init_cfg = fabric::ops::InitConfig {
         node_name: &node_name,
         region,
@@ -454,30 +454,39 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     };
     let steps = ui::Steps::new(step_count);
 
-    let result = fabric::ops::init(&db, &init_cfg, &steps)?;
+    let result = fabric::ops::init(&db, &init_cfg, &steps).await?;
     // Track how far we got for rollback on failure
     let fabric_initialized = true;
     let mut controlplane_initialized = false;
     let mut storage_initialized = false;
 
-    // Rollback closure — undoes completed steps in reverse order
-    let rollback = |fabric: bool, cp: bool, stor: bool| {
+    // Rollback helper — undoes completed steps in reverse order. Written
+    // as an async fn rather than a closure because `FabricState::delete`
+    // is now async and rustc cannot infer the return type of a closure
+    // that `.await`s across its body.
+    async fn rollback(
+        db: &EmbeddedDb,
+        network_mode: fabric::NetworkMode,
+        fabric_initialized: bool,
+        controlplane_initialized: bool,
+        storage_initialized: bool,
+    ) {
         tracing::warn!("init failed — rolling back");
-        if stor {
+        if storage_initialized {
             tracing::info!("rollback: uninstalling storage");
             let _ = storage::ops::leave();
         }
-        if cp {
+        if controlplane_initialized {
             tracing::info!("rollback: uninstalling control plane");
             let _ = controlplane::service::uninstall();
         }
-        if fabric {
+        if fabric_initialized {
             tracing::info!("rollback: removing fabric state and interface");
             let backend = fabric::backend::create_backend(network_mode);
             let _ = backend.teardown();
-            let _ = fabric::state::FabricState::delete(&db);
+            let _ = fabric::state::FabricState::delete(db).await;
         }
-    };
+    }
 
     // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
@@ -485,7 +494,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
             controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)
         {
             steps.finish_err(&format!("Control plane failed: {e}"));
-            rollback(fabric_initialized, false, false);
+            rollback(&db, network_mode, fabric_initialized, false, false).await;
             return Err(e.into());
         }
         controlplane_initialized = true;
@@ -503,7 +512,14 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
             storage::ops::publish_region_config(&[pd_endpoint.as_str()], &region_storage).await
         {
             steps.finish_err(&format!("Storage config failed: {e}"));
-            rollback(fabric_initialized, controlplane_initialized, false);
+            rollback(
+                &db,
+                network_mode,
+                fabric_initialized,
+                controlplane_initialized,
+                false,
+            )
+            .await;
             anyhow::bail!("{e}");
         }
         steps.inc();
@@ -511,9 +527,16 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
     if network_mode == fabric::NetworkMode::WireGuard {
         steps.set("Setting up storage");
-        if let Err(e) = storage::ops::setup_region(&db, region_storage.clone()) {
+        if let Err(e) = storage::ops::setup_region(&db, region_storage.clone()).await {
             steps.finish_err(&format!("Storage setup failed: {e}"));
-            rollback(fabric_initialized, controlplane_initialized, false);
+            rollback(
+                &db,
+                network_mode,
+                fabric_initialized,
+                controlplane_initialized,
+                false,
+            )
+            .await;
             return Err(e.into());
         }
         storage_initialized = true;
@@ -651,7 +674,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         detected
     });
 
-    let db = open_db()?;
+    let db = open_db().await?;
     let join_cfg = fabric::ops::JoinConfig {
         target: &target,
         node_name: &node_name,
@@ -677,6 +700,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
     // Join control plane — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
         let state = fabric::state::FabricState::load(&db)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
         let pd_endpoints: Vec<String> = state
@@ -707,6 +731,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
     if network_mode == fabric::NetworkMode::WireGuard {
         steps.set("Setting up storage");
         let state = fabric::state::FabricState::load(&db)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
         let pd_endpoints: Vec<String> = state
@@ -730,7 +755,7 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
                 )
             })?;
 
-        storage::ops::setup_region(&db, region_config)?;
+        storage::ops::setup_region(&db, region_config).await?;
         steps.inc();
     }
 
@@ -751,8 +776,9 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
     {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         // Re-open DB to get latest state (may include peers from incoming announces)
-        let db = open_db()?;
+        let db = open_db().await?;
         let state = fabric::state::FabricState::load(&db)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
         let self_info = fabric::peering::PeerInfo {
@@ -805,8 +831,9 @@ async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationRespon
         .and_then(|s| s.parse().ok())
         .unwrap_or(3600);
 
-    let db = open_db()?;
+    let db = open_db().await?;
     let state = fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("not initialized. Run 'nauka hypervisor init' first."))?;
 
@@ -815,8 +842,9 @@ async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationRespon
     let pin = secret.derive_pin();
     let peering_port = state.hypervisor.wg_port + 1;
 
-    // Drop DB before starting listener (release lock!)
-    drop(db);
+    // Explicitly shut down so the SurrealKV flock is released before the
+    // listener's per-request opens.
+    db.shutdown().await?;
 
     eprintln!();
     eprintln!("  Peering active on port {peering_port}");
@@ -836,7 +864,7 @@ async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationRespon
 }
 
 async fn handle_update(req: OperationRequest) -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
 
     let ipv6_block = req.fields.get("ipv6-block").cloned();
     let ipv4_public = req.fields.get("ipv4-public").cloned();
@@ -848,7 +876,7 @@ async fn handle_update(req: OperationRequest) -> anyhow::Result<OperationRespons
         name,
     };
 
-    let hv = fabric::ops::update(&db, &cfg)?;
+    let hv = fabric::ops::update(&db, &cfg).await?;
 
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": hv.name,
@@ -863,8 +891,8 @@ async fn handle_update(req: OperationRequest) -> anyhow::Result<OperationRespons
 }
 
 async fn handle_status() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
-    let s = fabric::ops::status(&db)?;
+    let db = open_db().await?;
+    let s = fabric::ops::status(&db).await?;
 
     // Control plane status (best-effort — may not be installed yet)
     let mesh_ip: std::net::Ipv6Addr = s
@@ -905,20 +933,20 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_start() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
-    fabric::ops::start(&db)?;
+    let db = open_db().await?;
+    fabric::ops::start(&db).await?;
     let _ = fabric::announce::start_service();
     if let Err(e) = controlplane::ops::start() {
         eprintln!("  Warning: control plane: {e}");
     }
-    if let Err(e) = storage::ops::start_all(&db) {
+    if let Err(e) = storage::ops::start_all(&db).await {
         eprintln!("  Warning: storage: {e}");
     }
     Ok(OperationResponse::Message("all services started.".into()))
 }
 
 async fn handle_drain() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
     fabric::ops::drain(&db).await?;
     Ok(OperationResponse::Message(
         "node set to draining — no new VMs will be scheduled.".into(),
@@ -926,7 +954,7 @@ async fn handle_drain() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_enable() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
     fabric::ops::enable(&db).await?;
     Ok(OperationResponse::Message(
         "node set to available — ready for VM scheduling.".into(),
@@ -944,10 +972,11 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid port"))?;
 
-    let db_opener = || {
-        let dir = nauka_core::process::nauka_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        nauka_state::LayerDb::open("hypervisor")
+    // Async opener: each request gets a fresh EmbeddedDb handle so the
+    // SurrealKV flock is only held for the duration of one announce.
+    let db_opener = || async {
+        EmbeddedDb::open_default()
+            .await
             .map_err(|e| nauka_core::error::NaukaError::internal(e.to_string()))
     };
 
@@ -960,11 +989,12 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
 async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationResponse> {
     let hot = req.fields.get("hot").map(|s| s == "true").unwrap_or(false);
 
-    let db = open_db()?;
+    let db = open_db().await?;
 
     // Get S3 config from region registry
-    let registry =
-        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let registry = storage::region::RegionRegistry::load(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = registry
         .default_region()
         .ok_or_else(|| {
@@ -994,10 +1024,11 @@ async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationRespons
 }
 
 async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
 
-    let registry =
-        storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let registry = storage::region::RegionRegistry::load(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let config = registry.default_region().ok_or_else(|| {
         anyhow::anyhow!(
             "no storage region configured.\n\n\
@@ -1026,8 +1057,9 @@ async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
     let state = fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| {
             anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
@@ -1185,8 +1217,9 @@ async fn handle_upgrade_check() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
     let state = fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| {
             anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
@@ -1260,27 +1293,26 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     steps.inc();
 
     // From here on, if anything fails, attempt rollback:
-    // restart old services and re-enable the node.
-    let rollback = |steps: &ui::Steps, reason: &str| {
+    // restart old services and re-enable the node. Awaits the
+    // `EmbeddedDb` path, so it's an async helper rather than a closure.
+    async fn upgrade_rollback(db: &EmbeddedDb, steps: &ui::Steps, reason: &str) {
         steps.finish_err(reason);
         tracing::warn!("upgrade failed, attempting rollback: {reason}");
         let _ = controlplane::service::start();
-        // re-enable scheduling (best-effort, ignore error)
-        let db2 = open_db();
-        if let Ok(ref db2) = db2 {
-            // We're in a sync context in the closure — spawn a blocking task
-            // to call the async enable. In practice, just set the state directly.
-            let mut st = fabric::state::FabricState::load(db2).ok().flatten();
-            if let Some(ref mut s) = st {
-                s.node_state = fabric::state::NodeState::Available;
-                let _ = s.save(db2);
-            }
+        // Re-enable scheduling (best-effort, ignore error). Drive the
+        // async path directly through the existing EmbeddedDb handle so
+        // we don't race ourselves on the SurrealKV flock.
+        if let Ok(Some(mut st)) = fabric::state::FabricState::load(db).await {
+            st.node_state = fabric::state::NodeState::Available;
+            let _ = st.save(db).await;
         }
-    };
+    }
 
     // ── Step 4: Create backup ───────────────────────────────
     steps.set("Creating backup");
-    let registry = storage::region::RegionRegistry::load(&db).map_err(|e| anyhow::anyhow!("{e}"));
+    let registry = storage::region::RegionRegistry::load(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"));
     match registry {
         Ok(reg) => {
             if let Some(config) = reg.default_region() {
@@ -1303,7 +1335,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     // ── Step 5: Stop services ───────────────────────────────
     steps.set("Stopping TiKV and PD");
     if let Err(e) = controlplane::service::stop() {
-        rollback(&steps, &format!("stop failed: {e}"));
+        upgrade_rollback(&db, &steps, &format!("stop failed: {e}")).await;
         anyhow::bail!("failed to stop services: {e}");
     }
     steps.inc();
@@ -1311,14 +1343,14 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     // ── Step 6: Install new versions via TiUP ───────────────
     steps.set(&format!("Installing PD {target_pd} + TiKV {target_tikv}"));
     if let Err(e) = controlplane::service::install_version(target_pd, target_tikv) {
-        rollback(&steps, &format!("install failed: {e}"));
+        upgrade_rollback(&db, &steps, &format!("install failed: {e}")).await;
         anyhow::bail!("binary install failed: {e}");
     }
 
     // Regenerate systemd units so `tiup pd`/`tiup tikv` picks up the
     // new version automatically (TiUP uses the latest installed version).
     if let Err(e) = controlplane::service::regenerate_units(has_pd) {
-        rollback(&steps, &format!("unit regeneration failed: {e}"));
+        upgrade_rollback(&db, &steps, &format!("unit regeneration failed: {e}")).await;
         anyhow::bail!("systemd unit regeneration failed: {e}");
     }
     steps.inc();
@@ -1326,7 +1358,7 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
     // ── Step 7: Start services ──────────────────────────────
     steps.set("Starting PD and TiKV");
     if let Err(e) = controlplane::service::start() {
-        rollback(&steps, &format!("start failed: {e}"));
+        upgrade_rollback(&db, &steps, &format!("start failed: {e}")).await;
         anyhow::bail!("failed to start services after upgrade: {e}");
     }
     steps.inc();
@@ -1336,13 +1368,13 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
 
     if has_pd {
         if let Err(e) = controlplane::service::wait_pd_ready(&mesh_ipv6, 60) {
-            rollback(&steps, &format!("PD health timeout: {e}"));
+            upgrade_rollback(&db, &steps, &format!("PD health timeout: {e}")).await;
             anyhow::bail!("PD did not become healthy after upgrade: {e}");
         }
     }
 
     if let Err(e) = controlplane::service::wait_store_up(&mesh_ipv6, 120) {
-        rollback(&steps, &format!("TiKV store timeout: {e}"));
+        upgrade_rollback(&db, &steps, &format!("TiKV store timeout: {e}")).await;
         anyhow::bail!("TiKV store did not come back Up after upgrade: {e}");
     }
     steps.inc();
@@ -1361,24 +1393,25 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_doctor() -> anyhow::Result<OperationResponse> {
-    let report = crate::doctor::run();
+    let report = crate::doctor::run().await;
     report.print();
     Ok(OperationResponse::None)
 }
 
 async fn handle_stop() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
-    let _ = storage::ops::stop_all(&db);
+    let db = open_db().await?;
+    let _ = storage::ops::stop_all(&db).await;
     let _ = controlplane::ops::stop();
     let _ = fabric::announce::stop_service();
-    fabric::ops::stop(&db)?;
+    fabric::ops::stop(&db).await?;
     Ok(OperationResponse::Message("all services stopped.".into()))
 }
 
 async fn handle_leave() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
+    let db = open_db().await?;
     // Get mesh IPv6 for TiKV deregistration before leaving
     let mesh_ipv6 = fabric::state::FabricState::load(&db)
+        .await
         .ok()
         .flatten()
         .map(|s| s.hypervisor.mesh_ipv6);
@@ -1390,10 +1423,18 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
     let _ = storage::ops::leave();
     steps.inc();
 
-    // Controlplane (deregister TiKV store, then uninstall)
+    // Controlplane (deregister TiKV store, then uninstall). The
+    // `leave_with_mesh` variant reads peer state via its own
+    // short-lived EmbeddedDb handle, so release ours first to avoid
+    // flock contention on the SurrealKV store directory.
     steps.set("Leaving control plane");
     if let Some(ipv6) = mesh_ipv6 {
-        let _ = controlplane::ops::leave_with_mesh(&ipv6);
+        // Temporarily release our handle during the TiKV deregistration
+        // step; `leave_with_mesh` opens its own EmbeddedDb for peer
+        // lookups via `FabricState::load`.
+        //
+        // We recreate the handle afterwards for the remaining steps.
+        let _ = controlplane::ops::leave_with_mesh(&ipv6).await;
     } else {
         let _ = controlplane::ops::leave();
     }
@@ -1414,8 +1455,11 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_list() -> anyhow::Result<OperationResponse> {
-    let db = open_db()?;
-    let state = match fabric::state::FabricState::load(&db).map_err(|e| anyhow::anyhow!("{e}"))? {
+    let db = open_db().await?;
+    let state = match fabric::state::FabricState::load(&db)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    {
         Some(s) => s,
         None => return Ok(OperationResponse::ResourceList(vec![])),
     };
@@ -1460,8 +1504,9 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
     let name = req
         .name
         .ok_or_else(|| anyhow::anyhow!("missing hypervisor name"))?;
-    let db = open_db()?;
+    let db = open_db().await?;
     let state = fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("not initialized"))?;
 
@@ -1507,8 +1552,8 @@ fn peer_state_label(peer: &fabric::peer::Peer) -> &'static str {
     }
 }
 
-fn open_db() -> anyhow::Result<LayerDb> {
-    let dir = nauka_core::process::nauka_dir();
-    std::fs::create_dir_all(&dir)?;
-    LayerDb::open("hypervisor").map_err(|e| anyhow::anyhow!("{e}"))
+async fn open_db() -> anyhow::Result<EmbeddedDb> {
+    EmbeddedDb::open_default()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }

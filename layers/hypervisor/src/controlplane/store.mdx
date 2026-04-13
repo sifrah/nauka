@@ -60,14 +60,14 @@ The fetch operation retries up to 6 times with a 2-second delay between attempts
 
 ## Relationship to local state
 
-Each Nauka node also has a local key-value store (LocalDb) backed by an embedded database for node-specific state like the mesh identity and peer list. The two stores serve different purposes:
+Each Nauka node also has a local SurrealDB instance (`EmbeddedDb`) backed by the on-disk SurrealKV engine for node-specific state like the mesh identity and peer list. The two stores serve different purposes:
 
-| | LocalDb | ClusterDb |
+| | EmbeddedDb | ClusterDb |
 |---|---|---|
 | **Scope** | Single node | Entire cluster |
-| **Backend** | Embedded (redb) | Distributed (TiKV) |
+| **Backend** | Embedded SurrealDB (SurrealKV) | Distributed (TiKV) |
 | **Survives node loss** | No | Yes (replicated) |
 | **Requires mesh** | No | Yes (PD + TiKV on mesh IPv6) |
 | **Use case** | Node identity, peer list, region registry | Shared config, VM records, network allocations |
 
-Both stores use the same `namespace/key` convention, so patterns developed with one transfer directly to the other.
+Both stores expose SurrealQL-flavoured semantics, so patterns developed against one transfer naturally to the other when Phase 2 swaps the distributed backend to `EmbeddedDb<TiKv>`.

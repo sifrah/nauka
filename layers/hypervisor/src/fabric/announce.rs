@@ -9,9 +9,11 @@
 //! Announcements are best-effort: if a peer is unreachable, we skip it
 //! and rely on the next health check or manual sync.
 
+use std::future::Future;
 use std::time::Duration;
 
 use nauka_core::error::NaukaError;
+use nauka_state::EmbeddedDb;
 
 use super::peer::Peer;
 use super::peering::{PeerAnnounce, PeerInfo, PeerRemove, StateChange};
@@ -246,10 +248,11 @@ pub async fn broadcast_state_change(
 /// 3. Persist state
 ///
 /// Opens DB per-request to avoid lock contention.
-pub async fn listen(
-    db_opener: impl Fn() -> Result<nauka_state::LayerDb, NaukaError>,
-    bind_addr: std::net::SocketAddr,
-) -> Result<(), NaukaError> {
+pub async fn listen<F, Fut>(db_opener: F, bind_addr: std::net::SocketAddr) -> Result<(), NaukaError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
+{
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(|e| NaukaError::internal(format!("failed to bind announce port: {e}")))?;
@@ -271,7 +274,7 @@ pub async fn listen(
                     }
                 };
 
-                let db = match db_opener() {
+                let db = match db_opener().await {
                     Ok(db) => db,
                     Err(e) => {
                         tracing::warn!(error = %e, "announce: failed to open DB");
@@ -287,6 +290,10 @@ pub async fn listen(
                         tracing::warn!(from = %peer_addr, error = %e, "announce failed");
                     }
                 }
+
+                // Release the SurrealKV flock before the next accept opens a
+                // new handle, so announce/peering/health runs don't contend.
+                let _ = db.shutdown().await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "announce accept error");
@@ -298,22 +305,23 @@ pub async fn listen(
 /// Handle an incoming announce message (add or remove).
 async fn handle_message(
     stream: &mut (impl tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin),
-    db: &nauka_state::LayerDb,
+    db: &EmbeddedDb,
 ) -> Result<String, NaukaError> {
     let msg: AnnounceMessage = read_json(stream).await?;
 
     match msg {
         AnnounceMessage::Announce(announce) => handle_peer_announce(announce, db).await,
-        AnnounceMessage::Remove(remove) => handle_peer_remove(remove, db),
-        AnnounceMessage::StateChange(change) => handle_state_change(change, db),
+        AnnounceMessage::Remove(remove) => handle_peer_remove(remove, db).await,
+        AnnounceMessage::StateChange(change) => handle_state_change(change, db).await,
     }
 }
 
 /// Handle a PeerRemove — remove a leaving peer.
-fn handle_peer_remove(remove: PeerRemove, db: &nauka_state::LayerDb) -> Result<String, NaukaError> {
+async fn handle_peer_remove(remove: PeerRemove, db: &EmbeddedDb) -> Result<String, NaukaError> {
     super::peering_server::validate_peer_field(&remove.name, "name")?;
 
     let mut state = super::state::FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| NaukaError::precondition("not initialized"))?;
 
@@ -322,6 +330,7 @@ fn handle_peer_remove(remove: PeerRemove, db: &nauka_state::LayerDb) -> Result<S
 
         state
             .save(db)
+            .await
             .map_err(|e| NaukaError::internal(e.to_string()))?;
 
         // Update WireGuard config
@@ -353,13 +362,11 @@ fn handle_peer_remove(remove: PeerRemove, db: &nauka_state::LayerDb) -> Result<S
 }
 
 /// Handle a StateChange — update a peer's scheduling state.
-fn handle_state_change(
-    change: StateChange,
-    db: &nauka_state::LayerDb,
-) -> Result<String, NaukaError> {
+async fn handle_state_change(change: StateChange, db: &EmbeddedDb) -> Result<String, NaukaError> {
     super::peering_server::validate_peer_field(&change.name, "name")?;
 
     let mut state = super::state::FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| NaukaError::precondition("not initialized"))?;
 
@@ -380,6 +387,7 @@ fn handle_state_change(
 
         state
             .save(db)
+            .await
             .map_err(|e| NaukaError::internal(e.to_string()))?;
 
         Ok(format!("{} → {}", change.name, change.node_state))
@@ -391,7 +399,7 @@ fn handle_state_change(
 /// Handle a PeerAnnounce — add or replace a peer.
 async fn handle_peer_announce(
     announce: PeerAnnounce,
-    db: &nauka_state::LayerDb,
+    db: &EmbeddedDb,
 ) -> Result<String, NaukaError> {
     // Validate peer data from untrusted source
     super::peering_server::validate_peer_field(&announce.peer.name, "name")?;
@@ -400,6 +408,7 @@ async fn handle_peer_announce(
     super::peering_server::validate_peer_field(&announce.peer.wg_public_key, "wg_public_key")?;
 
     let mut state = super::state::FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| NaukaError::precondition("not initialized"))?;
 
@@ -439,6 +448,7 @@ async fn handle_peer_announce(
     // Persist immediately
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     // Update WireGuard config

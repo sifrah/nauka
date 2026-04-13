@@ -190,7 +190,7 @@ impl super::Reconciler for VpcReconciler {
                 };
 
                 // Resolve remote hypervisor's mesh IPv6
-                let remote_ipv6 = resolve_hypervisor_ipv6(ctx, vm.hypervisor_id.as_deref());
+                let remote_ipv6 = resolve_hypervisor_ipv6(ctx, vm.hypervisor_id.as_deref()).await;
                 let remote_ipv6 = match remote_ipv6 {
                     Some(ip) => ip,
                     None => {
@@ -470,15 +470,20 @@ fn add_arp_in_container(container_pid: u32, ip: &str, mac: &str) -> anyhow::Resu
 }
 
 /// Resolve a hypervisor identifier (HV ID or name) to its mesh IPv6.
-fn resolve_hypervisor_ipv6(
+async fn resolve_hypervisor_ipv6(
     _ctx: &ReconcileContext,
     hypervisor_id: Option<&str>,
 ) -> Option<std::net::Ipv6Addr> {
     let hid = hypervisor_id?;
 
     // Load peer list from local fabric state
-    let db = nauka_state::LocalDb::open("hypervisor").ok()?;
-    let state = nauka_hypervisor::fabric::state::FabricState::load(&db).ok()??;
+    let db = nauka_state::EmbeddedDb::open_default().await.ok()?;
+    let state_opt = nauka_hypervisor::fabric::state::FabricState::load(&db)
+        .await
+        .ok()
+        .flatten();
+    let _ = db.shutdown().await;
+    let state = state_opt?;
 
     // Check if it's self
     if hid == state.hypervisor.id.as_str() || hid == state.hypervisor.name {

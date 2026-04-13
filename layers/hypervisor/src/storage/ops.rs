@@ -3,7 +3,7 @@
 //! Called by the hypervisor handler for storage lifecycle.
 
 use nauka_core::error::NaukaError;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
 use super::region::{RegionRegistry, RegionStorage};
 use super::service;
@@ -18,7 +18,7 @@ const TIKV_STORAGE_NS: &str = "storage/regions";
 /// 2. Install ZeroFS if needed
 /// 3. Install config + systemd unit
 /// 4. Start the service
-pub fn setup_region(db: &LocalDb, config: RegionStorage) -> Result<(), NaukaError> {
+pub async fn setup_region(db: &EmbeddedDb, config: RegionStorage) -> Result<(), NaukaError> {
     config.validate()?;
 
     tracing::info!(region = %config.region, "storage: setting up region");
@@ -33,9 +33,9 @@ pub fn setup_region(db: &LocalDb, config: RegionStorage) -> Result<(), NaukaErro
     service::start_region(&config.region)?;
 
     // Persist region config
-    let mut registry = RegionRegistry::load(db)?;
+    let mut registry = RegionRegistry::load(db).await?;
     registry.upsert(config.clone());
-    registry.save(db)?;
+    registry.save(db).await?;
 
     tracing::info!(region = %config.region, "storage: region ready");
 
@@ -43,21 +43,21 @@ pub fn setup_region(db: &LocalDb, config: RegionStorage) -> Result<(), NaukaErro
 }
 
 /// Remove storage for a region on this node.
-pub fn remove_region(db: &LocalDb, region: &str) -> Result<(), NaukaError> {
+pub async fn remove_region(db: &EmbeddedDb, region: &str) -> Result<(), NaukaError> {
     tracing::info!(region, "storage: removing region");
 
     service::uninstall_region(region)?;
 
-    let mut registry = RegionRegistry::load(db)?;
+    let mut registry = RegionRegistry::load(db).await?;
     registry.remove(region);
-    registry.save(db)?;
+    registry.save(db).await?;
 
     Ok(())
 }
 
 /// Start all configured storage regions on this node.
-pub fn start_all(db: &LocalDb) -> Result<(), NaukaError> {
-    let registry = RegionRegistry::load(db)?;
+pub async fn start_all(db: &EmbeddedDb) -> Result<(), NaukaError> {
+    let registry = RegionRegistry::load(db).await?;
     for region in &registry.regions {
         if !service::is_region_active(&region.region) {
             let _ = service::start_region(&region.region);
@@ -67,8 +67,8 @@ pub fn start_all(db: &LocalDb) -> Result<(), NaukaError> {
 }
 
 /// Stop all storage regions.
-pub fn stop_all(db: &LocalDb) -> Result<(), NaukaError> {
-    let registry = RegionRegistry::load(db)?;
+pub async fn stop_all(db: &EmbeddedDb) -> Result<(), NaukaError> {
+    let registry = RegionRegistry::load(db).await?;
     for region in &registry.regions {
         let _ = service::stop_region(&region.region);
     }
@@ -128,8 +128,8 @@ pub async fn fetch_region_config(
 }
 
 /// Get storage status for all regions.
-pub fn status(db: &LocalDb) -> Vec<RegionStatus> {
-    let registry = RegionRegistry::load(db).unwrap_or_default();
+pub async fn status(db: &EmbeddedDb) -> Vec<RegionStatus> {
+    let registry = RegionRegistry::load(db).await.unwrap_or_default();
     registry
         .regions
         .iter()
@@ -157,18 +157,25 @@ pub struct RegionStatus {
 mod tests {
     use super::*;
 
-    #[test]
-    fn status_empty() {
+    async fn temp_db() -> (tempfile::TempDir, EmbeddedDb) {
         let dir = tempfile::tempdir().unwrap();
-        let db = LocalDb::open_at(&dir.path().join("test.json")).unwrap();
-        let s = status(&db);
-        assert!(s.is_empty());
+        let db = EmbeddedDb::open(&dir.path().join("test.skv"))
+            .await
+            .unwrap();
+        (dir, db)
     }
 
-    #[test]
-    fn setup_validates() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = LocalDb::open_at(&dir.path().join("test.json")).unwrap();
+    #[tokio::test]
+    async fn status_empty() {
+        let (_d, db) = temp_db().await;
+        let s = status(&db).await;
+        assert!(s.is_empty());
+        db.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_validates() {
+        let (_d, db) = temp_db().await;
 
         let bad = RegionStorage {
             region: String::new(), // invalid
@@ -180,6 +187,8 @@ mod tests {
             encryption_password: "test".into(),
             is_default: false,
         };
-        assert!(setup_region(&db, bad).is_err());
+        assert!(setup_region(&db, bad).await.is_err());
+
+        db.shutdown().await.unwrap();
     }
 }

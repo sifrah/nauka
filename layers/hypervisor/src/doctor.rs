@@ -126,23 +126,43 @@ fn skip(name: &str, detail: &str) -> Check {
 // Run all checks
 // ═══════════════════════════════════════════════════
 
-pub fn run() -> DoctorReport {
+pub async fn run() -> DoctorReport {
     let mut report = DoctorReport::default();
 
-    // Load state
-    let db = nauka_state::LocalDb::open("hypervisor").ok();
-    let state = db
-        .as_ref()
-        .and_then(|db| fabric::state::FabricState::load(db).ok().flatten());
+    // Load state from the SurrealKV-backed EmbeddedDb. We open it here so
+    // both the fabric check and the storage check see the same snapshot,
+    // then drop it before running the other checks so the flock is free.
+    let (state, storage_statuses) = load_doctor_context().await;
 
     let mesh_ipv6 = state.as_ref().map(|s| s.hypervisor.mesh_ipv6);
 
     check_fabric(&mut report, &state);
     check_controlplane(&mut report, mesh_ipv6.as_ref());
-    check_storage(&mut report, db.as_ref());
+    check_storage(&mut report, &storage_statuses);
     check_system(&mut report);
 
     report
+}
+
+/// Load the single-pass doctor snapshot: fabric state + region statuses.
+///
+/// Both are read through a single `EmbeddedDb` handle that is then
+/// explicitly shut down, so the rest of the doctor run doesn't contend
+/// with the SurrealKV flock.
+async fn load_doctor_context() -> (
+    Option<fabric::state::FabricState>,
+    Vec<storage::ops::RegionStatus>,
+) {
+    let db = match nauka_state::EmbeddedDb::open_default().await {
+        Ok(db) => db,
+        Err(_) => return (None, Vec::new()),
+    };
+
+    let state = fabric::state::FabricState::load(&db).await.ok().flatten();
+    let statuses = storage::ops::status(&db).await;
+
+    let _ = db.shutdown().await;
+    (state, statuses)
 }
 
 // ═══════════════════════════════════════════════════
@@ -379,7 +399,7 @@ fn check_controlplane(report: &mut DoctorReport, mesh_ipv6: Option<&Ipv6Addr>) {
 // Storage checks
 // ═══════════════════════════════════════════════════
 
-fn check_storage(report: &mut DoctorReport, db: Option<&nauka_state::LocalDb>) {
+fn check_storage(report: &mut DoctorReport, statuses: &[storage::ops::RegionStatus]) {
     let checks = report.add_section("Storage");
 
     // ZeroFS installed
@@ -389,24 +409,22 @@ fn check_storage(report: &mut DoctorReport, db: Option<&nauka_state::LocalDb>) {
         checks.push(skip("zerofs", "not installed"));
     }
 
-    // Region configs
-    if let Some(db) = db {
-        let statuses = storage::ops::status(db);
-        if statuses.is_empty() {
-            checks.push(ok("regions", "none configured"));
-        } else {
-            for s in &statuses {
-                if s.active {
-                    checks.push(ok(
-                        &format!("region {}", s.region),
-                        &format!("active ({})", s.s3_bucket),
-                    ));
-                } else {
-                    checks.push(warn(
-                        &format!("region {}", s.region),
-                        &format!("stopped ({})", s.s3_bucket),
-                    ));
-                }
+    // Region configs — already fetched once by `load_doctor_context` so
+    // the doctor doesn't open a second EmbeddedDb handle here.
+    if statuses.is_empty() {
+        checks.push(ok("regions", "none configured"));
+    } else {
+        for s in statuses {
+            if s.active {
+                checks.push(ok(
+                    &format!("region {}", s.region),
+                    &format!("active ({})", s.s3_bucket),
+                ));
+            } else {
+                checks.push(warn(
+                    &format!("region {}", s.region),
+                    &format!("stopped ({})", s.s3_bucket),
+                ));
             }
         }
     }
@@ -443,23 +461,27 @@ fn check_system(report: &mut DoctorReport) {
         checks.push(warn("logs", "/var/log/nauka missing"));
     }
 
-    // State file
-    let state_path = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/root"))
-        .join(".nauka/hypervisor.json");
+    // State directory — SurrealKV-backed EmbeddedDb on disk.
+    //
+    // The legacy JSON check (`~/.nauka/hypervisor.json`) went away with
+    // P1.11 (sifrah/nauka#201). We now point at the SurrealKV datastore
+    // directory (CLI mode: `~/.nauka/bootstrap.skv`, service mode:
+    // `/var/lib/nauka/bootstrap.skv`). The doctor treats a live LOCK
+    // file inside that directory as a healthy signal — SurrealKV keeps
+    // its on-disk state under this path whenever an EmbeddedDb has been
+    // opened at least once.
+    let state_path = nauka_core::process::nauka_db_path();
     if state_path.exists() {
-        match std::fs::read_to_string(&state_path) {
-            Ok(content) => {
-                if serde_json::from_str::<serde_json::Value>(&content).is_ok() {
-                    checks.push(ok("state file", "valid JSON"));
-                } else {
-                    checks.push(fail("state file", "corrupt (invalid JSON)"));
-                }
-            }
-            Err(e) => checks.push(fail("state file", &format!("unreadable: {e}"))),
+        if state_path.join("LOCK").exists() {
+            checks.push(ok("state dir", "bootstrap.skv present"));
+        } else {
+            checks.push(warn(
+                "state dir",
+                "bootstrap.skv exists but LOCK file missing",
+            ));
         }
     } else {
-        checks.push(skip("state file", "not initialized"));
+        checks.push(skip("state dir", "not initialized"));
     }
 }
 
@@ -551,10 +573,10 @@ mod tests {
         assert!(free.unwrap() > 0);
     }
 
-    #[test]
-    fn run_doctor_no_panic() {
+    #[tokio::test]
+    async fn run_doctor_no_panic() {
         // On a test system, doctor should run without panic
-        let report = run();
+        let report = run().await;
         // Should have 4 sections
         assert_eq!(report.checks.len(), 4);
     }
