@@ -114,7 +114,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#112 id=112 data-nosnippet>112</a>            region: region.to_string(),
 <a href=#113 id=113 data-nosnippet>113</a>            zone: zone.to_string(),
 <a href=#114 id=114 data-nosnippet>114</a>            private_ip: <span class="prelude-val">Some</span>(private_ip),
-<a href=#115 id=115 data-nosnippet>115</a>            hypervisor_id: <span class="prelude-val">Some</span>(<span class="kw">crate</span>::scheduler::schedule(region, zone)<span class="question-mark">?</span>),
+<a href=#115 id=115 data-nosnippet>115</a>            hypervisor_id: <span class="prelude-val">Some</span>(<span class="kw">crate</span>::scheduler::schedule(region, zone).<span class="kw">await</span><span class="question-mark">?</span>),
 <a href=#116 id=116 data-nosnippet>116</a>            state: VmState::Pending,
 <a href=#117 id=117 data-nosnippet>117</a>        };
 <a href=#118 id=118 data-nosnippet>118</a>

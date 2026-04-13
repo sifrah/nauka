@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["RegionRegistry","RegionStorage"]};
+window.SIDEBAR_ITEMS = {"constant":["REGIONS_RECORD_ID","REGIONS_TABLE"],"fn":["ensure_regions_table"],"struct":["RegionRegistry","RegionStorage"]};
