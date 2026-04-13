@@ -862,4 +862,73 @@ mod tests {
 
         db.shutdown().await.expect("shutdown");
     }
+
+    /// P2.5 — every cluster-state `.surql` schema parses cleanly and is
+    /// fully idempotent against a fresh SurrealKV database.
+    ///
+    /// P2.5 (sifrah/nauka#209) ships SCHEMAFULL definitions for the
+    /// cluster-side resources (org, project, env, user, vpc, subnet, vm)
+    /// under `layers/{org,network,compute}/schemas/`. No Rust code reads
+    /// them yet — Phase 3 codegen (sifrah/nauka#225 ff) will consume them
+    /// to generate types and handlers — but we still need a CI-visible
+    /// guarantee that the files are valid SurrealQL and that every
+    /// `DEFINE` is idempotent.
+    ///
+    /// Strategy: open a throwaway `EmbeddedDb` at a tempdir, apply each
+    /// cluster schema twice in sequence via `client().query(SCHEMA)`,
+    /// and assert `.check()` on both passes. The first pass exercises a
+    /// real `DEFINE TABLE/FIELD/INDEX` path against an empty db; the
+    /// second pass exercises the `IF NOT EXISTS` idempotency promise.
+    /// Any parse error, `ASSERT` typo, reserved-word collision, or
+    /// missing `IF NOT EXISTS` surfaces as a test failure.
+    ///
+    /// The schemas define `cluster`-scoped tables (`org`, `project`, …)
+    /// that do not collide with the already-applied bootstrap tables
+    /// (`mesh`, `hypervisor`, `peer`, `wg_key`), so they can safely share
+    /// the same SurrealDB instance here.
+    #[tokio::test]
+    async fn cluster_schemas_parse_cleanly() {
+        // Compile-time-embedded copies of every P2.5 schema. `include_str!`
+        // resolves relative to *this* source file (`layers/state/src/embedded.rs`),
+        // so the paths climb out of `state/src` and back down into each
+        // sibling layer's `schemas/` directory.
+        const SCHEMAS: &[(&str, &str)] = &[
+            ("org", include_str!("../../org/schemas/org.surql")),
+            ("project", include_str!("../../org/schemas/project.surql")),
+            ("env", include_str!("../../org/schemas/env.surql")),
+            ("user", include_str!("../../org/schemas/user.surql")),
+            ("vpc", include_str!("../../network/schemas/vpc.surql")),
+            ("subnet", include_str!("../../network/schemas/subnet.surql")),
+            ("vm", include_str!("../../compute/schemas/vm.surql")),
+        ];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("cluster_schemas.skv"))
+            .await
+            .expect("open");
+
+        for (name, schema) in SCHEMAS {
+            // First application — must succeed against a fresh db. The
+            // bootstrap schema has already been applied by `open`, but
+            // these files define different tables so there's no conflict.
+            db.client()
+                .query(*schema)
+                .await
+                .unwrap_or_else(|e| panic!("{name} schema first apply failed: {e}"))
+                .check()
+                .unwrap_or_else(|e| panic!("{name} schema first apply check failed: {e}"));
+
+            // Second application — `IF NOT EXISTS` must make this a
+            // no-op. Any statement without `IF NOT EXISTS` blows up here
+            // with an "already exists" error.
+            db.client()
+                .query(*schema)
+                .await
+                .unwrap_or_else(|e| panic!("{name} schema second apply failed: {e}"))
+                .check()
+                .unwrap_or_else(|e| panic!("{name} schema idempotency check failed: {e}"));
+        }
+
+        db.shutdown().await.expect("shutdown");
+    }
 }
