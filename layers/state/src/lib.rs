@@ -46,6 +46,7 @@
 pub mod cluster;
 pub mod embedded;
 pub mod schema;
+pub mod sdk_bridge;
 
 pub use cluster::ClusterDb;
 pub use embedded::{pd_endpoints_for, EmbeddedDb};

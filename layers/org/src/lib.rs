@@ -9,7 +9,6 @@
 
 pub mod handlers;
 pub mod project;
-mod sdk_bridge;
 pub mod store;
 pub mod types;
 

@@ -37,7 +37,7 @@ use nauka_core::resource::ResourceMeta;
 use nauka_state::EmbeddedDb;
 use serde::Deserialize;
 
-use crate::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
+use nauka_state::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 
 use super::types::Project;
 
@@ -294,7 +294,7 @@ impl ProjectStore {
 /// serde_json renders as one of several shapes; we bridge through
 /// `serde_json::Value` and pull the inner string out in
 /// [`ProjectRow::into_project`] via
-/// [`crate::sdk_bridge::thing_to_id_string`].
+/// [`nauka_state::sdk_bridge::thing_to_id_string`].
 #[derive(Debug, Deserialize)]
 struct ProjectRow {
     id: serde_json::Value,
@@ -344,7 +344,7 @@ fn decode_first(raw: Vec<serde_json::Value>) -> anyhow::Result<Option<Project>> 
     }
 }
 
-/// Wrap [`crate::sdk_bridge::classify_create_error`] so the user-facing
+/// Wrap [`nauka_state::sdk_bridge::classify_create_error`] so the user-facing
 /// duplicate message includes the owning org. The composite unique
 /// index on `(org, name)` rejects `(org_a, "web")` + `(org_a, "web")`
 /// but allows `(org_a, "web")` + `(org_b, "web")`, so the error
@@ -360,7 +360,7 @@ fn classify_create_error_with_org(name: &str, org_name: &str, err_msg: &str) -> 
     } else {
         // Fall back to the shared helper for anything that isn't a
         // duplicate — it preserves the raw error text.
-        classify_create_error("project", name, err_msg)
+        anyhow::anyhow!(classify_create_error("project", name, err_msg))
     }
 }
 

@@ -35,11 +35,11 @@
 use nauka_core::id::{EnvId, OrgId, ProjectId};
 use nauka_core::resource::epoch_to_iso8601;
 use nauka_core::resource::ResourceMeta;
+use nauka_state::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 use nauka_state::EmbeddedDb;
 use serde::Deserialize;
 
 use crate::project;
-use crate::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 
 use super::types::Environment;
 
@@ -297,7 +297,7 @@ impl EnvStore {
 /// which serde_json renders as one of several shapes; we bridge
 /// through `serde_json::Value` and pull the inner string out in
 /// [`EnvRow::into_environment`] via
-/// [`crate::sdk_bridge::thing_to_id_string`].
+/// [`nauka_state::sdk_bridge::thing_to_id_string`].
 #[derive(Debug, Deserialize)]
 struct EnvRow {
     id: serde_json::Value,
@@ -351,7 +351,7 @@ fn decode_first(raw: Vec<serde_json::Value>) -> anyhow::Result<Option<Environmen
     }
 }
 
-/// Wrap [`crate::sdk_bridge::classify_create_error`] so the user-facing
+/// Wrap [`nauka_state::sdk_bridge::classify_create_error`] so the user-facing
 /// duplicate message includes the owning project. The composite
 /// unique index on `(project, name)` rejects
 /// `(proj_a, "prod")` + `(proj_a, "prod")` but allows
@@ -372,7 +372,7 @@ fn classify_create_error_with_project(
     } else {
         // Fall back to the shared helper for anything that isn't a
         // duplicate — it preserves the raw error text.
-        classify_create_error("environment", name, err_msg)
+        anyhow::anyhow!(classify_create_error("environment", name, err_msg))
     }
 }
 

@@ -1067,6 +1067,9 @@ mod tests {
         // resolves relative to *this* source file (`layers/state/src/embedded.rs`),
         // so the paths climb out of `state/src` and back down into each
         // sibling layer's `schemas/` directory.
+        // Mirrors `crate::schema::CLUSTER_SCHEMAS`. P2.12
+        // (sifrah/nauka#216) added the `peering` and `natgw`
+        // schemas alongside the network-layer SurrealDB migration.
         const SCHEMAS: &[(&str, &str)] = &[
             ("org", include_str!("../../org/schemas/org.surql")),
             ("project", include_str!("../../org/schemas/project.surql")),
@@ -1074,6 +1077,11 @@ mod tests {
             ("user", include_str!("../../org/schemas/user.surql")),
             ("vpc", include_str!("../../network/schemas/vpc.surql")),
             ("subnet", include_str!("../../network/schemas/subnet.surql")),
+            (
+                "vpc_peering",
+                include_str!("../../network/schemas/peering.surql"),
+            ),
+            ("natgw", include_str!("../../network/schemas/natgw.surql")),
             ("vm", include_str!("../../compute/schemas/vm.surql")),
         ];
 
