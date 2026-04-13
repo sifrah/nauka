@@ -147,15 +147,20 @@ impl super::Reconciler for VmReconciler {
                             let ip = vm.private_ip.as_deref().unwrap_or("0.0.0.0");
                             let mac =
                                 nauka_network::vpc::provision::mac_from_ip(ip).unwrap_or_default();
-                            let subnet_store =
-                                nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                            // P2.12 (sifrah/nauka#216): the VPC and
+                            // subnet stores take an `EmbeddedDb`
+                            // directly now; reach the inner handle
+                            // via `ClusterDb::embedded().clone()`.
+                            let subnet_store = nauka_network::vpc::subnet::store::SubnetStore::new(
+                                ctx.db.embedded().clone(),
+                            );
                             let gateway = subnet_store
                                 .get(vm.subnet_id.as_str(), None, None)
                                 .await?
                                 .map(|s| s.gateway.clone())
                                 .unwrap_or_else(|| "0.0.0.0".to_string());
                             let vpc_store =
-                                nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                                nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
                             let vpc_cidr = vpc_store
                                 .get(vm.vpc_id.as_str(), None)
                                 .await?
@@ -235,14 +240,16 @@ impl super::Reconciler for VmReconciler {
                         let has_tini = std::path::Path::new(&rootfs_dir)
                             .join("usr/bin/tini")
                             .exists();
-                        let subnet_store =
-                            nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                        let subnet_store = nauka_network::vpc::subnet::store::SubnetStore::new(
+                            ctx.db.embedded().clone(),
+                        );
                         let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
                         let (gateway, cidr) = match &subnet {
                             Some(s) => (s.gateway.clone(), s.cidr.clone()),
                             None => ("0.0.0.0".to_string(), "0.0.0.0/0".to_string()),
                         };
-                        let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                        let vpc_store =
+                            nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
                         let vpc_cidr = vpc_store
                             .get(vm.vpc_id.as_str(), None)
                             .await?
@@ -338,7 +345,7 @@ impl super::Reconciler for VmReconciler {
                 }
 
                 let subnet_store =
-                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.embedded().clone());
                 let subnet = subnet_store.get(vm.subnet_id.as_str(), None, None).await?;
 
                 let (gateway, cidr) = match &subnet {
@@ -347,7 +354,7 @@ impl super::Reconciler for VmReconciler {
                 };
 
                 // Resolve VPC CIDR for DNS64/NAT64 setup
-                let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+                let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
                 let vpc_cidr = vpc_store
                     .get(vm.vpc_id.as_str(), None)
                     .await?

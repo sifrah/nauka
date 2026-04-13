@@ -1,18 +1,18 @@
-//! Shared SurrealDB SDK → Rust bridge helpers used by the org-layer stores.
+//! Shared SurrealDB SDK → Rust bridge helpers used by every cluster
+//! store in the workspace.
 //!
-//! Every store in this crate talks to the cluster database through the
-//! `EmbeddedDb::client()` SDK handle and the JSON-bridge pattern
-//! established by `nauka_hypervisor::fabric::state::FabricState::save`:
+//! The pattern was established by
+//! `nauka_hypervisor::fabric::state::FabricState::save` during P1.10:
 //! write via an explicit `CREATE … SET …` statement, read via
-//! `SELECT * FROM …`, and bounce the row through `serde_json::Value` so
-//! the Rust side doesn't need a `surrealdb::types::SurrealValue` derive
-//! cascade over every resource type in the workspace.
+//! `SELECT * FROM …`, and bounce the row through `serde_json::Value`
+//! so the Rust side doesn't need a `surrealdb::types::SurrealValue`
+//! derive cascade over every resource type in the workspace.
 //!
-//! The helpers in this module are the small amount of glue every store
-//! needs for that pattern:
+//! The helpers in this module are the small amount of glue every
+//! store needs for that pattern:
 //!
-//! - [`thing_to_id_string`] extracts the bare `<table>-<ulid>` id from
-//!   the `Thing` value that SurrealDB hands back on `SELECT`.
+//! - [`thing_to_id_string`] extracts the bare `<table>-<ulid>` id
+//!   from the `Thing` value that SurrealDB hands back on `SELECT`.
 //! - [`iso8601_to_epoch`] parses the RFC 3339 `datetime` strings that
 //!   SurrealDB emits back into the `u64` Unix-epoch seconds that
 //!   [`nauka_core::resource::ResourceMeta`] carries.
@@ -21,10 +21,14 @@
 //!   `"<kind> '<name>' already exists"` flat `anyhow::Error` so every
 //!   store produces the same CLI-facing message shape.
 //!
-//! P2.9 (sifrah/nauka#213) introduced the first copies of these helpers
-//! inline in `crate::store` (the org store). P2.10 (sifrah/nauka#214)
-//! extracted them here so the newly-migrated project store can reuse
-//! them without drift.
+//! History: P2.9 (sifrah/nauka#213) introduced inline copies of these
+//! helpers in the org store. P2.10 (sifrah/nauka#214) extracted them
+//! to a private `sdk_bridge` module inside `nauka-org`. P2.12
+//! (sifrah/nauka#216) moved the module here into `nauka-state` — the
+//! lowest crate that holds the [`crate::EmbeddedDb`] wrapper — so
+//! every downstream layer (`nauka-org`, `nauka-network`,
+//! `nauka-compute`, `nauka-forge`, `nauka-hypervisor`) can reuse the
+//! same helpers without drifting into three different copies.
 
 /// Pull the bare id string out of a SurrealDB `Thing` rendered as
 /// `serde_json::Value`.
@@ -49,7 +53,7 @@
 /// Always returns the bare `<table>-<ulid>` id (without the `tb:`
 /// prefix or any wrapping backticks) because that's what the rest of
 /// Nauka has been carrying around as `ResourceMeta::id` since day one.
-pub(crate) fn thing_to_id_string(table_prefix: &str, value: &serde_json::Value) -> String {
+pub fn thing_to_id_string(table_prefix: &str, value: &serde_json::Value) -> String {
     let trim_backticks = |s: &str| s.trim_start_matches('`').trim_end_matches('`').to_string();
 
     if let Some(s) = value.as_str() {
@@ -90,7 +94,7 @@ pub(crate) fn thing_to_id_string(table_prefix: &str, value: &serde_json::Value) 
 /// value back — the alternative would be to fail a whole list/get path
 /// on a single malformed row, which is strictly worse for operators
 /// trying to clean up bad data.
-pub(crate) fn iso8601_to_epoch(s: &str) -> u64 {
+pub fn iso8601_to_epoch(s: &str) -> u64 {
     // Stripped-down parser: YYYY-MM-DDTHH:MM:SS… — accepts a trailing
     // `Z`, an optional fractional seconds part, and an optional
     // timezone offset (which we ignore — the only writers are the
@@ -150,35 +154,41 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// Map a SurrealDB error message from a `CREATE` into a flat
-/// `anyhow::Error` with a human-friendly message.
+/// Classify a SurrealDB error message from a `CREATE` into a
+/// human-friendly flat `String` message.
 ///
 /// Each cluster-state store has a unique index on its natural key
 /// (e.g. `org_name`, `project_org_name`) that surfaces duplicate
 /// inserts as `surrealdb::Error::already_exists`, whose `Display`
-/// rendering includes the phrase "already contains" (the substring is
-/// stable across surrealdb-types releases and is what the
-/// `From<surrealdb::Error>` impl in `nauka_state::lib.rs` documents as
-/// the `is_already_exists()` signal). We key on that substring rather
-/// than re-introducing a direct `surrealdb` dependency in this crate,
-/// so duplicate-name conflicts still surface as the same
+/// rendering includes the phrase "already contains" (the substring
+/// is stable across surrealdb-types releases and is what the
+/// `From<surrealdb::Error>` impl in [`crate::lib`] documents as the
+/// `is_already_exists()` signal). We key on that substring rather
+/// than pulling in a direct `surrealdb` dependency at this layer, so
+/// duplicate-name conflicts still surface as the same
 /// `<kind> '<name>' already exists` wording every store returned
-/// before the SurrealDB migration — CLI error-message tests downstream
-/// keep passing without edits.
+/// before the SurrealDB migration — CLI error-message tests
+/// downstream keep passing without edits.
 ///
 /// `kind` is the resource noun used in the message (`"org"`,
-/// `"project"`, `"environment"`, …). `name` is the human-readable name
-/// that was rejected. Everything else collapses to the underlying
-/// error text verbatim.
-pub(crate) fn classify_create_error(kind: &str, name: &str, err_msg: &str) -> anyhow::Error {
+/// `"project"`, `"environment"`, `"vpc"`, `"subnet"`, …). `name` is
+/// the human-readable name that was rejected. Everything else
+/// collapses to the underlying error text verbatim.
+///
+/// Callers wrap the returned `String` in whatever error type they
+/// use — typically `anyhow::anyhow!(classify_create_error(...))`.
+/// The helper deliberately returns `String` rather than
+/// `anyhow::Error` so that `nauka-state` does not need to pull in
+/// `anyhow` just to format a message.
+pub fn classify_create_error(kind: &str, name: &str, err_msg: &str) -> String {
     let lowered = err_msg.to_lowercase();
     if lowered.contains("already contains")
         || lowered.contains("already exists")
         || lowered.contains("duplicate")
     {
-        anyhow::anyhow!("{kind} '{name}' already exists")
+        format!("{kind} '{name}' already exists")
     } else {
-        anyhow::anyhow!("{err_msg}")
+        err_msg.to_string()
     }
 }
 
@@ -237,17 +247,17 @@ mod tests {
 
     #[test]
     fn classify_create_error_detects_duplicate() {
-        let err = classify_create_error(
+        let msg = classify_create_error(
             "project",
             "web",
             "database contains already contains an entry for `web`",
         );
-        assert_eq!(err.to_string(), "project 'web' already exists");
+        assert_eq!(msg, "project 'web' already exists");
     }
 
     #[test]
     fn classify_create_error_passes_through_unrelated() {
-        let err = classify_create_error("project", "web", "disk full");
-        assert_eq!(err.to_string(), "disk full");
+        let msg = classify_create_error("project", "web", "disk full");
+        assert_eq!(msg, "disk full");
     }
 }

@@ -54,7 +54,11 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = PeeringStore::new(nauka_hypervisor::controlplane::connect().await?);
+                // P2.12 (sifrah/nauka#216): PeeringStore now takes an
+                // EmbeddedDb directly; reach the cluster handle via
+                // the wrapper's `.embedded()` accessor.
+                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
+                let store = PeeringStore::new(cluster_db.embedded().clone());
                 match req.operation.as_str() {
                     "create" => {
                         let vpc = req

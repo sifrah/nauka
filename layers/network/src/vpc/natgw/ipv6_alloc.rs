@@ -1,17 +1,32 @@
 //! IPv6 address allocator for NAT gateways.
 //!
-//! Allocates /128 addresses from a hypervisor's public /64 block.
-//! Each NAT gateway gets a deterministic, unique IPv6 derived from
-//! the /64 prefix + a hash of the NAT gateway ID.
+//! Allocates deterministic `/128` addresses from a hypervisor's
+//! public `/64` block. Each NAT gateway gets a unique IPv6 derived
+//! from the prefix + a SHA-256 hash of the NAT gateway id, so the
+//! allocation is stable across restarts and identical across nodes
+//! without coordination.
+//!
+//! P2.12 (sifrah/nauka#216) migrated this helper from the legacy
+//! raw-KV cluster surface to the native SurrealDB SDK. The
+//! allocation ledger lives in a transitional SCHEMALESS
+//! `natgw_ipv6_alloc` table, keyed by the hypervisor id, with a
+//! `data` column holding the JSON blob of `{ipv6, nat_gw_id}`
+//! entries. The table is intentionally NOT in the
+//! `apply_cluster_schemas` bundle because it's a transitional
+//! single-blob-per-hypervisor shape — Phase 3 or a dedicated IPAM
+//! rewrite can normalise it into one row per address.
 
 use std::net::Ipv6Addr;
 
-use nauka_hypervisor::controlplane::ClusterDb;
+use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
 
-const NS_NATGW_IPV6: &str = "natgw-ipv6";
+/// Transitional SCHEMALESS table that holds the IPv6 allocation
+/// ledger. One row per hypervisor, keyed by the hypervisor's record
+/// id, with a `data` column holding the JSON blob.
+const IPV6_ALLOC_TABLE: &str = "natgw_ipv6_alloc";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Ipv6Allocations {
     entries: Vec<Ipv6Allocation>,
 }
@@ -22,10 +37,11 @@ struct Ipv6Allocation {
     nat_gw_id: String,
 }
 
-/// Derive a deterministic IPv6 /128 from a /64 prefix and a NAT gateway ID.
+/// Derive a deterministic IPv6 /128 from a /64 prefix and a NAT
+/// gateway id.
 ///
-/// Uses SHA-256 of the NAT GW ID to fill the lower 64 bits (interface ID).
-/// Skips ::1 which is conventionally reserved for the host.
+/// Uses SHA-256 of the NAT GW id to fill the lower 64 bits (interface
+/// id). Skips `::1` which is conventionally reserved for the host.
 fn derive_ipv6(prefix_str: &str, nat_gw_id: &str) -> anyhow::Result<Ipv6Addr> {
     let net: ipnet::Ipv6Net = prefix_str
         .parse()
@@ -40,7 +56,6 @@ fn derive_ipv6(prefix_str: &str, nat_gw_id: &str) -> anyhow::Result<Ipv6Addr> {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(nat_gw_id.as_bytes());
 
-    // Take 8 bytes from hash to form the interface ID (lower 64 bits)
     let iid = [
         u16::from_be_bytes([hash[0], hash[1]]),
         u16::from_be_bytes([hash[2], hash[3]]),
@@ -52,9 +67,8 @@ fn derive_ipv6(prefix_str: &str, nat_gw_id: &str) -> anyhow::Result<Ipv6Addr> {
         segs[0], segs[1], segs[2], segs[3], iid[0], iid[1], iid[2], iid[3],
     );
 
-    // Avoid ::1 (host) and :: (network)
+    // Avoid `::` (network) and `::1` (host).
     if addr == prefix || addr.segments()[4..] == [0, 0, 0, 1] {
-        // Extremely unlikely with SHA-256, but handle it
         let addr2 = Ipv6Addr::new(
             segs[0],
             segs[1],
@@ -71,23 +85,79 @@ fn derive_ipv6(prefix_str: &str, nat_gw_id: &str) -> anyhow::Result<Ipv6Addr> {
     Ok(addr)
 }
 
-/// Allocate a public IPv6 address for a NAT gateway from the hypervisor's /64 block.
+/// Ensure the transitional SCHEMALESS `natgw_ipv6_alloc` table
+/// exists. Idempotent thanks to `IF NOT EXISTS`.
+async fn ensure_table(db: &EmbeddedDb) -> anyhow::Result<()> {
+    db.client()
+        .query("DEFINE TABLE IF NOT EXISTS natgw_ipv6_alloc SCHEMALESS")
+        .await
+        .map_err(|e| anyhow::anyhow!("define natgw_ipv6_alloc: {e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("define natgw_ipv6_alloc check: {e}"))?;
+    Ok(())
+}
+
+/// Load the allocation blob for one hypervisor. Returns an empty
+/// [`Ipv6Allocations`] if no row exists yet.
+async fn load(db: &EmbeddedDb, hypervisor_id: &str) -> anyhow::Result<Ipv6Allocations> {
+    ensure_table(db).await?;
+    let mut response = db
+        .client()
+        .query("SELECT data FROM type::record($tbl, $id)")
+        .bind(("tbl", IPV6_ALLOC_TABLE))
+        .bind(("id", hypervisor_id.to_string()))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let rows: Vec<serde_json::Value> = response.take("data").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let first = rows.into_iter().next();
+    match first {
+        None | Some(serde_json::Value::Null) => Ok(Ipv6Allocations::default()),
+        Some(v) => serde_json::from_value::<Ipv6Allocations>(v)
+            .map_err(|e| anyhow::anyhow!("deserialise ipv6 alloc blob: {e}")),
+    }
+}
+
+/// Persist the allocation blob for one hypervisor. Creates the row
+/// on first write via `UPSERT`.
+async fn save(
+    db: &EmbeddedDb,
+    hypervisor_id: &str,
+    allocs: &Ipv6Allocations,
+) -> anyhow::Result<()> {
+    ensure_table(db).await?;
+    let data = serde_json::to_value(allocs)
+        .map_err(|e| anyhow::anyhow!("serialise ipv6 alloc blob: {e}"))?;
+    db.client()
+        .query("UPSERT type::record($tbl, $id) CONTENT { data: $data }")
+        .bind(("tbl", IPV6_ALLOC_TABLE))
+        .bind(("id", hypervisor_id.to_string()))
+        .bind(("data", data))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .check()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
+
+/// Allocate a public IPv6 address for a NAT gateway from the
+/// hypervisor's /64 block. Idempotent: if the NAT gateway already
+/// has an allocation for this hypervisor, returns the existing
+/// address unchanged.
 pub async fn allocate(
-    db: &ClusterDb,
+    db: &EmbeddedDb,
     hypervisor_id: &str,
     ipv6_block: &str,
     nat_gw_id: &str,
 ) -> anyhow::Result<Ipv6Addr> {
     let mut allocs = load(db, hypervisor_id).await?;
 
-    // Check if already allocated
     if let Some(existing) = allocs.entries.iter().find(|a| a.nat_gw_id == nat_gw_id) {
         return Ok(existing.ipv6);
     }
 
     let addr = derive_ipv6(ipv6_block, nat_gw_id)?;
 
-    // Check for collision (extremely unlikely with SHA-256)
+    // Collision check — extremely unlikely with SHA-256, but cheap.
     if allocs.entries.iter().any(|a| a.ipv6 == addr) {
         anyhow::bail!("IPv6 address collision for {addr} — this should not happen");
     }
@@ -96,33 +166,28 @@ pub async fn allocate(
         ipv6: addr,
         nat_gw_id: nat_gw_id.to_string(),
     });
-
     save(db, hypervisor_id, &allocs).await?;
     Ok(addr)
 }
 
 /// Release the IPv6 address allocated to a NAT gateway.
-pub async fn release(db: &ClusterDb, hypervisor_id: &str, nat_gw_id: &str) -> anyhow::Result<()> {
+pub async fn release(db: &EmbeddedDb, hypervisor_id: &str, nat_gw_id: &str) -> anyhow::Result<()> {
     let mut allocs = load(db, hypervisor_id).await?;
     allocs.entries.retain(|a| a.nat_gw_id != nat_gw_id);
     save(db, hypervisor_id, &allocs).await
 }
 
-async fn load(db: &ClusterDb, hypervisor_id: &str) -> anyhow::Result<Ipv6Allocations> {
-    let allocs: Option<Ipv6Allocations> = db.get(NS_NATGW_IPV6, hypervisor_id).await?;
-    Ok(allocs.unwrap_or(Ipv6Allocations {
-        entries: Vec::new(),
-    }))
-}
-
-async fn save(db: &ClusterDb, hypervisor_id: &str, allocs: &Ipv6Allocations) -> anyhow::Result<()> {
-    db.put(NS_NATGW_IPV6, hypervisor_id, allocs).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn temp_db() -> (tempfile::TempDir, EmbeddedDb) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("ipv6.skv"))
+            .await
+            .expect("open EmbeddedDb");
+        (dir, db)
+    }
 
     #[test]
     fn derive_ipv6_deterministic() {
@@ -152,5 +217,45 @@ mod tests {
     fn derive_ipv6_rejects_non_64() {
         assert!(derive_ipv6("2a01:4f8:c012::/48", "nat-test").is_err());
         assert!(derive_ipv6("2a01:4f8:c012:abcd::1/128", "nat-test").is_err());
+    }
+
+    #[tokio::test]
+    async fn allocate_returns_same_ip_for_same_nat_gw() {
+        let (_d, db) = temp_db().await;
+        let a = allocate(&db, "hv-1", "2a01:4f8:c012:abcd::/64", "nat-01")
+            .await
+            .unwrap();
+        let b = allocate(&db, "hv-1", "2a01:4f8:c012:abcd::/64", "nat-01")
+            .await
+            .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn release_frees_slot() {
+        let (_d, db) = temp_db().await;
+        let a = allocate(&db, "hv-1", "2a01:4f8:c012:abcd::/64", "nat-01")
+            .await
+            .unwrap();
+        release(&db, "hv-1", "nat-01").await.unwrap();
+        // Re-allocating the same id should reproduce the same deterministic addr.
+        let b = allocate(&db, "hv-1", "2a01:4f8:c012:abcd::/64", "nat-01")
+            .await
+            .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn allocations_are_isolated_per_hypervisor() {
+        let (_d, db) = temp_db().await;
+        allocate(&db, "hv-1", "2a01:4f8:c012:abcd::/64", "nat-01")
+            .await
+            .unwrap();
+        // Hypervisor 2 has a different /64 and should allocate in
+        // its own space without touching hv-1's ledger.
+        let b = allocate(&db, "hv-2", "2a01:4f8:c012:1234::/64", "nat-02")
+            .await
+            .unwrap();
+        assert_eq!(b.segments()[3], 0x1234);
     }
 }

@@ -70,14 +70,17 @@ impl VmStore {
                 anyhow::anyhow!("environment '{env_name}' not found in project '{project_name}'")
             })?;
 
-        // Resolve vpc -> subnet
-        let vpc_store = nauka_network::vpc::store::VpcStore::new(self.db.clone());
+        // Resolve vpc -> subnet. P2.12 (sifrah/nauka#216) migrated
+        // both stores to take an `EmbeddedDb` directly; reach the
+        // inner handle via `ClusterDb::embedded().clone()`.
+        let vpc_store = nauka_network::vpc::store::VpcStore::new(self.db.embedded().clone());
         let vpc = vpc_store
             .get(vpc_name, Some(org_name))
             .await?
             .ok_or_else(|| anyhow::anyhow!("vpc '{vpc_name}' not found"))?;
 
-        let sub_store = nauka_network::vpc::subnet::store::SubnetStore::new(self.db.clone());
+        let sub_store =
+            nauka_network::vpc::subnet::store::SubnetStore::new(self.db.embedded().clone());
         let subnet = sub_store
             .get(subnet_name, Some(vpc_name), Some(org_name))
             .await?
@@ -95,9 +98,11 @@ impl VmStore {
         // Generate VM ID first — needed for IPAM allocation
         let vm_id = VmId::generate().to_string();
 
-        // Allocate private IP from subnet IPAM
+        // Allocate private IP from subnet IPAM. P2.12 (sifrah/nauka#216)
+        // migrated the IPAM helper to take an `EmbeddedDb`; reach it
+        // via `ClusterDb::embedded()`.
         let private_ip = nauka_network::vpc::subnet::ipam::allocate(
-            &self.db,
+            self.db.embedded(),
             &subnet.meta.id,
             &subnet.cidr,
             &subnet.gateway,
@@ -251,9 +256,14 @@ impl VmStore {
             );
         }
 
-        // Release IPAM allocation
-        nauka_network::vpc::subnet::ipam::release(&self.db, vm.subnet_id.as_str(), &vm.meta.id)
-            .await?;
+        // Release IPAM allocation. P2.12 migrated the helper to take
+        // an `EmbeddedDb` directly.
+        nauka_network::vpc::subnet::ipam::release(
+            self.db.embedded(),
+            vm.subnet_id.as_str(),
+            &vm.meta.id,
+        )
+        .await?;
 
         let idx_key = format!("{}/{}", vm.env_id.as_str(), vm.meta.name);
         self.db.delete(NS_VM, &vm.meta.id).await?;

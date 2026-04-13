@@ -41,10 +41,10 @@
 use nauka_core::id::OrgId;
 use nauka_core::resource::epoch_to_iso8601;
 use nauka_core::resource::ResourceMeta;
+use nauka_state::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 use nauka_state::EmbeddedDb;
 use serde::Deserialize;
 
-use crate::sdk_bridge::{classify_create_error, iso8601_to_epoch, thing_to_id_string};
 use crate::types::Org;
 
 /// SurrealDB table backing this store. Defined in
@@ -118,10 +118,20 @@ impl OrgStore {
             .await;
         let response = match query_result {
             Ok(r) => r,
-            Err(e) => return Err(classify_create_error("org", name, &e.to_string())),
+            Err(e) => {
+                return Err(anyhow::anyhow!(classify_create_error(
+                    "org",
+                    name,
+                    &e.to_string()
+                )))
+            }
         };
         if let Err(e) = response.check() {
-            return Err(classify_create_error("org", name, &e.to_string()));
+            return Err(anyhow::anyhow!(classify_create_error(
+                "org",
+                name,
+                &e.to_string()
+            )));
         }
 
         Ok(org)

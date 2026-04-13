@@ -55,7 +55,11 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = SubnetStore::new(nauka_hypervisor::controlplane::connect().await?);
+                // P2.12 (sifrah/nauka#216): SubnetStore now takes an
+                // EmbeddedDb directly; reach the cluster handle via
+                // the wrapper's `.embedded()` accessor.
+                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
+                let store = SubnetStore::new(cluster_db.embedded().clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;

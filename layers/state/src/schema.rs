@@ -32,6 +32,14 @@ const CLUSTER_SCHEMAS: &[(&str, &str)] = &[
     ("env", include_str!("../../org/schemas/env.surql")),
     ("vpc", include_str!("../../network/schemas/vpc.surql")),
     ("subnet", include_str!("../../network/schemas/subnet.surql")),
+    // P2.12 (sifrah/nauka#216): peering + natgw schemas ship alongside
+    // the network layer's SurrealDB-SDK migration so the new stores
+    // write to SCHEMAFULL tables instead of legacy raw-KV catch-alls.
+    (
+        "vpc_peering",
+        include_str!("../../network/schemas/peering.surql"),
+    ),
+    ("natgw", include_str!("../../network/schemas/natgw.surql")),
     ("vm", include_str!("../../compute/schemas/vm.surql")),
 ];
 

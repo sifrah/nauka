@@ -96,7 +96,7 @@ impl super::Reconciler for VpcReconciler {
             .collect();
 
         // 2. Collect unique VPC IDs needed on this node + resolve their VNIs
-        let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.clone());
+        let vpc_store = nauka_network::vpc::store::VpcStore::new(ctx.db.embedded().clone());
         let mut needed_vpcs: Vec<(String, u32)> = Vec::new();
         for vm in &local_vms {
             let vpc_id = vm.vpc_id.as_str().to_string();
@@ -231,7 +231,7 @@ impl super::Reconciler for VpcReconciler {
             // Look up the subnet gateway from any local VM in this VPC
             if let Some(local_vm) = local_vms.iter().find(|vm| vm.vpc_id.as_str() == *vpc_id) {
                 let subnet_store =
-                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.clone());
+                    nauka_network::vpc::subnet::store::SubnetStore::new(ctx.db.embedded().clone());
                 if let Ok(Some(subnet)) = subnet_store
                     .get(local_vm.subnet_id.as_str(), None, None)
                     .await
@@ -275,7 +275,8 @@ impl super::Reconciler for VpcReconciler {
         }
 
         // 8. VPC Peering — route leak between VRFs
-        let peering_store = nauka_network::vpc::peering::store::PeeringStore::new(ctx.db.clone());
+        let peering_store =
+            nauka_network::vpc::peering::store::PeeringStore::new(ctx.db.embedded().clone());
         let mut peered_bridge_pairs: Vec<(String, String)> = Vec::new();
         for (vpc_id, _) in &needed_vpcs {
             let peerings = peering_store.list(Some(vpc_id)).await.unwrap_or_default();
