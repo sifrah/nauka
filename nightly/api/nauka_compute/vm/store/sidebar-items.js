@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["NS_VM","NS_VM_IDX","REG_V1","REG_V2_NS","REG_V2_PREFIX"],"fn":["add_id","load_ids","remove_id"],"struct":["VmStore"]};
+window.SIDEBAR_ITEMS = {"constant":["VM_TABLE"],"fn":["decode_first"],"struct":["VmRow","VmStore"]};
