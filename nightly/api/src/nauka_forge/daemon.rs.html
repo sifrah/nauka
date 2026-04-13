@@ -149,52 +149,55 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#147 id=147 data-nosnippet>147</a>    // assigned to any ID containing our name.
 <a href=#148 id=148 data-nosnippet>148</a>
 <a href=#149 id=149 data-nosnippet>149</a>    </span><span class="kw">let </span>ctx = ReconcileContext {
-<a href=#150 id=150 data-nosnippet>150</a>        db,
-<a href=#151 id=151 data-nosnippet>151</a>        hypervisor_id: state.hypervisor.id.as_str().to_string(),
-<a href=#152 id=152 data-nosnippet>152</a>        node_ids,
-<a href=#153 id=153 data-nosnippet>153</a>        node_name: state.hypervisor.name.clone(),
-<a href=#154 id=154 data-nosnippet>154</a>        mesh_ipv6: state.hypervisor.mesh_ipv6,
-<a href=#155 id=155 data-nosnippet>155</a>        runtime,
-<a href=#156 id=156 data-nosnippet>156</a>        cycle,
-<a href=#157 id=157 data-nosnippet>157</a>    };
-<a href=#158 id=158 data-nosnippet>158</a>
-<a href=#159 id=159 data-nosnippet>159</a>    <span class="comment">// Ensure replication is configured correctly.
-<a href=#160 id=160 data-nosnippet>160</a>    // On every cycle, check if max-replicas matches the number of active stores (capped at 3).
-<a href=#161 id=161 data-nosnippet>161</a>    </span><span class="kw">let </span>pd_url = <span class="macro">format!</span>(
-<a href=#162 id=162 data-nosnippet>162</a>        <span class="string">"http://[{}]:{}"</span>,
-<a href=#163 id=163 data-nosnippet>163</a>        state.hypervisor.mesh_ipv6,
-<a href=#164 id=164 data-nosnippet>164</a>        controlplane::PD_CLIENT_PORT
-<a href=#165 id=165 data-nosnippet>165</a>    );
-<a href=#166 id=166 data-nosnippet>166</a>    <span class="kw">let </span>active_stores = controlplane::service::count_active_stores(<span class="kw-2">&amp;</span>pd_url);
-<a href=#167 id=167 data-nosnippet>167</a>    <span class="kw">if </span>active_stores &gt;= <span class="number">3 </span>{
-<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">let _ </span>= controlplane::service::adjust_max_replicas(<span class="kw-2">&amp;</span>pd_url, <span class="number">3</span>);
-<a href=#169 id=169 data-nosnippet>169</a>    }
-<a href=#170 id=170 data-nosnippet>170</a>
-<a href=#171 id=171 data-nosnippet>171</a>    <span class="macro">tracing::debug!</span>(
-<a href=#172 id=172 data-nosnippet>172</a>        cycle,
-<a href=#173 id=173 data-nosnippet>173</a>        node = ctx.node_name.as_str(),
-<a href=#174 id=174 data-nosnippet>174</a>        <span class="string">"reconcile cycle start"
-<a href=#175 id=175 data-nosnippet>175</a>    </span>);
-<a href=#176 id=176 data-nosnippet>176</a>
-<a href=#177 id=177 data-nosnippet>177</a>    <span class="kw">let </span>results = reconciler::run_all(<span class="kw-2">&amp;</span>ctx).<span class="kw">await</span>;
-<a href=#178 id=178 data-nosnippet>178</a>
-<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">let </span>total_actions: usize = results
-<a href=#180 id=180 data-nosnippet>180</a>        .iter()
-<a href=#181 id=181 data-nosnippet>181</a>        .map(|r| r.created + r.deleted + r.updated)
-<a href=#182 id=182 data-nosnippet>182</a>        .sum();
-<a href=#183 id=183 data-nosnippet>183</a>    <span class="kw">let </span>total_failures: usize = results.iter().map(|r| r.failed).sum();
-<a href=#184 id=184 data-nosnippet>184</a>
-<a href=#185 id=185 data-nosnippet>185</a>    <span class="kw">if </span>total_actions &gt; <span class="number">0 </span>|| total_failures &gt; <span class="number">0 </span>{
-<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">tracing::info!</span>(
-<a href=#187 id=187 data-nosnippet>187</a>            cycle,
-<a href=#188 id=188 data-nosnippet>188</a>            actions = total_actions,
-<a href=#189 id=189 data-nosnippet>189</a>            failures = total_failures,
-<a href=#190 id=190 data-nosnippet>190</a>            <span class="string">"reconcile cycle done"
-<a href=#191 id=191 data-nosnippet>191</a>        </span>);
-<a href=#192 id=192 data-nosnippet>192</a>    } <span class="kw">else </span>{
-<a href=#193 id=193 data-nosnippet>193</a>        <span class="macro">tracing::debug!</span>(cycle, <span class="string">"reconcile cycle done — in sync"</span>);
-<a href=#194 id=194 data-nosnippet>194</a>    }
-<a href=#195 id=195 data-nosnippet>195</a>
-<a href=#196 id=196 data-nosnippet>196</a>    <span class="prelude-val">Ok</span>(results)
-<a href=#197 id=197 data-nosnippet>197</a>}
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="comment">// P2.14 (sifrah/nauka#218): forge holds the inner EmbeddedDb
+<a href=#151 id=151 data-nosnippet>151</a>        // directly; the ClusterDb wrapper only survives for the PD
+<a href=#152 id=152 data-nosnippet>152</a>        // health checks below, which still need TiKV-side helpers.
+<a href=#153 id=153 data-nosnippet>153</a>        </span>db: db.embedded().clone(),
+<a href=#154 id=154 data-nosnippet>154</a>        hypervisor_id: state.hypervisor.id.as_str().to_string(),
+<a href=#155 id=155 data-nosnippet>155</a>        node_ids,
+<a href=#156 id=156 data-nosnippet>156</a>        node_name: state.hypervisor.name.clone(),
+<a href=#157 id=157 data-nosnippet>157</a>        mesh_ipv6: state.hypervisor.mesh_ipv6,
+<a href=#158 id=158 data-nosnippet>158</a>        runtime,
+<a href=#159 id=159 data-nosnippet>159</a>        cycle,
+<a href=#160 id=160 data-nosnippet>160</a>    };
+<a href=#161 id=161 data-nosnippet>161</a>
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="comment">// Ensure replication is configured correctly.
+<a href=#163 id=163 data-nosnippet>163</a>    // On every cycle, check if max-replicas matches the number of active stores (capped at 3).
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="kw">let </span>pd_url = <span class="macro">format!</span>(
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="string">"http://[{}]:{}"</span>,
+<a href=#166 id=166 data-nosnippet>166</a>        state.hypervisor.mesh_ipv6,
+<a href=#167 id=167 data-nosnippet>167</a>        controlplane::PD_CLIENT_PORT
+<a href=#168 id=168 data-nosnippet>168</a>    );
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="kw">let </span>active_stores = controlplane::service::count_active_stores(<span class="kw-2">&amp;</span>pd_url);
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="kw">if </span>active_stores &gt;= <span class="number">3 </span>{
+<a href=#171 id=171 data-nosnippet>171</a>        <span class="kw">let _ </span>= controlplane::service::adjust_max_replicas(<span class="kw-2">&amp;</span>pd_url, <span class="number">3</span>);
+<a href=#172 id=172 data-nosnippet>172</a>    }
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a>    <span class="macro">tracing::debug!</span>(
+<a href=#175 id=175 data-nosnippet>175</a>        cycle,
+<a href=#176 id=176 data-nosnippet>176</a>        node = ctx.node_name.as_str(),
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="string">"reconcile cycle start"
+<a href=#178 id=178 data-nosnippet>178</a>    </span>);
+<a href=#179 id=179 data-nosnippet>179</a>
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="kw">let </span>results = reconciler::run_all(<span class="kw-2">&amp;</span>ctx).<span class="kw">await</span>;
+<a href=#181 id=181 data-nosnippet>181</a>
+<a href=#182 id=182 data-nosnippet>182</a>    <span class="kw">let </span>total_actions: usize = results
+<a href=#183 id=183 data-nosnippet>183</a>        .iter()
+<a href=#184 id=184 data-nosnippet>184</a>        .map(|r| r.created + r.deleted + r.updated)
+<a href=#185 id=185 data-nosnippet>185</a>        .sum();
+<a href=#186 id=186 data-nosnippet>186</a>    <span class="kw">let </span>total_failures: usize = results.iter().map(|r| r.failed).sum();
+<a href=#187 id=187 data-nosnippet>187</a>
+<a href=#188 id=188 data-nosnippet>188</a>    <span class="kw">if </span>total_actions &gt; <span class="number">0 </span>|| total_failures &gt; <span class="number">0 </span>{
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="macro">tracing::info!</span>(
+<a href=#190 id=190 data-nosnippet>190</a>            cycle,
+<a href=#191 id=191 data-nosnippet>191</a>            actions = total_actions,
+<a href=#192 id=192 data-nosnippet>192</a>            failures = total_failures,
+<a href=#193 id=193 data-nosnippet>193</a>            <span class="string">"reconcile cycle done"
+<a href=#194 id=194 data-nosnippet>194</a>        </span>);
+<a href=#195 id=195 data-nosnippet>195</a>    } <span class="kw">else </span>{
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="macro">tracing::debug!</span>(cycle, <span class="string">"reconcile cycle done — in sync"</span>);
+<a href=#197 id=197 data-nosnippet>197</a>    }
+<a href=#198 id=198 data-nosnippet>198</a>
+<a href=#199 id=199 data-nosnippet>199</a>    <span class="prelude-val">Ok</span>(results)
+<a href=#200 id=200 data-nosnippet>200</a>}
 </code></pre></div></section></main></body></html>

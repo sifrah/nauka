@@ -6,10 +6,10 @@ endpoints from local fabric state.</p>
 connection. Reads the local hypervisor state to discover PD
 endpoints on the mesh, then hands them to
 <a href="store/struct.ClusterDb.html#method.connect_from_addresses" title="associated function nauka_hypervisor::controlplane::store::ClusterDb::connect_from_addresses"><code>ClusterDb::connect_from_addresses</code></a>, which in turn drives
-<a href="../../nauka_state/embedded/struct.EmbeddedDb.html#method.open_tikv" title="associated function nauka_state::embedded::EmbeddedDb::open_tikv"><code>nauka_state::EmbeddedDb::open_tikv</code></a>.</p>
+[<code>nauka_state::EmbeddedDb::open_tikv</code>].</p>
 <p>P2.3 (sifrah/nauka#207) replaced the per-call <code>format!</code> ladder
 with the shared <a href="../fabric/state/struct.FabricState.html#method.pd_endpoints" title="method nauka_hypervisor::fabric::state::FabricState::pd_endpoints"><code>crate::fabric::state::FabricState::pd_endpoints</code></a>
-and <a href="../../nauka_state/embedded/fn.pd_endpoints_for.html" title="fn nauka_state::embedded::pd_endpoints_for"><code>nauka_state::pd_endpoints_for</code></a> helpers so every Phase-2
+and [<code>nauka_state::pd_endpoints_for</code>] helpers so every Phase-2
 call site lands on the same PD list shape. P2.8 (sifrah/nauka#212)
 then routed the final <code>ClusterDb::connect</code> through <code>EmbeddedDb</code>
 so bootstrap (SurrealKV) and cluster (TiKv) state both go through
