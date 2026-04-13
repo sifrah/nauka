@@ -446,9 +446,13 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         is_default: true,
     };
 
-    // Init: 2 (fabric) + 4 (control plane) + 2 (storage) + 3 (compute+forge) = 11
+    // Init: 2 (fabric) + 5 (control plane) + 2 (storage) + 3 (compute+forge) = 12
+    //
+    // The control plane consumed 4 steps through P2.6 and gained a fifth
+    // step — "Applying cluster schemas" — in P2.7 (sifrah/nauka#211) per
+    // ADR 0004 (sifrah/nauka#210).
     let step_count = if network_mode == fabric::NetworkMode::WireGuard {
-        11
+        12
     } else {
         5 // fabric + compute + forge
     };
@@ -491,7 +495,7 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     // Bootstrap control plane (TiKV) on the mesh — only in WireGuard mode
     if network_mode == fabric::NetworkMode::WireGuard {
         if let Err(e) =
-            controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps)
+            controlplane::ops::bootstrap(&node_name, &result.hypervisor.mesh_ipv6, &steps).await
         {
             steps.finish_err(&format!("Control plane failed: {e}"));
             rollback(&db, network_mode, fabric_initialized, false, false).await;
