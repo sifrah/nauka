@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_SCHEMA"],"struct":["EmbeddedDb"]};
+window.SIDEBAR_ITEMS = {"constant":["BOOTSTRAP_SCHEMA"],"fn":["wait_for_surrealkv_lock_release"],"struct":["EmbeddedDb"]};

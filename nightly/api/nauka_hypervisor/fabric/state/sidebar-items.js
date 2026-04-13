@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["STATE_KEY","STATE_TABLE"],"enum":["NodeState"],"fn":["default_max_pd_members"],"struct":["FabricState"]};
+window.SIDEBAR_ITEMS = {"constant":["FABRIC_RECORD_ID","FABRIC_TABLE","STATE_KEY","STATE_TABLE"],"enum":["NodeState"],"fn":["default_max_pd_members","ensure_fabric_table"],"struct":["FabricState"]};
