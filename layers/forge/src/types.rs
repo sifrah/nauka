@@ -3,12 +3,14 @@
 use std::net::Ipv6Addr;
 
 use nauka_compute::runtime::RuntimeMode;
-use nauka_hypervisor::controlplane::ClusterDb;
+use nauka_state::EmbeddedDb;
 
 /// Shared context for all reconcilers in a cycle.
 pub struct ReconcileContext {
-    /// Connection to TiKV (desired state).
-    pub db: ClusterDb,
+    /// Connection to TiKV (desired state), as the native SurrealDB SDK
+    /// handle. P2.14 (sifrah/nauka#218) dropped the `ClusterDb` wrapper
+    /// from the forge layer — stores now take an `EmbeddedDb` directly.
+    pub db: EmbeddedDb,
     /// This node's hypervisor ID.
     pub hypervisor_id: String,
     /// All IDs this node is known by (hypervisor ID + node IDs from peers).
