@@ -46,7 +46,11 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = ProjectStore::new(nauka_hypervisor::controlplane::connect().await?);
+                // P2.10 (sifrah/nauka#214): ProjectStore now takes an
+                // EmbeddedDb directly; reach the cluster handle via
+                // the wrapper's `.embedded()` accessor.
+                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
+                let store = ProjectStore::new(cluster_db.embedded().clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;
