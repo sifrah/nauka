@@ -6,14 +6,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-# Off by default. Enable to compile the P0.3 spike binary, which needs the
-# kv-tikv backend on top of kv-surrealkv. The production build path (and CI's
-# default `cargo build -p nauka-state`) intentionally does NOT enable this —
-# Phase 1 is SurrealKV-only; kv-tikv comes back as a permanent feature in
-# Phase 2 (P2.1, sifrah/nauka#205).
-spike-tikv = ["surrealdb/kv-tikv"]
-
 [dependencies]
 nauka-core = { path = "../core" }
 serde.workspace = true
@@ -21,19 +13,19 @@ serde_json.workspace = true
 thiserror.workspace = true
 tikv-client = "0.4"
 tokio.workspace = true
-# Force vendored OpenSSL into the build graph: tikv-client (and, when the
-# `spike-tikv` feature is on, surrealdb-tikv-client) both pull openssl-sys via
-# prometheus → reqwest → native-tls. Without a vendored OpenSSL the musl
+# Force vendored OpenSSL into the build graph: tikv-client and
+# surrealdb-tikv-client (pulled in by `surrealdb/kv-tikv`) both pull openssl-sys
+# via prometheus → reqwest → native-tls. Without a vendored OpenSSL the musl
 # cross-compile cannot find system openssl. The workspace declaration already
 # enables the `vendored` feature. This stays until P2.16 (sifrah/nauka#220)
 # removes the legacy tikv-client.
 openssl.workspace = true
-# P1.1: surrealdb SDK with kv-surrealkv only. The kv-tikv backend is gated
-# behind the local `spike-tikv` feature so that production builds (the CI
-# default) do not pull surrealdb-tikv-client transitively. P2.1
-# (sifrah/nauka#205) flips kv-tikv on permanently when the cluster-side
-# integration lands.
-surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surrealkv"] }
+# P2.1 (sifrah/nauka#205): surrealdb SDK with both kv-surrealkv and kv-tikv
+# permanently enabled. kv-surrealkv is the embedded backend used by every
+# hypervisor; kv-tikv is the distributed backend used when the production
+# binary talks to a shared TiKV cluster via the SurrealDB SDK. The former
+# P1-era `spike-tikv` gate is gone — kv-tikv is now always on.
+surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surrealkv", "kv-tikv"] }
 
 [[bin]]
 name = "p0-1-spike"
@@ -42,7 +34,6 @@ path = "src/bin/p0_1_spike.rs"
 [[bin]]
 name = "p0-3-spike"
 path = "src/bin/p0_3_spike.rs"
-required-features = ["spike-tikv"]
 
 [[bin]]
 name = "p1-9-integration"
