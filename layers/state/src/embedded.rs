@@ -6,11 +6,10 @@
 //! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, and
 //! an explicit `shutdown` step.
 //!
-//! This is the long-term replacement for [`crate::LocalDb`] (the
-//! JSON-file-backed bootstrap store). The migration of every existing
-//! `LocalDb` call site is tracked by P1.10 → P1.12 (sifrah/nauka#200,
-//! sifrah/nauka#201, sifrah/nauka#202). Until those land, both backends
-//! coexist.
+//! This is the production backend for Nauka's bootstrap state. The legacy
+//! JSON-file store shipped alongside it during P1.2–P1.10; P1.11
+//! (sifrah/nauka#201) migrated every caller to `EmbeddedDb`, and P1.12
+//! (sifrah/nauka#202) will delete the legacy code outright.
 //!
 //! P1.2 (sifrah/nauka#192) introduces only the wrapper struct and its
 //! lifecycle. The companion deliverables — error mapping (P1.3,
@@ -129,8 +128,39 @@ impl EmbeddedDb {
             }
         }
 
+        // Acquire the SurrealKV datastore with retry-on-lock-contention.
+        //
+        // # Why this exists
+        //
+        // SurrealKV takes an OS-level exclusive flock on `<path>/LOCK`
+        // whenever a `Datastore` is open. Only one process can hold the
+        // flock at a time. In Nauka, that matters because the fabric
+        // layer has concurrent consumers of the same `bootstrap.skv`:
+        //
+        // - Ad-hoc CLI invocations (`nauka hypervisor status`, etc.)
+        // - The `nauka-forge` daemon running reconcile cycles
+        // - The `nauka-announce` listener
+        //
+        // Each of them opens the DB for a short span (read state, do
+        // work, `shutdown().await`) but their windows overlap, so an
+        // open that happens to collide with another process's brief
+        // write window would fail with
+        // `Other("Database at ... LOCK is already locked by another process")`.
+        //
+        // Before P1.11 (sifrah/nauka#201), this was masked because every
+        // CLI caller used the JSON-file `LocalDb` backend, which doesn't
+        // use an exclusive flock. P1.11 migrates every caller to
+        // `EmbeddedDb`, so the contention becomes real.
+        //
+        // The fix: retry the open on "already locked" with exponential
+        // backoff up to a 5-second deadline, matching the pattern used
+        // by `shutdown` in `wait_for_surrealkv_lock_release`. 5 s is the
+        // same "fast timeout" budget used for health checks — long
+        // enough to ride out a forge reconcile cycle that briefly holds
+        // the lock, short enough that a stuck holder surfaces as a
+        // clear error instead of hanging forever.
         let path_str = path.to_string_lossy().into_owned();
-        let inner = Surreal::new::<SurrealKv>(path_str.as_str()).await?;
+        let inner = open_datastore_with_retry(&path_str).await?;
 
         inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).await?;
 
@@ -214,6 +244,55 @@ impl EmbeddedDb {
         drop(self.inner);
 
         wait_for_surrealkv_lock_release(&path).await
+    }
+}
+
+/// Open the SurrealKV datastore at `path_str`, retrying on flock
+/// contention until a 5-second deadline elapses.
+///
+/// See the rationale block in [`EmbeddedDb::open`] for the full context.
+/// The short version: SurrealKV holds a process-exclusive flock while a
+/// datastore is open, and Nauka's CLI / forge daemon / announce listener
+/// all touch the same `bootstrap.skv`, so brief overlaps are normal. We
+/// retry the open rather than surface a hard error for every such
+/// overlap.
+async fn open_datastore_with_retry(path_str: &str) -> Result<Surreal<Db>> {
+    /// Upper bound on the total wait. Same "fast timeout" budget as
+    /// `shutdown` (see `wait_for_surrealkv_lock_release`). Generous
+    /// relative to the real fast-path cost of a forge reconcile cycle
+    /// (~10–100 ms of flock-held time) but short enough that a truly
+    /// stuck holder surfaces as a clear error instead of a hang.
+    const MAX_WAIT: Duration = Duration::from_secs(5);
+    /// First retry after an initial miss.
+    const MIN_BACKOFF: Duration = Duration::from_millis(5);
+    /// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
+    const MAX_BACKOFF: Duration = Duration::from_millis(50);
+
+    let deadline = Instant::now() + MAX_WAIT;
+    let mut backoff = MIN_BACKOFF;
+
+    loop {
+        match Surreal::new::<SurrealKv>(path_str).await {
+            Ok(db) => return Ok(db),
+            Err(err) => {
+                // SurrealKV surfaces flock contention as an "other"
+                // backend error with a message containing the literal
+                // path to `<datastore>/LOCK`. There's no structured
+                // variant we can match on, so fall back to a substring
+                // check. If the message shape changes in a future
+                // surrealkv release the test
+                // `open_retries_on_flock_contention` will flag it.
+                let msg = err.to_string();
+                let is_lock_contention = msg.contains("already locked");
+
+                if !is_lock_contention || Instant::now() >= deadline {
+                    return Err(err.into());
+                }
+
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+        }
     }
 }
 
@@ -569,6 +648,47 @@ mod tests {
         }
 
         db.shutdown().await.expect("shutdown");
+    }
+
+    /// P1.11 — `EmbeddedDb::open` retries on SurrealKV flock contention.
+    ///
+    /// Opens the same datastore twice in sequence. The first open is
+    /// then shut down (which releases the SurrealKV flock), and we
+    /// kick off a parallel open *before* `shutdown` returns. The
+    /// parallel open must not fail immediately with "already locked":
+    /// the retry loop in `open_datastore_with_retry` should re-try
+    /// until the router task's `kvs.shutdown()` chain has released
+    /// the flock, then succeed.
+    ///
+    /// We deliberately DO NOT use `shutdown` on the second handle after
+    /// `drop(first)` — the shutdown's probe-lock would race the second
+    /// open's flock acquisition and make the test flaky. Only the
+    /// second handle is explicitly shut down at the end.
+    #[tokio::test]
+    async fn open_retries_on_flock_contention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contention.skv");
+
+        // First handle — held briefly, then dropped.
+        let db_a = EmbeddedDb::open(&path).await.expect("open #1");
+
+        // Spawn the second open before db_a is gone; it should spin in
+        // the retry loop until db_a's router releases the flock.
+        let path_clone = path.clone();
+        let joiner = tokio::spawn(async move {
+            EmbeddedDb::open(&path_clone)
+                .await
+                .expect("second open should succeed after retry")
+        });
+
+        // Let the second open spin on the retry loop a bit, then drop
+        // db_a (without calling `shutdown` to avoid racing the second
+        // open on the probe-lock — see the doc comment above).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(db_a);
+
+        let db_b = joiner.await.expect("join second open");
+        db_b.shutdown().await.expect("shutdown #2");
     }
 
     /// P1.5 — Error path: open at an invalid path returns `StateError`.

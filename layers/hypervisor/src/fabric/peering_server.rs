@@ -3,6 +3,7 @@
 //! Opens the DB per-request (no long-lived lock).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 use nauka_core::error::NaukaError;
-use nauka_state::LayerDb;
+use nauka_state::EmbeddedDb;
 
 /// Max PIN failures per IP before blocking.
 const MAX_PIN_FAILURES: u32 = 5;
@@ -62,13 +63,17 @@ use super::service;
 use super::state::FabricState;
 
 /// Start a peering listener. Opens the DB per-request to avoid holding the lock.
-pub async fn listen(
-    db_opener: impl Fn() -> Result<LayerDb, NaukaError>,
+pub async fn listen<F, Fut>(
+    db_opener: F,
     pin: &str,
     bind_addr: SocketAddr,
     timeout: Duration,
     max_joins: usize,
-) -> Result<usize, NaukaError> {
+) -> Result<usize, NaukaError>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
+{
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| NaukaError::internal(format!("failed to bind peering port: {e}")))?;
@@ -107,7 +112,7 @@ pub async fn listen(
 
                 tracing::info!(peer = %peer_addr, "incoming join request (TLS)");
 
-                let db = match db_opener() {
+                let db = match db_opener().await {
                     Ok(db) => db,
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to open DB for join");
@@ -123,7 +128,9 @@ pub async fn listen(
                             .record_success(&peer_addr.ip());
                         tracing::info!(peer = %peer_addr, name = %peer_name, "join accepted");
                         accepted += 1;
-                        drop(db);
+                        // Best-effort shutdown to release the SurrealKV flock
+                        // before the next accept opens a new handle.
+                        let _ = db.shutdown().await;
                         if max_joins > 0 && accepted >= max_joins {
                             break;
                         }
@@ -134,7 +141,7 @@ pub async fn listen(
                             .unwrap_or_else(|e| e.into_inner())
                             .record_failure(peer_addr.ip());
                         tracing::warn!(peer = %peer_addr, error = %e, "join rejected");
-                        drop(db);
+                        let _ = db.shutdown().await;
                     }
                 }
             }
@@ -154,7 +161,7 @@ pub async fn listen(
 /// Handle a single join request on a stream.
 async fn handle_join(
     stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-    db: &LayerDb,
+    db: &EmbeddedDb,
     expected_pin: &str,
     peer_addr: SocketAddr,
 ) -> Result<String, NaukaError> {
@@ -194,6 +201,7 @@ async fn handle_join(
     }
 
     let mut state = FabricState::load(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
         .ok_or_else(|| NaukaError::precondition("not initialized"))?;
 
@@ -283,6 +291,7 @@ async fn handle_join(
     // from state on the next `wg-quick up` / service restart.
     state
         .save(db)
+        .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
     // Update WireGuard config. If this fails, state is still correct and

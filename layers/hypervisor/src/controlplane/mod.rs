@@ -39,11 +39,10 @@ pub use store::ClusterDb;
 /// This is the standard way for any layer to get a ClusterDb connection.
 /// Reads the local hypervisor state to discover PD endpoints on the mesh.
 pub async fn connect() -> anyhow::Result<ClusterDb> {
-    let dir = nauka_core::process::nauka_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let db = nauka_state::LocalDb::open("hypervisor")?;
+    let db = nauka_state::EmbeddedDb::open_default().await?;
 
     let state = crate::fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -52,6 +51,9 @@ pub async fn connect() -> anyhow::Result<ClusterDb> {
                  \x20 nauka hypervisor init"
             )
         })?;
+    // Explicit shutdown so the SurrealKV flock is released before the caller
+    // issues its next `connect()` or local-state read.
+    db.shutdown().await?;
 
     let self_endpoint = format!("http://[{}]:{}", state.hypervisor.mesh_ipv6, PD_CLIENT_PORT,);
     let mut endpoints = vec![self_endpoint];

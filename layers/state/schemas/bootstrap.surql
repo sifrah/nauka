@@ -7,11 +7,11 @@
 -- that holds everything Nauka needs to read *before* the cluster TiKV is up:
 -- mesh identity, this node's hypervisor identity, peer list, WireGuard keys.
 --
--- It is the schema-driven replacement for the JSON store used by the legacy
--- LocalDb. P1.7 (sifrah/nauka#197) wires this file into EmbeddedDb::open
--- via include_str! so every node applies it idempotently at startup.
--- P1.10 (sifrah/nauka#200) is the issue that actually migrates FabricState
--- to read/write through these tables.
+-- It is the schema-driven replacement for the JSON store that Nauka
+-- shipped with during P1.2–P1.10. P1.7 (sifrah/nauka#197) wires this
+-- file into EmbeddedDb::open via include_str! so every node applies it
+-- idempotently at startup. P1.10 (sifrah/nauka#200) is the issue that
+-- actually migrates FabricState to read/write through these tables.
 --
 -- Idempotency: every DEFINE statement uses `IF NOT EXISTS` so re-running the
 -- whole script on an existing database is a no-op. SurrealDB SCHEMAFULL +

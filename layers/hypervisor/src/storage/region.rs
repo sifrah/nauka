@@ -4,6 +4,7 @@
 //! locally in the fabric state (future: encrypted in TiKV).
 
 use nauka_core::error::NaukaError;
+use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
 
 /// S3 storage configuration for a region.
@@ -58,27 +59,87 @@ impl RegionStorage {
 }
 
 /// Local registry of region storage configs.
-/// Persisted as JSON at ~/.nauka/regions.json.
+///
+/// Persisted in the SurrealKV-backed [`EmbeddedDb`] at
+/// `regions:current`. Like [`crate::fabric::state::FabricState`], the whole
+/// registry is stored as a single JSON blob rather than split row-per-region
+/// — the cost of a SurrealValue derive cascade isn't worth it for a
+/// collection that is only ever read/written as a whole.
+///
+/// The transitional SCHEMALESS `regions` table is created lazily on first
+/// use by [`ensure_regions_table`]. Phase 3 codegen (sifrah/nauka#225 ff)
+/// will replace this with a proper SCHEMAFULL per-region table in the
+/// bootstrap schema.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RegionRegistry {
     pub regions: Vec<RegionStorage>,
 }
 
-impl RegionRegistry {
-    const PATH: &'static str = "regions";
-    const KEY: &'static str = "config";
+/// Table name for the transitional JSON-blob region registry.
+const REGIONS_TABLE: &str = "regions";
+/// Record id that holds the whole registry.
+const REGIONS_RECORD_ID: &str = "current";
 
-    /// Load from local store.
-    pub fn load(db: &nauka_state::LocalDb) -> Result<Self, NaukaError> {
-        db.get(Self::PATH, Self::KEY)
-            .map(|opt| opt.unwrap_or_default())
-            .map_err(|e| NaukaError::internal(e.to_string()))
+/// Lazily create the SCHEMALESS `regions` table on first use.
+///
+/// Idempotent thanks to `IF NOT EXISTS`. Same rationale as the `fabric`
+/// table in `FabricState::save_async` — transitional artefact for P1.11
+/// that Phase 3 will replace with a SCHEMAFULL per-region table.
+async fn ensure_regions_table(db: &EmbeddedDb) -> Result<(), NaukaError> {
+    db.client()
+        .query("DEFINE TABLE IF NOT EXISTS regions SCHEMALESS")
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .check()
+        .map_err(|e| NaukaError::internal(e.to_string()))?;
+    Ok(())
+}
+
+impl RegionRegistry {
+    /// Load the registry from the SurrealKV-backed [`EmbeddedDb`]. Returns
+    /// an empty registry if no record exists yet.
+    pub async fn load(db: &EmbeddedDb) -> Result<Self, NaukaError> {
+        ensure_regions_table(db).await?;
+
+        let mut response = db
+            .client()
+            .query("SELECT * FROM type::record($tbl, $id)")
+            .bind(("tbl", REGIONS_TABLE))
+            .bind(("id", REGIONS_RECORD_ID))
+            .await
+            .map_err(|e| NaukaError::internal(e.to_string()))?;
+
+        let row: Option<serde_json::Value> = response
+            .take(0)
+            .map_err(|e| NaukaError::internal(e.to_string()))?;
+        let Some(row) = row else {
+            return Ok(Self::default());
+        };
+
+        let registry: RegionRegistry = serde_json::from_value(row)
+            .map_err(|e| NaukaError::internal(format!("deserialize RegionRegistry: {e}")))?;
+        Ok(registry)
     }
 
-    /// Save to local store.
-    pub fn save(&self, db: &nauka_state::LocalDb) -> Result<(), NaukaError> {
-        db.set(Self::PATH, Self::KEY, self)
-            .map_err(|e| NaukaError::internal(e.to_string()))
+    /// Persist the registry to the SurrealKV-backed [`EmbeddedDb`].
+    ///
+    /// Stored as a single record at `regions:current`, same JSON-bridge
+    /// pattern as `FabricState::save_async`.
+    pub async fn save(&self, db: &EmbeddedDb) -> Result<(), NaukaError> {
+        ensure_regions_table(db).await?;
+
+        let json = serde_json::to_value(self)
+            .map_err(|e| NaukaError::internal(format!("serialize RegionRegistry: {e}")))?;
+        db.client()
+            .query("UPSERT type::record($tbl, $id) CONTENT $data")
+            .bind(("tbl", REGIONS_TABLE))
+            .bind(("id", REGIONS_RECORD_ID))
+            .bind(("data", json))
+            .await
+            .map_err(|e| NaukaError::internal(e.to_string()))?
+            .check()
+            .map_err(|e| NaukaError::internal(e.to_string()))?;
+        Ok(())
     }
 
     /// Add or update a region.
@@ -186,18 +247,55 @@ mod tests {
         assert_eq!(reg.default_region().unwrap().region, "us");
     }
 
-    #[test]
-    fn registry_persistence() {
+    #[tokio::test]
+    async fn registry_persistence() {
         let dir = tempfile::tempdir().unwrap();
-        let db = nauka_state::LocalDb::open_at(&dir.path().join("test.json")).unwrap();
+        let db = EmbeddedDb::open(&dir.path().join("test.skv"))
+            .await
+            .unwrap();
 
         let mut reg = RegionRegistry::default();
         reg.upsert(make_region("eu"));
-        reg.save(&db).unwrap();
+        reg.save(&db).await.unwrap();
 
-        let loaded = RegionRegistry::load(&db).unwrap();
+        let loaded = RegionRegistry::load(&db).await.unwrap();
         assert_eq!(loaded.regions.len(), 1);
         assert_eq!(loaded.find("eu").unwrap().s3_bucket, "nauka-eu");
+
+        db.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_empty_on_fresh_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = EmbeddedDb::open(&dir.path().join("empty.skv"))
+            .await
+            .unwrap();
+
+        let loaded = RegionRegistry::load(&db).await.unwrap();
+        assert!(loaded.regions.is_empty());
+
+        db.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_save_overwrites_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = EmbeddedDb::open(&dir.path().join("overwrite.skv"))
+            .await
+            .unwrap();
+
+        let mut reg = RegionRegistry::default();
+        reg.upsert(make_region("eu"));
+        reg.save(&db).await.unwrap();
+
+        reg.upsert(make_region("us"));
+        reg.save(&db).await.unwrap();
+
+        let loaded = RegionRegistry::load(&db).await.unwrap();
+        assert_eq!(loaded.regions.len(), 2);
+
+        db.shutdown().await.unwrap();
     }
 
     #[test]

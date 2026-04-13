@@ -1,7 +1,7 @@
 //! Distributed state backed by TiKV.
 //!
-//! Provides the same API patterns as `LayerDb` (redb) but backed by TiKV
-//! for distributed, replicated state across the mesh.
+//! Provides a key/value API over TiKV for distributed, replicated state
+//! across the mesh.
 //!
 //! Keys are prefixed by namespace: `{namespace}/{key}` to partition data.
 //!

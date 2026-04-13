@@ -80,7 +80,8 @@ pub fn handler() -> HandlerFn {
                         // Resolve hypervisor with an IPv6 block
                         let (hv_id, ipv6_block) = resolve_hypervisor(
                             req.fields.get("hypervisor").map(|s| s.as_str()),
-                        )?;
+                        )
+                        .await?;
 
                         let natgw = store
                             .create(&name, &vpc, &org, &hv_id, &ipv6_block)
@@ -144,16 +145,17 @@ pub fn registration() -> ResourceRegistration {
 ///
 /// Reads the local fabric state to find a hypervisor with an ipv6_block.
 /// If `preferred` is provided, validates it matches the local node.
-fn resolve_hypervisor(preferred: Option<&str>) -> anyhow::Result<(String, String)> {
-    let dir = nauka_core::process::nauka_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let db = nauka_state::LayerDb::open("hypervisor")
+async fn resolve_hypervisor(preferred: Option<&str>) -> anyhow::Result<(String, String)> {
+    let db = nauka_state::EmbeddedDb::open_default()
+        .await
         .map_err(|e| anyhow::anyhow!("cannot open hypervisor state: {e}"))?;
     let state = nauka_hypervisor::fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| {
             anyhow::anyhow!("hypervisor not initialized. Run 'nauka hypervisor init' first.")
         })?;
+    let _ = db.shutdown().await;
 
     let hv = &state.hypervisor;
 

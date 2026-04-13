@@ -3,30 +3,15 @@
 //! The fabric state is the complete snapshot of a node's mesh membership:
 //! mesh identity, node identity, secret, and list of peers.
 //!
-//! # Storage backends
-//!
-//! There are two persistence APIs on `FabricState`, present at the same
-//! time during the Phase 1 migration:
-//!
-//! - **Legacy sync** (`load`, `save`, `delete`, `exists`) — uses the
-//!   JSON-file `LayerDb` on disk. Still wired up everywhere; will be
-//!   migrated away from in P1.11 (sifrah/nauka#201) and removed in
-//!   P1.12 (sifrah/nauka#202).
-//! - **New async** (`load_async`, `save_async`, `delete_async`,
-//!   `exists_async`) — uses the SurrealKV-backed [`EmbeddedDb`]. This
-//!   is the production path going forward, introduced by P1.10
-//!   (sifrah/nauka#200).
-//!
-//! Both APIs target the same logical record (`fabric:state`) so they
-//! cannot accidentally diverge in meaning, but they store to different
-//! files (`~/.nauka/{layer}.json` vs `~/.nauka/bootstrap.skv`). They are
-//! NOT kept in sync — once a caller migrates from the sync API to the
-//! async API, the state on disk moves with it. Mixing the two APIs in
-//! the same node is unsupported.
+//! Persisted in the SurrealKV-backed [`EmbeddedDb`] (P1.10, sifrah/nauka#200)
+//! as a single JSON blob at `fabric:state`. Read/written via the async
+//! `save`/`load`/`delete`/`exists` API. P1.11 (sifrah/nauka#201) removed
+//! the legacy sync JSON-file API; every caller now goes through
+//! [`EmbeddedDb`].
 
 use std::fmt;
 
-use nauka_state::{EmbeddedDb, LayerDb};
+use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
 
 use super::backend::NetworkMode;
@@ -80,10 +65,7 @@ fn default_max_pd_members() -> usize {
     3
 }
 
-const STATE_TABLE: &str = "fabric";
-const STATE_KEY: &str = "state";
-
-/// Wrapper used for the SurrealDB-side serialization.
+/// SurrealDB table + record id for the single fabric-state blob.
 ///
 /// FabricState contains nested types (Ipv6Addr, custom typed IDs, enums)
 /// that don't have native `surrealdb::types::SurrealValue` impls. Rather
@@ -95,67 +77,22 @@ const STATE_KEY: &str = "state";
 /// that handles arbitrary JSON, so anything FabricState can already
 /// serde-serialize round-trips through it for free.
 ///
-/// This wrapper is intentionally a thin row containing exactly one
-/// field, `data`, holding the JSON encoding. P3 codegen
-/// (sifrah/nauka#225 ff) will replace this with a SCHEMAFULL split of
-/// FabricState across the proper `mesh` / `hypervisor` / `peer` /
-/// `wg_key` tables defined in `bootstrap.surql`. Until then, the
-/// embedded path is just "store the JSON blob in `fabric:state`".
+/// P3 codegen (sifrah/nauka#225 ff) will replace this single-blob storage
+/// with a SCHEMAFULL split of FabricState across the proper
+/// `mesh` / `hypervisor` / `peer` / `wg_key` tables defined in
+/// `bootstrap.surql`. Until then the embedded path is just "store the
+/// JSON blob in `fabric:state`".
 const FABRIC_TABLE: &str = "fabric";
 const FABRIC_RECORD_ID: &str = "state";
 
 impl FabricState {
-    // ─── Legacy sync API (LayerDb / JSON file) ──────────────────────
-    //
-    // To be migrated away from by P1.11 (sifrah/nauka#201) and removed
-    // by P1.12 (sifrah/nauka#202). Kept here so existing call sites
-    // continue to compile during Phase 1.
-
-    /// Save state to the JSON-file `LayerDb`.
-    pub fn save(&self, db: &LayerDb) -> Result<(), nauka_state::StateError> {
-        db.set(STATE_TABLE, STATE_KEY, self)
-    }
-
-    /// Load state from the JSON-file `LayerDb`. Returns `None` if no state
-    /// exists.
-    pub fn load(db: &LayerDb) -> Result<Option<Self>, nauka_state::StateError> {
-        db.get(STATE_TABLE, STATE_KEY)
-    }
-
-    /// Delete state from the JSON-file `LayerDb` (used by `leave`).
-    pub fn delete(db: &LayerDb) -> Result<(), nauka_state::StateError> {
-        db.delete(STATE_TABLE, STATE_KEY)?;
-        Ok(())
-    }
-
-    /// Check if fabric state exists in the JSON-file `LayerDb`.
-    pub fn exists(db: &LayerDb) -> Result<bool, nauka_state::StateError> {
-        db.exists(STATE_TABLE, STATE_KEY)
-    }
-
-    // ─── New async API (EmbeddedDb / SurrealKV) ─────────────────────
-    //
-    // P1.10 (sifrah/nauka#200) — these are the production-bound methods.
-
     /// Save state to the SurrealKV-backed [`EmbeddedDb`].
     ///
     /// The full `FabricState` is stored as a single record at
-    /// `fabric:state`. Internally, the struct is converted via
-    /// `serde_json::Value` into a SurrealDB value (avoiding a wide
-    /// `SurrealValue` derive cascade), then written via SurrealQL
-    /// `UPSERT fabric:state CONTENT $data` so the first save creates
-    /// the row and subsequent saves replace it in place.
-    ///
-    /// The first save also lazily creates the SCHEMALESS `fabric`
-    /// table via `DEFINE TABLE IF NOT EXISTS`. This is done inline
-    /// here instead of in `bootstrap.surql` because the table is a
-    /// transitional artefact that only the FabricState async path
-    /// uses — it should not appear in the bootstrap schema that
-    /// every `EmbeddedDb::open` runs (P1.7, sifrah/nauka#197).
-    /// P3 codegen (sifrah/nauka#225 ff) will eventually replace this
-    /// JSON-blob storage with a proper SCHEMAFULL split across
-    /// `mesh` / `hypervisor` / `peer` / `wg_key`.
-    pub async fn save_async(&self, db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
+    /// `fabric:state`. Written via SurrealQL `UPSERT fabric:state CONTENT
+    /// $data` so the first save creates the row and subsequent saves
+    /// replace it in place.
+    pub async fn save(&self, db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
         ensure_fabric_table(db).await?;
 
         let json = serde_json::to_value(self)
@@ -173,7 +110,7 @@ impl FabricState {
 
     /// Load state from the SurrealKV-backed [`EmbeddedDb`]. Returns `None`
     /// if no state exists.
-    pub async fn load_async(db: &EmbeddedDb) -> Result<Option<Self>, nauka_state::StateError> {
+    pub async fn load(db: &EmbeddedDb) -> Result<Option<Self>, nauka_state::StateError> {
         ensure_fabric_table(db).await?;
 
         let mut response = db
@@ -184,7 +121,7 @@ impl FabricState {
             .await?;
 
         // The result is `Option<serde_json::Value>` because we round-trip
-        // through JSON (see the wrapper-rationale comment above). The
+        // through JSON (see the FABRIC_TABLE rationale comment above).
         // FabricState fields live at the top level of the row alongside
         // the SurrealDB-auto-added `id` field. serde will ignore the
         // unknown `id` field when deserialising into FabricState (the
@@ -198,7 +135,7 @@ impl FabricState {
     }
 
     /// Delete state from the SurrealKV-backed [`EmbeddedDb`] (used by `leave`).
-    pub async fn delete_async(db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
+    pub async fn delete(db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
         ensure_fabric_table(db).await?;
 
         let result = db
@@ -213,22 +150,22 @@ impl FabricState {
 
     /// Check whether fabric state exists in the SurrealKV-backed
     /// [`EmbeddedDb`].
-    pub async fn exists_async(db: &EmbeddedDb) -> Result<bool, nauka_state::StateError> {
-        Ok(Self::load_async(db).await?.is_some())
+    pub async fn exists(db: &EmbeddedDb) -> Result<bool, nauka_state::StateError> {
+        Ok(Self::load(db).await?.is_some())
     }
 }
 
 /// Lazily create the SCHEMALESS `fabric` table on first use.
 ///
-/// Idempotent thanks to `IF NOT EXISTS`. Called by every async
-/// FabricState method that touches the table, so callers don't need
-/// to remember to do it themselves.
+/// Idempotent thanks to `IF NOT EXISTS`. Called by every FabricState
+/// method that touches the table, so callers don't need to remember to
+/// do it themselves.
 ///
 /// This lives outside `bootstrap.surql` because the table is a
-/// transitional artefact for P1.10 only — Phase 3 (sifrah/nauka#225 ff)
-/// replaces this with a SCHEMAFULL split across the existing
-/// `mesh` / `hypervisor` / `peer` / `wg_key` tables, at which point
-/// this function and the `fabric` table both go away.
+/// transitional artefact for P1 — Phase 3 (sifrah/nauka#225 ff) replaces
+/// this with a SCHEMAFULL split across the existing
+/// `mesh` / `hypervisor` / `peer` / `wg_key` tables, at which point this
+/// function and the `fabric` table both go away.
 async fn ensure_fabric_table(db: &EmbeddedDb) -> Result<(), nauka_state::StateError> {
     db.client()
         .query("DEFINE TABLE IF NOT EXISTS fabric SCHEMALESS")
@@ -242,10 +179,11 @@ mod tests {
     use super::super::mesh;
     use super::*;
 
-    fn temp_db() -> (tempfile::TempDir, LayerDb) {
+    async fn temp_db() -> (tempfile::TempDir, EmbeddedDb) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.redb");
-        let db = LayerDb::open_at(&path).unwrap();
+        let db = EmbeddedDb::open(&dir.path().join("test.skv"))
+            .await
+            .expect("open EmbeddedDb at temp path");
         (dir, db)
     }
 
@@ -275,43 +213,48 @@ mod tests {
         }
     }
 
-    #[test]
-    fn save_and_load() {
-        let (_d, db) = temp_db();
+    #[tokio::test]
+    async fn save_and_load() {
+        let (_d, db) = temp_db().await;
         let state = make_state();
 
-        state.save(&db).unwrap();
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        state.save(&db).await.unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
 
         assert_eq!(loaded.hypervisor.name, "node-1");
         assert_eq!(loaded.hypervisor.region, "eu");
+
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn load_empty() {
-        let (_d, db) = temp_db();
-        assert!(FabricState::load(&db).unwrap().is_none());
+    #[tokio::test]
+    async fn load_empty() {
+        let (_d, db) = temp_db().await;
+        assert!(FabricState::load(&db).await.unwrap().is_none());
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn exists_check() {
-        let (_d, db) = temp_db();
-        assert!(!FabricState::exists(&db).unwrap());
-        make_state().save(&db).unwrap();
-        assert!(FabricState::exists(&db).unwrap());
+    #[tokio::test]
+    async fn exists_check() {
+        let (_d, db) = temp_db().await;
+        assert!(!FabricState::exists(&db).await.unwrap());
+        make_state().save(&db).await.unwrap();
+        assert!(FabricState::exists(&db).await.unwrap());
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn delete_state() {
-        let (_d, db) = temp_db();
-        make_state().save(&db).unwrap();
-        FabricState::delete(&db).unwrap();
-        assert!(!FabricState::exists(&db).unwrap());
+    #[tokio::test]
+    async fn delete_state() {
+        let (_d, db) = temp_db().await;
+        make_state().save(&db).await.unwrap();
+        FabricState::delete(&db).await.unwrap();
+        assert!(!FabricState::exists(&db).await.unwrap());
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn save_with_peers() {
-        let (_d, db) = temp_db();
+    #[tokio::test]
+    async fn save_with_peers() {
+        let (_d, db) = temp_db().await;
         let mut state = make_state();
 
         state
@@ -327,22 +270,26 @@ mod tests {
             ))
             .unwrap();
 
-        state.save(&db).unwrap();
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        state.save(&db).await.unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.peers.len(), 1);
         assert_eq!(loaded.peers.find_by_name("node-2").unwrap().zone, "nbg1");
+
+        db.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn secret_persists() {
-        let (_d, db) = temp_db();
+    #[tokio::test]
+    async fn secret_persists() {
+        let (_d, db) = temp_db().await;
         let state = make_state();
         let secret = state.secret.clone();
 
-        state.save(&db).unwrap();
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        state.save(&db).await.unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.secret, secret);
         assert!(loaded.secret.starts_with("syf_sk_"));
+
+        db.shutdown().await.unwrap();
     }
 
     #[test]
@@ -357,39 +304,23 @@ mod tests {
         );
     }
 
-    // ── #5: Private key persists through save/load ──
-
-    #[test]
-    fn private_key_persists() {
-        let (_d, db) = temp_db();
+    #[tokio::test]
+    async fn private_key_persists() {
+        let (_d, db) = temp_db().await;
         let state = make_state();
         let original_key = state.hypervisor.wg_private_key.clone();
         assert!(!original_key.is_empty());
 
-        state.save(&db).unwrap();
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        state.save(&db).await.unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.hypervisor.wg_private_key, original_key);
+
+        db.shutdown().await.unwrap();
     }
 
-    // ── #4: Corruption handling ──
-
-    #[test]
-    fn corrupted_state_returns_error() {
-        let (_d, db) = temp_db();
-        // Write garbage JSON
-        db.set("fabric", "state", &"not valid json {{{").unwrap();
-        // Load should fail gracefully (returns the raw string, not FabricState)
-        let result = FabricState::load(&db);
-        // It will either succeed (deserializes as a string wrapper) or fail
-        // The important thing is it doesn't panic
-        let _ = result;
-    }
-
-    // ── #6: Update peer then persist ──
-
-    #[test]
-    fn update_peer_and_save() {
-        let (_d, db) = temp_db();
+    #[tokio::test]
+    async fn update_peer_and_save() {
+        let (_d, db) = temp_db().await;
         let mut state = make_state();
 
         state
@@ -407,143 +338,27 @@ mod tests {
 
         // Update peer handshake
         state.peers.peers[0].update_handshake(99999);
-        state.save(&db).unwrap();
+        state.save(&db).await.unwrap();
 
-        let loaded = FabricState::load(&db).unwrap().unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.peers.peers[0].last_handshake, 99999);
         assert!(loaded.peers.peers[0].is_active());
-    }
-
-    // ── Overwrite state ──
-
-    #[test]
-    fn save_overwrites_previous() {
-        let (_d, db) = temp_db();
-        let state = make_state();
-        state.save(&db).unwrap();
-
-        // Modify and save again
-        state.save(&db).unwrap();
-
-        let _loaded = FabricState::load(&db).unwrap().unwrap();
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // P1.10 — async EmbeddedDb (SurrealKV) API tests
-    // ────────────────────────────────────────────────────────────────
-
-    async fn temp_embedded() -> (tempfile::TempDir, EmbeddedDb) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = EmbeddedDb::open(&dir.path().join("test.skv"))
-            .await
-            .expect("open EmbeddedDb at temp path");
-        (dir, db)
-    }
-
-    #[tokio::test]
-    async fn async_save_and_load() {
-        let (_d, db) = temp_embedded().await;
-        let state = make_state();
-
-        state.save_async(&db).await.unwrap();
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
-
-        assert_eq!(loaded.hypervisor.name, "node-1");
-        assert_eq!(loaded.hypervisor.region, "eu");
 
         db.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn async_load_empty() {
-        let (_d, db) = temp_embedded().await;
-        assert!(FabricState::load_async(&db).await.unwrap().is_none());
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_exists_check() {
-        let (_d, db) = temp_embedded().await;
-        assert!(!FabricState::exists_async(&db).await.unwrap());
-        make_state().save_async(&db).await.unwrap();
-        assert!(FabricState::exists_async(&db).await.unwrap());
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_delete_state() {
-        let (_d, db) = temp_embedded().await;
-        make_state().save_async(&db).await.unwrap();
-        FabricState::delete_async(&db).await.unwrap();
-        assert!(!FabricState::exists_async(&db).await.unwrap());
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_save_with_peers() {
-        let (_d, db) = temp_embedded().await;
+    async fn save_overwrites_previous() {
+        let (_d, db) = temp_db().await;
         let mut state = make_state();
-        state
-            .peers
-            .add(super::super::peer::Peer::new(
-                "node-2".into(),
-                "eu".into(),
-                "nbg1".into(),
-                "key-n2".into(),
-                51820,
-                Some("1.2.3.4:51820".into()),
-                "fd01::2".parse().unwrap(),
-            ))
-            .unwrap();
-
-        state.save_async(&db).await.unwrap();
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
-        assert_eq!(loaded.peers.len(), 1);
-        assert_eq!(loaded.peers.find_by_name("node-2").unwrap().zone, "nbg1");
-
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_secret_persists() {
-        let (_d, db) = temp_embedded().await;
-        let state = make_state();
-        let secret = state.secret.clone();
-
-        state.save_async(&db).await.unwrap();
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
-        assert_eq!(loaded.secret, secret);
-        assert!(loaded.secret.starts_with("syf_sk_"));
-
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_private_key_persists() {
-        let (_d, db) = temp_embedded().await;
-        let state = make_state();
-        let original_key = state.hypervisor.wg_private_key.clone();
-        assert!(!original_key.is_empty());
-
-        state.save_async(&db).await.unwrap();
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
-        assert_eq!(loaded.hypervisor.wg_private_key, original_key);
-
-        db.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn async_save_overwrites_previous() {
-        let (_d, db) = temp_embedded().await;
-        let mut state = make_state();
-        state.save_async(&db).await.unwrap();
+        state.save(&db).await.unwrap();
 
         // Mutate then re-save: the row at fabric:state should reflect
         // the new value, not append a duplicate.
         state.max_pd_members = 5;
-        state.save_async(&db).await.unwrap();
+        state.save(&db).await.unwrap();
 
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.max_pd_members, 5);
 
         db.shutdown().await.unwrap();
@@ -554,7 +369,7 @@ mod tests {
     /// the P1.5 in-process persistence test proves for arbitrary
     /// records, but for FabricState specifically.
     #[tokio::test]
-    async fn async_persistence_across_reopen() {
+    async fn persistence_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("persist.skv");
 
@@ -562,13 +377,13 @@ mod tests {
             let db = EmbeddedDb::open(&path).await.unwrap();
             let state = make_state();
             let secret = state.secret.clone();
-            state.save_async(&db).await.unwrap();
+            state.save(&db).await.unwrap();
             db.shutdown().await.unwrap();
             secret
         };
 
         let db = EmbeddedDb::open(&path).await.unwrap();
-        let loaded = FabricState::load_async(&db).await.unwrap().unwrap();
+        let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.secret, original_secret);
         db.shutdown().await.unwrap();
     }

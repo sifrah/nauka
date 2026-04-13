@@ -1,6 +1,6 @@
 ---
 title: State Layer
-description: Two-tier persistence for Nauka — local JSON files for bootstrap state and TiKV for distributed cluster state.
+description: Two-tier persistence for Nauka — embedded SurrealDB for bootstrap state and TiKV for distributed cluster state.
 sidebar:
   order: 1
 ---
@@ -11,8 +11,8 @@ The state layer handles all data persistence in Nauka. It provides two storage b
 
 Nauka uses a two-tier approach to persistence because a distributed database is not available when a node first boots. The two tiers are:
 
-- **Local store (LocalDb)** — a JSON file on each node, used for bootstrap state that must exist before the cluster database is reachable.
-- **Cluster store (ClusterDb)** — a TiKV-backed distributed key-value store, replicated across the mesh via Raft. Used for all shared state once the cluster is running.
+- **Local store (`EmbeddedDb`)** — an embedded SurrealDB instance on each node, backed by the SurrealKV on-disk engine. Used for bootstrap state that must exist before the cluster database is reachable.
+- **Cluster store (`ClusterDb`)** — a TiKV-backed distributed key-value store, replicated across the mesh via Raft. Used for all shared state once the cluster is running.
 
 Platform engineers do not choose which tier to use at runtime. Each piece of state has a fixed home: bootstrap data lives locally, everything else lives in the cluster store.
 
@@ -22,25 +22,25 @@ The local store persists the minimum state a node needs to function independentl
 
 ### File location
 
-Each layer gets its own JSON file at:
+Each node stores its bootstrap state in a single SurrealKV datastore at:
 
 ```
-~/.nauka/{layer}.json
+~/.nauka/bootstrap.skv
 ```
 
-For example, the hypervisor layer stores its state at `~/.nauka/fabric.json`. If you need to inspect or back up a node's bootstrap state, this is where to look.
+(or `/var/lib/nauka/bootstrap.skv` in service mode, as resolved by `nauka_core::process::nauka_db_path`). If you need to inspect or back up a node's bootstrap state, this is where to look.
 
 ### File permissions
 
-The `~/.nauka/` directory is created with mode `0700` and each JSON file with mode `0600`. Only the owning user can read or write these files. This matters because the files contain WireGuard private keys and mesh credentials.
+The `~/.nauka/` directory is created with mode `0700`, and the SurrealKV datastore directory inherits a matching set of protective permissions. Only the owning user can read or write these files. This matters because they contain WireGuard private keys and mesh credentials.
 
-### Data format
+### Data model
 
-The JSON file is a flat key-value map. Keys are structured as `{table}/{key}`, where `table` groups related records and `key` identifies a specific entry. Values are JSON objects. The file is human-readable and can be inspected with any JSON tool.
+The bootstrap schema (`schemas/bootstrap.surql`) defines the SCHEMAFULL tables for mesh, hypervisor, peer, and WireGuard key records. `EmbeddedDb::open` applies this schema idempotently at every startup via `DEFINE ... IF NOT EXISTS`, so adding new fields or tables in later releases remains forward-compatible.
 
 ### Persistence guarantees
 
-Every write flushes the entire file to disk immediately. There is no write-ahead log or batching. This is acceptable because the local store holds a small amount of slowly-changing data (typically a few kilobytes). If the process crashes mid-write, the file may be truncated; on next open, a parse failure will surface as an error.
+SurrealKV is an LSM-backed engine with a write-ahead log. Writes are durable once the underlying commit returns. `EmbeddedDb::shutdown` polls the OS-level flock on the datastore so that by the time it returns, every committed write is durably on disk and the file can be safely reopened by the next caller.
 
 ### When the local store is used
 
@@ -61,6 +61,6 @@ The cluster store is covered in detail on the [Cluster Store](/layers/state/clus
 
 ## Separation of concerns
 
-A node's local JSON file and the cluster database never store the same data. The local store holds per-node identity; the cluster store holds shared resources. This means there is no synchronization or conflict resolution between the two tiers. Each tier is authoritative for its own data.
+A node's local SurrealKV datastore and the cluster database never store the same data. The local store holds per-node identity; the cluster store holds shared resources. This means there is no synchronization or conflict resolution between the two tiers. Each tier is authoritative for its own data.
 
-If you need to reset a single node without affecting the cluster, delete its `~/.nauka/*.json` files and re-join the mesh. If you need to reset the entire cluster's state, that is a TiKV operation and does not involve the local files.
+If you need to reset a single node without affecting the cluster, delete its `~/.nauka/bootstrap.skv/` directory and re-join the mesh. If you need to reset the entire cluster's state, that is a TiKV operation and does not involve the local datastore.

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nauka_hypervisor::controlplane;
 use nauka_hypervisor::controlplane::pd_client::PdClient;
 use nauka_hypervisor::fabric;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
 use crate::types::{ReconcileContext, ReconcileResult};
 
@@ -47,13 +47,20 @@ impl super::Reconciler for StoreReconciler {
         let mut result = ReconcileResult::new("store");
 
         // Load fabric state to get peer list
-        let local_db = LocalDb::open("hypervisor")?;
+        let local_db = EmbeddedDb::open_default().await?;
         let state = match fabric::state::FabricState::load(&local_db)
+            .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
         {
             Some(s) => s,
-            None => return Ok(result), // not initialized
+            None => {
+                let _ = local_db.shutdown().await;
+                return Ok(result); // not initialized
+            }
         };
+        // Release the flock early — the rest of the reconcile pass only
+        // talks to PD/TiKV and other HTTP endpoints.
+        let _ = local_db.shutdown().await;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

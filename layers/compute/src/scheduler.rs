@@ -4,7 +4,7 @@
 //! Future: capacity-based scoring, anti-affinity, taints/tolerations.
 
 use nauka_hypervisor::fabric;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
 /// A candidate hypervisor for VM placement.
 #[derive(Debug)]
@@ -20,14 +20,15 @@ struct Candidate {
 ///
 /// Reads the local fabric state to build the list of available nodes.
 /// Filters by region/zone if specified. Picks the first match.
-pub fn schedule(region: &str, zone: &str) -> anyhow::Result<String> {
-    let dir = nauka_core::process::nauka_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let db = LocalDb::open("hypervisor")?;
+pub async fn schedule(region: &str, zone: &str) -> anyhow::Result<String> {
+    let db = EmbeddedDb::open_default().await?;
 
     let state = fabric::state::FabricState::load(&db)
+        .await
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .ok_or_else(|| anyhow::anyhow!("cluster not initialized"))?;
+    // Release the flock before the caller does anything else on-disk.
+    db.shutdown().await?;
 
     // Build candidate list: self + peers
     // Use node NAME as the canonical identifier — it's the only ID
@@ -78,10 +79,10 @@ pub fn schedule(region: &str, zone: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn schedule_without_cluster_returns_error() {
+    #[tokio::test]
+    async fn schedule_without_cluster_returns_error() {
         // Without a cluster, schedule should fail gracefully
-        let result = super::schedule("default", "default");
+        let result = super::schedule("default", "default").await;
         assert!(result.is_err());
     }
 }

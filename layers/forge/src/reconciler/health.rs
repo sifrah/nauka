@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nauka_hypervisor::controlplane;
 use nauka_hypervisor::fabric;
-use nauka_state::LocalDb;
+use nauka_state::EmbeddedDb;
 
 /// Path where health status is written.
 const HEALTH_FILE: &str = "/var/lib/nauka/health.json";
@@ -51,13 +51,13 @@ pub struct HealthReport {
 /// Run health checks if this cycle is eligible (every other cycle = ~60s).
 ///
 /// Called after all reconcilers complete. Returns true if checks ran.
-pub fn run_if_due(cycle: u64, mesh_ipv6: &Ipv6Addr) -> bool {
+pub async fn run_if_due(cycle: u64, mesh_ipv6: &Ipv6Addr) -> bool {
     // Run every other cycle (60s at 30s intervals).
     if !cycle.is_multiple_of(2) {
         return false;
     }
 
-    let report = run_checks(mesh_ipv6);
+    let report = run_checks(mesh_ipv6).await;
     let status = report.status;
 
     // Update consecutive failure tracker
@@ -127,12 +127,12 @@ pub fn run_if_due(cycle: u64, mesh_ipv6: &Ipv6Addr) -> bool {
 }
 
 /// Run the core health checks and return a report.
-fn run_checks(mesh_ipv6: &Ipv6Addr) -> HealthReport {
+async fn run_checks(mesh_ipv6: &Ipv6Addr) -> HealthReport {
     let checks = vec![
         check_pd_health(mesh_ipv6),
         check_tikv_stores(mesh_ipv6),
         check_disk_space(),
-        check_fabric_up(),
+        check_fabric_up().await,
         check_pd_service(),
         check_tikv_service(),
     ];
@@ -280,13 +280,15 @@ fn check_disk_space() -> HealthCheck {
 }
 
 /// Check that the fabric network interface is up.
-fn check_fabric_up() -> HealthCheck {
-    let local_db = LocalDb::open("hypervisor").ok();
-    let state = local_db
-        .as_ref()
-        .and_then(|db| fabric::state::FabricState::load(db).ok().flatten());
-
-    let network_mode = state.as_ref().map(|s| s.network_mode).unwrap_or_default();
+async fn check_fabric_up() -> HealthCheck {
+    let network_mode = match EmbeddedDb::open_default().await {
+        Ok(db) => {
+            let state = fabric::state::FabricState::load(&db).await.ok().flatten();
+            let _ = db.shutdown().await;
+            state.map(|s| s.network_mode).unwrap_or_default()
+        }
+        Err(_) => fabric::NetworkMode::default(),
+    };
     let backend = fabric::backend::create_backend(network_mode);
 
     if backend.is_up() {
