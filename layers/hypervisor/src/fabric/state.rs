@@ -10,6 +10,7 @@
 //! [`EmbeddedDb`].
 
 use std::fmt;
+use std::net::Ipv6Addr;
 
 use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
@@ -152,6 +153,33 @@ impl FabricState {
     /// [`EmbeddedDb`].
     pub async fn exists(db: &EmbeddedDb) -> Result<bool, nauka_state::StateError> {
         Ok(Self::load(db).await?.is_some())
+    }
+
+    /// Mesh IPv6 addresses of every PD (Placement Driver) member the
+    /// local node knows about, in the order the SurrealDB TiKv engine
+    /// should seed its connect loop.
+    ///
+    /// The ordering is `self + peers`, so the local hypervisor is the
+    /// preferred first contact. Introduced in P2.3 (sifrah/nauka#207)
+    /// so [`nauka_state::EmbeddedDb::open_tikv_from_pd_addresses`] can
+    /// be called without having `nauka-state` depend on `nauka-hypervisor`
+    /// — the helper takes a flat `&[Ipv6Addr]` slice, `FabricState`
+    /// builds the slice here and hands it down.
+    ///
+    /// Note: this reflects whatever peers the local fabric state knows
+    /// about, which is not necessarily the full PD quorum. That's a
+    /// deliberate match for the pre-P2.3 behaviour of
+    /// `controlplane::connect()`, which also only looked at
+    /// `state.peers` — a PD member that is up but has not been
+    /// announced to this node yet cannot be used as a seed endpoint
+    /// anyway.
+    pub fn pd_endpoints(&self) -> Vec<Ipv6Addr> {
+        let mut endpoints = Vec::with_capacity(1 + self.peers.peers.len());
+        endpoints.push(self.hypervisor.mesh_ipv6);
+        for peer in &self.peers.peers {
+            endpoints.push(peer.mesh_ipv6);
+        }
+        endpoints
     }
 }
 
@@ -386,5 +414,65 @@ mod tests {
         let loaded = FabricState::load(&db).await.unwrap().unwrap();
         assert_eq!(loaded.secret, original_secret);
         db.shutdown().await.unwrap();
+    }
+
+    /// P2.3 (sifrah/nauka#207) — `pd_endpoints()` returns `self` first
+    /// followed by every peer in insertion order.
+    ///
+    /// This anchors the contract that
+    /// `EmbeddedDb::open_tikv_from_pd_addresses` relies on: the local
+    /// hypervisor is always the preferred seed, and peers come in
+    /// whatever order the fabric state has them. A change to this
+    /// ordering is a caller-visible behavioural change and must flip
+    /// this test.
+    #[test]
+    fn pd_endpoints_self_then_peers() {
+        let mut state = make_state();
+
+        let self_addr = state.hypervisor.mesh_ipv6;
+        let peer1_addr: std::net::Ipv6Addr = "fd01::a".parse().unwrap();
+        let peer2_addr: std::net::Ipv6Addr = "fd01::b".parse().unwrap();
+
+        state
+            .peers
+            .add(super::super::peer::Peer::new(
+                "peer-a".into(),
+                "eu".into(),
+                "fsn1".into(),
+                "key-a".into(),
+                51820,
+                None,
+                peer1_addr,
+            ))
+            .unwrap();
+        state
+            .peers
+            .add(super::super::peer::Peer::new(
+                "peer-b".into(),
+                "eu".into(),
+                "nbg1".into(),
+                "key-b".into(),
+                51820,
+                None,
+                peer2_addr,
+            ))
+            .unwrap();
+
+        let endpoints = state.pd_endpoints();
+        assert_eq!(endpoints.len(), 3, "self + 2 peers = 3 endpoints");
+        assert_eq!(endpoints[0], self_addr, "self must come first");
+        assert_eq!(endpoints[1], peer1_addr);
+        assert_eq!(endpoints[2], peer2_addr);
+    }
+
+    /// P2.3 — `pd_endpoints()` on a freshly-initialised state (no peers)
+    /// returns a single-element slice containing only the local
+    /// hypervisor.
+    #[test]
+    fn pd_endpoints_single_node() {
+        let state = make_state();
+        let endpoints = state.pd_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0], state.hypervisor.mesh_ipv6);
     }
 }

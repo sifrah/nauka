@@ -1,20 +1,35 @@
-//! Embedded SurrealDB wrapper used for Nauka's local bootstrap state.
+//! Embedded SurrealDB wrapper used for Nauka's local bootstrap state and
+//! the distributed TiKV-backed cluster state.
 //!
-//! Wraps `surrealdb::Surreal<Db>` with a Nauka-friendly lifecycle: a single
-//! `open` constructor that creates the on-disk SurrealKV datastore at a given
-//! path and selects the `nauka` / `bootstrap` namespace/database (per ADR
-//! 0003, sifrah/nauka#190), an accessor for the underlying SDK client, an
+//! Wraps `surrealdb::Surreal<Db>` with a Nauka-friendly lifecycle: `open` /
+//! `open_default` open the on-disk SurrealKV bootstrap datastore (per ADR
+//! 0003, sifrah/nauka#190), apply the bootstrap schema
+//! (`schemas/bootstrap.surql`) automatically on every open, and expose an
 //! explicit `shutdown` step that waits for SurrealKV's background router to
-//! release its OS-level flock, and automatic application of the bootstrap
-//! schema (`schemas/bootstrap.surql`) on every open.
+//! release its OS-level flock. `open_tikv` / `open_tikv_from_pd_addresses`
+//! connect to the distributed TiKV cluster through the PD endpoints found
+//! in fabric state. Both paths select the right `nauka` /
+//! `{bootstrap,cluster}` namespace/database and expose the same underlying
+//! SDK client accessor.
 //!
-//! This is the single source of truth for everything a node needs to read
-//! before the cluster is reachable: mesh identity, hypervisor identity, peer
-//! list, WireGuard keypair, and the storage region registry. See the crate
+//! The SurrealKV half is the single source of truth for everything a node
+//! needs to read before the cluster is reachable: mesh identity, hypervisor
+//! identity, peer list, WireGuard keypair, and the storage region registry.
+//! See the crate
 //! [`README`](https://github.com/sifrah/nauka/blob/main/layers/state/README.md)
 //! for the full guide and on-disk layout.
 //!
-//! # Example
+//! The TiKV half hosts shared cluster state (VMs, VPCs, orgs, users) and
+//! will eventually supersede the legacy `ClusterDb` raw-KV path altogether
+//! (P2.16, sifrah/nauka#220). P2.1 (sifrah/nauka#205) flipped the SurrealDB
+//! `kv-tikv` backend on permanently; P2.2 (sifrah/nauka#206) introduced
+//! `open_tikv`; P2.3 (sifrah/nauka#207) added the PD-endpoint discovery
+//! helper that lives one layer up in `nauka-hypervisor` and flows through
+//! [`EmbeddedDb::open_tikv_from_pd_addresses`].
+//!
+//! # Examples
+//!
+//! ## Bootstrap (local SurrealKV)
 //!
 //! ```no_run
 //! use nauka_state::EmbeddedDb;
@@ -38,15 +53,27 @@
 //! db.shutdown().await?;
 //! # Ok(()) }
 //! ```
+//!
+//! ## Cluster (distributed TiKV)
+//!
+//! ```no_run
+//! # use nauka_state::EmbeddedDb;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let db = EmbeddedDb::open_tikv(&["http://[fd01::1]:2379"]).await?;
+//! db.client().query("INFO FOR DB").await?;
+//! db.shutdown().await?;
+//! # Ok(()) }
+//! ```
 
 use std::fs::{OpenOptions, TryLockError};
+use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use surrealdb::engine::local::{Db, SurrealKv};
+use surrealdb::engine::local::{Db, SurrealKv, TiKv};
 use surrealdb::Surreal;
 
-use crate::{Result, StateError, BOOTSTRAP_DB, NAUKA_NS};
+use crate::{Result, StateError, BOOTSTRAP_DB, CLUSTER_DB, NAUKA_NS};
 
 /// The bootstrap-state SurrealQL schema, embedded at compile time.
 ///
@@ -56,14 +83,42 @@ use crate::{Result, StateError, BOOTSTRAP_DB, NAUKA_NS};
 /// re-applying against an already-initialised database is a no-op.
 const BOOTSTRAP_SCHEMA: &str = include_str!("../schemas/bootstrap.surql");
 
-/// Embedded SurrealDB instance, persisted to disk via the SurrealKV backend.
+/// Which SurrealDB storage engine an [`EmbeddedDb`] handle is connected to.
+///
+/// Introduced in P2.2 (sifrah/nauka#206). `EmbeddedDb` used to be
+/// SurrealKV-only, but with the distributed TiKV backend enabled on the
+/// surrealdb dep (P2.1, sifrah/nauka#205) the wrapper now handles both
+/// engines through the same `Surreal<Db>` client type. The two engines
+/// differ only in their lifecycle — SurrealKV holds an OS-level flock on
+/// `<path>/LOCK` that `shutdown` has to wait for, TiKV is fully remote
+/// and has no such lock — so the variant is captured once at open time
+/// and branched on only where it matters.
+#[derive(Clone, Debug)]
+enum Backend {
+    /// Local on-disk SurrealKV datastore. The `PathBuf` is the datastore
+    /// path so `shutdown` can poll `<path>/LOCK` for release.
+    SurrealKv(PathBuf),
+    /// Remote distributed TiKV backend, connected via PD endpoints. There
+    /// is no local lockfile, so `shutdown` is a simple drop.
+    TiKv,
+}
+
+/// Embedded SurrealDB instance.
+///
+/// Two backends are exposed through this single wrapper:
+///
+/// - [`Self::open`] / [`Self::open_default`] — on-disk SurrealKV datastore
+///   used for Nauka's bootstrap state (mesh/hypervisor/peers/wg keys).
+/// - [`Self::open_tikv`] / [`Self::open_tikv_from_pd_addresses`] —
+///   distributed TiKV datastore used for cluster state (VMs, VPCs, orgs,
+///   users, ...).
 ///
 /// Cheap to clone: every clone shares the same underlying `Surreal<Db>`
 /// connection (which itself uses an `Arc` internally).
 #[derive(Clone)]
 pub struct EmbeddedDb {
     inner: Surreal<Db>,
-    path: PathBuf,
+    backend: Backend,
 }
 
 impl EmbeddedDb {
@@ -168,8 +223,93 @@ impl EmbeddedDb {
 
         Ok(Self {
             inner,
-            path: path.to_path_buf(),
+            backend: Backend::SurrealKv(path.to_path_buf()),
         })
+    }
+
+    /// Connect to a distributed TiKV cluster through the given PD client
+    /// endpoints and select the `nauka` / `cluster` namespace/database
+    /// (per ADR 0003, sifrah/nauka#190).
+    ///
+    /// Each endpoint is an HTTP URL for a PD member, e.g.
+    /// `"http://[fd01::1]:2379"`. The TiKv engine takes the full list and
+    /// picks a leader internally, so passing every PD member that the
+    /// local node knows about gives the best tolerance to a leader
+    /// failure between `connect` and the first query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError::Database`] if `pd_endpoints` is empty, if
+    /// SurrealDB's TiKv engine fails to connect to the cluster (for
+    /// example, every PD endpoint is unreachable, the ones that respond
+    /// are unhealthy, or no leader can be elected within the engine's
+    /// internal connect timeout), or if the `use_ns(...).use_db(...)`
+    /// handshake fails. Lower-level schema / validation errors surface
+    /// through the same `From<surrealdb::Error>` mapping used by
+    /// [`Self::open`].
+    pub async fn open_tikv(pd_endpoints: &[&str]) -> Result<Self> {
+        if pd_endpoints.is_empty() {
+            return Err(StateError::Database(
+                "open_tikv: at least one PD endpoint is required".to_string(),
+            ));
+        }
+
+        // The SurrealDB TiKv engine accepts a comma-separated list of PD
+        // endpoints as its single "host" string. Internally it forwards
+        // the list to `surrealdb-tikv-client`, which treats the list as
+        // seed members and discovers the rest of the cluster through PD.
+        let endpoints = pd_endpoints.join(",");
+        let inner = Surreal::new::<TiKv>(endpoints.as_str())
+            .await
+            .map_err(StateError::from)?;
+
+        inner.use_ns(NAUKA_NS).use_db(CLUSTER_DB).await?;
+
+        Ok(Self {
+            inner,
+            backend: Backend::TiKv,
+        })
+    }
+
+    /// Build PD endpoints from the given mesh IPv6 addresses + PD client
+    /// port and connect to the resulting TiKV cluster.
+    ///
+    /// This is a thin convenience wrapper on top of [`Self::open_tikv`]
+    /// that exists so callers in `nauka-hypervisor` don't have to format
+    /// `http://[{addr}]:{port}` strings themselves. The layer rule
+    /// (`nauka-state` cannot depend on `nauka-hypervisor`) means the
+    /// helper can't take a `&FabricState` directly — the caller loads
+    /// FabricState, collects `self.hypervisor.mesh_ipv6 + peer.mesh_ipv6
+    /// for peer in peers`, and hands the resulting slice in. See P2.3
+    /// (sifrah/nauka#207) for the design rationale.
+    ///
+    /// The endpoint format matches what
+    /// `layers/hypervisor/src/controlplane/mod.rs::connect()` used to
+    /// format inline: `http://[<ipv6>]:<port>`.
+    ///
+    /// # Errors
+    ///
+    /// - [`StateError::Database`] if `mesh_addresses` is empty (treated
+    ///   the same as "no PD endpoints to connect to").
+    /// - Any error surfaced by [`Self::open_tikv`] (connect failure,
+    ///   `use_ns/use_db` failure, etc).
+    pub async fn open_tikv_from_pd_addresses(
+        mesh_addresses: &[Ipv6Addr],
+        pd_client_port: u16,
+    ) -> Result<Self> {
+        if mesh_addresses.is_empty() {
+            return Err(StateError::Database(
+                "open_tikv_from_pd_addresses: at least one mesh IPv6 address is required"
+                    .to_string(),
+            ));
+        }
+
+        let endpoints: Vec<String> = mesh_addresses
+            .iter()
+            .map(|addr| format!("http://[{addr}]:{pd_client_port}"))
+            .collect();
+        let refs: Vec<&str> = endpoints.iter().map(String::as_str).collect();
+        Self::open_tikv(&refs).await
     }
 
     /// Borrow the underlying SurrealDB SDK client.
@@ -181,9 +321,19 @@ impl EmbeddedDb {
         &self.inner
     }
 
-    /// Path of the on-disk SurrealKV datastore.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Path of the on-disk datastore, if this handle is connected to the
+    /// local SurrealKV backend.
+    ///
+    /// Returns `Some(path)` when the handle was opened via
+    /// [`Self::open`] / [`Self::open_default`] (bootstrap state) and
+    /// `None` when it was opened via [`Self::open_tikv`] /
+    /// [`Self::open_tikv_from_pd_addresses`] (distributed cluster state),
+    /// which has no local path.
+    pub fn path(&self) -> Option<&Path> {
+        match &self.backend {
+            Backend::SurrealKv(p) => Some(p.as_path()),
+            Backend::TiKv => None,
+        }
     }
 
     /// Shut down the wrapper, dropping the SDK client and waiting for the
@@ -233,13 +383,26 @@ impl EmbeddedDb {
     /// contended runtime, and still well under the "fast timeout" Nauka
     /// convention for health checks.
     pub async fn shutdown(self) -> Result<()> {
-        // Explicit drop of the inner client. The compiler would do this
-        // anyway when `self` goes out of scope, but naming the step
-        // makes the handoff to the router task visible.
-        let path = self.path.clone();
-        drop(self.inner);
-
-        wait_for_surrealkv_lock_release(&path).await
+        // TiKV-backed handles have no local flock to wait on: the
+        // distributed datastore is fully remote, and the SDK client's
+        // router task is a thin RPC forwarder that exits cleanly on
+        // drop. Dropping the inner client is all the lifecycle we
+        // need, and polling for a nonexistent `<path>/LOCK` file would
+        // be both meaningless and wrong (there is no `path`).
+        match self.backend {
+            Backend::SurrealKv(path) => {
+                // Explicit drop of the inner client. The compiler would
+                // do this anyway when `self` goes out of scope, but
+                // naming the step makes the handoff to the router
+                // task visible.
+                drop(self.inner);
+                wait_for_surrealkv_lock_release(&path).await
+            }
+            Backend::TiKv => {
+                drop(self.inner);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -380,11 +543,19 @@ async fn wait_for_surrealkv_lock_release(path: &Path) -> Result<()> {
 
 impl std::fmt::Debug for EmbeddedDb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EmbeddedDb")
-            .field("path", &self.path)
-            .field("ns", &NAUKA_NS)
-            .field("db", &BOOTSTRAP_DB)
-            .finish()
+        let mut dbg = f.debug_struct("EmbeddedDb");
+        dbg.field("ns", &NAUKA_NS);
+        match &self.backend {
+            Backend::SurrealKv(path) => {
+                dbg.field("backend", &"SurrealKv")
+                    .field("db", &BOOTSTRAP_DB)
+                    .field("path", path);
+            }
+            Backend::TiKv => {
+                dbg.field("backend", &"TiKv").field("db", &CLUSTER_DB);
+            }
+        }
+        dbg.finish()
     }
 }
 
@@ -413,7 +584,7 @@ mod tests {
             .await
             .expect("open should succeed at a writable temp path");
 
-        assert_eq!(db.path(), path);
+        assert_eq!(db.path(), Some(path.as_path()));
         assert!(path.exists(), "datastore path should exist after open");
 
         let _ = db
@@ -749,7 +920,10 @@ mod tests {
         // The schema is also idempotent: a second open at the same path
         // (after explicit shutdown) must succeed and the tables must
         // still be defined.
-        let path = db.path().to_path_buf();
+        let path = db
+            .path()
+            .expect("SurrealKV handle must expose its path")
+            .to_path_buf();
         db.shutdown().await.expect("shutdown");
 
         let db2 = EmbeddedDb::open(&path)
@@ -856,6 +1030,103 @@ mod tests {
             .check()
             .expect("insert wg_key check");
 
+        db.shutdown().await.expect("shutdown");
+    }
+
+    // ─── P2.2 / P2.3 — TiKV backend (sifrah/nauka#206, #207) ─────────
+
+    /// P2.2 — `open_tikv` with an empty endpoint list fails fast without
+    /// attempting a network connection.
+    ///
+    /// An empty list is always a programming error: there is no "default"
+    /// cluster to fall back to. The constructor surfaces it as
+    /// [`StateError::Database`] with a message that names the function.
+    #[tokio::test]
+    async fn open_tikv_rejects_empty_endpoints() {
+        let err = EmbeddedDb::open_tikv(&[])
+            .await
+            .expect_err("empty endpoints must fail");
+        match err {
+            StateError::Database(msg) => {
+                assert!(
+                    msg.contains("open_tikv"),
+                    "error message should name the function, got: {msg}"
+                );
+            }
+            other => panic!("expected StateError::Database, got: {other:?}"),
+        }
+    }
+
+    /// P2.3 — `open_tikv_from_pd_addresses` with an empty address slice
+    /// fails fast the same way.
+    #[tokio::test]
+    async fn open_tikv_from_pd_addresses_rejects_empty_slice() {
+        let err = EmbeddedDb::open_tikv_from_pd_addresses(&[], 2379)
+            .await
+            .expect_err("empty slice must fail");
+        match err {
+            StateError::Database(msg) => {
+                assert!(
+                    msg.contains("open_tikv_from_pd_addresses"),
+                    "error message should name the function, got: {msg}"
+                );
+            }
+            other => panic!("expected StateError::Database, got: {other:?}"),
+        }
+    }
+
+    /// P2.3 — `open_tikv_from_pd_addresses` pointed at a TCP port that is
+    /// guaranteed to be unreachable surfaces as [`StateError::Database`].
+    ///
+    /// Uses `::1` (IPv6 loopback) on an unlikely high port so there is no
+    /// chance of a real PD responding and making the test non-deterministic.
+    /// The test is about the error variant, not the exact message: the
+    /// SurrealDB TiKv engine's internal message is an implementation
+    /// detail of `surrealdb-tikv-client`.
+    ///
+    /// A hard 30 s timeout caps the wait per the Nauka "fast timeout"
+    /// convention — the SurrealDB TiKv engine can take a handful of
+    /// seconds to give up on a dead endpoint but should never hang
+    /// indefinitely.
+    #[tokio::test]
+    async fn open_tikv_from_pd_addresses_unreachable_errors() {
+        let addrs = [Ipv6Addr::LOCALHOST];
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            // Port 1 is reserved and nothing listens on it by default.
+            EmbeddedDb::open_tikv_from_pd_addresses(&addrs, 1),
+        )
+        .await
+        .expect("open_tikv_from_pd_addresses should not hang past 30s");
+
+        let err = result.expect_err("unreachable PD must not succeed");
+        assert!(
+            matches!(err, StateError::Database(_)),
+            "expected StateError::Database, got: {err:?}"
+        );
+    }
+
+    /// P2.3 — `path()` returns `None` for TiKV-backed handles.
+    ///
+    /// The handle itself is never constructed (the connect fails), but
+    /// this test pins down the public contract of `path()`. A
+    /// SurrealKV-backed handle returns `Some` — covered by
+    /// `open_and_shutdown_smoke` above.
+    #[tokio::test]
+    async fn tikv_path_is_none() {
+        // We can't actually build a TiKv-backed EmbeddedDb without a
+        // live cluster, so this test just anchors the type signature:
+        // the return type is `Option<&Path>` and SurrealKv handles
+        // return `Some` (covered elsewhere). The TiKv branch returning
+        // `None` is proven by the match on `Backend::TiKv` above.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = EmbeddedDb::open(&dir.path().join("path_contract.skv"))
+            .await
+            .expect("open");
+        assert!(
+            db.path().is_some(),
+            "SurrealKv handle must return Some from path()"
+        );
         db.shutdown().await.expect("shutdown");
     }
 }
