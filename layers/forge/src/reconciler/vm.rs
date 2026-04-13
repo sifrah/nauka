@@ -87,8 +87,9 @@ impl super::Reconciler for VmReconciler {
         let mut result = ReconcileResult::new("vm");
         let rt = Self::runtime(ctx);
 
-        // 1. Get VMs assigned to this node
-        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.clone());
+        // 1. Get VMs assigned to this node. P2.13 (sifrah/nauka#217)
+        // migrated `VmStore` to take an `EmbeddedDb` directly.
+        let vm_store = nauka_compute::vm::store::VmStore::new(ctx.db.embedded().clone());
         let all_vms = vm_store.list(None, None, None).await?;
         let local_vms: Vec<_> = all_vms
             .iter()

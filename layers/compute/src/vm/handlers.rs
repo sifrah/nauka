@@ -119,7 +119,11 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                let store = VmStore::new(nauka_hypervisor::controlplane::connect().await?);
+                // P2.13 (sifrah/nauka#217): VmStore now takes an
+                // EmbeddedDb directly; reach the cluster handle via
+                // the wrapper's `.embedded()` accessor.
+                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
+                let store = VmStore::new(cluster_db.embedded().clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;
@@ -183,10 +187,17 @@ pub fn handler() -> HandlerFn {
                             .unwrap_or_else(|| "default".to_string());
 
                         nauka_core::validate::name(&name)?;
+                        // P2.13 (sifrah/nauka#217): scheduling lives
+                        // outside `VmStore::create` so the store
+                        // stays decoupled from live fabric state
+                        // and can be unit-tested. The handler
+                        // resolves a hypervisor via the scheduler
+                        // immediately before persisting the row.
+                        let hypervisor_id = crate::scheduler::schedule(&region, &zone).await?;
                         let vm = store
                             .create(
                                 &name, &org, &project, &env, &vpc, &subnet, cpu, memory, disk,
-                                &image, &region, &zone,
+                                &image, &region, &zone, hypervisor_id,
                             )
                             .await?;
                         Ok(OperationResponse::Resource(vm.to_api_json()))
