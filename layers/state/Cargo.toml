@@ -39,5 +39,9 @@ path = "src/bin/p0_3_spike.rs"
 name = "p1-9-integration"
 path = "src/bin/p1_9_integration.rs"
 
+[[bin]]
+name = "p2-4-spike"
+path = "src/bin/p2_4_spike.rs"
+
 [dev-dependencies]
 tempfile = "3"

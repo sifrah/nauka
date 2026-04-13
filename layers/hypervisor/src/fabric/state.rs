@@ -10,6 +10,7 @@
 //! [`EmbeddedDb`].
 
 use std::fmt;
+use std::net::Ipv6Addr;
 
 use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
@@ -152,6 +153,35 @@ impl FabricState {
     /// [`EmbeddedDb`].
     pub async fn exists(db: &EmbeddedDb) -> Result<bool, nauka_state::StateError> {
         Ok(Self::load(db).await?.is_some())
+    }
+
+    /// PD mesh IPv6 addresses this node knows about, **self first**.
+    ///
+    /// Returns `self` as the leading element, followed by every peer's
+    /// `mesh_ipv6` in peer-list order. Used by
+    /// [`crate::controlplane::connect`] to produce the `http://[...]:2379`
+    /// list that gets handed to `EmbeddedDb::open_tikv` (which in turn
+    /// falls back through them until one PD responds).
+    ///
+    /// Self-first matters for two reasons:
+    ///
+    /// 1. On a single-node cluster (nothing in `peers`) it's the only
+    ///    PD endpoint, so it *has* to be first for `open_tikv` to even
+    ///    find it.
+    /// 2. In a multi-node cluster the local PD is always the cheapest
+    ///    hop from the client's perspective — one-packet latency over
+    ///    the loopback-ish `nauka0` interface vs. a WireGuard-encrypted
+    ///    round-trip to another node — so putting it first optimises
+    ///    the common case.
+    ///
+    /// Added in P2.3 (sifrah/nauka#207).
+    pub fn pd_endpoints(&self) -> Vec<Ipv6Addr> {
+        let mut out = Vec::with_capacity(1 + self.peers.peers.len());
+        out.push(self.hypervisor.mesh_ipv6);
+        for peer in &self.peers.peers {
+            out.push(peer.mesh_ipv6);
+        }
+        out
     }
 }
 
@@ -362,6 +392,58 @@ mod tests {
         assert_eq!(loaded.max_pd_members, 5);
 
         db.shutdown().await.unwrap();
+    }
+
+    /// P2.3 — `pd_endpoints()` on a zero-peer state returns exactly
+    /// the local hypervisor's mesh IPv6.
+    #[test]
+    fn pd_endpoints_single_node() {
+        let state = make_state();
+        let endpoints = state.pd_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0], state.hypervisor.mesh_ipv6);
+    }
+
+    /// P2.3 — `pd_endpoints()` on a multi-peer state returns
+    /// `self` first, then every peer in peer-list order.
+    #[test]
+    fn pd_endpoints_multi_node_self_first() {
+        let mut state = make_state();
+        let self_ipv6 = state.hypervisor.mesh_ipv6;
+
+        let peer_a_ipv6: std::net::Ipv6Addr = "fd01::a".parse().unwrap();
+        let peer_b_ipv6: std::net::Ipv6Addr = "fd01::b".parse().unwrap();
+
+        state
+            .peers
+            .add(super::super::peer::Peer::new(
+                "node-a".into(),
+                "eu".into(),
+                "fsn1".into(),
+                "key-a".into(),
+                51820,
+                None,
+                peer_a_ipv6,
+            ))
+            .unwrap();
+        state
+            .peers
+            .add(super::super::peer::Peer::new(
+                "node-b".into(),
+                "eu".into(),
+                "nbg1".into(),
+                "key-b".into(),
+                51820,
+                None,
+                peer_b_ipv6,
+            ))
+            .unwrap();
+
+        let endpoints = state.pd_endpoints();
+        assert_eq!(endpoints.len(), 3);
+        assert_eq!(endpoints[0], self_ipv6, "self must come first");
+        assert_eq!(endpoints[1], peer_a_ipv6);
+        assert_eq!(endpoints[2], peer_b_ipv6);
     }
 
     /// Cross-process round-trip: write via the async API, drop the

@@ -38,6 +38,12 @@ pub use store::ClusterDb;
 ///
 /// This is the standard way for any layer to get a ClusterDb connection.
 /// Reads the local hypervisor state to discover PD endpoints on the mesh.
+///
+/// P2.3 (sifrah/nauka#207) replaced the per-call `format!` ladder with
+/// the shared [`crate::fabric::state::FabricState::pd_endpoints`] +
+/// [`nauka_state::pd_endpoints_for`] helpers so every Phase-2 call site
+/// lands on the same PD list shape — and so `EmbeddedDb::open_tikv`
+/// (P2.2) and `ClusterDb::connect` both see the exact same endpoints.
 pub async fn connect() -> anyhow::Result<ClusterDb> {
     let db = nauka_state::EmbeddedDb::open_default().await?;
 
@@ -55,11 +61,11 @@ pub async fn connect() -> anyhow::Result<ClusterDb> {
     // issues its next `connect()` or local-state read.
     db.shutdown().await?;
 
-    let self_endpoint = format!("http://[{}]:{}", state.hypervisor.mesh_ipv6, PD_CLIENT_PORT,);
-    let mut endpoints = vec![self_endpoint];
-    for peer in &state.peers.peers {
-        endpoints.push(format!("http://[{}]:{}", peer.mesh_ipv6, PD_CLIENT_PORT,));
-    }
+    // Self first, peers after. The self-first contract matters for
+    // single-node clusters (nothing in peers) and for always routing
+    // through the cheapest hop when multiple PDs are live.
+    let mesh_addrs = state.pd_endpoints();
+    let endpoints = nauka_state::pd_endpoints_for(&mesh_addrs, PD_CLIENT_PORT);
     let refs: Vec<&str> = endpoints.iter().map(|s| s.as_str()).collect();
 
     ClusterDb::connect(&refs).await.map_err(Into::into)
