@@ -1,2 +1,2 @@
-window.ALL_CRATES = ["nauka","nauka_compute","nauka_core","nauka_forge","nauka_hypervisor","nauka_network","nauka_openapi","nauka_org","nauka_state","p0_1_spike","p1_9_integration"];
-//{"start":21,"fragment_lengths":[7,16,13,14,19,16,16,12,14,13,19]}
+window.ALL_CRATES = ["nauka","nauka_compute","nauka_core","nauka_forge","nauka_hypervisor","nauka_network","nauka_openapi","nauka_org","nauka_state","p0_1_spike","p0_3_spike","p1_9_integration"];
+//{"start":21,"fragment_lengths":[7,16,13,14,19,16,16,12,14,13,13,19]}

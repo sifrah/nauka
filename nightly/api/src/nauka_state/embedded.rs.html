@@ -860,5 +860,74 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#858 id=858 data-nosnippet>858</a>
 <a href=#859 id=859 data-nosnippet>859</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
 <a href=#860 id=860 data-nosnippet>860</a>    }
-<a href=#861 id=861 data-nosnippet>861</a>}
+<a href=#861 id=861 data-nosnippet>861</a>
+<a href=#862 id=862 data-nosnippet>862</a>    <span class="doccomment">/// P2.5 — every cluster-state `.surql` schema parses cleanly and is
+<a href=#863 id=863 data-nosnippet>863</a>    /// fully idempotent against a fresh SurrealKV database.
+<a href=#864 id=864 data-nosnippet>864</a>    ///
+<a href=#865 id=865 data-nosnippet>865</a>    /// P2.5 (sifrah/nauka#209) ships SCHEMAFULL definitions for the
+<a href=#866 id=866 data-nosnippet>866</a>    /// cluster-side resources (org, project, env, user, vpc, subnet, vm)
+<a href=#867 id=867 data-nosnippet>867</a>    /// under `layers/{org,network,compute}/schemas/`. No Rust code reads
+<a href=#868 id=868 data-nosnippet>868</a>    /// them yet — Phase 3 codegen (sifrah/nauka#225 ff) will consume them
+<a href=#869 id=869 data-nosnippet>869</a>    /// to generate types and handlers — but we still need a CI-visible
+<a href=#870 id=870 data-nosnippet>870</a>    /// guarantee that the files are valid SurrealQL and that every
+<a href=#871 id=871 data-nosnippet>871</a>    /// `DEFINE` is idempotent.
+<a href=#872 id=872 data-nosnippet>872</a>    ///
+<a href=#873 id=873 data-nosnippet>873</a>    /// Strategy: open a throwaway `EmbeddedDb` at a tempdir, apply each
+<a href=#874 id=874 data-nosnippet>874</a>    /// cluster schema twice in sequence via `client().query(SCHEMA)`,
+<a href=#875 id=875 data-nosnippet>875</a>    /// and assert `.check()` on both passes. The first pass exercises a
+<a href=#876 id=876 data-nosnippet>876</a>    /// real `DEFINE TABLE/FIELD/INDEX` path against an empty db; the
+<a href=#877 id=877 data-nosnippet>877</a>    /// second pass exercises the `IF NOT EXISTS` idempotency promise.
+<a href=#878 id=878 data-nosnippet>878</a>    /// Any parse error, `ASSERT` typo, reserved-word collision, or
+<a href=#879 id=879 data-nosnippet>879</a>    /// missing `IF NOT EXISTS` surfaces as a test failure.
+<a href=#880 id=880 data-nosnippet>880</a>    ///
+<a href=#881 id=881 data-nosnippet>881</a>    /// The schemas define `cluster`-scoped tables (`org`, `project`, …)
+<a href=#882 id=882 data-nosnippet>882</a>    /// that do not collide with the already-applied bootstrap tables
+<a href=#883 id=883 data-nosnippet>883</a>    /// (`mesh`, `hypervisor`, `peer`, `wg_key`), so they can safely share
+<a href=#884 id=884 data-nosnippet>884</a>    /// the same SurrealDB instance here.
+<a href=#885 id=885 data-nosnippet>885</a>    </span><span class="attr">#[tokio::test]
+<a href=#886 id=886 data-nosnippet>886</a>    </span><span class="kw">async fn </span>cluster_schemas_parse_cleanly() {
+<a href=#887 id=887 data-nosnippet>887</a>        <span class="comment">// Compile-time-embedded copies of every P2.5 schema. `include_str!`
+<a href=#888 id=888 data-nosnippet>888</a>        // resolves relative to *this* source file (`layers/state/src/embedded.rs`),
+<a href=#889 id=889 data-nosnippet>889</a>        // so the paths climb out of `state/src` and back down into each
+<a href=#890 id=890 data-nosnippet>890</a>        // sibling layer's `schemas/` directory.
+<a href=#891 id=891 data-nosnippet>891</a>        </span><span class="kw">const </span>SCHEMAS: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#892 id=892 data-nosnippet>892</a>            (<span class="string">"org"</span>, <span class="macro">include_str!</span>(<span class="string">"../../org/schemas/org.surql"</span>)),
+<a href=#893 id=893 data-nosnippet>893</a>            (<span class="string">"project"</span>, <span class="macro">include_str!</span>(<span class="string">"../../org/schemas/project.surql"</span>)),
+<a href=#894 id=894 data-nosnippet>894</a>            (<span class="string">"env"</span>, <span class="macro">include_str!</span>(<span class="string">"../../org/schemas/env.surql"</span>)),
+<a href=#895 id=895 data-nosnippet>895</a>            (<span class="string">"user"</span>, <span class="macro">include_str!</span>(<span class="string">"../../org/schemas/user.surql"</span>)),
+<a href=#896 id=896 data-nosnippet>896</a>            (<span class="string">"vpc"</span>, <span class="macro">include_str!</span>(<span class="string">"../../network/schemas/vpc.surql"</span>)),
+<a href=#897 id=897 data-nosnippet>897</a>            (<span class="string">"subnet"</span>, <span class="macro">include_str!</span>(<span class="string">"../../network/schemas/subnet.surql"</span>)),
+<a href=#898 id=898 data-nosnippet>898</a>            (<span class="string">"vm"</span>, <span class="macro">include_str!</span>(<span class="string">"../../compute/schemas/vm.surql"</span>)),
+<a href=#899 id=899 data-nosnippet>899</a>        ];
+<a href=#900 id=900 data-nosnippet>900</a>
+<a href=#901 id=901 data-nosnippet>901</a>        <span class="kw">let </span>dir = tempfile::tempdir().expect(<span class="string">"tempdir"</span>);
+<a href=#902 id=902 data-nosnippet>902</a>        <span class="kw">let </span>db = EmbeddedDb::open(<span class="kw-2">&amp;</span>dir.path().join(<span class="string">"cluster_schemas.skv"</span>))
+<a href=#903 id=903 data-nosnippet>903</a>            .<span class="kw">await
+<a href=#904 id=904 data-nosnippet>904</a>            </span>.expect(<span class="string">"open"</span>);
+<a href=#905 id=905 data-nosnippet>905</a>
+<a href=#906 id=906 data-nosnippet>906</a>        <span class="kw">for </span>(name, schema) <span class="kw">in </span>SCHEMAS {
+<a href=#907 id=907 data-nosnippet>907</a>            <span class="comment">// First application — must succeed against a fresh db. The
+<a href=#908 id=908 data-nosnippet>908</a>            // bootstrap schema has already been applied by `open`, but
+<a href=#909 id=909 data-nosnippet>909</a>            // these files define different tables so there's no conflict.
+<a href=#910 id=910 data-nosnippet>910</a>            </span>db.client()
+<a href=#911 id=911 data-nosnippet>911</a>                .query(<span class="kw-2">*</span>schema)
+<a href=#912 id=912 data-nosnippet>912</a>                .<span class="kw">await
+<a href=#913 id=913 data-nosnippet>913</a>                </span>.unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{name} schema first apply failed: {e}"</span>))
+<a href=#914 id=914 data-nosnippet>914</a>                .check()
+<a href=#915 id=915 data-nosnippet>915</a>                .unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{name} schema first apply check failed: {e}"</span>));
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>            <span class="comment">// Second application — `IF NOT EXISTS` must make this a
+<a href=#918 id=918 data-nosnippet>918</a>            // no-op. Any statement without `IF NOT EXISTS` blows up here
+<a href=#919 id=919 data-nosnippet>919</a>            // with an "already exists" error.
+<a href=#920 id=920 data-nosnippet>920</a>            </span>db.client()
+<a href=#921 id=921 data-nosnippet>921</a>                .query(<span class="kw-2">*</span>schema)
+<a href=#922 id=922 data-nosnippet>922</a>                .<span class="kw">await
+<a href=#923 id=923 data-nosnippet>923</a>                </span>.unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{name} schema second apply failed: {e}"</span>))
+<a href=#924 id=924 data-nosnippet>924</a>                .check()
+<a href=#925 id=925 data-nosnippet>925</a>                .unwrap_or_else(|e| <span class="macro">panic!</span>(<span class="string">"{name} schema idempotency check failed: {e}"</span>));
+<a href=#926 id=926 data-nosnippet>926</a>        }
+<a href=#927 id=927 data-nosnippet>927</a>
+<a href=#928 id=928 data-nosnippet>928</a>        db.shutdown().<span class="kw">await</span>.expect(<span class="string">"shutdown"</span>);
+<a href=#929 id=929 data-nosnippet>929</a>    }
+<a href=#930 id=930 data-nosnippet>930</a>}
 </code></pre></div></section></main></body></html>
