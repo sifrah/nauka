@@ -138,6 +138,7 @@ pub async fn run() -> DoctorReport {
 
     check_fabric(&mut report, &state);
     check_controlplane(&mut report, mesh_ipv6.as_ref());
+    check_surrealdb(&mut report).await;
     check_storage(&mut report, &storage_statuses);
     check_system(&mut report);
 
@@ -396,6 +397,130 @@ fn check_controlplane(report: &mut DoctorReport, mesh_ipv6: Option<&Ipv6Addr>) {
 }
 
 // ═══════════════════════════════════════════════════
+// SurrealDB checks (P2.17 — sifrah/nauka#221)
+// ═══════════════════════════════════════════════════
+
+/// Verify the cluster-side SurrealDB is reachable, that the configured
+/// namespace/database is selected, and that every expected schema
+/// table from [`nauka_state::CLUSTER_TABLE_NAMES`] is present.
+///
+/// All three checks degrade gracefully: if `controlplane::connect`
+/// fails (PD/TiKV down, cluster not initialised, …) the rest of the
+/// section is skipped with an actionable hint pointing at the next
+/// command to run, not a stack trace.
+async fn check_surrealdb(report: &mut DoctorReport) {
+    let checks = report.add_section("SurrealDB");
+
+    // 1. Connectivity — go through the same controlplane helper every
+    //    other layer uses so we exercise the real connect path
+    //    (PD endpoint discovery, TiKv handshake, NS/DB select).
+    let db = match controlplane::connect().await {
+        Ok(db) => {
+            checks.push(ok(
+                "connectivity",
+                "cluster reachable via controlplane::connect",
+            ));
+            db
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Two distinct failure modes → two distinct fixes.
+            let hint = if msg.contains("not initialized") {
+                "run `nauka hypervisor init` to bootstrap a cluster"
+            } else {
+                "check PD/TiKV services with `nauka hypervisor cp-status`"
+            };
+            checks.push(fail("connectivity", &format!("{msg} — {hint}")));
+            checks.push(skip("namespace/database", "skipped (no connection)"));
+            checks.push(skip("schemas", "skipped (no connection)"));
+            return;
+        }
+    };
+
+    // 2. NS/DB sanity — `INFO FOR DB` returns the catalog of the
+    //    currently-selected database, which is exactly the namespace
+    //    [`nauka_state::EmbeddedDb::open_tikv`] selected on connect.
+    //    A failure here means we connected but the use_ns/use_db call
+    //    silently no-op'd (shouldn't happen) or the user pointed us at
+    //    a database that exists but lacks SCHEMAFULL definitions.
+    let info_value: Option<serde_json::Value> = match db.client().query("INFO FOR DB").await {
+        Ok(mut res) => match res.take::<Option<serde_json::Value>>(0) {
+            Ok(Some(v)) => {
+                checks.push(ok(
+                    "namespace/database",
+                    &format!(
+                        "{}/{} selected",
+                        nauka_state::NAUKA_NS,
+                        nauka_state::CLUSTER_DB
+                    ),
+                ));
+                Some(v)
+            }
+            Ok(None) => {
+                checks.push(fail("namespace/database", "INFO FOR DB returned no rows"));
+                None
+            }
+            Err(e) => {
+                checks.push(fail(
+                    "namespace/database",
+                    &format!("INFO FOR DB take failed: {e}"),
+                ));
+                None
+            }
+        },
+        Err(e) => {
+            checks.push(fail(
+                "namespace/database",
+                &format!(
+                    "INFO FOR DB failed: {e} — schemas are not applied, \
+                     re-run `nauka hypervisor init` on the bootstrap node"
+                ),
+            ));
+            None
+        }
+    };
+
+    // 3. Schemas — every table in the canonical list must appear in
+    //    INFO FOR DB's `tables` map. Anything missing is actionable:
+    //    upgrade the binary or re-bootstrap.
+    if let Some(info) = info_value {
+        let present: std::collections::HashSet<&str> = info
+            .get("tables")
+            .and_then(|t| t.as_object())
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+
+        let missing: Vec<&str> = nauka_state::CLUSTER_TABLE_NAMES
+            .iter()
+            .copied()
+            .filter(|t| !present.contains(t))
+            .collect();
+
+        if missing.is_empty() {
+            checks.push(ok(
+                "schemas",
+                &format!(
+                    "all {} cluster tables present",
+                    nauka_state::CLUSTER_TABLE_NAMES.len()
+                ),
+            ));
+        } else {
+            checks.push(fail(
+                "schemas",
+                &format!(
+                    "missing tables: {} — re-run `nauka hypervisor init` to apply schemas",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    } else {
+        checks.push(skip("schemas", "skipped (INFO FOR DB unavailable)"));
+    }
+
+    let _ = db.shutdown().await;
+}
+
+// ═══════════════════════════════════════════════════
 // Storage checks
 // ═══════════════════════════════════════════════════
 
@@ -577,7 +702,7 @@ mod tests {
     async fn run_doctor_no_panic() {
         // On a test system, doctor should run without panic
         let report = run().await;
-        // Should have 4 sections
-        assert_eq!(report.checks.len(), 4);
+        // 5 sections: Fabric, Controlplane, SurrealDB (P2.17), Storage, System.
+        assert_eq!(report.checks.len(), 5);
     }
 }
