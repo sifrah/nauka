@@ -40,7 +40,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../../
 <a href=#38 id=38 data-nosnippet>38</a>    <span class="doccomment">/// Build a [`NatGwStore`] over a SurrealDB handle.
 <a href=#39 id=39 data-nosnippet>39</a>    ///
 <a href=#40 id=40 data-nosnippet>40</a>    /// Call sites that already hold a cluster-DB wrapper pass
-<a href=#41 id=41 data-nosnippet>41</a>    /// `cluster_db.embedded().clone()`.
+<a href=#41 id=41 data-nosnippet>41</a>    /// `db.clone()`.
 <a href=#42 id=42 data-nosnippet>42</a>    </span><span class="kw">pub fn </span>new(db: EmbeddedDb) -&gt; <span class="self">Self </span>{
 <a href=#43 id=43 data-nosnippet>43</a>        <span class="self">Self </span>{ db }
 <a href=#44 id=44 data-nosnippet>44</a>    }

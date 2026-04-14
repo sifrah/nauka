@@ -15,10 +15,10 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#13 id=13 data-nosnippet>13</a>//! The store holds an [`EmbeddedDb`] directly rather than the legacy
 <a href=#14 id=14 data-nosnippet>14</a>//! cluster wrapper type — the previous version stored a
 <a href=#15 id=15 data-nosnippet>15</a>//! cluster-wrapper value and reached the SDK via a
-<a href=#16 id=16 data-nosnippet>16</a>//! `.embedded().client()` chain, but that kept the legacy type's name
+<a href=#16 id=16 data-nosnippet>16</a>//! `.client()` chain, but that kept the legacy type's name
 <a href=#17 id=17 data-nosnippet>17</a>//! in the file even though the methods had all migrated. P2.9 drops
 <a href=#18 id=18 data-nosnippet>18</a>//! the indirection entirely: call sites now pass
-<a href=#19 id=19 data-nosnippet>19</a>//! `cluster_db.embedded().clone()` at construction time, which gives
+<a href=#19 id=19 data-nosnippet>19</a>//! `db.clone()` at construction time, which gives
 <a href=#20 id=20 data-nosnippet>20</a>//! the store a cheap `Arc`-shared handle onto the same underlying
 <a href=#21 id=21 data-nosnippet>21</a>//! `Surreal&lt;Db&gt;` the rest of the cluster path sees.
 <a href=#22 id=22 data-nosnippet>22</a>//!
@@ -62,7 +62,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#60 id=60 data-nosnippet>60</a>    <span class="doccomment">/// Build an [`OrgStore`] over a SurrealDB handle.
 <a href=#61 id=61 data-nosnippet>61</a>    ///
 <a href=#62 id=62 data-nosnippet>62</a>    /// Call sites typically have a cluster-DB wrapper on hand and pass
-<a href=#63 id=63 data-nosnippet>63</a>    /// `cluster_db.embedded().clone()` as the argument. The
+<a href=#63 id=63 data-nosnippet>63</a>    /// `db.clone()` as the argument. The
 <a href=#64 id=64 data-nosnippet>64</a>    /// [`EmbeddedDb`] is cheap to clone (`Arc`-shared internally), so
 <a href=#65 id=65 data-nosnippet>65</a>    /// constructing per-request `OrgStore` values off the same cluster
 <a href=#66 id=66 data-nosnippet>66</a>    /// handle is free.

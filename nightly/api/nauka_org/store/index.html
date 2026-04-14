@@ -13,10 +13,10 @@ it without an upward layer dependency).</p>
 <p>The store holds an <a href="../../nauka_state/embedded/struct.EmbeddedDb.html" title="struct nauka_state::embedded::EmbeddedDb"><code>EmbeddedDb</code></a> directly rather than the legacy
 cluster wrapper type — the previous version stored a
 cluster-wrapper value and reached the SDK via a
-<code>.embedded().client()</code> chain, but that kept the legacy type’s name
+<code>.client()</code> chain, but that kept the legacy type’s name
 in the file even though the methods had all migrated. P2.9 drops
 the indirection entirely: call sites now pass
-<code>cluster_db.embedded().clone()</code> at construction time, which gives
+<code>db.clone()</code> at construction time, which gives
 the store a cheap <code>Arc</code>-shared handle onto the same underlying
 <code>Surreal&lt;Db&gt;</code> the rest of the cluster path sees.</p>
 <p>The legacy <code>_reg_v2</code> registry / <code>org-idx</code> sidecar keys that the

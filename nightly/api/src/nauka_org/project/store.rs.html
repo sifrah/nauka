@@ -11,7 +11,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#9 id=9 data-nosnippet>9</a>//! `nauka_state::apply_cluster_schemas` at bootstrap per ADR 0004).
 <a href=#10 id=10 data-nosnippet>10</a>//!
 <a href=#11 id=11 data-nosnippet>11</a>//! The store holds an [`EmbeddedDb`] directly, same as the post-P2.9
-<a href=#12 id=12 data-nosnippet>12</a>//! `OrgStore`. Call sites pass `cluster_db.embedded().clone()` at
+<a href=#12 id=12 data-nosnippet>12</a>//! `OrgStore`. Call sites pass `db.clone()` at
 <a href=#13 id=13 data-nosnippet>13</a>//! construction time; the clone is cheap (`Arc`-shared `Surreal&lt;Db&gt;`
 <a href=#14 id=14 data-nosnippet>14</a>//! router) and lets the store share the underlying connection with the
 <a href=#15 id=15 data-nosnippet>15</a>//! rest of the cluster path.
@@ -57,7 +57,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#55 id=55 data-nosnippet>55</a>    <span class="doccomment">/// Build a [`ProjectStore`] over a SurrealDB handle.
 <a href=#56 id=56 data-nosnippet>56</a>    ///
 <a href=#57 id=57 data-nosnippet>57</a>    /// Call sites that already hold a cluster-DB wrapper pass
-<a href=#58 id=58 data-nosnippet>58</a>    /// `cluster_db.embedded().clone()` — the [`EmbeddedDb`] is cheap
+<a href=#58 id=58 data-nosnippet>58</a>    /// `db.clone()` — the [`EmbeddedDb`] is cheap
 <a href=#59 id=59 data-nosnippet>59</a>    /// to clone (`Arc`-shared internally), so constructing per-request
 <a href=#60 id=60 data-nosnippet>60</a>    /// stores off the same cluster handle is free.
 <a href=#61 id=61 data-nosnippet>61</a>    </span><span class="kw">pub fn </span>new(db: EmbeddedDb) -&gt; <span class="self">Self </span>{

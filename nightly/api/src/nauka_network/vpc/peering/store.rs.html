@@ -36,7 +36,7 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../../
 <a href=#34 id=34 data-nosnippet>34</a>    <span class="doccomment">/// Build a [`PeeringStore`] over a SurrealDB handle.
 <a href=#35 id=35 data-nosnippet>35</a>    ///
 <a href=#36 id=36 data-nosnippet>36</a>    /// Call sites that already hold a cluster-DB wrapper pass
-<a href=#37 id=37 data-nosnippet>37</a>    /// `cluster_db.embedded().clone()`.
+<a href=#37 id=37 data-nosnippet>37</a>    /// `db.clone()`.
 <a href=#38 id=38 data-nosnippet>38</a>    </span><span class="kw">pub fn </span>new(db: EmbeddedDb) -&gt; <span class="self">Self </span>{
 <a href=#39 id=39 data-nosnippet>39</a>        <span class="self">Self </span>{ db }
 <a href=#40 id=40 data-nosnippet>40</a>    }

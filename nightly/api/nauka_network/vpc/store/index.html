@@ -10,7 +10,7 @@ SDK via <code>self.db.client()</code> and writes/reads against the SCHEMAFULL
 to the cluster by <code>nauka_state::apply_cluster_schemas</code> at
 bootstrap per ADR 0004).</p>
 <p>The store holds an <a href="../../../nauka_state/embedded/struct.EmbeddedDb.html" title="struct nauka_state::embedded::EmbeddedDb"><code>EmbeddedDb</code></a> directly. Call sites pass
-<code>cluster_db.embedded().clone()</code> at construction time; the clone is
+<code>db.clone()</code> at construction time; the clone is
 cheap (<code>Arc</code>-shared <code>Surreal&lt;Db&gt;</code> router).</p>
 <p>The legacy <code>vpc</code> / <code>vpc-idx</code> / <code>_reg_v2</code> sidecar namespaces are
 gone: the schema’s composite unique index on <code>(org, name)</code> is now

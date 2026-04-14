@@ -10,8 +10,8 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data
 <a href=#8 id=8 data-nosnippet>8</a><span class="doccomment">/// Shared context for all reconcilers in a cycle.
 <a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">pub struct </span>ReconcileContext {
 <a href=#10 id=10 data-nosnippet>10</a>    <span class="doccomment">/// Connection to TiKV (desired state), as the native SurrealDB SDK
-<a href=#11 id=11 data-nosnippet>11</a>    /// handle. P2.14 (sifrah/nauka#218) dropped the `ClusterDb` wrapper
-<a href=#12 id=12 data-nosnippet>12</a>    /// from the forge layer — stores now take an `EmbeddedDb` directly.
+<a href=#11 id=11 data-nosnippet>11</a>    /// handle. Passed to every store (`OrgStore`, `VpcStore`,
+<a href=#12 id=12 data-nosnippet>12</a>    /// `VmStore`, …) via `db.clone()`.
 <a href=#13 id=13 data-nosnippet>13</a>    </span><span class="kw">pub </span>db: EmbeddedDb,
 <a href=#14 id=14 data-nosnippet>14</a>    <span class="doccomment">/// This node's hypervisor ID.
 <a href=#15 id=15 data-nosnippet>15</a>    </span><span class="kw">pub </span>hypervisor_id: String,

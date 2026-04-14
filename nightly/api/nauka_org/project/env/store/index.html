@@ -11,7 +11,7 @@ SCHEMAFULL <code>env</code> table defined in <code>layers/org/schemas/env.surql<
 (applied to the cluster by <code>nauka_state::apply_cluster_schemas</code> at
 bootstrap per ADR 0004).</p>
 <p>The store holds an <a href="../../../../nauka_state/embedded/struct.EmbeddedDb.html" title="struct nauka_state::embedded::EmbeddedDb"><code>EmbeddedDb</code></a> directly, same as the other two
-org-layer stores. Call sites pass <code>cluster_db.embedded().clone()</code>
+org-layer stores. Call sites pass <code>db.clone()</code>
 at construction time; the clone is cheap (<code>Arc</code>-shared
 <code>Surreal&lt;Db&gt;</code> router) and lets the store share the underlying
 connection with the rest of the cluster path.</p>

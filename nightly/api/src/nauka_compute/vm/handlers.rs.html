@@ -121,151 +121,148 @@ data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" d
 <a href=#119 id=119 data-nosnippet>119</a>            Box&lt;<span class="kw">dyn </span>Future&lt;Output = anyhow::Result&lt;OperationResponse&gt;&gt; + Send&gt;,
 <a href=#120 id=120 data-nosnippet>120</a>        &gt; {
 <a href=#121 id=121 data-nosnippet>121</a>            Box::pin(<span class="kw">async move </span>{
-<a href=#122 id=122 data-nosnippet>122</a>                <span class="comment">// P2.13 (sifrah/nauka#217): VmStore now takes an
-<a href=#123 id=123 data-nosnippet>123</a>                // EmbeddedDb directly; reach the cluster handle via
-<a href=#124 id=124 data-nosnippet>124</a>                // the wrapper's `.embedded()` accessor.
-<a href=#125 id=125 data-nosnippet>125</a>                </span><span class="kw">let </span>cluster_db = nauka_hypervisor::controlplane::connect().<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#126 id=126 data-nosnippet>126</a>                <span class="kw">let </span>store = VmStore::new(cluster_db.embedded().clone());
-<a href=#127 id=127 data-nosnippet>127</a>                <span class="kw">match </span>req.operation.as_str() {
-<a href=#128 id=128 data-nosnippet>128</a>                    <span class="string">"create" </span>=&gt; {
-<a href=#129 id=129 data-nosnippet>129</a>                        <span class="kw">let </span>name = req.name.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
-<a href=#130 id=130 data-nosnippet>130</a>                        <span class="kw">let </span>org = req
-<a href=#131 id=131 data-nosnippet>131</a>                            .scope
-<a href=#132 id=132 data-nosnippet>132</a>                            .get(<span class="string">"org"</span>)
-<a href=#133 id=133 data-nosnippet>133</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--org is required"</span>))<span class="question-mark">?
-<a href=#134 id=134 data-nosnippet>134</a>                            </span>.to_string();
-<a href=#135 id=135 data-nosnippet>135</a>                        <span class="kw">let </span>project = req
-<a href=#136 id=136 data-nosnippet>136</a>                            .fields
-<a href=#137 id=137 data-nosnippet>137</a>                            .get(<span class="string">"project"</span>)
-<a href=#138 id=138 data-nosnippet>138</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--project is required"</span>))<span class="question-mark">?
-<a href=#139 id=139 data-nosnippet>139</a>                            </span>.clone();
-<a href=#140 id=140 data-nosnippet>140</a>                        <span class="kw">let </span>env = req
-<a href=#141 id=141 data-nosnippet>141</a>                            .fields
-<a href=#142 id=142 data-nosnippet>142</a>                            .get(<span class="string">"env"</span>)
-<a href=#143 id=143 data-nosnippet>143</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--env is required"</span>))<span class="question-mark">?
-<a href=#144 id=144 data-nosnippet>144</a>                            </span>.clone();
-<a href=#145 id=145 data-nosnippet>145</a>                        <span class="kw">let </span>vpc = req
-<a href=#146 id=146 data-nosnippet>146</a>                            .fields
-<a href=#147 id=147 data-nosnippet>147</a>                            .get(<span class="string">"vpc"</span>)
-<a href=#148 id=148 data-nosnippet>148</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--vpc is required"</span>))<span class="question-mark">?
-<a href=#149 id=149 data-nosnippet>149</a>                            </span>.clone();
-<a href=#150 id=150 data-nosnippet>150</a>                        <span class="kw">let </span>subnet = req
-<a href=#151 id=151 data-nosnippet>151</a>                            .fields
-<a href=#152 id=152 data-nosnippet>152</a>                            .get(<span class="string">"subnet"</span>)
-<a href=#153 id=153 data-nosnippet>153</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--subnet is required"</span>))<span class="question-mark">?
-<a href=#154 id=154 data-nosnippet>154</a>                            </span>.clone();
-<a href=#155 id=155 data-nosnippet>155</a>                        <span class="kw">let </span>cpu: u32 = req
-<a href=#156 id=156 data-nosnippet>156</a>                            .fields
-<a href=#157 id=157 data-nosnippet>157</a>                            .get(<span class="string">"cpu"</span>)
-<a href=#158 id=158 data-nosnippet>158</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--cpu is required"</span>))<span class="question-mark">?
-<a href=#159 id=159 data-nosnippet>159</a>                            </span>.parse()
-<a href=#160 id=160 data-nosnippet>160</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--cpu must be a number"</span>))<span class="question-mark">?</span>;
-<a href=#161 id=161 data-nosnippet>161</a>                        <span class="kw">let </span>memory: u32 = req
-<a href=#162 id=162 data-nosnippet>162</a>                            .fields
-<a href=#163 id=163 data-nosnippet>163</a>                            .get(<span class="string">"memory"</span>)
-<a href=#164 id=164 data-nosnippet>164</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--memory is required"</span>))<span class="question-mark">?
-<a href=#165 id=165 data-nosnippet>165</a>                            </span>.parse()
-<a href=#166 id=166 data-nosnippet>166</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--memory must be a number"</span>))<span class="question-mark">?</span>;
-<a href=#167 id=167 data-nosnippet>167</a>                        <span class="kw">let </span>disk: u32 = req
-<a href=#168 id=168 data-nosnippet>168</a>                            .fields
-<a href=#169 id=169 data-nosnippet>169</a>                            .get(<span class="string">"disk"</span>)
-<a href=#170 id=170 data-nosnippet>170</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--disk is required"</span>))<span class="question-mark">?
-<a href=#171 id=171 data-nosnippet>171</a>                            </span>.parse()
-<a href=#172 id=172 data-nosnippet>172</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--disk must be a number"</span>))<span class="question-mark">?</span>;
-<a href=#173 id=173 data-nosnippet>173</a>                        <span class="kw">let </span>image = req
-<a href=#174 id=174 data-nosnippet>174</a>                            .fields
-<a href=#175 id=175 data-nosnippet>175</a>                            .get(<span class="string">"image"</span>)
-<a href=#176 id=176 data-nosnippet>176</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--image is required"</span>))<span class="question-mark">?
-<a href=#177 id=177 data-nosnippet>177</a>                            </span>.clone();
-<a href=#178 id=178 data-nosnippet>178</a>                        <span class="kw">let </span>region = req
-<a href=#179 id=179 data-nosnippet>179</a>                            .fields
-<a href=#180 id=180 data-nosnippet>180</a>                            .get(<span class="string">"region"</span>)
-<a href=#181 id=181 data-nosnippet>181</a>                            .cloned()
-<a href=#182 id=182 data-nosnippet>182</a>                            .unwrap_or_else(|| <span class="string">"default"</span>.to_string());
-<a href=#183 id=183 data-nosnippet>183</a>                        <span class="kw">let </span>zone = req
-<a href=#184 id=184 data-nosnippet>184</a>                            .fields
-<a href=#185 id=185 data-nosnippet>185</a>                            .get(<span class="string">"zone"</span>)
-<a href=#186 id=186 data-nosnippet>186</a>                            .cloned()
-<a href=#187 id=187 data-nosnippet>187</a>                            .unwrap_or_else(|| <span class="string">"default"</span>.to_string());
-<a href=#188 id=188 data-nosnippet>188</a>
-<a href=#189 id=189 data-nosnippet>189</a>                        nauka_core::validate::name(<span class="kw-2">&amp;</span>name)<span class="question-mark">?</span>;
-<a href=#190 id=190 data-nosnippet>190</a>                        <span class="comment">// P2.13 (sifrah/nauka#217): scheduling lives
-<a href=#191 id=191 data-nosnippet>191</a>                        // outside `VmStore::create` so the store
-<a href=#192 id=192 data-nosnippet>192</a>                        // stays decoupled from live fabric state
-<a href=#193 id=193 data-nosnippet>193</a>                        // and can be unit-tested. The handler
-<a href=#194 id=194 data-nosnippet>194</a>                        // resolves a hypervisor via the scheduler
-<a href=#195 id=195 data-nosnippet>195</a>                        // immediately before persisting the row.
-<a href=#196 id=196 data-nosnippet>196</a>                        </span><span class="kw">let </span>hypervisor_id = <span class="kw">crate</span>::scheduler::schedule(<span class="kw-2">&amp;</span>region, <span class="kw-2">&amp;</span>zone).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#197 id=197 data-nosnippet>197</a>                        <span class="kw">let </span>vm = store
-<a href=#198 id=198 data-nosnippet>198</a>                            .create(
-<a href=#199 id=199 data-nosnippet>199</a>                                <span class="kw-2">&amp;</span>name, <span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;</span>project, <span class="kw-2">&amp;</span>env, <span class="kw-2">&amp;</span>vpc, <span class="kw-2">&amp;</span>subnet, cpu, memory, disk,
-<a href=#200 id=200 data-nosnippet>200</a>                                <span class="kw-2">&amp;</span>image, <span class="kw-2">&amp;</span>region, <span class="kw-2">&amp;</span>zone, hypervisor_id,
-<a href=#201 id=201 data-nosnippet>201</a>                            )
-<a href=#202 id=202 data-nosnippet>202</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#203 id=203 data-nosnippet>203</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
-<a href=#204 id=204 data-nosnippet>204</a>                    }
-<a href=#205 id=205 data-nosnippet>205</a>                    <span class="string">"list" </span>=&gt; {
-<a href=#206 id=206 data-nosnippet>206</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
-<a href=#207 id=207 data-nosnippet>207</a>                        <span class="kw">let </span>project = req.fields.get(<span class="string">"project"</span>).cloned();
-<a href=#208 id=208 data-nosnippet>208</a>                        <span class="kw">let </span>env = req.fields.get(<span class="string">"env"</span>).cloned();
-<a href=#209 id=209 data-nosnippet>209</a>                        <span class="kw">let </span>vms = store
-<a href=#210 id=210 data-nosnippet>210</a>                            .list(org.as_deref(), project.as_deref(), env.as_deref())
-<a href=#211 id=211 data-nosnippet>211</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#212 id=212 data-nosnippet>212</a>                        <span class="kw">let </span>items: Vec&lt;serde_json::Value&gt; =
-<a href=#213 id=213 data-nosnippet>213</a>                            vms.iter().map(|v| v.to_api_json()).collect();
-<a href=#214 id=214 data-nosnippet>214</a>                        <span class="prelude-val">Ok</span>(OperationResponse::ResourceList(items))
-<a href=#215 id=215 data-nosnippet>215</a>                    }
-<a href=#216 id=216 data-nosnippet>216</a>                    <span class="string">"get" </span>=&gt; {
-<a href=#217 id=217 data-nosnippet>217</a>                        <span class="kw">let </span>name = req
-<a href=#218 id=218 data-nosnippet>218</a>                            .name
-<a href=#219 id=219 data-nosnippet>219</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name or ID"</span>))<span class="question-mark">?</span>;
-<a href=#220 id=220 data-nosnippet>220</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
-<a href=#221 id=221 data-nosnippet>221</a>                        <span class="kw">let </span>vm = store
-<a href=#222 id=222 data-nosnippet>222</a>                            .get(<span class="kw-2">&amp;</span>name, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
-<a href=#223 id=223 data-nosnippet>223</a>                            .<span class="kw">await</span><span class="question-mark">?
-<a href=#224 id=224 data-nosnippet>224</a>                            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"vm '{name}' not found"</span>))<span class="question-mark">?</span>;
-<a href=#225 id=225 data-nosnippet>225</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
-<a href=#226 id=226 data-nosnippet>226</a>                    }
-<a href=#227 id=227 data-nosnippet>227</a>                    <span class="string">"delete" </span>=&gt; {
-<a href=#228 id=228 data-nosnippet>228</a>                        <span class="kw">let </span>name = req
-<a href=#229 id=229 data-nosnippet>229</a>                            .name
-<a href=#230 id=230 data-nosnippet>230</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name or ID"</span>))<span class="question-mark">?</span>;
-<a href=#231 id=231 data-nosnippet>231</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
-<a href=#232 id=232 data-nosnippet>232</a>                        store.delete(<span class="kw-2">&amp;</span>name, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>).<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#233 id=233 data-nosnippet>233</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(<span class="string">"vm '{name}' deleted."</span>)))
-<a href=#234 id=234 data-nosnippet>234</a>                    }
-<a href=#235 id=235 data-nosnippet>235</a>                    <span class="string">"start" </span>=&gt; {
-<a href=#236 id=236 data-nosnippet>236</a>                        <span class="kw">let </span>name = req
-<a href=#237 id=237 data-nosnippet>237</a>                            .name
-<a href=#238 id=238 data-nosnippet>238</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
-<a href=#239 id=239 data-nosnippet>239</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
-<a href=#240 id=240 data-nosnippet>240</a>                        <span class="kw">let </span>vm = store
-<a href=#241 id=241 data-nosnippet>241</a>                            .update_state(<span class="kw-2">&amp;</span>name, VmState::Running, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
-<a href=#242 id=242 data-nosnippet>242</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#243 id=243 data-nosnippet>243</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
-<a href=#244 id=244 data-nosnippet>244</a>                    }
-<a href=#245 id=245 data-nosnippet>245</a>                    <span class="string">"stop" </span>=&gt; {
-<a href=#246 id=246 data-nosnippet>246</a>                        <span class="kw">let </span>name = req
-<a href=#247 id=247 data-nosnippet>247</a>                            .name
-<a href=#248 id=248 data-nosnippet>248</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
-<a href=#249 id=249 data-nosnippet>249</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
-<a href=#250 id=250 data-nosnippet>250</a>                        <span class="kw">let </span>vm = store
-<a href=#251 id=251 data-nosnippet>251</a>                            .update_state(<span class="kw-2">&amp;</span>name, VmState::Stopped, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
-<a href=#252 id=252 data-nosnippet>252</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#253 id=253 data-nosnippet>253</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
-<a href=#254 id=254 data-nosnippet>254</a>                    }
-<a href=#255 id=255 data-nosnippet>255</a>                    other =&gt; <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(<span class="string">"unknown: {other}"</span>))),
-<a href=#256 id=256 data-nosnippet>256</a>                }
-<a href=#257 id=257 data-nosnippet>257</a>            })
-<a href=#258 id=258 data-nosnippet>258</a>        },
-<a href=#259 id=259 data-nosnippet>259</a>    )
-<a href=#260 id=260 data-nosnippet>260</a>}
-<a href=#261 id=261 data-nosnippet>261</a>
-<a href=#262 id=262 data-nosnippet>262</a><span class="kw">pub fn </span>registration() -&gt; ResourceRegistration {
-<a href=#263 id=263 data-nosnippet>263</a>    ResourceRegistration {
-<a href=#264 id=264 data-nosnippet>264</a>        def: resource_def(),
-<a href=#265 id=265 data-nosnippet>265</a>        handler: handler(),
-<a href=#266 id=266 data-nosnippet>266</a>        children: <span class="macro">vec!</span>[<span class="kw">crate</span>::image::handlers::registration()],
-<a href=#267 id=267 data-nosnippet>267</a>    }
-<a href=#268 id=268 data-nosnippet>268</a>}
+<a href=#122 id=122 data-nosnippet>122</a>                <span class="kw">let </span>db = nauka_hypervisor::controlplane::connect().<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#123 id=123 data-nosnippet>123</a>                <span class="kw">let </span>store = VmStore::new(db.clone());
+<a href=#124 id=124 data-nosnippet>124</a>                <span class="kw">match </span>req.operation.as_str() {
+<a href=#125 id=125 data-nosnippet>125</a>                    <span class="string">"create" </span>=&gt; {
+<a href=#126 id=126 data-nosnippet>126</a>                        <span class="kw">let </span>name = req.name.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
+<a href=#127 id=127 data-nosnippet>127</a>                        <span class="kw">let </span>org = req
+<a href=#128 id=128 data-nosnippet>128</a>                            .scope
+<a href=#129 id=129 data-nosnippet>129</a>                            .get(<span class="string">"org"</span>)
+<a href=#130 id=130 data-nosnippet>130</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--org is required"</span>))<span class="question-mark">?
+<a href=#131 id=131 data-nosnippet>131</a>                            </span>.to_string();
+<a href=#132 id=132 data-nosnippet>132</a>                        <span class="kw">let </span>project = req
+<a href=#133 id=133 data-nosnippet>133</a>                            .fields
+<a href=#134 id=134 data-nosnippet>134</a>                            .get(<span class="string">"project"</span>)
+<a href=#135 id=135 data-nosnippet>135</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--project is required"</span>))<span class="question-mark">?
+<a href=#136 id=136 data-nosnippet>136</a>                            </span>.clone();
+<a href=#137 id=137 data-nosnippet>137</a>                        <span class="kw">let </span>env = req
+<a href=#138 id=138 data-nosnippet>138</a>                            .fields
+<a href=#139 id=139 data-nosnippet>139</a>                            .get(<span class="string">"env"</span>)
+<a href=#140 id=140 data-nosnippet>140</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--env is required"</span>))<span class="question-mark">?
+<a href=#141 id=141 data-nosnippet>141</a>                            </span>.clone();
+<a href=#142 id=142 data-nosnippet>142</a>                        <span class="kw">let </span>vpc = req
+<a href=#143 id=143 data-nosnippet>143</a>                            .fields
+<a href=#144 id=144 data-nosnippet>144</a>                            .get(<span class="string">"vpc"</span>)
+<a href=#145 id=145 data-nosnippet>145</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--vpc is required"</span>))<span class="question-mark">?
+<a href=#146 id=146 data-nosnippet>146</a>                            </span>.clone();
+<a href=#147 id=147 data-nosnippet>147</a>                        <span class="kw">let </span>subnet = req
+<a href=#148 id=148 data-nosnippet>148</a>                            .fields
+<a href=#149 id=149 data-nosnippet>149</a>                            .get(<span class="string">"subnet"</span>)
+<a href=#150 id=150 data-nosnippet>150</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--subnet is required"</span>))<span class="question-mark">?
+<a href=#151 id=151 data-nosnippet>151</a>                            </span>.clone();
+<a href=#152 id=152 data-nosnippet>152</a>                        <span class="kw">let </span>cpu: u32 = req
+<a href=#153 id=153 data-nosnippet>153</a>                            .fields
+<a href=#154 id=154 data-nosnippet>154</a>                            .get(<span class="string">"cpu"</span>)
+<a href=#155 id=155 data-nosnippet>155</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--cpu is required"</span>))<span class="question-mark">?
+<a href=#156 id=156 data-nosnippet>156</a>                            </span>.parse()
+<a href=#157 id=157 data-nosnippet>157</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--cpu must be a number"</span>))<span class="question-mark">?</span>;
+<a href=#158 id=158 data-nosnippet>158</a>                        <span class="kw">let </span>memory: u32 = req
+<a href=#159 id=159 data-nosnippet>159</a>                            .fields
+<a href=#160 id=160 data-nosnippet>160</a>                            .get(<span class="string">"memory"</span>)
+<a href=#161 id=161 data-nosnippet>161</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--memory is required"</span>))<span class="question-mark">?
+<a href=#162 id=162 data-nosnippet>162</a>                            </span>.parse()
+<a href=#163 id=163 data-nosnippet>163</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--memory must be a number"</span>))<span class="question-mark">?</span>;
+<a href=#164 id=164 data-nosnippet>164</a>                        <span class="kw">let </span>disk: u32 = req
+<a href=#165 id=165 data-nosnippet>165</a>                            .fields
+<a href=#166 id=166 data-nosnippet>166</a>                            .get(<span class="string">"disk"</span>)
+<a href=#167 id=167 data-nosnippet>167</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--disk is required"</span>))<span class="question-mark">?
+<a href=#168 id=168 data-nosnippet>168</a>                            </span>.parse()
+<a href=#169 id=169 data-nosnippet>169</a>                            .map_err(|<span class="kw">_</span>| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--disk must be a number"</span>))<span class="question-mark">?</span>;
+<a href=#170 id=170 data-nosnippet>170</a>                        <span class="kw">let </span>image = req
+<a href=#171 id=171 data-nosnippet>171</a>                            .fields
+<a href=#172 id=172 data-nosnippet>172</a>                            .get(<span class="string">"image"</span>)
+<a href=#173 id=173 data-nosnippet>173</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"--image is required"</span>))<span class="question-mark">?
+<a href=#174 id=174 data-nosnippet>174</a>                            </span>.clone();
+<a href=#175 id=175 data-nosnippet>175</a>                        <span class="kw">let </span>region = req
+<a href=#176 id=176 data-nosnippet>176</a>                            .fields
+<a href=#177 id=177 data-nosnippet>177</a>                            .get(<span class="string">"region"</span>)
+<a href=#178 id=178 data-nosnippet>178</a>                            .cloned()
+<a href=#179 id=179 data-nosnippet>179</a>                            .unwrap_or_else(|| <span class="string">"default"</span>.to_string());
+<a href=#180 id=180 data-nosnippet>180</a>                        <span class="kw">let </span>zone = req
+<a href=#181 id=181 data-nosnippet>181</a>                            .fields
+<a href=#182 id=182 data-nosnippet>182</a>                            .get(<span class="string">"zone"</span>)
+<a href=#183 id=183 data-nosnippet>183</a>                            .cloned()
+<a href=#184 id=184 data-nosnippet>184</a>                            .unwrap_or_else(|| <span class="string">"default"</span>.to_string());
+<a href=#185 id=185 data-nosnippet>185</a>
+<a href=#186 id=186 data-nosnippet>186</a>                        nauka_core::validate::name(<span class="kw-2">&amp;</span>name)<span class="question-mark">?</span>;
+<a href=#187 id=187 data-nosnippet>187</a>                        <span class="comment">// P2.13 (sifrah/nauka#217): scheduling lives
+<a href=#188 id=188 data-nosnippet>188</a>                        // outside `VmStore::create` so the store
+<a href=#189 id=189 data-nosnippet>189</a>                        // stays decoupled from live fabric state
+<a href=#190 id=190 data-nosnippet>190</a>                        // and can be unit-tested. The handler
+<a href=#191 id=191 data-nosnippet>191</a>                        // resolves a hypervisor via the scheduler
+<a href=#192 id=192 data-nosnippet>192</a>                        // immediately before persisting the row.
+<a href=#193 id=193 data-nosnippet>193</a>                        </span><span class="kw">let </span>hypervisor_id = <span class="kw">crate</span>::scheduler::schedule(<span class="kw-2">&amp;</span>region, <span class="kw-2">&amp;</span>zone).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#194 id=194 data-nosnippet>194</a>                        <span class="kw">let </span>vm = store
+<a href=#195 id=195 data-nosnippet>195</a>                            .create(
+<a href=#196 id=196 data-nosnippet>196</a>                                <span class="kw-2">&amp;</span>name, <span class="kw-2">&amp;</span>org, <span class="kw-2">&amp;</span>project, <span class="kw-2">&amp;</span>env, <span class="kw-2">&amp;</span>vpc, <span class="kw-2">&amp;</span>subnet, cpu, memory, disk,
+<a href=#197 id=197 data-nosnippet>197</a>                                <span class="kw-2">&amp;</span>image, <span class="kw-2">&amp;</span>region, <span class="kw-2">&amp;</span>zone, hypervisor_id,
+<a href=#198 id=198 data-nosnippet>198</a>                            )
+<a href=#199 id=199 data-nosnippet>199</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#200 id=200 data-nosnippet>200</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
+<a href=#201 id=201 data-nosnippet>201</a>                    }
+<a href=#202 id=202 data-nosnippet>202</a>                    <span class="string">"list" </span>=&gt; {
+<a href=#203 id=203 data-nosnippet>203</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
+<a href=#204 id=204 data-nosnippet>204</a>                        <span class="kw">let </span>project = req.fields.get(<span class="string">"project"</span>).cloned();
+<a href=#205 id=205 data-nosnippet>205</a>                        <span class="kw">let </span>env = req.fields.get(<span class="string">"env"</span>).cloned();
+<a href=#206 id=206 data-nosnippet>206</a>                        <span class="kw">let </span>vms = store
+<a href=#207 id=207 data-nosnippet>207</a>                            .list(org.as_deref(), project.as_deref(), env.as_deref())
+<a href=#208 id=208 data-nosnippet>208</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#209 id=209 data-nosnippet>209</a>                        <span class="kw">let </span>items: Vec&lt;serde_json::Value&gt; =
+<a href=#210 id=210 data-nosnippet>210</a>                            vms.iter().map(|v| v.to_api_json()).collect();
+<a href=#211 id=211 data-nosnippet>211</a>                        <span class="prelude-val">Ok</span>(OperationResponse::ResourceList(items))
+<a href=#212 id=212 data-nosnippet>212</a>                    }
+<a href=#213 id=213 data-nosnippet>213</a>                    <span class="string">"get" </span>=&gt; {
+<a href=#214 id=214 data-nosnippet>214</a>                        <span class="kw">let </span>name = req
+<a href=#215 id=215 data-nosnippet>215</a>                            .name
+<a href=#216 id=216 data-nosnippet>216</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name or ID"</span>))<span class="question-mark">?</span>;
+<a href=#217 id=217 data-nosnippet>217</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
+<a href=#218 id=218 data-nosnippet>218</a>                        <span class="kw">let </span>vm = store
+<a href=#219 id=219 data-nosnippet>219</a>                            .get(<span class="kw-2">&amp;</span>name, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
+<a href=#220 id=220 data-nosnippet>220</a>                            .<span class="kw">await</span><span class="question-mark">?
+<a href=#221 id=221 data-nosnippet>221</a>                            </span>.ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"vm '{name}' not found"</span>))<span class="question-mark">?</span>;
+<a href=#222 id=222 data-nosnippet>222</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
+<a href=#223 id=223 data-nosnippet>223</a>                    }
+<a href=#224 id=224 data-nosnippet>224</a>                    <span class="string">"delete" </span>=&gt; {
+<a href=#225 id=225 data-nosnippet>225</a>                        <span class="kw">let </span>name = req
+<a href=#226 id=226 data-nosnippet>226</a>                            .name
+<a href=#227 id=227 data-nosnippet>227</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name or ID"</span>))<span class="question-mark">?</span>;
+<a href=#228 id=228 data-nosnippet>228</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
+<a href=#229 id=229 data-nosnippet>229</a>                        store.delete(<span class="kw-2">&amp;</span>name, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>).<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#230 id=230 data-nosnippet>230</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(<span class="string">"vm '{name}' deleted."</span>)))
+<a href=#231 id=231 data-nosnippet>231</a>                    }
+<a href=#232 id=232 data-nosnippet>232</a>                    <span class="string">"start" </span>=&gt; {
+<a href=#233 id=233 data-nosnippet>233</a>                        <span class="kw">let </span>name = req
+<a href=#234 id=234 data-nosnippet>234</a>                            .name
+<a href=#235 id=235 data-nosnippet>235</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
+<a href=#236 id=236 data-nosnippet>236</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
+<a href=#237 id=237 data-nosnippet>237</a>                        <span class="kw">let </span>vm = store
+<a href=#238 id=238 data-nosnippet>238</a>                            .update_state(<span class="kw-2">&amp;</span>name, VmState::Running, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
+<a href=#239 id=239 data-nosnippet>239</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#240 id=240 data-nosnippet>240</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
+<a href=#241 id=241 data-nosnippet>241</a>                    }
+<a href=#242 id=242 data-nosnippet>242</a>                    <span class="string">"stop" </span>=&gt; {
+<a href=#243 id=243 data-nosnippet>243</a>                        <span class="kw">let </span>name = req
+<a href=#244 id=244 data-nosnippet>244</a>                            .name
+<a href=#245 id=245 data-nosnippet>245</a>                            .ok_or_else(|| <span class="macro">anyhow::anyhow!</span>(<span class="string">"missing name"</span>))<span class="question-mark">?</span>;
+<a href=#246 id=246 data-nosnippet>246</a>                        <span class="kw">let </span>org = req.scope.get(<span class="string">"org"</span>).map(|s| s.to_string());
+<a href=#247 id=247 data-nosnippet>247</a>                        <span class="kw">let </span>vm = store
+<a href=#248 id=248 data-nosnippet>248</a>                            .update_state(<span class="kw-2">&amp;</span>name, VmState::Stopped, org.as_deref(), <span class="prelude-val">None</span>, <span class="prelude-val">None</span>)
+<a href=#249 id=249 data-nosnippet>249</a>                            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#250 id=250 data-nosnippet>250</a>                        <span class="prelude-val">Ok</span>(OperationResponse::Resource(vm.to_api_json()))
+<a href=#251 id=251 data-nosnippet>251</a>                    }
+<a href=#252 id=252 data-nosnippet>252</a>                    other =&gt; <span class="prelude-val">Ok</span>(OperationResponse::Message(<span class="macro">format!</span>(<span class="string">"unknown: {other}"</span>))),
+<a href=#253 id=253 data-nosnippet>253</a>                }
+<a href=#254 id=254 data-nosnippet>254</a>            })
+<a href=#255 id=255 data-nosnippet>255</a>        },
+<a href=#256 id=256 data-nosnippet>256</a>    )
+<a href=#257 id=257 data-nosnippet>257</a>}
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a><span class="kw">pub fn </span>registration() -&gt; ResourceRegistration {
+<a href=#260 id=260 data-nosnippet>260</a>    ResourceRegistration {
+<a href=#261 id=261 data-nosnippet>261</a>        def: resource_def(),
+<a href=#262 id=262 data-nosnippet>262</a>        handler: handler(),
+<a href=#263 id=263 data-nosnippet>263</a>        children: <span class="macro">vec!</span>[<span class="kw">crate</span>::image::handlers::registration()],
+<a href=#264 id=264 data-nosnippet>264</a>    }
+<a href=#265 id=265 data-nosnippet>265</a>}
 </code></pre></div></section></main></body></html>
