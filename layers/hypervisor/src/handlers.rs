@@ -993,21 +993,27 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
 async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationResponse> {
     let hot = req.fields.get("hot").map(|s| s == "true").unwrap_or(false);
 
-    let db = open_db().await?;
-
-    // Get S3 config from region registry
-    let registry = storage::region::RegionRegistry::load(&db)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let config = registry
-        .default_region()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no storage region configured.\n\n\
-                 Initialize the cluster first with: nauka hypervisor init"
-            )
-        })?
-        .clone();
+    // Scope the local EmbeddedDb so its SurrealKV flock is released
+    // before `backup_logical` calls `controlplane::connect`, which
+    // opens `bootstrap.skv` a second time to resolve PD endpoints.
+    // Without the shutdown, the second open deadlocks on the flock.
+    let config = {
+        let db = open_db().await?;
+        let registry = storage::region::RegionRegistry::load(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let config = registry
+            .default_region()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no storage region configured.\n\n\
+                     Initialize the cluster first with: nauka hypervisor init"
+                )
+            })?
+            .clone();
+        db.shutdown().await.ok();
+        config
+    };
 
     let mode = if hot { "hot" } else { "cold (consistent)" };
     let mut results = vec![format!("Backup mode: {mode}")];
@@ -1022,6 +1028,15 @@ async fn handle_backup(req: OperationRequest) -> anyhow::Result<OperationRespons
     match controlplane::backup::backup_tikv(&config, hot) {
         Ok(key) => results.push(format!("TiKV backup: {key}")),
         Err(e) => results.push(format!("TiKV backup failed: {e}")),
+    }
+
+    // P2.15 (sifrah/nauka#219): logical SurrealQL dump alongside the
+    // physical tar backups. Survives independently: if the cluster is
+    // reachable we capture a portable logical snapshot, otherwise we
+    // fall through with a note and the tar backups still stand.
+    match controlplane::backup::backup_logical(&config).await {
+        Ok(key) => results.push(format!("Logical backup: {key}")),
+        Err(e) => results.push(format!("Logical backup failed: {e}")),
     }
 
     Ok(OperationResponse::Message(results.join("\n")))
@@ -1325,6 +1340,9 @@ async fn handle_upgrade() -> anyhow::Result<OperationResponse> {
                 }
                 if let Err(e) = controlplane::backup::backup_tikv(config, false) {
                     tracing::warn!("TiKV backup failed (non-fatal): {e}");
+                }
+                if let Err(e) = controlplane::backup::backup_logical(config).await {
+                    tracing::warn!("logical backup failed (non-fatal): {e}");
                 }
             } else {
                 tracing::warn!("no storage region configured, skipping backup");

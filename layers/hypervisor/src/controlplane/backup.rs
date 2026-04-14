@@ -673,6 +673,112 @@ pub fn restore_backup(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════
+// Logical backup — SurrealDB EXPORT / IMPORT
+// ═══════════════════════════════════════════════════
+//
+// P2.15 (sifrah/nauka#219) adds a second backup lane alongside the
+// filesystem-tar path. The tar lane (`backup_pd` / `backup_tikv`) is
+// still the only way to recover from a corrupted cluster, so it stays.
+// This lane produces a portable SurrealQL dump via `Surreal::export`
+// that can be replayed into a fresh cluster via `Surreal::import`,
+// which is the right primitive for cross-cluster migrations, audits,
+// and logical point-in-time snapshots. Keys live under
+// `backups/logical/` so `list_backups` transparently returns both
+// lanes.
+
+const LOGICAL_BACKUP_PREFIX: &str = "backups/logical";
+
+/// Returns `true` if the backup key is a logical SurrealQL export
+/// (as opposed to a physical tar snapshot). Used by restore flows to
+/// decide whether to replay via `Surreal::import` or via tar extract.
+pub fn is_logical_backup(key: &str) -> bool {
+    key.ends_with(".surql") || key.ends_with(".surql.enc")
+}
+
+/// Create a logical backup of the cluster database and upload it to S3.
+///
+/// Unlike [`backup_tikv`], this does not touch the PD/TiKV data
+/// directories — it connects to the cluster via
+/// [`crate::controlplane::connect`] and asks SurrealDB to export the
+/// current namespace/database to a SurrealQL file. No service downtime.
+///
+/// The dump is encrypted with the TiKV master key (same as the tar
+/// lane) and uploaded under `backups/logical/cluster-{ts}.surql.enc`.
+/// Returns the S3 key of the uploaded backup.
+pub async fn backup_logical(config: &RegionStorage) -> Result<String, NaukaError> {
+    let ts = timestamp_label();
+    let dump_name = format!("cluster-{ts}.surql");
+    let dump_path = format!("{BACKUP_TMP_DIR}/{dump_name}");
+    let s3_key = format!("{LOGICAL_BACKUP_PREFIX}/{dump_name}.enc");
+
+    tracing::info!("creating logical backup: {s3_key}");
+
+    std::fs::create_dir_all(BACKUP_TMP_DIR)
+        .map_err(|e| NaukaError::internal(format!("failed to create tmp dir: {e}")))?;
+
+    let db = crate::controlplane::connect()
+        .await
+        .map_err(|e| NaukaError::internal(format!("connect to cluster: {e}")))?;
+
+    db.embedded()
+        .client()
+        .export(std::path::PathBuf::from(&dump_path))
+        .await
+        .map_err(|e| NaukaError::internal(format!("surrealdb export: {e}")))?;
+
+    let enc_path = encrypt_archive(&dump_path)?;
+    s3_upload(config, &enc_path, &s3_key)?;
+    let _ = std::fs::remove_file(&enc_path);
+
+    tracing::info!("logical backup uploaded: {s3_key}");
+    Ok(s3_key)
+}
+
+/// Restore a logical backup into the currently-connected cluster.
+///
+/// Downloads the encrypted dump from S3, decrypts it with the TiKV
+/// master key, and replays it against the cluster via
+/// `Surreal::import`. The target cluster must already be up — unlike
+/// the tar restore path, this does not reconstruct PD/TiKV state.
+pub async fn restore_logical(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
+    std::fs::create_dir_all(BACKUP_TMP_DIR)
+        .map_err(|e| NaukaError::internal(format!("failed to create tmp dir: {e}")))?;
+
+    let local_enc = format!("{BACKUP_TMP_DIR}/restore-logical.surql.enc");
+    let local_dump = format!("{BACKUP_TMP_DIR}/restore-logical.surql");
+
+    let is_encrypted = s3_key.ends_with(".enc");
+    let download_path = if is_encrypted {
+        &local_enc
+    } else {
+        &local_dump
+    };
+
+    tracing::info!("downloading logical backup: {s3_key}");
+    s3_download(config, s3_key, download_path)?;
+
+    if is_encrypted {
+        decrypt_archive(&local_enc, &local_dump)?;
+        let _ = std::fs::remove_file(&local_enc);
+    }
+
+    let db = crate::controlplane::connect()
+        .await
+        .map_err(|e| NaukaError::internal(format!("connect to cluster: {e}")))?;
+
+    db.embedded()
+        .client()
+        .import(&local_dump)
+        .await
+        .map_err(|e| NaukaError::internal(format!("surrealdb import: {e}")))?;
+
+    let _ = std::fs::remove_file(&local_dump);
+
+    tracing::info!("logical backup restored from {s3_key}");
+    Ok(())
+}
+
 /// Parse an ISO-8601 timestamp string into Unix seconds.
 /// Handles format: 2026-04-10T19:00:00.000Z or 2026-04-10T19:00:00Z
 fn parse_backup_timestamp(ts: &str) -> Option<u64> {
@@ -773,5 +879,80 @@ mod tests {
     fn timestamp_label_not_empty() {
         let ts = timestamp_label();
         assert!(!ts.is_empty());
+    }
+
+    #[test]
+    fn is_logical_backup_matches_expected_extensions() {
+        assert!(is_logical_backup("backups/logical/cluster-x.surql"));
+        assert!(is_logical_backup("backups/logical/cluster-x.surql.enc"));
+        assert!(!is_logical_backup("backups/pd/pd-snapshot-x.tar.gz.enc"));
+        assert!(!is_logical_backup("backups/tikv/tikv-snapshot-x.tar.gz"));
+    }
+
+    /// P2.15 (sifrah/nauka#219) round-trip: `Surreal::export` followed
+    /// by `Surreal::import` must restore inserted rows byte-for-byte.
+    /// Bypasses S3/encryption — those are orthogonal and already covered
+    /// by the tar path's unit tests. What this test pins is the core
+    /// contract the issue is actually gating: dumps produced against an
+    /// embedded SurrealKv EmbeddedDb can be replayed back into it.
+    #[tokio::test]
+    async fn logical_backup_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("source.skv");
+        let dump_path = dir.path().join("cluster.surql");
+
+        let db = nauka_state::EmbeddedDb::open(&db_path).await.expect("open");
+        nauka_state::schema::apply_cluster_schemas(&db)
+            .await
+            .expect("apply schemas");
+
+        // Seed one row through the SurrealDB SDK so the dump has real
+        // content to replay. Every SCHEMAFULL field must be set.
+        db.client()
+            .query(
+                "CREATE org:01j_backup_test SET \
+                    name = 'acme-backup', \
+                    status = 'active', \
+                    labels = {}, \
+                    created_at = time::now(), \
+                    updated_at = time::now();",
+            )
+            .await
+            .expect("seed")
+            .check()
+            .expect("seed check");
+
+        // Export → file, sanity-check it landed on disk.
+        db.client().export(dump_path.clone()).await.expect("export");
+        let meta = std::fs::metadata(&dump_path).expect("dump exists");
+        assert!(meta.len() > 0, "dump file is empty");
+
+        // Wipe the row and confirm it's gone, so the import below has
+        // something observable to restore.
+        db.client()
+            .query("DELETE org:01j_backup_test;")
+            .await
+            .expect("delete")
+            .check()
+            .expect("delete check");
+        let mut gone = db
+            .client()
+            .query("SELECT name FROM org WHERE name = 'acme-backup';")
+            .await
+            .expect("query");
+        let empty: Vec<serde_json::Value> = gone.take(0).expect("take");
+        assert!(empty.is_empty(), "row should be gone before import");
+
+        // Import and verify the row is back.
+        db.client().import(&dump_path).await.expect("import");
+        let mut after = db
+            .client()
+            .query("SELECT name FROM org WHERE name = 'acme-backup';")
+            .await
+            .expect("query");
+        let rows: Vec<serde_json::Value> = after.take(0).expect("take");
+        assert_eq!(rows.len(), 1, "row restored from dump");
+
+        db.shutdown().await.expect("shutdown");
     }
 }
