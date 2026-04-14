@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["CheckStatus"],"fn":["check_controlplane","check_fabric","check_storage","check_system","cmd_exists","disk_free_mb","fail","load_doctor_context","ok","ping6","run","skip","warn"],"struct":["Check","DoctorReport"]};
+window.SIDEBAR_ITEMS = {"enum":["CheckStatus"],"fn":["check_controlplane","check_fabric","check_storage","check_surrealdb","check_system","cmd_exists","disk_free_mb","fail","load_doctor_context","ok","ping6","run","skip","warn"],"struct":["Check","DoctorReport"]};

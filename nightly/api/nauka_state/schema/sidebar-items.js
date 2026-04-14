@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["CLUSTER_SCHEMAS"],"fn":["apply_cluster_schemas"]};
+window.SIDEBAR_ITEMS = {"constant":["CLUSTER_SCHEMAS","CLUSTER_TABLE_NAMES"],"fn":["apply_cluster_schemas"]};
