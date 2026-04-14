@@ -7,10 +7,13 @@ use nauka_state::EmbeddedDb;
 
 use super::region::{RegionRegistry, RegionStorage};
 use super::service;
-use crate::controlplane::ClusterDb;
 
-/// Namespace for region storage configs in TiKV.
-const TIKV_STORAGE_NS: &str = "storage/regions";
+/// SurrealDB table (SCHEMALESS) that holds inter-node region-config
+/// handoff records. Each row is keyed by the region name and stores
+/// the full [`RegionStorage`] as JSON under a `data` wrapper field,
+/// following the same JSON-bridge pattern the legacy
+/// `ClusterDb::put`/`get` path used before P2.16 (sifrah/nauka#220).
+const REGION_TABLE: &str = "storage_regions";
 
 /// Setup storage for a region on this node.
 ///
@@ -81,14 +84,43 @@ pub fn leave() -> Result<(), NaukaError> {
 }
 
 /// Publish a region's S3 config to the distributed KV (TiKV).
+///
+/// Opens a fresh `EmbeddedDb<TiKv>` against the supplied PD endpoints,
+/// makes sure the `storage_regions` SCHEMALESS catch-all table exists,
+/// and UPSERTs the config under `storage_regions:{region}` wrapped in
+/// a `data` field. The JSON-bridge shape mirrors what the legacy
+/// `ClusterDb::put` did so joining nodes running older binaries can
+/// still read rows written here.
 pub async fn publish_region_config(
     pd_endpoints: &[&str],
     config: &RegionStorage,
 ) -> Result<(), NaukaError> {
-    let cluster_db = ClusterDb::connect(pd_endpoints).await?;
-    cluster_db
-        .put(TIKV_STORAGE_NS, &config.region, config)
-        .await?;
+    let db = EmbeddedDb::open_tikv(pd_endpoints)
+        .await
+        .map_err(|e| NaukaError::internal(format!("TiKV connect failed: {e}")))?;
+
+    db.client()
+        .query(format!(
+            "DEFINE TABLE IF NOT EXISTS {REGION_TABLE} SCHEMALESS"
+        ))
+        .await
+        .map_err(|e| NaukaError::internal(format!("DEFINE TABLE failed: {e}")))?
+        .check()
+        .map_err(|e| NaukaError::internal(format!("DEFINE TABLE check failed: {e}")))?;
+
+    let data = serde_json::to_value(config)
+        .map_err(|e| NaukaError::internal(format!("serialize region: {e}")))?;
+
+    db.client()
+        .query("UPSERT type::record($tbl, $id) CONTENT { data: $data }")
+        .bind(("tbl", REGION_TABLE.to_string()))
+        .bind(("id", config.region.clone()))
+        .bind(("data", data))
+        .await
+        .map_err(|e| NaukaError::internal(format!("UPSERT region failed: {e}")))?
+        .check()
+        .map_err(|e| NaukaError::internal(format!("UPSERT region check: {e}")))?;
+
     tracing::info!(region = %config.region, "storage config published to cluster");
     Ok(())
 }
@@ -107,16 +139,10 @@ pub async fn fetch_region_config(
 ) -> Result<Option<RegionStorage>, NaukaError> {
     let mut last_err = None;
     for attempt in 1..=FETCH_RETRIES {
-        match ClusterDb::connect(pd_endpoints).await {
-            Ok(db) => match db.get(TIKV_STORAGE_NS, region).await {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    tracing::debug!(attempt, error = %e, "TiKV read failed, retrying...");
-                    last_err = Some(e);
-                }
-            },
+        match fetch_region_config_once(pd_endpoints, region).await {
+            Ok(result) => return Ok(result),
             Err(e) => {
-                tracing::debug!(attempt, error = %e, "TiKV connect failed, retrying...");
+                tracing::debug!(attempt, error = %e, "TiKV read failed, retrying...");
                 last_err = Some(e);
             }
         }
@@ -125,6 +151,44 @@ pub async fn fetch_region_config(
         }
     }
     Err(last_err.unwrap_or_else(|| NaukaError::internal("TiKV fetch failed after retries")))
+}
+
+/// Single-shot fetch used by [`fetch_region_config`]. Split out so the
+/// retry loop can treat connect + read as one atomic attempt instead
+/// of retrying them independently.
+async fn fetch_region_config_once(
+    pd_endpoints: &[&str],
+    region: &str,
+) -> Result<Option<RegionStorage>, NaukaError> {
+    let db = EmbeddedDb::open_tikv(pd_endpoints)
+        .await
+        .map_err(|e| NaukaError::internal(format!("TiKV connect failed: {e}")))?;
+
+    let mut res = db
+        .client()
+        .query("SELECT data FROM type::record($tbl, $id)")
+        .bind(("tbl", REGION_TABLE.to_string()))
+        .bind(("id", region.to_string()))
+        .await
+        .map_err(|e| {
+            // Missing table is an expected "no rows yet" signal — the
+            // first reader on a fresh cluster always races the first
+            // writer. Surface that as `Ok(None)` by re-mapping below.
+            NaukaError::internal(format!("SELECT region failed: {e}"))
+        })?;
+
+    let rows: Vec<serde_json::Value> = res
+        .take("data")
+        .map_err(|e| NaukaError::internal(format!("take region rows: {e}")))?;
+
+    match rows.into_iter().next() {
+        None => Ok(None),
+        Some(data) => {
+            let parsed: RegionStorage = serde_json::from_value(data)
+                .map_err(|e| NaukaError::internal(format!("deserialize region: {e}")))?;
+            Ok(Some(parsed))
+        }
+    }
 }
 
 /// Get storage status for all regions.

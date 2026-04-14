@@ -147,10 +147,7 @@ async fn run_cycle(cycle: u64) -> anyhow::Result<Vec<crate::types::ReconcileResu
     // assigned to any ID containing our name.
 
     let ctx = ReconcileContext {
-        // P2.14 (sifrah/nauka#218): forge holds the inner EmbeddedDb
-        // directly; the ClusterDb wrapper only survives for the PD
-        // health checks below, which still need TiKV-side helpers.
-        db: db.embedded().clone(),
+        db: db.clone(),
         hypervisor_id: state.hypervisor.id.as_str().to_string(),
         node_ids,
         node_name: state.hypervisor.name.clone(),

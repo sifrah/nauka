@@ -31,7 +31,7 @@ impl SubnetStore {
     /// Build a [`SubnetStore`] over a SurrealDB handle.
     ///
     /// Call sites that already hold a cluster-DB wrapper pass
-    /// `cluster_db.embedded().clone()`.
+    /// `db.clone()`.
     pub fn new(db: EmbeddedDb) -> Self {
         Self { db }
     }

@@ -11,8 +11,8 @@ The state layer handles all data persistence in Nauka. It provides two storage b
 
 Nauka uses a two-tier approach to persistence because a distributed database is not available when a node first boots. The two tiers are:
 
-- **Local store (`EmbeddedDb`)** — an embedded SurrealDB instance on each node, backed by the SurrealKV on-disk engine. Used for bootstrap state that must exist before the cluster database is reachable.
-- **Cluster store (`ClusterDb`)** — a TiKV-backed distributed key-value store, replicated across the mesh via Raft. Used for all shared state once the cluster is running.
+- **Local store (`EmbeddedDb::open`)** — an embedded SurrealDB instance on each node, backed by the SurrealKV on-disk engine. Used for bootstrap state that must exist before the cluster database is reachable.
+- **Cluster store (`EmbeddedDb::open_tikv`)** — the same SurrealDB API, this time against a TiKv cluster replicated across the mesh via Raft. Used for all shared state once the cluster is running.
 
 Platform engineers do not choose which tier to use at runtime. Each piece of state has a fixed home: bootstrap data lives locally, everything else lives in the cluster store.
 
