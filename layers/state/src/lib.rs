@@ -48,7 +48,7 @@ pub mod schema;
 pub mod sdk_bridge;
 
 pub use embedded::{pd_endpoints_for, EmbeddedDb};
-pub use schema::{apply_cluster_schemas, CLUSTER_TABLE_NAMES};
+pub use schema::{apply_cluster_schemas, registrations, SchemaRegistration};
 
 // ═══════════════════════════════════════════════════
 // SurrealDB namespace / database constants (ADR 0003)

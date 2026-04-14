@@ -490,7 +490,15 @@ async fn check_surrealdb(report: &mut DoctorReport) {
             .map(|m| m.keys().map(String::as_str).collect())
             .unwrap_or_default();
 
-        let missing: Vec<&str> = nauka_state::CLUSTER_TABLE_NAMES
+        // P2/#286: the canonical list of expected tables is whatever
+        // was registered via `nauka_state::SchemaRegistration` at link
+        // time. Walking the registry keeps this check in lockstep with
+        // the schemas actually applied by `apply_cluster_schemas`.
+        let expected: Vec<&str> = nauka_state::registrations()
+            .iter()
+            .map(|r| r.name)
+            .collect();
+        let missing: Vec<&str> = expected
             .iter()
             .copied()
             .filter(|t| !present.contains(t))
@@ -499,10 +507,7 @@ async fn check_surrealdb(report: &mut DoctorReport) {
         if missing.is_empty() {
             checks.push(ok(
                 "schemas",
-                &format!(
-                    "all {} cluster tables present",
-                    nauka_state::CLUSTER_TABLE_NAMES.len()
-                ),
+                &format!("all {} cluster tables present", expected.len()),
             ));
         } else {
             checks.push(fail(

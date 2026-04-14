@@ -1066,15 +1066,26 @@ mod tests {
         // Compile-time-embedded copies of every P2.5 schema. `include_str!`
         // resolves relative to *this* source file (`layers/state/src/embedded.rs`),
         // so the paths climb out of `state/src` and back down into each
-        // sibling layer's `schemas/` directory.
-        // Mirrors `crate::schema::CLUSTER_SCHEMAS`. P2.12
-        // (sifrah/nauka#216) added the `peering` and `natgw`
-        // schemas alongside the network-layer SurrealDB migration.
+        // sibling layer's nested module tree. Kept as a compile-time
+        // parse smoke test — P2 (sifrah/nauka#286) moved the runtime
+        // application path to the inventory-based `SchemaRegistration`
+        // registry, but we still want to fail the build fast if any
+        // checked-in `.surql` has a parse error.
         const SCHEMAS: &[(&str, &str)] = &[
-            ("org", include_str!("../../org/schemas/org.surql")),
-            ("project", include_str!("../../org/schemas/project.surql")),
-            ("env", include_str!("../../org/schemas/env.surql")),
-            ("user", include_str!("../../org/schemas/user.surql")),
+            ("org", include_str!("../../org/src/definition.surql")),
+            ("iam", include_str!("../../org/src/iam/definition.surql")),
+            (
+                "user",
+                include_str!("../../org/src/iam/user/definition.surql"),
+            ),
+            (
+                "project",
+                include_str!("../../org/src/project/definition.surql"),
+            ),
+            (
+                "env",
+                include_str!("../../org/src/project/env/definition.surql"),
+            ),
         ];
 
         let dir = tempfile::tempdir().expect("tempdir");
