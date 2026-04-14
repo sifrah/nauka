@@ -11,7 +11,7 @@
 //! bootstrap per ADR 0004).
 //!
 //! The store holds an [`EmbeddedDb`] directly, same as the other two
-//! org-layer stores. Call sites pass `cluster_db.embedded().clone()`
+//! org-layer stores. Call sites pass `db.clone()`
 //! at construction time; the clone is cheap (`Arc`-shared
 //! `Surreal<Db>` router) and lets the store share the underlying
 //! connection with the rest of the cluster path.
@@ -56,7 +56,7 @@ impl EnvStore {
     /// Build an [`EnvStore`] over a SurrealDB handle.
     ///
     /// Call sites that already hold a cluster-DB wrapper pass
-    /// `cluster_db.embedded().clone()` — the [`EmbeddedDb`] is cheap
+    /// `db.clone()` — the [`EmbeddedDb`] is cheap
     /// to clone (`Arc`-shared internally), so constructing per-request
     /// stores off the same cluster handle is free.
     pub fn new(db: EmbeddedDb) -> Self {

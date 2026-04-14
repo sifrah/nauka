@@ -60,11 +60,8 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                // P2.12 (sifrah/nauka#216): NatGwStore now takes an
-                // EmbeddedDb directly; reach the cluster handle via
-                // the wrapper's `.embedded()` accessor.
-                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
-                let store = NatGwStore::new(cluster_db.embedded().clone());
+                let db = nauka_hypervisor::controlplane::connect().await?;
+                let store = NatGwStore::new(db.clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;

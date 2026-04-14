@@ -1,20 +1,20 @@
 #![allow(clippy::result_large_err)]
 //! State persistence for Nauka.
 //!
-//! Two backends, one local and one distributed, that together cover every
-//! piece of state a Nauka deployment needs. The two never hold the same
-//! data: bootstrap state lives locally on each node, everything else lives
-//! in the cluster store.
+//! A single [`EmbeddedDb`] type fronts both the per-node bootstrap
+//! store (SurrealDB on SurrealKV) and the distributed cluster store
+//! (SurrealDB on TiKv). One API, two backends — pick the constructor
+//! that matches the backend you need.
 //!
-//! - [`EmbeddedDb`] — embedded SurrealDB on disk via the SurrealKV backend.
-//!   The single source of truth for per-node bootstrap state that must be
-//!   readable before any cluster exists: mesh identity, hypervisor identity,
-//!   peers, WireGuard keys, and the storage region registry.
-//! - [`ClusterDb`] — TiKV-backed distributed raw KV store for shared state
-//!   (orgs, projects, VMs, VPCs, etc.). Transitional: Phase 2
-//!   (sifrah/nauka#206 / sifrah/nauka#220) replaces it with `EmbeddedDb`
-//!   over the SurrealDB SDK's `kv-tikv` backend, after which the two
-//!   stores share the same API.
+//! - Local SurrealKV: `EmbeddedDb::open(path)` or `EmbeddedDb::open_default()`
+//!   for per-node bootstrap state that must be readable before any
+//!   cluster exists (mesh identity, hypervisor identity, peers,
+//!   WireGuard keys, storage region registry).
+//! - Distributed TiKv: `EmbeddedDb::open_tikv(pd_endpoints)` for the
+//!   cluster-wide shared state (orgs, projects, VMs, VPCs, …). The
+//!   legacy raw-KV `ClusterDb` wrapper that briefly fronted this
+//!   backend during the P2.8–P2.16 migration (sifrah/nauka#212 →
+//!   #220) has been deleted — call `EmbeddedDb::open_tikv` directly.
 //!
 //! See [`README.md`](https://github.com/sifrah/nauka/blob/main/layers/state/README.md)
 //! for the full crate guide.
@@ -43,12 +43,10 @@
 //! # Ok(()) }
 //! ```
 
-pub mod cluster;
 pub mod embedded;
 pub mod schema;
 pub mod sdk_bridge;
 
-pub use cluster::ClusterDb;
 pub use embedded::{pd_endpoints_for, EmbeddedDb};
 pub use schema::apply_cluster_schemas;
 
@@ -111,12 +109,10 @@ pub enum StateError {
 
     /// A serde / JSON serialization error.
     ///
-    /// Surfaced today by [`ClusterDb`] (which still serializes values as
-    /// raw JSON under TiKV) and by the JSON-bridge paths on `EmbeddedDb`
-    /// that round-trip Rust structs through `serde_json::Value` before
-    /// handing them to SurrealDB. Phase 2 (sifrah/nauka#220) retires the
-    /// `ClusterDb` half; Phase 3 codegen (sifrah/nauka#225 ff) retires
-    /// the JSON-bridge half, at which point this variant goes away.
+    /// Surfaced by the JSON-bridge paths on `EmbeddedDb` that round-trip
+    /// Rust structs through `serde_json::Value` before handing them to
+    /// SurrealDB. Phase 3 codegen (sifrah/nauka#225 ff) retires the
+    /// JSON-bridge layer, at which point this variant goes away.
     #[error("serialization error: {0}")]
     Serialization(String),
 

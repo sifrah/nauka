@@ -11,14 +11,11 @@ nauka-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tikv-client = "0.4"
 tokio.workspace = true
-# Force vendored OpenSSL into the build graph: tikv-client and
-# surrealdb-tikv-client (pulled in by `surrealdb/kv-tikv`) both pull openssl-sys
-# via prometheus → reqwest → native-tls. Without a vendored OpenSSL the musl
-# cross-compile cannot find system openssl. The workspace declaration already
-# enables the `vendored` feature. This stays until P2.16 (sifrah/nauka#220)
-# removes the legacy tikv-client.
+# Force vendored OpenSSL into the build graph: surrealdb-tikv-client
+# (pulled in by `surrealdb/kv-tikv`) still pulls openssl-sys via
+# prometheus → reqwest → native-tls. Without a vendored OpenSSL the
+# musl cross-compile cannot find system openssl.
 openssl.workspace = true
 # P2.1 (sifrah/nauka#205): surrealdb SDK with both kv-surrealkv and kv-tikv
 # permanently enabled. kv-surrealkv is the embedded backend used by every
@@ -30,10 +27,6 @@ surrealdb = { version = "3.0.5", default-features = false, features = ["kv-surre
 [[bin]]
 name = "p0-1-spike"
 path = "src/bin/p0_1_spike.rs"
-
-[[bin]]
-name = "p0-3-spike"
-path = "src/bin/p0_3_spike.rs"
 
 [[bin]]
 name = "p1-9-integration"

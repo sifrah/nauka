@@ -13,10 +13,10 @@
 //! The store holds an [`EmbeddedDb`] directly rather than the legacy
 //! cluster wrapper type — the previous version stored a
 //! cluster-wrapper value and reached the SDK via a
-//! `.embedded().client()` chain, but that kept the legacy type's name
+//! `.client()` chain, but that kept the legacy type's name
 //! in the file even though the methods had all migrated. P2.9 drops
 //! the indirection entirely: call sites now pass
-//! `cluster_db.embedded().clone()` at construction time, which gives
+//! `db.clone()` at construction time, which gives
 //! the store a cheap `Arc`-shared handle onto the same underlying
 //! `Surreal<Db>` the rest of the cluster path sees.
 //!
@@ -60,7 +60,7 @@ impl OrgStore {
     /// Build an [`OrgStore`] over a SurrealDB handle.
     ///
     /// Call sites typically have a cluster-DB wrapper on hand and pass
-    /// `cluster_db.embedded().clone()` as the argument. The
+    /// `db.clone()` as the argument. The
     /// [`EmbeddedDb`] is cheap to clone (`Arc`-shared internally), so
     /// constructing per-request `OrgStore` values off the same cluster
     /// handle is free.

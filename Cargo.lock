@@ -2907,7 +2907,6 @@ dependencies = [
  "surrealdb",
  "tempfile",
  "thiserror 2.0.18",
- "tikv-client",
  "tokio",
 ]
 

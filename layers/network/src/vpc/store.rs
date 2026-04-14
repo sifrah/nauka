@@ -10,7 +10,7 @@
 //! bootstrap per ADR 0004).
 //!
 //! The store holds an [`EmbeddedDb`] directly. Call sites pass
-//! `cluster_db.embedded().clone()` at construction time; the clone is
+//! `db.clone()` at construction time; the clone is
 //! cheap (`Arc`-shared `Surreal<Db>` router).
 //!
 //! The legacy `vpc` / `vpc-idx` / `_reg_v2` sidecar namespaces are
@@ -59,7 +59,7 @@ impl VpcStore {
     /// Build a [`VpcStore`] over a SurrealDB handle.
     ///
     /// Call sites that already hold a cluster-DB wrapper pass
-    /// `cluster_db.embedded().clone()`.
+    /// `db.clone()`.
     pub fn new(db: EmbeddedDb) -> Self {
         Self { db }
     }

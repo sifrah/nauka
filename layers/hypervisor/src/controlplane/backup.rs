@@ -721,8 +721,7 @@ pub async fn backup_logical(config: &RegionStorage) -> Result<String, NaukaError
         .await
         .map_err(|e| NaukaError::internal(format!("connect to cluster: {e}")))?;
 
-    db.embedded()
-        .client()
+    db.client()
         .export(std::path::PathBuf::from(&dump_path))
         .await
         .map_err(|e| NaukaError::internal(format!("surrealdb export: {e}")))?;
@@ -767,8 +766,7 @@ pub async fn restore_logical(config: &RegionStorage, s3_key: &str) -> Result<(),
         .await
         .map_err(|e| NaukaError::internal(format!("connect to cluster: {e}")))?;
 
-    db.embedded()
-        .client()
+    db.client()
         .import(&local_dump)
         .await
         .map_err(|e| NaukaError::internal(format!("surrealdb import: {e}")))?;

@@ -119,11 +119,8 @@ pub fn handler() -> HandlerFn {
             Box<dyn Future<Output = anyhow::Result<OperationResponse>> + Send>,
         > {
             Box::pin(async move {
-                // P2.13 (sifrah/nauka#217): VmStore now takes an
-                // EmbeddedDb directly; reach the cluster handle via
-                // the wrapper's `.embedded()` accessor.
-                let cluster_db = nauka_hypervisor::controlplane::connect().await?;
-                let store = VmStore::new(cluster_db.embedded().clone());
+                let db = nauka_hypervisor::controlplane::connect().await?;
+                let store = VmStore::new(db.clone());
                 match req.operation.as_str() {
                     "create" => {
                         let name = req.name.ok_or_else(|| anyhow::anyhow!("missing name"))?;

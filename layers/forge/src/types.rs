@@ -8,8 +8,8 @@ use nauka_state::EmbeddedDb;
 /// Shared context for all reconcilers in a cycle.
 pub struct ReconcileContext {
     /// Connection to TiKV (desired state), as the native SurrealDB SDK
-    /// handle. P2.14 (sifrah/nauka#218) dropped the `ClusterDb` wrapper
-    /// from the forge layer — stores now take an `EmbeddedDb` directly.
+    /// handle. Passed to every store (`OrgStore`, `VpcStore`,
+    /// `VmStore`, …) via `db.clone()`.
     pub db: EmbeddedDb,
     /// This node's hypervisor ID.
     pub hypervisor_id: String,
