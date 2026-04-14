@@ -1075,14 +1075,6 @@ mod tests {
             ("project", include_str!("../../org/schemas/project.surql")),
             ("env", include_str!("../../org/schemas/env.surql")),
             ("user", include_str!("../../org/schemas/user.surql")),
-            ("vpc", include_str!("../../network/schemas/vpc.surql")),
-            ("subnet", include_str!("../../network/schemas/subnet.surql")),
-            (
-                "vpc_peering",
-                include_str!("../../network/schemas/peering.surql"),
-            ),
-            ("natgw", include_str!("../../network/schemas/natgw.surql")),
-            ("vm", include_str!("../../compute/schemas/vm.surql")),
         ];
 
         let dir = tempfile::tempdir().expect("tempdir");

@@ -6,10 +6,7 @@
 //! layer to Cargo.toml + an extern crate line here is all it takes.
 
 // Force-link layer crates so inventory collects their registrations.
-extern crate nauka_compute;
-extern crate nauka_forge;
 extern crate nauka_hypervisor;
-extern crate nauka_network;
 extern crate nauka_org;
 
 mod registry;

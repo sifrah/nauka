@@ -2700,11 +2700,8 @@ dependencies = [
  "clap",
  "flate2",
  "http 1.4.0",
- "nauka-compute",
  "nauka-core",
- "nauka-forge",
  "nauka-hypervisor",
- "nauka-network",
  "nauka-org",
  "nauka-state",
  "openssl",
@@ -2718,29 +2715,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "nauka-compute"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "futures-util",
- "inventory",
- "libc",
- "nauka-core",
- "nauka-hypervisor",
- "nauka-network",
- "nauka-org",
- "nauka-state",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-client",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2794,29 +2768,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nauka-forge"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "inventory",
- "libc",
- "nauka-compute",
- "nauka-core",
- "nauka-hypervisor",
- "nauka-network",
- "nauka-org",
- "nauka-state",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-client",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "nauka-hypervisor"
 version = "2.0.0"
 dependencies = [
@@ -2854,28 +2805,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower 0.5.3",
-]
-
-[[package]]
-name = "nauka-network"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "hex",
- "inventory",
- "ipnet",
- "nauka-core",
- "nauka-hypervisor",
- "nauka-org",
- "nauka-state",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tikv-client",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4040,14 +3969,12 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls 0.26.4",
- "tokio-util",
  "tower 0.5.3",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -6085,19 +6012,6 @@ dependencies = [
  "indexmap 2.13.1",
  "wasm-encoder",
  "wasmparser",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

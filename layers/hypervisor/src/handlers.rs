@@ -548,10 +548,6 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     }
 
     // Non-critical steps — warn but don't rollback
-    if let Err(e) = crate::compute_setup::install(&steps) {
-        tracing::warn!(error = %e, "compute setup failed (VMs won't work until fixed)");
-    }
-
     if !peering {
         if let Err(e) = fabric::announce::install_service(port) {
             tracing::warn!(error = %e, "announce service install failed");
@@ -761,11 +757,6 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
 
         storage::ops::setup_region(&db, region_config).await?;
         steps.inc();
-    }
-
-    // Install compute runtime + base image
-    if let Err(e) = crate::compute_setup::install(&steps) {
-        tracing::warn!(error = %e, "compute setup failed (VMs won't work until fixed)");
     }
 
     // Install persistent announce listener

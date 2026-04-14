@@ -32,34 +32,13 @@ use crate::{EmbeddedDb, Result, StateError};
 /// running cluster without having to re-parse the `.surql` files.
 /// Kept in lockstep with [`CLUSTER_SCHEMAS`] by
 /// [`tests::cluster_table_names_matches_schemas`].
-pub const CLUSTER_TABLE_NAMES: &[&str] = &[
-    "user",
-    "org",
-    "project",
-    "env",
-    "vpc",
-    "subnet",
-    "vpc_peering",
-    "natgw",
-    "vm",
-];
+pub const CLUSTER_TABLE_NAMES: &[&str] = &["user", "org", "project", "env"];
 
 const CLUSTER_SCHEMAS: &[(&str, &str)] = &[
     ("user", include_str!("../../org/schemas/user.surql")),
     ("org", include_str!("../../org/schemas/org.surql")),
     ("project", include_str!("../../org/schemas/project.surql")),
     ("env", include_str!("../../org/schemas/env.surql")),
-    ("vpc", include_str!("../../network/schemas/vpc.surql")),
-    ("subnet", include_str!("../../network/schemas/subnet.surql")),
-    // P2.12 (sifrah/nauka#216): peering + natgw schemas ship alongside
-    // the network layer's SurrealDB-SDK migration so the new stores
-    // write to SCHEMAFULL tables instead of legacy raw-KV catch-alls.
-    (
-        "vpc_peering",
-        include_str!("../../network/schemas/peering.surql"),
-    ),
-    ("natgw", include_str!("../../network/schemas/natgw.surql")),
-    ("vm", include_str!("../../compute/schemas/vm.surql")),
 ];
 
 /// Apply every cluster schema to the given [`EmbeddedDb`] in order.

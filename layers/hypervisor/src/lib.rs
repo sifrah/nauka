@@ -13,7 +13,6 @@ inventory::submit!(nauka_core::resource::LayerRegistration(
     handlers::registration,
 ));
 
-pub mod compute_setup;
 pub mod controlplane;
 pub mod detect;
 pub mod doctor;
