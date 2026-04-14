@@ -702,7 +702,7 @@ mod tests {
     async fn run_doctor_no_panic() {
         // On a test system, doctor should run without panic
         let report = run().await;
-        // Should have 4 sections
-        assert_eq!(report.checks.len(), 4);
+        // 5 sections: Fabric, Controlplane, SurrealDB (P2.17), Storage, System.
+        assert_eq!(report.checks.len(), 5);
     }
 }
