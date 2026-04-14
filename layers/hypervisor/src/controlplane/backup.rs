@@ -6,7 +6,8 @@
 //! - **Hot** (`--hot`): tar while the service is running.
 //!   The archive may contain torn writes but avoids any downtime.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nauka_core::error::NaukaError;
@@ -254,30 +255,86 @@ fn decrypt_archive(enc_path: &str, output_path: &str) -> Result<(), NaukaError> 
     Ok(())
 }
 
+/// Resolve the effective S3 region: explicit config wins, otherwise a
+/// conservative default that most S3-compatible endpoints accept for
+/// SigV4 signing.
+fn s3_region(config: &RegionStorage) -> &str {
+    if config.s3_region.is_empty() {
+        "us-east-1"
+    } else {
+        &config.s3_region
+    }
+}
+
+/// Run `curl` with `--aws-sigv4` and feed the access/secret keys via a
+/// `-K -` stdin config file.
+///
+/// `curl`'s `--aws-sigv4` does **not** read `AWS_ACCESS_KEY_ID` /
+/// `AWS_SECRET_ACCESS_KEY` — the only supported credential channel is
+/// the `-u user:pass` form. Passing `-u ":"` (as the earlier code did)
+/// signs every request with empty keys and the S3 endpoint rejects it
+/// with `InvalidArgument`, which is why every backup upload was
+/// silently broken until now.
+///
+/// We can't write the credentials directly into argv either, because
+/// that exposes them in `ps auxww` to every local user. Instead we
+/// spawn curl with `-K -` and pipe a one-line config file on stdin.
+/// The config goes through a pipe that no other process can read, and
+/// argv stays clean.
+fn run_curl_with_creds(
+    config: &RegionStorage,
+    args: &[&str],
+    context: &str,
+) -> Result<std::process::Output, NaukaError> {
+    let mut child = Command::new("curl")
+        .args(args)
+        .arg("-K")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| NaukaError::internal(format!("{context}: spawn curl: {e}")))?;
+
+    // Escape backslashes and double-quotes — curl's config parser takes
+    // the `user = "..."` form with backslash escapes.
+    let access = config
+        .s3_access_key
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let secret = config
+        .s3_secret_key
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let config_blob = format!("user = \"{access}:{secret}\"\n");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(config_blob.as_bytes())
+            .map_err(|e| NaukaError::internal(format!("{context}: write creds: {e}")))?;
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| NaukaError::internal(format!("{context}: wait curl: {e}")))
+}
+
 /// Upload a file to S3 using curl with AWS Signature V4.
 fn s3_upload(config: &RegionStorage, local_path: &str, s3_key: &str) -> Result<(), NaukaError> {
     let bucket = &config.s3_bucket;
     let endpoint = config.s3_endpoint.trim_end_matches('/');
-
-    // Use the s3 region if set, otherwise extract from endpoint
-    let region = if config.s3_region.is_empty() {
-        "us-east-1"
-    } else {
-        &config.s3_region
-    };
-
-    // Build the S3 URL
+    let region = s3_region(config);
     let url = format!("{endpoint}/{bucket}/{s3_key}");
+    let sigv4 = format!("aws:amz:{region}:s3");
 
-    // Use curl with aws-sigv4 for authenticated upload.
-    // -s suppresses progress, --fail-with-body returns non-zero on HTTP errors
-    // while still capturing the response body for diagnostics.
-    // UNSIGNED-PAYLOAD avoids content-hash mismatch on large files.
-    // Credentials are passed via env vars so they don't appear in `ps aux`.
-    let output = Command::new("curl")
-        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
-        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
-        .args([
+    // `-s` suppresses progress, `--fail-with-body` returns non-zero on
+    // HTTP errors while still capturing the response body for
+    // diagnostics. `UNSIGNED-PAYLOAD` avoids content-hash mismatch on
+    // large files. Credentials arrive via the `-K -` stdin channel
+    // inside [`run_curl_with_creds`], never via argv.
+    let output = run_curl_with_creds(
+        config,
+        &[
             "-s",
             "--fail-with-body",
             "--max-time",
@@ -289,13 +346,11 @@ fn s3_upload(config: &RegionStorage, local_path: &str, s3_key: &str) -> Result<(
             "-H",
             "x-amz-content-sha256: UNSIGNED-PAYLOAD",
             "--aws-sigv4",
-            &format!("aws:amz:{region}:s3"),
-            "-u",
-            ":",
+            &sigv4,
             &url,
-        ])
-        .output()
-        .map_err(|e| NaukaError::internal(format!("curl upload failed: {e}")))?;
+        ],
+        "S3 upload",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -315,31 +370,15 @@ fn s3_upload(config: &RegionStorage, local_path: &str, s3_key: &str) -> Result<(
 fn s3_list(config: &RegionStorage, prefix: &str) -> Result<String, NaukaError> {
     let bucket = &config.s3_bucket;
     let endpoint = config.s3_endpoint.trim_end_matches('/');
-
-    let region = if config.s3_region.is_empty() {
-        "us-east-1"
-    } else {
-        &config.s3_region
-    };
-
+    let region = s3_region(config);
     let url = format!("{endpoint}/{bucket}?prefix={prefix}&list-type=2");
+    let sigv4 = format!("aws:amz:{region}:s3");
 
-    // Credentials are passed via env vars so they don't appear in `ps aux`.
-    let output = Command::new("curl")
-        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
-        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
-        .args([
-            "-sf",
-            "--max-time",
-            "30",
-            "--aws-sigv4",
-            &format!("aws:amz:{region}:s3"),
-            "-u",
-            ":",
-            &url,
-        ])
-        .output()
-        .map_err(|e| NaukaError::internal(format!("S3 list failed: {e}")))?;
+    let output = run_curl_with_creds(
+        config,
+        &["-sf", "--max-time", "30", "--aws-sigv4", &sigv4, &url],
+        "S3 list",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -356,33 +395,24 @@ fn s3_list(config: &RegionStorage, prefix: &str) -> Result<String, NaukaError> {
 fn s3_delete(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
     let bucket = &config.s3_bucket;
     let endpoint = config.s3_endpoint.trim_end_matches('/');
-
-    let region = if config.s3_region.is_empty() {
-        "us-east-1"
-    } else {
-        &config.s3_region
-    };
-
+    let region = s3_region(config);
     let url = format!("{endpoint}/{bucket}/{s3_key}");
+    let sigv4 = format!("aws:amz:{region}:s3");
 
-    // Credentials are passed via env vars so they don't appear in `ps aux`.
-    let output = Command::new("curl")
-        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
-        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
-        .args([
+    let output = run_curl_with_creds(
+        config,
+        &[
             "-sf",
             "--max-time",
             "30",
             "-X",
             "DELETE",
             "--aws-sigv4",
-            &format!("aws:amz:{region}:s3"),
-            "-u",
-            ":",
+            &sigv4,
             &url,
-        ])
-        .output()
-        .map_err(|e| NaukaError::internal(format!("S3 delete failed: {e}")))?;
+        ],
+        "S3 delete",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -399,32 +429,24 @@ fn s3_delete(config: &RegionStorage, s3_key: &str) -> Result<(), NaukaError> {
 fn s3_download(config: &RegionStorage, s3_key: &str, local_path: &str) -> Result<(), NaukaError> {
     let bucket = &config.s3_bucket;
     let endpoint = config.s3_endpoint.trim_end_matches('/');
-
-    let region = if config.s3_region.is_empty() {
-        "us-east-1"
-    } else {
-        &config.s3_region
-    };
-
+    let region = s3_region(config);
     let url = format!("{endpoint}/{bucket}/{s3_key}");
+    let sigv4 = format!("aws:amz:{region}:s3");
 
-    let output = Command::new("curl")
-        .args([
+    let output = run_curl_with_creds(
+        config,
+        &[
             "-sf",
             "--max-time",
             "600",
             "-o",
             local_path,
             "--aws-sigv4",
-            &format!("aws:amz:{region}:s3"),
-            "-u",
-            ":",
+            &sigv4,
             &url,
-        ])
-        .env("AWS_ACCESS_KEY_ID", &config.s3_access_key)
-        .env("AWS_SECRET_ACCESS_KEY", &config.s3_secret_key)
-        .output()
-        .map_err(|e| NaukaError::internal(format!("S3 download failed: {e}")))?;
+        ],
+        "S3 download",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
