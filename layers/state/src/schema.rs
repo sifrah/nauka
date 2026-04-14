@@ -25,6 +25,25 @@ use crate::{EmbeddedDb, Result, StateError};
 /// (`layers/state/src/schema.rs`), so the paths climb out of
 /// `state/src` and back down into each sibling layer's `schemas/`
 /// directory.
+/// Table names defined by the cluster schemas, in application order.
+///
+/// Exposed publicly so callers (`nauka hypervisor doctor`, the migration
+/// runner, etc.) can verify that every expected table is present in a
+/// running cluster without having to re-parse the `.surql` files.
+/// Kept in lockstep with [`CLUSTER_SCHEMAS`] by
+/// [`tests::cluster_table_names_matches_schemas`].
+pub const CLUSTER_TABLE_NAMES: &[&str] = &[
+    "user",
+    "org",
+    "project",
+    "env",
+    "vpc",
+    "subnet",
+    "vpc_peering",
+    "natgw",
+    "vm",
+];
+
 const CLUSTER_SCHEMAS: &[(&str, &str)] = &[
     ("user", include_str!("../../org/schemas/user.surql")),
     ("org", include_str!("../../org/schemas/org.surql")),
@@ -107,5 +126,21 @@ mod tests {
             .expect("second apply (idempotency) should succeed");
 
         db.shutdown().await.expect("shutdown");
+    }
+
+    /// P2.17 (sifrah/nauka#221) — the public [`CLUSTER_TABLE_NAMES`]
+    /// list must stay in sync with the schemas actually applied. If
+    /// somebody adds a `.surql` file to [`CLUSTER_SCHEMAS`] without
+    /// updating the names list (or vice versa), the doctor's
+    /// schema-presence check would silently miss the new table.
+    #[test]
+    fn cluster_table_names_matches_schemas() {
+        let schema_names: Vec<&str> = CLUSTER_SCHEMAS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            CLUSTER_TABLE_NAMES,
+            &schema_names[..],
+            "CLUSTER_TABLE_NAMES drifted from CLUSTER_SCHEMAS — \
+             update layers/state/src/schema.rs to keep them in lockstep"
+        );
     }
 }
