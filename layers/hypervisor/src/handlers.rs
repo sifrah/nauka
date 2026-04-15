@@ -767,19 +767,17 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         steps.inc();
     }
 
-    // Install persistent announce listener
-    if let Err(e) = fabric::announce::install_service(port) {
-        tracing::warn!(error = %e, "announce service install failed");
-    }
-
     // Self-announce to all peers (ensures they know about us even if the
     // peering server's announce arrived before their listener was ready).
-    // Re-read state after a delay to include peers discovered via incoming announces.
+    //
+    // IMPORTANT (#282): this MUST run BEFORE `announce::install_service`.
+    // That call does `systemctl enable --now`, which spawns the forge
+    // service, which opens `bootstrap.skv` and holds its flock. If we
+    // re-open the DB here after that, we lose the race and the whole
+    // join exits 1 despite being semantically successful. Reuse the
+    // already-open `db` handle.
     steps.set("Announcing to peers");
     {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        // Re-open DB to get latest state (may include peers from incoming announces)
-        let db = open_db().await?;
         let state = fabric::state::FabricState::load(&db)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -806,6 +804,13 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         }
     }
     steps.inc();
+
+    // Install persistent announce listener AFTER self-announce, so the
+    // forge/announce systemd unit doesn't grab `bootstrap.skv`'s flock
+    // while we're still holding it in-process (see #282).
+    if let Err(e) = fabric::announce::install_service(port) {
+        tracing::warn!(error = %e, "announce service install failed");
+    }
 
     steps.finish("Joined cluster");
     eprintln!();
