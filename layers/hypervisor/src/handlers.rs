@@ -1127,16 +1127,31 @@ async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-    let state = fabric::state::FabricState::load(&db)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| {
-            anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
-        })?;
+    // sifrah/nauka#295 — release the bootstrap.skv flock BEFORE making any
+    // PD HTTP round trips. Holding the flock across the (potentially slow)
+    // `get_members`/`get_stores`/`get_region_stats` calls blocks every
+    // other local CLI that needs to open the same DB, including the
+    // persistent announce listener — which then drops incoming peer
+    // announces and cascades into `open_tikv` failures on freshly-joining
+    // nodes (the symptom that made #293 so hard to reproduce cleanly).
+    // Scope the DB tightly: open, read the one field we need, shut down.
+    let mesh_ipv6 = {
+        let db = open_db().await?;
+        let state = fabric::state::FabricState::load(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
+            })?;
+        let ip = state.hypervisor.mesh_ipv6;
+        db.shutdown().await.ok();
+        ip
+    };
 
-    let mesh_ipv6 = state.hypervisor.mesh_ipv6;
-    let client = controlplane::pd_client::PdClient::from_mesh(&mesh_ipv6);
+    // Tighter per-request timeout than the default 10s — cp-status is
+    // an operator-facing read path and should fail fast if PD is stuck
+    // rather than hold the terminal for 30 s across three endpoints.
+    let client = controlplane::pd_client::PdClient::from_mesh(&mesh_ipv6).with_timeout(5);
 
     // --- PD Members ---
     let members_result = client.get_members();
