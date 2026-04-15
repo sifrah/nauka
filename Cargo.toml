@@ -1,14 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "layers/core",
-    "layers/core/tests/e2e",
-    "layers/state",
-    "layers/hypervisor",
-    "layers/hypervisor/tests/e2e",
-    "layers/org",
-    "bin/nauka",
-]
+members = ["bin/nauka"]
 
 [workspace.package]
 version = "2.0.0"
@@ -19,19 +11,5 @@ keywords = ["cloud", "wireguard", "mesh", "control-plane", "infrastructure"]
 categories = ["network-programming", "command-line-utilities"]
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror = "2"
-anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "limit", "trace"] }
-hyper = "1"
-openssl = { version = "0.10", features = ["vendored"] }
-ipnet = "2"
-async-trait = "0.1"
-inventory = "0.3"
+anyhow = "1"
