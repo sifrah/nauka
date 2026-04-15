@@ -2795,6 +2795,7 @@ name = "nauka-hypervisor-e2e"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.8",
+ "base64 0.22.1",
  "http 1.4.0",
  "nauka-core",
  "nauka-hypervisor",

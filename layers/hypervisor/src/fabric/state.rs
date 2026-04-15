@@ -11,13 +11,50 @@
 
 use std::fmt;
 use std::net::Ipv6Addr;
+use std::sync::OnceLock;
 
 use nauka_state::EmbeddedDb;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use super::backend::NetworkMode;
 use super::mesh::{HypervisorIdentity, MeshIdentity};
 use super::peer::PeerList;
+
+/// Process-global async mutex guarding every read-modify-write of the
+/// single-blob `fabric:state` record.
+///
+/// Why this exists: `FabricState` persists as one JSON blob written by
+/// `UPSERT fabric:state CONTENT $data`. Concurrent callers that
+/// `load`-mutate-`save` against the same record race each other — the
+/// last writer wins and every earlier change is silently lost. Before
+/// #299 this was hidden by the OS flock on `bootstrap.skv/LOCK`, which
+/// serialised *all* access across processes. With #299 the flock is
+/// held for the daemon's entire lifetime and concurrent in-process
+/// tasks share one `EmbeddedDb` clone, so the lost-update race
+/// surfaces — notably on parallel `hypervisor join` requests handled
+/// by the peering listener.
+///
+/// Every state mutator (`peering_server::handle_join`, the announce
+/// `handle_peer_*` handlers, `ops::drain` / `ops::enable` /
+/// `ops::update`, CLI `leave`) acquires this lock for the duration of
+/// its load-modify-save block via [`write_lock`]. Holding the lock
+/// across an async write is cheap because the critical section is
+/// milliseconds — the lock is only here to serialise the coarse blob
+/// writes, not to gate long I/O.
+///
+/// Phase 3 codegen (sifrah/nauka#225 ff) retires the single-blob
+/// storage in favour of SCHEMAFULL rows under the `mesh` /
+/// `hypervisor` / `peer` tables, at which point this lock can go away
+/// and be replaced with per-row transactions.
+static WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Accessor for the fabric-state write lock. Lazy-initialised on
+/// first call so tests and unit bench harnesses don't pay for the
+/// mutex until they actually mutate state.
+pub fn write_lock() -> &'static Mutex<()> {
+    WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Scheduling state of a node (maintenance mode).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -69,6 +69,25 @@ use super::state::FabricState;
 
 /// Run the peering listener on `bind_addr`.
 ///
+/// Convenience wrapper that binds a `TcpListener` and forwards to
+/// [`serve`]. Integration tests that need to pick the bound port
+/// before driving clients can skip the bind and call `serve` directly.
+pub async fn listen(
+    db: EmbeddedDb,
+    pin: String,
+    bind_addr: SocketAddr,
+    timeout: Duration,
+    max_joins: usize,
+    shutdown: watch::Receiver<bool>,
+) -> Result<usize, NaukaError> {
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| NaukaError::internal(format!("failed to bind peering port: {e}")))?;
+    serve(listener, db, pin, timeout, max_joins, shutdown).await
+}
+
+/// Run the peering accept loop against a pre-bound `TcpListener`.
+///
 /// Accepts TLS-wrapped join requests and services each one in a freshly
 /// spawned task. The supplied `db` handle is cloned into every spawn so
 /// concurrent joins share the same underlying `Surreal<Db>` (and
@@ -83,21 +102,21 @@ use super::state::FabricState;
 ///   immediately.
 ///
 /// Returns the number of successfully accepted joins.
-pub async fn listen(
+pub async fn serve(
+    listener: TcpListener,
     db: EmbeddedDb,
     pin: String,
-    bind_addr: SocketAddr,
     timeout: Duration,
     max_joins: usize,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<usize, NaukaError> {
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .map_err(|e| NaukaError::internal(format!("failed to bind peering port: {e}")))?;
-
     let tls_config = super::tls::server_config()?;
     let tls_acceptor = TlsAcceptor::from(tls_config);
 
+    let bind_addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
     tracing::info!(addr = %bind_addr, "peering listener started (TLS)");
 
     let rate_limiter = Arc::new(Mutex::new(PinRateLimiter::new()));
@@ -226,6 +245,25 @@ async fn handle_join(
         return Err(NaukaError::permission_denied("invalid PIN"));
     }
 
+    // Derive the new peer's mesh IPv6 *before* taking the write lock
+    // so the base64 decode error (if any) surfaces without ever
+    // touching the shared state.
+    let pub_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&req.wg_public_key)
+        .map_err(|e| NaukaError::validation(format!("invalid WireGuard key: {e}")))?;
+
+    // ─── Critical section: serialise load+modify+save against
+    // every other concurrent state mutator in this process.
+    // Without this, two `handle_join` tasks running in parallel
+    // both load a snapshot with the same `peers` vec, each add
+    // their new peer locally, each save back — and the last
+    // writer wins, silently dropping every earlier join. The
+    // pre-#299 OS flock hid this by serialising at the process
+    // level; with one shared `EmbeddedDb` handle the race is
+    // live, which is exactly what the `parallel_join` regression
+    // test exercises.
+    let write_guard = super::state::write_lock().lock().await;
+
     let mut state = FabricState::load(db)
         .await
         .map_err(|e| NaukaError::internal(e.to_string()))?
@@ -266,12 +304,7 @@ async fn handle_join(
         self_info,
         state.max_pd_members,
     );
-    write_json(stream, &resp).await?;
 
-    // Derive the new peer's mesh IPv6
-    let pub_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&req.wg_public_key)
-        .map_err(|e| NaukaError::validation(format!("invalid WireGuard key: {e}")))?;
     let peer_ipv6 = nauka_core::addressing::derive_node_address(&state.mesh.prefix, &pub_bytes);
 
     // Build announce info before consuming req fields
@@ -288,6 +321,8 @@ async fn handle_join(
     // Skip if exact same key already exists (duplicate join)
     if state.peers.find_by_key(&req.wg_public_key).is_some() {
         tracing::info!(peer = %req.name, "duplicate join, same key already known");
+        drop(write_guard);
+        write_json(stream, &resp).await?;
         return Ok(req.name);
     }
 
@@ -300,11 +335,11 @@ async fn handle_join(
     // Add peer + save + update WG
     let new_peer = Peer::new(
         req.name.clone(),
-        req.region,
-        req.zone,
-        req.wg_public_key,
+        req.region.clone(),
+        req.zone.clone(),
+        req.wg_public_key.clone(),
         req.wg_port,
-        req.endpoint,
+        req.endpoint.clone(),
         peer_ipv6,
     );
     state
@@ -312,16 +347,18 @@ async fn handle_join(
         .add(new_peer)
         .map_err(|e| NaukaError::internal(format!("peer add failed: {e}")))?;
 
-    // Save state FIRST — state is the source of truth.
-    // If the process crashes after this point, WireGuard will be reconciled
-    // from state on the next `wg-quick up` / service restart.
+    // Save state FIRST — state is the source of truth. If the
+    // process crashes after this point, WireGuard will be
+    // reconciled from state on the next `wg-quick up` / service
+    // restart.
     state
         .save(db)
         .await
         .map_err(|e| NaukaError::internal(e.to_string()))?;
 
-    // Update WireGuard config. If this fails, state is still correct and
-    // WG will catch up on next restart — log a warning but don't fail the join.
+    // Update WireGuard config. If this fails, state is still
+    // correct and WG will catch up on next restart — log a
+    // warning but don't fail the join.
     let peers_for_wg: Vec<_> = state
         .peers
         .peers
@@ -358,11 +395,14 @@ async fn handle_join(
         .cloned()
         .collect();
 
+    // Release the write lock before the async response write + the
+    // spawned broadcast. The next joiner can proceed immediately.
+    drop(write_guard);
+
+    write_json(stream, &resp).await?;
+
     if !announce_targets.is_empty() {
         tokio::spawn(async move {
-            // Best-effort immediate announce — some peers may not have their
-            // listener yet. The periodic reconciliation loop in ops.rs
-            // guarantees eventual convergence.
             let (ok, fail) = super::announce::broadcast_new_peer(
                 &new_peer_info,
                 &announcer_name,
