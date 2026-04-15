@@ -735,47 +735,29 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         )?;
     }
 
-    // Fetch region storage config from distributed KV and setup locally
-    if network_mode == fabric::NetworkMode::WireGuard {
-        steps.set("Setting up storage");
-        let state = fabric::state::FabricState::load(&db)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
-        let pd_endpoints: Vec<String> = state
-            .peers
-            .peers
-            .iter()
-            .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
-            .collect();
-        let pd_refs: Vec<&str> = pd_endpoints.iter().map(|s| s.as_str()).collect();
-
-        let region_config = storage::ops::fetch_region_config(&pd_refs, region)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no storage backend configured for region '{region}'.\n\n\
-                     An S3 backend must be registered before nodes can join this region.\n\
-                     On the init node, re-initialize with storage flags:\n\n\
-                     \x20 nauka hypervisor init --region {region} \\\n\
-                     \x20   --s3-endpoint <URL> --s3-bucket <BUCKET> \\\n\
-                     \x20   --s3-access-key <KEY> --s3-secret-key <SECRET>"
-                )
-            })?;
-
-        storage::ops::setup_region(&db, region_config).await?;
-        steps.inc();
-    }
-
-    // Self-announce to all peers (ensures they know about us even if the
-    // peering server's announce arrived before their listener was ready).
+    // Self-announce to all peers BEFORE storage setup.
     //
-    // IMPORTANT (#282): this MUST run BEFORE `announce::install_service`.
-    // That call does `systemctl enable --now`, which spawns the forge
-    // service, which opens `bootstrap.skv` and holds its flock. If we
-    // re-open the DB here after that, we lose the race and the whole
-    // join exits 1 despite being semantically successful. Reuse the
-    // already-open `db` handle.
+    // Why first: the peering server on the accepting node broadcasts our
+    // PeerAnnounce to every existing peer, but that is best-effort — if
+    // any recipient's announce listener is busy or the TCP connect fails,
+    // that recipient never learns about us and its WireGuard config stays
+    // without our public key. Packets we send to it over wg0 then get
+    // dropped, which manifests later as `open_tikv: handshake timed out`
+    // if that recipient happens to be the PD we (or the SDK) picks for
+    // the storage step (sifrah/nauka#293).
+    //
+    // Doing the self-announce here, before storage setup, makes the join
+    // establish bidirectional WireGuard peerage with every peer directly
+    // — one TCP dial per peer, not relying on the accepting node's
+    // broadcast — so that by the time `open_tikv` runs, the joining node
+    // can actually reach every PD member.
+    //
+    // IMPORTANT (#282): this step must still run BEFORE
+    // `announce::install_service`. That call does `systemctl enable --now`,
+    // which spawns the forge service, which opens `bootstrap.skv` and
+    // holds its flock. If we re-open the DB here after that, we lose
+    // the race and the whole join exits 1 despite being semantically
+    // successful. Reuse the already-open `db` handle.
     steps.set("Announcing to peers");
     {
         let state = fabric::state::FabricState::load(&db)
@@ -804,6 +786,53 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         }
     }
     steps.inc();
+
+    // Fetch region storage config from distributed KV and setup locally
+    if network_mode == fabric::NetworkMode::WireGuard {
+        steps.set("Setting up storage");
+        let state = fabric::state::FabricState::load(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("state missing after join"))?;
+        let pd_endpoints: Vec<String> = state
+            .peers
+            .peers
+            .iter()
+            .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
+            .collect();
+
+        // sifrah/nauka#293 — filter to currently-reachable PD endpoints
+        // before handing the list to the TiKV SDK. Without this, the
+        // SDK wastes its 10s handshake timeout on peers whose WG
+        // propagation is still in flight, or on synthesized PD URLs
+        // for TiKV-only peers that don't run PD at all. The helper
+        // queries the first reachable PD for the authoritative member
+        // list, so synthesized phantoms are dropped fast.
+        let reachable_pds = controlplane::ops::wait_reachable_pds(&pd_endpoints, 30);
+        if reachable_pds.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no reachable PD endpoints after 30s (checked {})",
+                pd_endpoints.len()
+            ));
+        }
+        let pd_refs: Vec<&str> = reachable_pds.iter().map(|s| s.as_str()).collect();
+
+        let region_config = storage::ops::fetch_region_config(&pd_refs, region)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no storage backend configured for region '{region}'.\n\n\
+                     An S3 backend must be registered before nodes can join this region.\n\
+                     On the init node, re-initialize with storage flags:\n\n\
+                     \x20 nauka hypervisor init --region {region} \\\n\
+                     \x20   --s3-endpoint <URL> --s3-bucket <BUCKET> \\\n\
+                     \x20   --s3-access-key <KEY> --s3-secret-key <SECRET>"
+                )
+            })?;
+
+        storage::ops::setup_region(&db, region_config).await?;
+        steps.inc();
+    }
 
     // Install persistent announce listener AFTER self-announce, so the
     // forge/announce systemd unit doesn't grab `bootstrap.skv`'s flock
