@@ -246,6 +246,11 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::integer("port", "Announce listen port").with_default("51822"),
             ))
         })
+        .action(
+            "daemon",
+            "Run the hypervisor daemon (installed as nauka.service)",
+        )
+        .op(|op| op.with_output(OutputKind::None))
         // Future
         .action("drain", "Evacuate all VMs before maintenance")
         .op(|op| op.with_confirm())
@@ -299,6 +304,7 @@ pub fn handler() -> HandlerFn {
                 "upgrade" => handle_upgrade().await,
                 "doctor" => handle_doctor().await,
                 "announce-listen" => handle_announce_listen(req).await,
+                "daemon" => handle_daemon().await,
                 "drain" => handle_drain().await,
                 "enable" => handle_enable().await,
                 other => Ok(OperationResponse::Message(format!("unknown: {other}"))),
@@ -1014,6 +1020,11 @@ async fn handle_enable() -> anyhow::Result<OperationResponse> {
     Ok(OperationResponse::Message(
         "node set to available — ready for VM scheduling.".into(),
     ))
+}
+
+async fn handle_daemon() -> anyhow::Result<OperationResponse> {
+    fabric::daemon::run().await?;
+    Ok(OperationResponse::None)
 }
 
 async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<OperationResponse> {
