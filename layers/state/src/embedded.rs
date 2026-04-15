@@ -241,6 +241,17 @@ impl EmbeddedDb {
     /// - [`StateError::Database`] with a fixed "no PD endpoints" message
     ///   if `pd_endpoints` is empty.
     pub async fn open_tikv(pd_endpoints: &[&str]) -> Result<Self> {
+        /// Hard timeout per PD endpoint. Covers the full handshake:
+        /// `Surreal::new::<TiKv>` (which blocks until the gRPC channel to
+        /// PD is healthy *and* PD has an elected leader) plus the
+        /// subsequent `use_ns` / `use_db`. Without this, a PD re-election
+        /// window or an unreachable endpoint parks the caller's future
+        /// forever — which is what sifrah/nauka#288 traced the doctor
+        /// hang to. 10 s is generous relative to the ~100–500 ms a
+        /// healthy TiKv handshake takes, but well under the Nauka "fast
+        /// timeout" convention for operator-facing commands.
+        const PER_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+
         if pd_endpoints.is_empty() {
             return Err(StateError::Database(
                 "open_tikv: no PD endpoints provided".to_string(),
@@ -252,7 +263,7 @@ impl EmbeddedDb {
         // `Surreal::new` call, so the fallback loop lives here — match
         // the fallback contract of `tikv-client::new_with_config(vec![...])`
         // without forcing callers to duplicate the logic.
-        let mut last_err: Option<surrealdb::Error> = None;
+        let mut last_err: Option<StateError> = None;
         for ep in pd_endpoints {
             // SurrealDB's TiKv endpoint builder wraps the argument in
             // `tikv://{self}`, and the downstream URL parser expects a
@@ -260,9 +271,15 @@ impl EmbeddedDb {
             // we were handed so call sites can use the same
             // `http://[ipv6]:2379` string everywhere.
             let bare = strip_http_scheme(ep);
-            match Surreal::new::<TiKv>(bare).await {
-                Ok(db) => {
-                    db.use_ns(NAUKA_NS).use_db(CLUSTER_DB).await?;
+
+            let attempt = async {
+                let db = Surreal::new::<TiKv>(bare).await?;
+                db.use_ns(NAUKA_NS).use_db(CLUSTER_DB).await?;
+                Ok::<Surreal<Db>, surrealdb::Error>(db)
+            };
+
+            match tokio::time::timeout(PER_ENDPOINT_TIMEOUT, attempt).await {
+                Ok(Ok(db)) => {
                     return Ok(Self {
                         inner: db,
                         // The TiKv backend has no local file. `path()`
@@ -272,17 +289,27 @@ impl EmbeddedDb {
                         backend: EmbeddedBackend::TiKv,
                     });
                 }
-                Err(err) => {
-                    last_err = Some(err);
+                Ok(Err(err)) => {
+                    last_err = Some(err.into());
+                }
+                Err(_elapsed) => {
+                    // The handshake itself hung past the deadline —
+                    // surface it as a `StateError::Database` with a
+                    // clear "timed out" message so the caller (doctor,
+                    // connect, etc.) can distinguish a real connection
+                    // failure from a stuck future.
+                    last_err = Some(StateError::Database(format!(
+                        "open_tikv: handshake to {bare} timed out after {}s",
+                        PER_ENDPOINT_TIMEOUT.as_secs()
+                    )));
                 }
             }
         }
 
         // Every endpoint failed. Surface the most recent error (it
-        // carries the richest detail — DNS failure, gRPC refused, etc.)
-        // through the standard SurrealDB → StateError mapping.
+        // carries the richest detail — DNS failure, gRPC refused, or
+        // timeout) so the operator can tell what went wrong.
         Err(last_err
-            .map(StateError::from)
             .unwrap_or_else(|| StateError::Database("open_tikv: all endpoints failed".into())))
     }
 
