@@ -143,7 +143,7 @@ pub fn join(
     mesh_ipv6: &Ipv6Addr,
     existing_pd_endpoints: &[String],
     peer_count: usize,
-    all_peer_infos: &[(&str, Ipv6Addr)],
+    all_peer_infos: &[(&str, Ipv6Addr, u16)],
     max_pd_members: usize,
     steps: &ui::Steps,
 ) -> Result<(), NaukaError> {
@@ -217,41 +217,150 @@ fn should_scale_pd(peer_count: usize, max_pd_members: usize) -> bool {
     total_nodes >= 3 && total_nodes % 2 == 1 && total_nodes <= max_pd_members
 }
 
-/// Scale PD by adding this node as a new PD member.
+/// Scale PD from N to N+2 atomically.
 ///
-/// Called when the cluster reaches an odd total node count (3, 5, 7)
-/// that is within the configured max_pd_members. This node joins PD
-/// in --join mode, connecting to the existing cluster.
+/// Called when the joining node pushes the cluster over an odd-total
+/// threshold (3, 5, 7) still within `max_pd_members`. Because we never
+/// want an even PD member count, we must promote the joining node **and**
+/// all pre-existing TiKV-only peers in a single operation.
 ///
-/// We accept a brief even-member window during the scale-up, but add
-/// rollback on failure to prevent phantom members that break quorum.
+/// Flow (for the 1→3 case, which is the common one):
+/// 1. Identify TiKV-only peers (peers not currently in `existing_pd_endpoints`).
+/// 2. For each TiKV-only peer, send a `PromoteToPd` message over the
+///    announce protocol. The peer installs its PD unit in --join mode,
+///    which registers it with the bootstrap PD via PD's internal join
+///    protocol. We poll `existing_pd_endpoints[0]` until the peer appears
+///    in the member list, with a hard timeout.
+/// 3. Only after every peer has become a PD member do we install and
+///    start our own PD. This preserves the invariant that the member
+///    count transitions 1 → 2 → 3 as quickly as possible (though we
+///    still briefly cross 2 members — unavoidable without a multi-raft
+///    joint-consensus primitive, but the scale-up is now driven by us
+///    rather than left half-done).
+/// 4. Rollback: if our own PD fails, we deregister ourselves from PD.
+///    Peers promoted earlier stay as PD members — they're healthy and
+///    the cluster is simply at N+1 members instead of N+2. Operators
+///    can retry the failed node's join.
 fn scale_pd(
     node_name: &str,
     mesh_ipv6: &Ipv6Addr,
-    existing_pd_endpoints: &[String],
+    _existing_pd_endpoints: &[String],
     primary_pd: &str,
-    _all_peer_infos: &[(&str, Ipv6Addr)],
+    all_peer_infos: &[(&str, Ipv6Addr, u16)],
 ) -> Result<(), NaukaError> {
     wait_mesh_connectivity(primary_pd, 30)?;
 
-    let self_peer_url = format!("http://[{mesh_ipv6}]:{}", super::PD_PEER_PORT);
+    // Query the primary PD for the authoritative current member list.
+    // The caller's `existing_pd_endpoints` is built from the local peer
+    // list and contains one entry per peer — including TiKV-only nodes
+    // whose PD doesn't actually exist. Using that list would make us
+    // miss the very peers we need to promote. The PD /members API
+    // returns only nodes that are real Raft members.
+    let pd_client = super::pd_client::PdClient::new(vec![primary_pd.to_string()]);
+    let current_members = pd_client.get_members().map_err(|e| {
+        NaukaError::internal(format!("scale_pd: fetch PD members: {e}"))
+    })?;
 
+    let existing_pd_ips: std::collections::HashSet<Ipv6Addr> = current_members
+        .iter()
+        .flat_map(|m| m.peer_urls.iter())
+        .filter_map(|url| extract_ipv6_from_endpoint(url))
+        .collect();
+
+    // The real PD endpoints (client URLs) that existing members advertise.
+    // We hand these to promoted peers so their PromoteToPd request carries
+    // an accurate "join against these PDs" list for the TiKV config rewrite.
+    let real_pd_endpoints: Vec<String> = current_members
+        .iter()
+        .flat_map(|m| m.client_urls.iter().cloned())
+        .collect();
+
+    let to_promote: Vec<(String, Ipv6Addr, u16)> = all_peer_infos
+        .iter()
+        .filter(|(_, ip, _)| !existing_pd_ips.contains(ip))
+        .map(|(name, ip, port)| ((*name).to_string(), *ip, *port))
+        .collect();
+
+    // Build the post-scale PD endpoint list (existing + promoted + self).
+    // Used to rewrite the TiKV config on this node so it sees every PD.
+    let mut full_pd_endpoints = real_pd_endpoints.clone();
+    for (_, ip, _) in &to_promote {
+        let ep = format!("http://[{ip}]:{}", super::PD_CLIENT_PORT);
+        if !full_pd_endpoints.contains(&ep) {
+            full_pd_endpoints.push(ep);
+        }
+    }
+    let self_endpoint = format!("http://[{mesh_ipv6}]:{}", super::PD_CLIENT_PORT);
+    if !full_pd_endpoints.contains(&self_endpoint) {
+        full_pd_endpoints.push(self_endpoint.clone());
+    }
+
+    // Step 1: promote each TiKV-only peer to a full PD member.
+    // Sequential on purpose — PD's add-member path is cheap but we want
+    // deterministic ordering so rollback reasoning is tractable.
+    for (peer_name, peer_ip, peer_wg_port) in &to_promote {
+        tracing::info!(
+            peer = %peer_name,
+            %peer_ip,
+            "scale_pd: requesting PD promotion"
+        );
+
+        let announce_addr = format!(
+            "[{peer_ip}]:{}",
+            *peer_wg_port + super::super::fabric::announce::ANNOUNCE_PORT_OFFSET
+        );
+        let promote_msg = super::super::fabric::peering::PromoteToPd {
+            target_name: peer_name.clone(),
+            primary_pd_url: primary_pd.to_string(),
+            pd_endpoints: real_pd_endpoints.clone(),
+            requested_by: node_name.to_string(),
+        };
+
+        // We're invoked from an async handler via a sync call chain, so
+        // we block on the announce send using the current tokio runtime.
+        // block_in_place requires a multi-threaded runtime — the CLI
+        // uses `#[tokio::main]` which defaults to that.
+        let send_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(
+                super::super::fabric::announce::send_promote_to_pd(&announce_addr, &promote_msg),
+            )
+        });
+
+        if let Err(e) = send_result {
+            return Err(NaukaError::internal(format!(
+                "failed to deliver PromoteToPd to {peer_name}: {e}"
+            )));
+        }
+
+        // Wait for PD to report the new member. member_exists() does a
+        // GET /members against the primary PD.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            if pd_client.member_exists(peer_ip) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(NaukaError::timeout(
+                    &format!("PD promotion of {peer_name}"),
+                    120,
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        tracing::info!(peer = %peer_name, "scale_pd: peer promoted to PD");
+    }
+
+    // Step 2: install and start our own PD (join mode).
+    let self_peer_url = format!("http://[{mesh_ipv6}]:{}", super::PD_PEER_PORT);
     let pd_cfg = PdConfig {
         name: node_name.to_string(),
         mesh_ipv6: *mesh_ipv6,
         initial_cluster: format!("{node_name}={self_peer_url}"),
         initial_cluster_state: "join".to_string(),
     };
-
-    let mut pd_endpoints: Vec<String> = existing_pd_endpoints.to_vec();
-    let self_endpoint = format!("http://[{mesh_ipv6}]:{}", super::PD_CLIENT_PORT);
-    if !pd_endpoints.contains(&self_endpoint) {
-        pd_endpoints.push(self_endpoint);
-    }
-
     let tikv_cfg = TikvConfig {
         mesh_ipv6: *mesh_ipv6,
-        pd_endpoints,
+        pd_endpoints: full_pd_endpoints,
     };
 
     service::install(&pd_cfg, &tikv_cfg, Some(primary_pd))?;
@@ -270,6 +379,47 @@ fn scale_pd(
         rollback_pd_member(mesh_ipv6, primary_pd);
         return Err(e);
     }
+
+    Ok(())
+}
+
+/// Promote this node from TiKV-only to full PD+TiKV.
+///
+/// Invoked by the announce listener when another node (the joining one
+/// that's driving a PD scale-up) sends us a `PromoteToPd` message. We
+/// rewrite our control-plane configs (PD in --join mode, TiKV with the
+/// new full PD endpoint list) and start PD. TiKV is already running and
+/// re-discovers the new PD members at the next heartbeat.
+pub fn promote_self_to_pd(
+    node_name: &str,
+    mesh_ipv6: &Ipv6Addr,
+    primary_pd: &str,
+    existing_pd_endpoints: &[String],
+) -> Result<(), NaukaError> {
+    let self_peer_url = format!("http://[{mesh_ipv6}]:{}", super::PD_PEER_PORT);
+    let pd_cfg = PdConfig {
+        name: node_name.to_string(),
+        mesh_ipv6: *mesh_ipv6,
+        initial_cluster: format!("{node_name}={self_peer_url}"),
+        initial_cluster_state: "join".to_string(),
+    };
+
+    // TiKV needs the full post-scale PD list. We include existing + self;
+    // any other peer being promoted in the same scale-up will appear via
+    // PD's own discovery once they join.
+    let mut full_pd = existing_pd_endpoints.to_vec();
+    let self_client = format!("http://[{mesh_ipv6}]:{}", super::PD_CLIENT_PORT);
+    if !full_pd.contains(&self_client) {
+        full_pd.push(self_client);
+    }
+    let tikv_cfg = TikvConfig {
+        mesh_ipv6: *mesh_ipv6,
+        pd_endpoints: full_pd,
+    };
+
+    service::install(&pd_cfg, &tikv_cfg, Some(primary_pd))?;
+    service::enable_and_start()?;
+    service::wait_pd_ready(mesh_ipv6, 120)?;
 
     Ok(())
 }

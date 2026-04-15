@@ -94,6 +94,24 @@ pub struct PeerRemove {
     pub wg_public_key: String,
 }
 
+/// Promote a TiKV-only peer to a full PD member.
+///
+/// Sent over the announce protocol when the cluster scales PD from N→N+2
+/// (e.g. 1→3, 3→5). The receiving node validates that `target_name` matches
+/// its own name, then installs and starts its local PD service in `--join`
+/// mode against `primary_pd_url`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteToPd {
+    /// Name of the node being promoted — receiver MUST match this.
+    pub target_name: String,
+    /// Primary PD URL to --join against (existing bootstrap PD).
+    pub primary_pd_url: String,
+    /// Full PD endpoint list (after scale-up) for the TiKV config rewrite.
+    pub pd_endpoints: Vec<String>,
+    /// Node name that initiated the scale-up (for audit trail).
+    pub requested_by: String,
+}
+
 /// Node state change — broadcast when a node enters/exits maintenance mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateChange {

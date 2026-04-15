@@ -718,11 +718,11 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
             .map(|p| format!("http://[{}]:{}", p.mesh_ipv6, controlplane::PD_CLIENT_PORT))
             .collect();
         let peer_count = state.peers.len();
-        let all_peer_infos: Vec<(&str, std::net::Ipv6Addr)> = state
+        let all_peer_infos: Vec<(&str, std::net::Ipv6Addr, u16)> = state
             .peers
             .peers
             .iter()
-            .map(|p| (p.name.as_str(), p.mesh_ipv6))
+            .map(|p| (p.name.as_str(), p.mesh_ipv6, p.wg_port))
             .collect();
         controlplane::ops::join(
             &node_name,
