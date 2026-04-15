@@ -4,10 +4,11 @@
 //! - Handshake within threshold → Active
 //! - Handshake older than threshold → Unreachable
 //!
-//! Designed to run as a background tokio task during `peering` or future daemon mode.
+//! Designed to run as a background tokio task inside the hypervisor daemon.
 
-use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use tokio::sync::watch;
 
 use nauka_core::error::NaukaError;
 use nauka_state::EmbeddedDb;
@@ -150,26 +151,33 @@ pub async fn check_once(
     })
 }
 
-/// Run the health check loop. Blocks until cancelled.
+/// Run the health check loop. Blocks until `shutdown` transitions to `true`.
 ///
-/// Opens a fresh DB connection each sweep to avoid holding the lock.
-pub async fn run_loop<F, Fut>(db_opener: F, interval_secs: u64, stale_threshold_secs: u64)
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
-{
+/// The caller supplies a long-lived [`EmbeddedDb`] handle — the loop
+/// reuses it every sweep, so there is no per-iteration flock dance.
+pub async fn run_loop(
+    db: EmbeddedDb,
+    interval_secs: u64,
+    stale_threshold_secs: u64,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let interval = Duration::from_secs(interval_secs);
 
     loop {
-        tokio::time::sleep(interval).await;
-
-        let db = match db_opener().await {
-            Ok(db) => db,
-            Err(e) => {
-                tracing::warn!(error = %e, "health check: failed to open DB");
-                continue;
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("health check loop shutting down");
+                    break;
+                }
             }
-        };
+            _ = tokio::time::sleep(interval) => {}
+        }
+
+        if *shutdown.borrow() {
+            break;
+        }
 
         match check_once(&db, stale_threshold_secs).await {
             Ok(result) => {
@@ -187,10 +195,6 @@ where
                 tracing::warn!(error = %e, "health check failed");
             }
         }
-
-        // Explicit shutdown to release the SurrealKV flock before the next
-        // iteration opens a new handle.
-        let _ = db.shutdown().await;
     }
 }
 

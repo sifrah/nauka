@@ -1,16 +1,22 @@
 //! Peering TCP server — accepts join requests from new nodes.
 //!
-//! Opens the DB per-request (no long-lived lock).
+//! The listener borrows a long-lived [`EmbeddedDb`] handle from its
+//! caller (the hypervisor daemon, or `listen_for_peers` during
+//! `init --peering`) and clones it into a per-connection `tokio::spawn`
+//! for every incoming join. SurrealDB itself is thread-safe, so
+//! concurrent joins run truly in parallel against the same underlying
+//! `Datastore` — no OS-level flock serialisation.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 use nauka_core::error::NaukaError;
@@ -45,7 +51,6 @@ impl PinRateLimiter {
     fn record_failure(&mut self, ip: IpAddr) {
         let entry = self.failures.entry(ip).or_insert((0, Instant::now()));
         if entry.1.elapsed() >= PIN_BLOCK_DURATION {
-            // Reset after block period
             *entry = (1, Instant::now());
         } else {
             entry.0 += 1;
@@ -62,100 +67,121 @@ use super::peering::{JoinRequest, JoinResponse, PeerInfo};
 use super::service;
 use super::state::FabricState;
 
-/// Start a peering listener. Opens the DB per-request to avoid holding the lock.
-pub async fn listen<F, Fut>(
-    db_opener: F,
-    pin: &str,
+/// Run the peering listener on `bind_addr`.
+///
+/// Accepts TLS-wrapped join requests and services each one in a freshly
+/// spawned task. The supplied `db` handle is cloned into every spawn so
+/// concurrent joins share the same underlying `Surreal<Db>` (and
+/// therefore never contend on the SurrealKV `LOCK`).
+///
+/// Termination rules:
+/// - If `max_joins > 0`, the accept loop stops once `max_joins`
+///   handlers have returned `Ok(_)`. Spawned handlers that are still
+///   running are left to finish on their own.
+/// - If no connection is accepted for `timeout`, the accept loop exits.
+/// - If `shutdown` transitions to `true`, the accept loop exits
+///   immediately.
+///
+/// Returns the number of successfully accepted joins.
+pub async fn listen(
+    db: EmbeddedDb,
+    pin: String,
     bind_addr: SocketAddr,
     timeout: Duration,
     max_joins: usize,
-) -> Result<usize, NaukaError>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
-{
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<usize, NaukaError> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| NaukaError::internal(format!("failed to bind peering port: {e}")))?;
 
-    // TLS setup
     let tls_config = super::tls::server_config()?;
     let tls_acceptor = TlsAcceptor::from(tls_config);
 
     tracing::info!(addr = %bind_addr, "peering listener started (TLS)");
 
-    let mut accepted = 0;
     let rate_limiter = Arc::new(Mutex::new(PinRateLimiter::new()));
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let pin = Arc::new(pin);
 
     loop {
-        let accept = tokio::time::timeout(timeout, listener.accept()).await;
+        if max_joins > 0 && accepted.load(Ordering::Acquire) >= max_joins {
+            break;
+        }
+        if *shutdown.borrow() {
+            break;
+        }
 
-        match accept {
-            Ok(Ok((tcp_stream, peer_addr))) => {
-                // Check rate limit before processing
-                {
-                    let rl = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
-                    if rl.is_blocked(&peer_addr.ip()) {
-                        tracing::warn!(peer = %peer_addr, "blocked (too many failed PIN attempts)");
-                        continue;
-                    }
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("peering listener shutting down");
+                    break;
                 }
-
-                // TLS handshake
-                let mut stream = match tls_acceptor.accept(tcp_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
-                        continue;
-                    }
-                };
-
-                tracing::info!(peer = %peer_addr, "incoming join request (TLS)");
-
-                let db = match db_opener().await {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to open DB for join");
-                        continue;
-                    }
-                };
-
-                match handle_join(&mut stream, &db, pin, peer_addr).await {
-                    Ok(peer_name) => {
-                        rate_limiter
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .record_success(&peer_addr.ip());
-                        tracing::info!(peer = %peer_addr, name = %peer_name, "join accepted");
-                        accepted += 1;
-                        // Best-effort shutdown to release the SurrealKV flock
-                        // before the next accept opens a new handle.
-                        let _ = db.shutdown().await;
-                        if max_joins > 0 && accepted >= max_joins {
-                            break;
+            }
+            accept_result = tokio::time::timeout(timeout, listener.accept()) => {
+                match accept_result {
+                    Ok(Ok((tcp_stream, peer_addr))) => {
+                        // Cheap per-IP rate-limit check before paying
+                        // for the TLS handshake.
+                        {
+                            let rl = rate_limiter.lock().unwrap_or_else(|e| e.into_inner());
+                            if rl.is_blocked(&peer_addr.ip()) {
+                                tracing::warn!(peer = %peer_addr, "blocked (too many failed PIN attempts)");
+                                continue;
+                            }
                         }
+
+                        let db = db.clone();
+                        let pin = pin.clone();
+                        let tls_acceptor = tls_acceptor.clone();
+                        let rate_limiter = rate_limiter.clone();
+                        let accepted = accepted.clone();
+
+                        tokio::spawn(async move {
+                            let mut stream = match tls_acceptor.accept(tcp_stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::warn!(peer = %peer_addr, error = %e, "TLS handshake failed");
+                                    return;
+                                }
+                            };
+
+                            tracing::info!(peer = %peer_addr, "incoming join request (TLS)");
+
+                            match handle_join(&mut stream, &db, pin.as_str(), peer_addr).await {
+                                Ok(peer_name) => {
+                                    rate_limiter
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .record_success(&peer_addr.ip());
+                                    accepted.fetch_add(1, Ordering::AcqRel);
+                                    tracing::info!(peer = %peer_addr, name = %peer_name, "join accepted");
+                                }
+                                Err(e) => {
+                                    rate_limiter
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .record_failure(peer_addr.ip());
+                                    tracing::warn!(peer = %peer_addr, error = %e, "join rejected");
+                                }
+                            }
+                        });
                     }
-                    Err(e) => {
-                        rate_limiter
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .record_failure(peer_addr.ip());
-                        tracing::warn!(peer = %peer_addr, error = %e, "join rejected");
-                        let _ = db.shutdown().await;
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "accept error");
+                    }
+                    Err(_) => {
+                        tracing::info!("peering listener idle timeout");
+                        break;
                     }
                 }
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "accept error");
-            }
-            Err(_) => {
-                tracing::info!("peering listener timeout");
-                break;
             }
         }
     }
 
-    Ok(accepted)
+    Ok(accepted.load(Ordering::Acquire))
 }
 
 /// Handle a single join request on a stream.

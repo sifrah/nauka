@@ -9,8 +9,9 @@
 //! Announcements are best-effort: if a peer is unreachable, we skip it
 //! and rely on the next health check or manual sync.
 
-use std::future::Future;
 use std::time::Duration;
+
+use tokio::sync::watch;
 
 use nauka_core::error::NaukaError;
 use nauka_state::EmbeddedDb;
@@ -261,12 +262,17 @@ pub async fn broadcast_state_change(
 /// 2. Update WireGuard config
 /// 3. Persist state
 ///
-/// Opens DB per-request to avoid lock contention.
-pub async fn listen<F, Fut>(db_opener: F, bind_addr: std::net::SocketAddr) -> Result<(), NaukaError>
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<EmbeddedDb, NaukaError>>,
-{
+/// The caller supplies a long-lived [`EmbeddedDb`] handle; each incoming
+/// message is serviced in a freshly spawned task with a clone of that
+/// handle, so concurrent announces run in parallel against the same
+/// underlying `Datastore` with no flock contention.
+///
+/// Exits when `shutdown` transitions to `true`.
+pub async fn listen(
+    db: EmbeddedDb,
+    bind_addr: std::net::SocketAddr,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), NaukaError> {
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .map_err(|e| NaukaError::internal(format!("failed to bind announce port: {e}")))?;
@@ -277,43 +283,51 @@ where
     tracing::info!(addr = %bind_addr, "announce listener started (TLS)");
 
     loop {
-        match listener.accept().await {
-            Ok((tcp_stream, peer_addr)) => {
-                // TLS handshake
-                let mut stream = match tls_acceptor.accept(tcp_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(peer = %peer_addr, error = %e, "announce TLS handshake failed");
-                        continue;
-                    }
-                };
+        if *shutdown.borrow() {
+            break;
+        }
 
-                let db = match db_opener().await {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "announce: failed to open DB");
-                        continue;
-                    }
-                };
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("announce listener shutting down");
+                    break;
+                }
+            }
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((tcp_stream, peer_addr)) => {
+                        let tls_acceptor = tls_acceptor.clone();
+                        let db = db.clone();
+                        tokio::spawn(async move {
+                            let mut stream = match tls_acceptor.accept(tcp_stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::warn!(peer = %peer_addr, error = %e, "announce TLS handshake failed");
+                                    return;
+                                }
+                            };
 
-                match handle_message(&mut stream, &db).await {
-                    Ok(msg) => {
-                        tracing::info!(from = %peer_addr, result = %msg, "announce handled");
+                            match handle_message(&mut stream, &db).await {
+                                Ok(msg) => {
+                                    tracing::info!(from = %peer_addr, result = %msg, "announce handled");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(from = %peer_addr, error = %e, "announce failed");
+                                }
+                            }
+                        });
                     }
                     Err(e) => {
-                        tracing::warn!(from = %peer_addr, error = %e, "announce failed");
+                        tracing::warn!(error = %e, "announce accept error");
                     }
                 }
-
-                // Release the SurrealKV flock before the next accept opens a
-                // new handle, so announce/peering/health runs don't contend.
-                let _ = db.shutdown().await;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "announce accept error");
             }
         }
     }
+
+    Ok(())
 }
 
 /// Handle an incoming announce message (add or remove).

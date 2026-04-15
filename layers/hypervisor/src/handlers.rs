@@ -1027,16 +1027,21 @@ async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<Operati
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid port"))?;
 
-    // Async opener: each request gets a fresh EmbeddedDb handle so the
-    // SurrealKV flock is only held for the duration of one announce.
-    let db_opener = || async {
-        EmbeddedDb::open_default()
-            .await
-            .map_err(|e| nauka_core::error::NaukaError::internal(e.to_string()))
-    };
+    // Open the DB once and hold the handle for the lifetime of the
+    // listener — SurrealDB's `Surreal<Db>` is thread-safe and every
+    // spawned announce-handler task clones the same underlying
+    // `Datastore`, so concurrent announces never contend on the
+    // SurrealKV `LOCK`. The `Ctrl+C` shutdown below drops the handle
+    // cleanly before the process exits.
+    let db = open_db().await?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // This blocks forever (until killed by systemd)
-    fabric::announce::listen(db_opener, bind_addr).await?;
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(true);
+    });
+
+    fabric::announce::listen(db, bind_addr, shutdown_rx).await?;
 
     Ok(OperationResponse::None)
 }
