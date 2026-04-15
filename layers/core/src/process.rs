@@ -1,7 +1,7 @@
 //! Process utilities — paths, directories, run-mode detection.
 //!
-//! No daemon, no fork, no PID file. Nauka is a CLI orchestrator,
-//! not a daemon. WireGuard runs in the kernel.
+//! Run-mode-aware helpers for both CLI invocations and the long-lived
+//! hypervisor daemon (`nauka.service`). WireGuard runs in the kernel.
 //!
 //! # Run modes
 //!
@@ -40,9 +40,21 @@ pub fn ensure_nauka_dir() -> Result<(), NaukaError> {
     Ok(())
 }
 
-/// Default control socket path (for future API server).
+/// Path of the hypervisor daemon's Unix control socket.
+///
+/// - CLI mode → `$HOME/.nauka/ctl.sock`
+/// - Service mode → `/run/nauka/ctl.sock`
+///
+/// The parent directory is **not** created by this function. In service
+/// mode it is populated by systemd via `RuntimeDirectory=nauka` on
+/// `nauka.service`; in CLI mode [`ensure_nauka_dir`] / the daemon
+/// creates `~/.nauka` before binding.
 pub fn socket_path() -> PathBuf {
-    nauka_dir().join("control.sock")
+    if is_service_mode() {
+        PathBuf::from("/run/nauka/ctl.sock")
+    } else {
+        nauka_dir().join("ctl.sock")
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -138,9 +150,16 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_in_dir() {
+    fn socket_path_run_mode_aware() {
         let p = socket_path();
-        assert!(p.to_str().unwrap().contains(".nauka/control.sock"));
+        // In test environment we run as non-root so we land in CLI mode.
+        // The service-mode branch is exercised manually via Hetzner smoke
+        // tests; asserting on it here would require faking geteuid().
+        if is_service_mode() {
+            assert_eq!(p, PathBuf::from("/run/nauka/ctl.sock"));
+        } else {
+            assert!(p.to_str().unwrap().ends_with(".nauka/ctl.sock"));
+        }
     }
 
     #[test]

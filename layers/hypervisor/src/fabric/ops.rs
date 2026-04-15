@@ -849,3 +849,165 @@ pub async fn leave(db: &EmbeddedDb) -> Result<(), NaukaError> {
 
     Ok(())
 }
+
+// ═══════════════════════════════════════════════════
+// JSON views — used by both the CLI fallback and the
+// hypervisor daemon control socket (#299).
+// ═══════════════════════════════════════════════════
+
+/// JSON view of `status` — matches the payload that `handle_status`
+/// used to build inline. Lives here so both the CLI (direct path)
+/// and the daemon's control server can call exactly the same code.
+pub async fn status_view(db: &EmbeddedDb) -> Result<serde_json::Value, NaukaError> {
+    let s = status(db).await?;
+
+    let mesh_ip: std::net::Ipv6Addr = s
+        .mesh_ipv6
+        .parse()
+        .map_err(|_| NaukaError::internal(format!("corrupt state: invalid mesh_ipv6 '{}'", s.mesh_ipv6)))?;
+    let cp = crate::controlplane::ops::status(&mesh_ip);
+    let (pd_active, tikv_active, pd_members, tikv_stores, leader) = match cp {
+        Ok(cs) => (
+            cs.pd_active,
+            cs.tikv_active,
+            cs.pd_members,
+            cs.tikv_stores,
+            cs.leader,
+        ),
+        Err(_) => (false, false, 0, 0, None),
+    };
+
+    let state_label = if s.service_active && tikv_active {
+        s.state.clone()
+    } else if s.service_active {
+        "degraded".to_string()
+    } else {
+        "down".to_string()
+    };
+
+    Ok(serde_json::json!({
+        "name": s.hypervisor_name,
+        "id": s.hypervisor_id,
+        "region": s.region,
+        "zone": s.zone,
+        "mesh_ipv6": s.mesh_ipv6,
+        "state": state_label,
+        "wg": if s.service_active { "running" } else { "stopped" },
+        "wg_interface": s.wg_interface_up,
+        "peers": s.peer_count,
+        "wg_port": s.wg_port,
+        "rx_bytes": s.rx_bytes,
+        "tx_bytes": s.tx_bytes,
+        "pd": if pd_active { "running" } else { "stopped" },
+        "tikv": if tikv_active { "running" } else { "stopped" },
+        "pd_members": pd_members,
+        "tikv_stores": tikv_stores,
+        "leader": leader,
+    }))
+}
+
+/// JSON view of `list` — this node + every peer as an array of rows.
+/// Returns `[]` when the node is not initialised (no state on disk).
+pub async fn list_view(db: &EmbeddedDb) -> Result<serde_json::Value, NaukaError> {
+    let state = match FabricState::load(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+    {
+        Some(s) => s,
+        None => return Ok(serde_json::json!([])),
+    };
+
+    let backend = super::backend::create_backend(state.network_mode);
+    let self_state = if !backend.is_up() {
+        "down"
+    } else if state.node_state == super::state::NodeState::Draining {
+        "draining"
+    } else {
+        "available"
+    };
+
+    let mut items = vec![serde_json::json!({
+        "id": state.hypervisor.id.as_str(),
+        "name": state.hypervisor.name,
+        "region": state.hypervisor.region,
+        "zone": state.hypervisor.zone,
+        "state": self_state,
+        "cpu": "0/0",
+        "memory": "0/0",
+        "vms": 0,
+    })];
+
+    for peer in &state.peers.peers {
+        items.push(serde_json::json!({
+            "id": peer.id.as_str(),
+            "name": peer.name,
+            "region": peer.region,
+            "zone": peer.zone,
+            "state": peer_state_label(peer),
+            "cpu": "0/0",
+            "memory": "0/0",
+            "vms": 0,
+        }));
+    }
+
+    Ok(serde_json::json!(items))
+}
+
+/// JSON view of `get <name>` — returns a single hypervisor (either
+/// this node or one of its peers). Errors with "not found" when no
+/// match exists.
+pub async fn get_view(db: &EmbeddedDb, name: &str) -> Result<serde_json::Value, NaukaError> {
+    let state = FabricState::load(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| NaukaError::precondition("not initialized"))?;
+
+    let backend = super::backend::create_backend(state.network_mode);
+
+    if state.hypervisor.name == name {
+        return Ok(serde_json::json!({
+            "name": state.hypervisor.name,
+            "id": state.hypervisor.id.as_str(),
+            "region": state.hypervisor.region,
+            "zone": state.hypervisor.zone,
+            "mesh_ipv6": state.hypervisor.mesh_ipv6.to_string(),
+            "state": if !backend.is_up() {
+                "down"
+            } else if state.node_state == super::state::NodeState::Draining {
+                "draining"
+            } else {
+                "available"
+            },
+        }));
+    }
+
+    if let Some(peer) = state.peers.find_by_name(name) {
+        return Ok(serde_json::json!({
+            "name": peer.name,
+            "id": peer.id.as_str(),
+            "region": peer.region,
+            "zone": peer.zone,
+            "mesh_ipv6": peer.mesh_ipv6.to_string(),
+            "state": peer_state_label(peer),
+        }));
+    }
+
+    Err(NaukaError::not_found("hypervisor", name))
+}
+
+/// Map peer status to user-facing label. Shared between the live
+/// `list_view` / `get_view` paths and the CLI handlers that used to
+/// carry an inline copy.
+pub(crate) fn peer_state_label(peer: &super::peer::Peer) -> &'static str {
+    match peer.status {
+        super::peer::PeerStatus::Active => {
+            if peer.node_state == super::state::NodeState::Draining {
+                "draining"
+            } else {
+                "available"
+            }
+        }
+        super::peer::PeerStatus::Unreachable => "unreachable",
+        super::peer::PeerStatus::Removed => "removed",
+    }
+}

@@ -9,6 +9,7 @@
 
 pub mod announce;
 pub mod backend;
+pub mod control;
 pub mod direct;
 pub mod health;
 pub mod mesh;
