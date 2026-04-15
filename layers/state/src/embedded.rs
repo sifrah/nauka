@@ -191,22 +191,44 @@ impl EmbeddedDb {
         // enough to ride out a forge reconcile cycle that briefly holds
         // the lock, short enough that a stuck holder surfaces as a
         // clear error instead of hanging forever.
+        // Hard outer deadline on the entire open sequence. The
+        // per-attempt timeouts inside `open_datastore_with_retry`
+        // only cover `Surreal::new::<SurrealKv>` itself — but
+        // `use_ns`/`use_db` and the `BOOTSTRAP_SCHEMA` query have
+        // also been observed wedging under heavy concurrent-open
+        // contention (hypervisor test suite running ~20 `#[tokio::test]`
+        // opens in parallel). Wrapping the whole sequence in a single
+        // `tokio::time::timeout` guarantees callers see a clean
+        // `StateError::Database` instead of an indefinite hang, no
+        // matter which step of the SurrealDB / SurrealKV init pipeline
+        // is the one that stalled.
+        const TOTAL_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
         let path_str = path.to_string_lossy().into_owned();
-        let inner = open_datastore_with_retry(&path_str).await?;
+        let path_buf = path.to_path_buf();
+        let open_fut = async move {
+            let inner = open_datastore_with_retry(&path_str).await?;
+            inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).await?;
+            // Apply the bootstrap schema after switching to the right ns/db.
+            // DEFINE TABLE / FIELD / INDEX are db-scoped, so use_db must
+            // happen first. The schema's IF NOT EXISTS clauses make this
+            // safe to run on every open.
+            inner.query(BOOTSTRAP_SCHEMA).await?.check()?;
+            Ok::<_, StateError>(Self {
+                inner,
+                path: path_buf,
+                backend: EmbeddedBackend::SurrealKv,
+            })
+        };
 
-        inner.use_ns(NAUKA_NS).use_db(BOOTSTRAP_DB).await?;
-
-        // Apply the bootstrap schema after switching to the right ns/db.
-        // DEFINE TABLE / FIELD / INDEX are db-scoped, so use_db must
-        // happen first. The schema's IF NOT EXISTS clauses make this
-        // safe to run on every open.
-        inner.query(BOOTSTRAP_SCHEMA).await?.check()?;
-
-        Ok(Self {
-            inner,
-            path: path.to_path_buf(),
-            backend: EmbeddedBackend::SurrealKv,
-        })
+        match tokio::time::timeout(TOTAL_OPEN_TIMEOUT, open_fut).await {
+            Ok(res) => res,
+            Err(_) => Err(StateError::Database(format!(
+                "EmbeddedDb::open wedged for {} s on '{}'",
+                TOTAL_OPEN_TIMEOUT.as_secs(),
+                path.display(),
+            ))),
+        }
     }
 
     /// Open the cluster-side SurrealDB database backed by an existing
@@ -462,13 +484,30 @@ async fn open_datastore_with_retry(path_str: &str) -> Result<Surreal<Db>> {
     /// Backoff ceiling. Caps worst-case polling pressure at ~20 Hz.
     const MAX_BACKOFF: Duration = Duration::from_millis(50);
 
+    /// Hard per-attempt cap on `Surreal::new::<SurrealKv>`. The retry
+    /// loop below already bails on *errors* via the 5 s deadline, but
+    /// surrealkv can (and under concurrent opens in the test suite
+    /// does) wedge the future itself — a Pending that never resolves.
+    /// Without this wrapper, the outer deadline never fires because
+    /// it only advances between `.await` returns. 2 s is an order of
+    /// magnitude above the healthy open cost (~10 ms) but well inside
+    /// the 5 s total budget, so a transient stall is retried while a
+    /// genuine wedge surfaces quickly.
+    const PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+
     let deadline = Instant::now() + MAX_WAIT;
     let mut backoff = MIN_BACKOFF;
 
     loop {
-        match Surreal::new::<SurrealKv>(path_str).await {
-            Ok(db) => return Ok(db),
-            Err(err) => {
+        let attempt = tokio::time::timeout(
+            PER_ATTEMPT_TIMEOUT,
+            Surreal::new::<SurrealKv>(path_str),
+        )
+        .await;
+
+        match attempt {
+            Ok(Ok(db)) => return Ok(db),
+            Ok(Err(err)) => {
                 // SurrealKV surfaces flock contention as an "other"
                 // backend error with a message containing the literal
                 // path to `<datastore>/LOCK`. There's no structured
@@ -481,6 +520,21 @@ async fn open_datastore_with_retry(path_str: &str) -> Result<Surreal<Db>> {
 
                 if !is_lock_contention || Instant::now() >= deadline {
                     return Err(err.into());
+                }
+
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+            Err(_elapsed) => {
+                // Per-attempt wedge. Treat exactly like a lock
+                // contention: retry until the overall deadline, then
+                // surface a clear timeout error.
+                if Instant::now() >= deadline {
+                    return Err(StateError::Database(format!(
+                        "open_datastore: SurrealKV open wedged for {} s on '{}'",
+                        MAX_WAIT.as_secs(),
+                        path_str,
+                    )));
                 }
 
                 tokio::time::sleep(backoff).await;
