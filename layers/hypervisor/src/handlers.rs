@@ -92,13 +92,6 @@ pub fn resource_def() -> ResourceDef {
                 FieldDef::string("ipv4-public", "Public IPv4 address of this server"),
             ))
             .with_arg(OperationArg::optional(
-                "peering",
-                FieldDef::flag(
-                    "peering",
-                    "Start peering listener after init (accepts joins)",
-                ),
-            ))
-            .with_arg(OperationArg::optional(
                 "max-pd-members",
                 FieldDef::integer(
                     "max-pd-members",
@@ -367,11 +360,14 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
                 .unwrap_or_else(|| "node".to_string())
         });
 
-    let peering = req
-        .fields
-        .get("peering")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    // #299: the old `--peering` flag used to keep an ephemeral
+    // listener running inline after `init`. The hypervisor daemon
+    // now takes over that role (installed at the end of this
+    // handler) and listens continuously, gated by the PIN and
+    // per-IP rate-limited, so the flag is no longer meaningful.
+    // We silently ignore any `peering` field that may still show
+    // up from scripted callers or stale docs.
+    let _ = req.fields.get("peering");
 
     let max_pd_members: usize = req
         .fields
@@ -536,15 +532,23 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         steps.inc();
     }
 
-    // Non-critical steps — warn but don't rollback
-    if !peering {
-        if let Err(e) = fabric::announce::install_service(port) {
-            tracing::warn!(error = %e, "announce service install failed");
-        }
-    }
-
     // Suppress unused variable warnings
     let _ = (fabric_initialized, storage_initialized);
+
+    // Release our in-process flock BEFORE installing the daemon: the
+    // daemon opens `bootstrap.skv` on startup and would otherwise
+    // race us. `shutdown()` polls the LOCK file for release so the
+    // next open is guaranteed to succeed. From this point on, the
+    // daemon owns the handle.
+    db.shutdown().await.ok();
+
+    // Install and start `nauka.service`. The daemon hosts the
+    // peering TCP listener on `port + 1`, the announce listener on
+    // `port + 2`, the health loop, the mesh reconciler, and the
+    // operator control socket — all under one long-lived process.
+    if let Err(e) = fabric::daemon::install_service() {
+        tracing::warn!(error = %e, "hypervisor daemon install failed");
+    }
 
     steps.finish("Hypervisor initialized");
     eprintln!();
@@ -555,42 +559,12 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
     eprintln!("  address  {}", result.hypervisor.mesh_ipv6);
     eprintln!("  pin      {}", result.pin);
     eprintln!();
-
-    if peering {
-        let peering_port = port + 1;
-        eprintln!("  Peering active on port {peering_port}");
-        eprintln!("  Nodes can join with:");
-        eprintln!(
-            "    nauka hypervisor join --target <this-ip>:{peering_port} --pin {}",
-            result.pin
-        );
-        eprintln!();
-        eprintln!("  Waiting for joins... (Ctrl+C to stop)");
-        eprintln!();
-
-        // Block here listening for joins (DB opened per-request, no lock held).
-        // P2/#281: `init --peering` is the bootstrap-then-accept-unlimited-
-        // joins flow, so we explicitly request unlimited mode (0) with the
-        // legacy 1-hour idle timeout. The standalone `nauka hypervisor
-        // peering` command defaults to 1-join-then-exit instead.
-        let accepted = fabric::ops::listen_for_peers(&result.pin, peering_port, 3600, 0).await?;
-
-        eprintln!("  {} node(s) joined.", accepted);
-
-        // Peering session ended — install announce service for persistent listening
-        if let Err(e) = fabric::announce::install_service(port) {
-            tracing::warn!(error = %e, "announce service install failed");
-        }
-    } else {
-        eprintln!("  To accept joins on this node:");
-        eprintln!("    nauka hypervisor peering");
-        eprintln!();
-        eprintln!("  Or from another node:");
-        eprintln!(
-            "    nauka hypervisor join --target <this-ip> --pin {}",
-            result.pin
-        );
-    }
+    eprintln!("  Daemon running. Nodes can join with:");
+    eprintln!(
+        "    nauka hypervisor join --target <this-ip> --pin {}",
+        result.pin
+    );
+    eprintln!();
 
     Ok(OperationResponse::Resource(serde_json::json!({
         "name": result.hypervisor.name,
@@ -814,11 +788,17 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
         steps.inc();
     }
 
-    // Install persistent announce listener AFTER self-announce, so the
-    // forge/announce systemd unit doesn't grab `bootstrap.skv`'s flock
-    // while we're still holding it in-process (see #282).
-    if let Err(e) = fabric::announce::install_service(port) {
-        tracing::warn!(error = %e, "announce service install failed");
+    // Release our in-process flock BEFORE installing the hypervisor
+    // daemon. The daemon opens `bootstrap.skv` as soon as
+    // `systemctl --now` starts it, and would otherwise race our
+    // handle. `EmbeddedDb::shutdown` polls the LOCK file for release,
+    // guaranteeing the daemon's open will succeed on first try.
+    // (Supersedes #282 which worked around this by carefully
+    // ordering self-announce before the announce-service install.)
+    db.shutdown().await.ok();
+
+    if let Err(e) = fabric::daemon::install_service() {
+        tracing::warn!(error = %e, "hypervisor daemon install failed");
     }
 
     steps.finish("Joined cluster");
@@ -908,14 +888,28 @@ async fn handle_status() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_start() -> anyhow::Result<OperationResponse> {
+    // If the daemon is running, stop it briefly so we can open the
+    // DB directly for the boot-up checks. We restart it at the end.
+    let daemon_was_installed = fabric::daemon::is_service_installed();
+    let daemon_was_active = fabric::daemon::is_service_active();
+    if daemon_was_active {
+        let _ = fabric::daemon::stop_service();
+        // Give systemd a moment to actually release the LOCK.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
     let db = open_db().await?;
     fabric::ops::start(&db).await?;
-    let _ = fabric::announce::start_service();
     if let Err(e) = controlplane::ops::start() {
         eprintln!("  Warning: control plane: {e}");
     }
     if let Err(e) = storage::ops::start_all(&db).await {
         eprintln!("  Warning: storage: {e}");
+    }
+    db.shutdown().await.ok();
+
+    if daemon_was_installed {
+        let _ = fabric::daemon::start_service();
     }
     Ok(OperationResponse::Message("all services started.".into()))
 }
@@ -1413,15 +1407,31 @@ async fn handle_doctor() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_stop() -> anyhow::Result<OperationResponse> {
+    // Stop the daemon first so we can open the DB without flock
+    // contention for the rest of the teardown.
+    let _ = fabric::daemon::request_shutdown_and_wait(std::time::Duration::from_secs(5)).await;
+    let _ = fabric::daemon::stop_service();
+
     let db = open_db().await?;
     let _ = storage::ops::stop_all(&db).await;
     let _ = controlplane::ops::stop();
-    let _ = fabric::announce::stop_service();
     fabric::ops::stop(&db).await?;
     Ok(OperationResponse::Message("all services stopped.".into()))
 }
 
 async fn handle_leave() -> anyhow::Result<OperationResponse> {
+    let steps = ui::Steps::new(5);
+
+    // 1. Stop the daemon if it's running so the bootstrap.skv flock
+    //    is free before we open the DB directly for teardown.
+    steps.set("Stopping daemon");
+    if let Err(e) =
+        fabric::daemon::request_shutdown_and_wait(std::time::Duration::from_secs(10)).await
+    {
+        tracing::warn!(error = %e, "daemon shutdown request failed, continuing");
+    }
+    steps.inc();
+
     let db = open_db().await?;
     // Get mesh IPv6 for TiKV deregistration before leaving
     let mesh_ipv6 = fabric::state::FabricState::load(&db)
@@ -1430,38 +1440,35 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
         .flatten()
         .map(|s| s.hypervisor.mesh_ipv6);
 
-    let steps = ui::Steps::new(4);
-
-    // Storage first (stop ZeroFS instances)
+    // 2. Storage (stop ZeroFS instances)
     steps.set("Stopping storage");
     let _ = storage::ops::leave();
     steps.inc();
 
-    // Controlplane (deregister TiKV store, then uninstall). The
-    // `leave_with_mesh` variant reads peer state via its own
-    // short-lived EmbeddedDb handle, so release ours first to avoid
-    // flock contention on the SurrealKV store directory.
+    // 3. Controlplane (deregister TiKV store, then uninstall). The
+    //    `leave_with_mesh` variant reads peer state via its own
+    //    short-lived EmbeddedDb handle — safe now that our daemon is
+    //    no longer holding the flock.
     steps.set("Leaving control plane");
     if let Some(ipv6) = mesh_ipv6 {
-        // Temporarily release our handle during the TiKV deregistration
-        // step; `leave_with_mesh` opens its own EmbeddedDb for peer
-        // lookups via `FabricState::load`.
-        //
-        // We recreate the handle afterwards for the remaining steps.
         let _ = controlplane::ops::leave_with_mesh(&ipv6).await;
     } else {
         let _ = controlplane::ops::leave();
     }
     steps.inc();
 
-    // Notify peers + tear down mesh
+    // 4. Notify peers + tear down mesh
     steps.set("Notifying peers");
-    let _ = fabric::announce::uninstall_service();
     fabric::ops::leave(&db).await?;
     steps.inc();
 
-    // Final cleanup
+    // Release our DB handle before uninstalling the daemon unit, so
+    // `daemon-reload` doesn't race anything still holding `LOCK`.
+    db.shutdown().await.ok();
+
+    // 5. Final cleanup: remove the daemon systemd unit.
     steps.set("Removing services");
+    let _ = fabric::daemon::uninstall_service();
     steps.inc();
 
     steps.finish("Left the cluster");

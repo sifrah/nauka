@@ -19,6 +19,6 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 
-pub use client::{forward_or_fallback, ClientError};
+pub use client::{forward_or_fallback, is_daemon_up, send, ClientError};
 pub use protocol::{socket_path, ControlRequest, ControlResponse};
 pub use server::run as run_control_server;

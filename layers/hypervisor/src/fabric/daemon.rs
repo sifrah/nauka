@@ -348,6 +348,41 @@ pub fn start_service() -> Result<(), NaukaError> {
     run_systemctl(&["start", DAEMON_SERVICE])
 }
 
+/// Ask the running daemon to shut itself down via the control
+/// socket, then wait up to `timeout` for the socket file to
+/// disappear (which happens when the daemon's main task returns
+/// from `run` and `server::run` deletes the socket path on its way
+/// out).
+///
+/// Returns:
+/// - `Ok(true)` — a daemon was running, accepted the shutdown, and
+///   exited within the timeout.
+/// - `Ok(false)` — no daemon was running.
+/// - `Err(_)` — a daemon was running but either rejected the
+///   request or failed to exit within `timeout`.
+pub async fn request_shutdown_and_wait(timeout: Duration) -> Result<bool, NaukaError> {
+    use super::control;
+
+    match control::send(&control::ControlRequest::Shutdown).await {
+        Ok(_) => {
+            let socket = control::socket_path();
+            let start = std::time::Instant::now();
+            while start.elapsed() < timeout {
+                if !socket.exists() {
+                    return Ok(true);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(NaukaError::internal(
+                "daemon did not exit within timeout after shutdown request",
+            ))
+        }
+        Err(control::ClientError::SocketMissing)
+        | Err(control::ClientError::ConnectRefused(_)) => Ok(false),
+        Err(e) => Err(NaukaError::internal(format!("daemon shutdown: {e}"))),
+    }
+}
+
 fn run_systemctl(args: &[&str]) -> Result<(), NaukaError> {
     let output = std::process::Command::new("systemctl")
         .args(args)
