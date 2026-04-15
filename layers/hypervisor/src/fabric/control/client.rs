@@ -147,7 +147,7 @@ where
 /// otherwise. Used by the CLI to decide whether to print "daemon
 /// running" vs "daemon not installed" hints.
 pub async fn is_daemon_up() -> bool {
-    matches!(send(&ControlRequest::Ping).await, Ok(_))
+    send(&ControlRequest::Ping).await.is_ok()
 }
 
 #[cfg(test)]

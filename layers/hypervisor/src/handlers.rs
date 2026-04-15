@@ -190,23 +190,6 @@ pub fn resource_def() -> ResourceDef {
         .op(|op| op.with_example("nauka hypervisor list"))
         .get()
         .op(|op| op.with_example("nauka hypervisor get HYPERVISOR-1"))
-        .action("peering", "Start peering listener to accept new nodes")
-        .op(|op| {
-            op.with_arg(OperationArg::optional(
-                "timeout",
-                FieldDef::integer("timeout", "Listener idle timeout in seconds").with_default("300"),
-            ))
-            .with_arg(OperationArg::optional(
-                "max-joins",
-                FieldDef::integer(
-                    "max-joins",
-                    "Number of joins to accept before exiting (0 = unlimited)",
-                )
-                .with_default("1"),
-            ))
-            .with_example("nauka hypervisor peering")
-            .with_example("nauka hypervisor peering --max-joins 3 --timeout 600")
-        })
         .action("backup", "Create a backup of PD and TiKV data to S3")
         .op(|op| {
             op.with_arg(OperationArg::optional(
@@ -239,13 +222,6 @@ pub fn resource_def() -> ResourceDef {
                 .with_example("nauka hypervisor upgrade")
         })
         .action("doctor", "Diagnose hypervisor health")
-        .action("announce-listen", "Run the announce listener (internal)")
-        .op(|op| {
-            op.with_arg(OperationArg::optional(
-                "port",
-                FieldDef::integer("port", "Announce listen port").with_default("51822"),
-            ))
-        })
         .action(
             "daemon",
             "Run the hypervisor daemon (installed as nauka.service)",
@@ -296,14 +272,12 @@ pub fn handler() -> HandlerFn {
                 "list" => handle_list().await,
                 "get" => handle_get(req).await,
                 "join" => handle_join(req).await,
-                "peering" => handle_peering(req).await,
                 "backup" => handle_backup(req).await,
                 "backup-list" => handle_backup_list().await,
                 "cp-status" => handle_cp_status().await,
                 "upgrade-check" => handle_upgrade_check().await,
                 "upgrade" => handle_upgrade().await,
                 "doctor" => handle_doctor().await,
-                "announce-listen" => handle_announce_listen(req).await,
                 "daemon" => handle_daemon().await,
                 "drain" => handle_drain().await,
                 "enable" => handle_enable().await,
@@ -867,130 +841,70 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
     })))
 }
 
-async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationResponse> {
-    // P2/#281: default to accepting ONE join then exiting. The
-    // operator-intuitive model is "run this, wait for a join, get
-    // your shell back". Unlimited-accept mode is still available via
-    // `--max-joins 0` for scripted bulk-join workflows. Default idle
-    // timeout is also dropped from 1 h to 5 min so a forgotten
-    // listener cleans up quickly instead of parking resources.
-    let timeout_secs: u64 = req
-        .fields
-        .get("timeout")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(300);
-    let max_joins: usize = req
-        .fields
-        .get("max-joins")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-
-    let db = open_db().await?;
-    let state = fabric::state::FabricState::load(&db)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| anyhow::anyhow!("not initialized. Run 'nauka hypervisor init' first."))?;
-
-    // Derive PIN from secret
-    let secret: nauka_core::crypto::MeshSecret = state.secret.parse()?;
-    let pin = secret.derive_pin();
-    let peering_port = state.hypervisor.wg_port + 1;
-
-    // Explicitly shut down so the SurrealKV flock is released before the
-    // listener's per-request opens.
-    db.shutdown().await?;
-
-    eprintln!();
-    eprintln!("  Peering active on port {peering_port}");
-    eprintln!("  PIN: {pin}");
-    if max_joins > 0 {
-        eprintln!(
-            "  Accepting up to {max_joins} join{} (idle timeout {timeout_secs}s)",
-            if max_joins == 1 { "" } else { "s" }
-        );
-    } else {
-        eprintln!("  Accepting unlimited joins (idle timeout {timeout_secs}s)");
-    }
-    eprintln!();
-    eprintln!("  Nodes can join with:");
-    eprintln!("    nauka hypervisor join --target <this-ip>:{peering_port} --pin {pin}");
-    eprintln!();
-
-    let accepted =
-        fabric::ops::listen_for_peers(&pin, peering_port, timeout_secs, max_joins).await?;
-
-    Ok(OperationResponse::Message(format!(
-        "{accepted} node(s) joined."
-    )))
-}
-
 async fn handle_update(req: OperationRequest) -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-
     let ipv6_block = req.fields.get("ipv6-block").cloned();
     let ipv4_public = req.fields.get("ipv4-public").cloned();
     let name = req.fields.get("name").cloned();
 
-    let cfg = fabric::ops::UpdateConfig {
-        ipv6_block,
-        ipv4_public,
-        name,
+    let req = fabric::control::ControlRequest::Update {
+        ipv6_block: ipv6_block.clone(),
+        ipv4_public: ipv4_public.clone(),
+        name: name.clone(),
     };
 
-    let hv = fabric::ops::update(&db, &cfg).await?;
+    let value = fabric::control::forward_or_fallback(
+        req,
+        || async move {
+            let db = open_db().await?;
+            let cfg = fabric::ops::UpdateConfig {
+                ipv6_block,
+                ipv4_public,
+                name,
+            };
+            let hv = fabric::ops::update(&db, &cfg).await?;
+            Ok(serde_json::json!({
+                "name": hv.name,
+                "id": hv.id.as_str(),
+                "region": hv.region,
+                "zone": hv.zone,
+                "mesh_ipv6": hv.mesh_ipv6.to_string(),
+                "ipv6_block": hv.ipv6_block,
+                "ipv4_public": hv.ipv4_public,
+            }))
+        },
+        Ok,
+    )
+    .await?;
 
-    Ok(OperationResponse::Resource(serde_json::json!({
-        "name": hv.name,
-        "id": hv.id.as_str(),
-        "region": hv.region,
-        "zone": hv.zone,
-        "mesh_ipv6": hv.mesh_ipv6.to_string(),
-        "ipv6_block": hv.ipv6_block,
-        "ipv4_public": hv.ipv4_public,
-        "state": "available",
-    })))
+    // The control-server response shape matches the fallback JSON
+    // above but does not include the synthetic "state" field — add
+    // it here so CLI output stays identical regardless of which path
+    // served the request.
+    let mut value = value;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "state".to_string(),
+            serde_json::Value::String("available".to_string()),
+        );
+    }
+
+    Ok(OperationResponse::Resource(value))
 }
 
 async fn handle_status() -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-    let s = fabric::ops::status(&db).await?;
+    let value = fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::Status,
+        || async {
+            let db = open_db().await?;
+            fabric::ops::status_view(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        },
+        Ok,
+    )
+    .await?;
 
-    // Control plane status (best-effort — may not be installed yet)
-    let mesh_ip: std::net::Ipv6Addr = s
-        .mesh_ipv6
-        .parse()
-        .map_err(|_| anyhow::anyhow!("corrupt state: invalid mesh_ipv6 '{}'", s.mesh_ipv6))?;
-    let cp = controlplane::ops::status(&mesh_ip);
-    let (pd_active, tikv_active, pd_members, tikv_stores, leader) = match cp {
-        Ok(cs) => (
-            cs.pd_active,
-            cs.tikv_active,
-            cs.pd_members,
-            cs.tikv_stores,
-            cs.leader,
-        ),
-        Err(_) => (false, false, 0, 0, None),
-    };
-
-    Ok(OperationResponse::Resource(serde_json::json!({
-        "name": s.hypervisor_name,
-        "id": s.hypervisor_id,
-        "region": s.region,
-        "zone": s.zone,
-        "mesh_ipv6": s.mesh_ipv6,
-        "state": if s.service_active && tikv_active { &s.state } else if s.service_active { "degraded" } else { "down" },
-        "wg": if s.service_active { "running" } else { "stopped" },
-        "wg_interface": s.wg_interface_up,
-        "peers": s.peer_count,
-        "wg_port": s.wg_port,
-        "rx_bytes": s.rx_bytes,
-        "tx_bytes": s.tx_bytes,
-        "pd": if pd_active { "running" } else { "stopped" },
-        "tikv": if tikv_active { "running" } else { "stopped" },
-        "pd_members": pd_members,
-        "tikv_stores": tikv_stores,
-        "leader": leader,
-    })))
+    Ok(OperationResponse::Resource(value))
 }
 
 async fn handle_start() -> anyhow::Result<OperationResponse> {
@@ -1007,16 +921,32 @@ async fn handle_start() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_drain() -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-    fabric::ops::drain(&db).await?;
+    fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::Drain,
+        || async {
+            let db = open_db().await?;
+            fabric::ops::drain(&db).await?;
+            Ok(serde_json::Value::Null)
+        },
+        |_| Ok(()),
+    )
+    .await?;
     Ok(OperationResponse::Message(
         "node set to draining — no new VMs will be scheduled.".into(),
     ))
 }
 
 async fn handle_enable() -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-    fabric::ops::enable(&db).await?;
+    fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::Enable,
+        || async {
+            let db = open_db().await?;
+            fabric::ops::enable(&db).await?;
+            Ok(serde_json::Value::Null)
+        },
+        |_| Ok(()),
+    )
+    .await?;
     Ok(OperationResponse::Message(
         "node set to available — ready for VM scheduling.".into(),
     ))
@@ -1024,36 +954,6 @@ async fn handle_enable() -> anyhow::Result<OperationResponse> {
 
 async fn handle_daemon() -> anyhow::Result<OperationResponse> {
     fabric::daemon::run().await?;
-    Ok(OperationResponse::None)
-}
-
-async fn handle_announce_listen(req: OperationRequest) -> anyhow::Result<OperationResponse> {
-    let port: u16 = req
-        .fields
-        .get("port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(51822);
-
-    let bind_addr: std::net::SocketAddr = format!("[::]:{port}")
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid port"))?;
-
-    // Open the DB once and hold the handle for the lifetime of the
-    // listener — SurrealDB's `Surreal<Db>` is thread-safe and every
-    // spawned announce-handler task clones the same underlying
-    // `Datastore`, so concurrent announces never contend on the
-    // SurrealKV `LOCK`. The `Ctrl+C` shutdown below drops the handle
-    // cleanly before the process exits.
-    let db = open_db().await?;
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = shutdown_tx.send(true);
-    });
-
-    fabric::announce::listen(db, bind_addr, shutdown_rx).await?;
-
     Ok(OperationResponse::None)
 }
 
@@ -1143,26 +1043,36 @@ async fn handle_backup_list() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_cp_status() -> anyhow::Result<OperationResponse> {
-    // sifrah/nauka#295 — release the bootstrap.skv flock BEFORE making any
-    // PD HTTP round trips. Holding the flock across the (potentially slow)
-    // `get_members`/`get_stores`/`get_region_stats` calls blocks every
-    // other local CLI that needs to open the same DB, including the
-    // persistent announce listener — which then drops incoming peer
-    // announces and cascades into `open_tikv` failures on freshly-joining
-    // nodes (the symptom that made #293 so hard to reproduce cleanly).
-    // Scope the DB tightly: open, read the one field we need, shut down.
-    let mesh_ipv6 = {
-        let db = open_db().await?;
-        let state = fabric::state::FabricState::load(&db)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .ok_or_else(|| {
-                anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
-            })?;
-        let ip = state.hypervisor.mesh_ipv6;
-        db.shutdown().await.ok();
-        ip
-    };
+    // #299: ask the daemon for mesh_ipv6 over the control socket so
+    // we never touch bootstrap.skv while the daemon holds it. When
+    // there is no daemon (init hasn't finished yet, recovery, test
+    // harness) we fall back to a direct open + immediate shutdown —
+    // which is still safe because nothing else is holding the flock
+    // in that case.
+    let mesh_ipv6_str: String = fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::MeshIpv6,
+        || async {
+            let db = open_db().await?;
+            let state = fabric::state::FabricState::load(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cluster not initialized. Run 'nauka hypervisor init' first.")
+                })?;
+            let ip = state.hypervisor.mesh_ipv6.to_string();
+            db.shutdown().await.ok();
+            Ok(serde_json::json!(ip))
+        },
+        |v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("mesh_ipv6: expected string"))
+        },
+    )
+    .await?;
+    let mesh_ipv6: std::net::Ipv6Addr = mesh_ipv6_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("corrupt mesh_ipv6: {mesh_ipv6_str}"))?;
 
     // Tighter per-request timeout than the default 10s — cp-status is
     // an operator-facing read path and should fail fast if PD is stuck
@@ -1559,48 +1469,19 @@ async fn handle_leave() -> anyhow::Result<OperationResponse> {
 }
 
 async fn handle_list() -> anyhow::Result<OperationResponse> {
-    let db = open_db().await?;
-    let state = match fabric::state::FabricState::load(&db)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-    {
-        Some(s) => s,
-        None => return Ok(OperationResponse::ResourceList(vec![])),
-    };
+    let value = fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::List,
+        || async {
+            let db = open_db().await?;
+            fabric::ops::list_view(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        },
+        Ok,
+    )
+    .await?;
 
-    let backend = fabric::backend::create_backend(state.network_mode);
-    let self_state = if !backend.is_up() {
-        "down"
-    } else if state.node_state == fabric::state::NodeState::Draining {
-        "draining"
-    } else {
-        "available"
-    };
-
-    let mut items = vec![serde_json::json!({
-        "id": state.hypervisor.id.as_str(),
-        "name": state.hypervisor.name,
-        "region": state.hypervisor.region,
-        "zone": state.hypervisor.zone,
-        "state": self_state,
-        "cpu": "0/0",
-        "memory": "0/0",
-        "vms": 0,
-    })];
-
-    for peer in &state.peers.peers {
-        items.push(serde_json::json!({
-            "id": peer.id.as_str(),
-            "name": peer.name,
-            "region": peer.region,
-            "zone": peer.zone,
-            "state": peer_state_label(peer),
-            "cpu": "0/0",
-            "memory": "0/0",
-            "vms": 0,
-        }));
-    }
-
+    let items: Vec<serde_json::Value> = value.as_array().cloned().unwrap_or_default();
     Ok(OperationResponse::ResourceList(items))
 }
 
@@ -1608,52 +1489,21 @@ async fn handle_get(req: OperationRequest) -> anyhow::Result<OperationResponse> 
     let name = req
         .name
         .ok_or_else(|| anyhow::anyhow!("missing hypervisor name"))?;
-    let db = open_db().await?;
-    let state = fabric::state::FabricState::load(&db)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| anyhow::anyhow!("not initialized"))?;
+    let name_for_fallback = name.clone();
 
-    let backend = fabric::backend::create_backend(state.network_mode);
+    let value = fabric::control::forward_or_fallback(
+        fabric::control::ControlRequest::Get { name },
+        || async move {
+            let db = open_db().await?;
+            fabric::ops::get_view(&db, &name_for_fallback)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        },
+        Ok,
+    )
+    .await?;
 
-    if state.hypervisor.name == name {
-        return Ok(OperationResponse::Resource(serde_json::json!({
-            "name": state.hypervisor.name,
-            "id": state.hypervisor.id.as_str(),
-            "region": state.hypervisor.region,
-            "zone": state.hypervisor.zone,
-            "mesh_ipv6": state.hypervisor.mesh_ipv6.to_string(),
-            "state": if !backend.is_up() { "down" } else if state.node_state == fabric::state::NodeState::Draining { "draining" } else { "available" },
-        })));
-    }
-
-    if let Some(peer) = state.peers.find_by_name(&name) {
-        return Ok(OperationResponse::Resource(serde_json::json!({
-            "name": peer.name,
-            "id": peer.id.as_str(),
-            "region": peer.region,
-            "zone": peer.zone,
-            "mesh_ipv6": peer.mesh_ipv6.to_string(),
-            "state": peer_state_label(peer),
-        })));
-    }
-
-    anyhow::bail!("hypervisor '{name}' not found")
-}
-
-/// Map peer status to user-facing label.
-fn peer_state_label(peer: &fabric::peer::Peer) -> &'static str {
-    match peer.status {
-        fabric::peer::PeerStatus::Active => {
-            if peer.node_state == fabric::state::NodeState::Draining {
-                "draining"
-            } else {
-                "available"
-            }
-        }
-        fabric::peer::PeerStatus::Unreachable => "unreachable",
-        fabric::peer::PeerStatus::Removed => "removed",
-    }
+    Ok(OperationResponse::Resource(value))
 }
 
 async fn open_db() -> anyhow::Result<EmbeddedDb> {
