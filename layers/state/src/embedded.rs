@@ -499,11 +499,8 @@ async fn open_datastore_with_retry(path_str: &str) -> Result<Surreal<Db>> {
     let mut backoff = MIN_BACKOFF;
 
     loop {
-        let attempt = tokio::time::timeout(
-            PER_ATTEMPT_TIMEOUT,
-            Surreal::new::<SurrealKv>(path_str),
-        )
-        .await;
+        let attempt =
+            tokio::time::timeout(PER_ATTEMPT_TIMEOUT, Surreal::new::<SurrealKv>(path_str)).await;
 
         match attempt {
             Ok(Ok(db)) => return Ok(db),
