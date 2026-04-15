@@ -216,7 +216,27 @@ pub fn uninstall() -> Result<(), NaukaError> {
     Ok(())
 }
 
-/// Update the WireGuard config (e.g., when a peer joins) and reload.
+/// Update the WireGuard config (e.g., when a peer joins) and apply it
+/// to the running interface without tearing it down.
+///
+/// Writes the full wg-quick-format config (with `[Interface].Address`)
+/// to `WG_CONF_FILE`, then hot-applies the peer diff via
+/// `wg-quick strip | wg syncconf nauka0 /dev/stdin`. The `strip` stage
+/// is load-bearing: `wg syncconf` only understands the pure wg subset
+/// (PublicKey, AllowedIPs, etc.) and errors out with
+/// `Line unrecognized: Address=...` if handed a wg-quick config
+/// directly. Before this fix, the failed `wg syncconf` fell back to
+/// `systemctl restart nauka-wg.service`, which cascaded through
+/// `Requires=nauka-wg.service` on `nauka.service` / `nauka-pd` /
+/// `nauka-tikv` and bounced the entire control plane for every
+/// single peer add — visible during #299 Hetzner validation as the
+/// hypervisor daemon deactivating the instant a join arrived.
+///
+/// If the hot-apply fails for any reason, we log a warning and
+/// return `Ok(())`: the updated config is persisted on disk and the
+/// next `wg-quick up` (service restart, reboot, or operator-driven
+/// reconciliation) will pick it up. Never cascade-restart systemd —
+/// the recovery path is more disruptive than the original failure.
 pub fn update_config(
     private_key: &str,
     listen_port: u16,
@@ -232,15 +252,117 @@ pub fn update_config(
         let _ = std::fs::set_permissions(WG_CONF_FILE, std::fs::Permissions::from_mode(0o600));
     }
 
-    // wg syncconf applies changes without tearing down the interface
-    let output = Command::new("wg")
-        .args(["syncconf", "nauka0", WG_CONF_FILE])
+    // Hot-apply: `wg-quick strip <conf>` → pipe → `wg syncconf nauka0 /dev/stdin`.
+    // The strip stage drops `Address`, `MTU`, `PreUp`, etc., leaving
+    // only the directives `wg syncconf` understands.
+    match syncconf_via_strip() {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "wg syncconf hot-apply failed; config persisted for next wg-quick up"
+            );
+        }
+    }
+
+    // `wg syncconf` updates WireGuard's internal peer table but does
+    // **not** touch the kernel routing table. `wg-quick up` normally
+    // installs an `ip -6 route add <AllowedIPs> dev nauka0` for every
+    // peer on top of the syncconf — without those routes the kernel
+    // has no reason to steer a peer's mesh IPv6 via `nauka0`, so
+    // traffic gets default-routed out `eth0` and never enters the
+    // tunnel. Symptom during #299 Hetzner validation: a joining node
+    // got its WG handshake through but `ping`/`curl` to the acceptor's
+    // mesh IPv6 timed out because the return packet left via the
+    // public interface.
+    //
+    // Install each peer's `AllowedIPs` as a `/128` route on `nauka0`.
+    // Idempotent: `ip -6 route add` returns `RTNETLINK: File exists`
+    // when the route is already present, which we treat as success.
+    install_peer_routes(peers);
+
+    Ok(())
+}
+
+/// Install a `/128` route on `nauka0` for every peer in the slice.
+///
+/// `ip -6 route add <ipv6>/128 dev nauka0` — idempotent: the
+/// `File exists` failure mode is ignored. Failures to spawn `ip`
+/// are logged but do not surface as errors because the config file
+/// on disk will be reloaded on the next `wg-quick up`.
+fn install_peer_routes(peers: &[(String, String, std::net::Ipv6Addr, Option<String>)]) {
+    for (_pub, _keepalive, mesh_ipv6, _endpoint) in peers {
+        let dst = format!("{mesh_ipv6}/128");
+        match Command::new("ip")
+            .args(["-6", "route", "add", &dst, "dev", "nauka0"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Already-installed routes look like "File exists"
+                // from ip/route2, or rtnetlink error 17. Swallow those.
+                if !stderr.contains("File exists") && !stderr.contains("exists") {
+                    tracing::warn!(
+                        dst = %dst,
+                        stderr = %stderr.trim(),
+                        "ip -6 route add failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(dst = %dst, error = %e, "ip -6 route add spawn failed");
+            }
+        }
+    }
+}
+
+/// Run `wg-quick strip <conf>` and pipe its stdout into
+/// `wg syncconf nauka0 /dev/stdin`.
+///
+/// Returns `Err` only when the strip step spawned successfully but
+/// wrote an error, or when either subprocess exited non-zero. The
+/// caller logs and swallows — we never want a syncconf failure to
+/// cascade into a systemd restart.
+fn syncconf_via_strip() -> Result<(), NaukaError> {
+    use std::io::Write;
+
+    let strip = Command::new("wg-quick")
+        .args(["strip", WG_CONF_FILE])
         .output()
-        .map_err(|e| NaukaError::internal(format!("wg syncconf failed: {e}")))?;
+        .map_err(|e| NaukaError::internal(format!("wg-quick strip spawn: {e}")))?;
+
+    if !strip.status.success() {
+        return Err(NaukaError::internal(format!(
+            "wg-quick strip: {}",
+            String::from_utf8_lossy(&strip.stderr).trim()
+        )));
+    }
+
+    let mut child = Command::new("wg")
+        .args(["syncconf", "nauka0", "/dev/stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| NaukaError::internal(format!("wg syncconf spawn: {e}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&strip.stdout)
+            .map_err(|e| NaukaError::internal(format!("wg syncconf stdin write: {e}")))?;
+        // drop stdin → EOF
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| NaukaError::internal(format!("wg syncconf wait: {e}")))?;
 
     if !output.status.success() {
-        // Fallback: restart the service
-        let _ = run_systemctl(&["restart", SERVICE_NAME]);
+        return Err(NaukaError::internal(format!(
+            "wg syncconf: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
 
     Ok(())
