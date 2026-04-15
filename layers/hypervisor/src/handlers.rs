@@ -194,9 +194,18 @@ pub fn resource_def() -> ResourceDef {
         .op(|op| {
             op.with_arg(OperationArg::optional(
                 "timeout",
-                FieldDef::integer("timeout", "Listener timeout in seconds").with_default("3600"),
+                FieldDef::integer("timeout", "Listener idle timeout in seconds").with_default("300"),
+            ))
+            .with_arg(OperationArg::optional(
+                "max-joins",
+                FieldDef::integer(
+                    "max-joins",
+                    "Number of joins to accept before exiting (0 = unlimited)",
+                )
+                .with_default("1"),
             ))
             .with_example("nauka hypervisor peering")
+            .with_example("nauka hypervisor peering --max-joins 3 --timeout 600")
         })
         .action("backup", "Create a backup of PD and TiKV data to S3")
         .op(|op| {
@@ -579,13 +588,12 @@ async fn handle_init(req: OperationRequest) -> anyhow::Result<OperationResponse>
         eprintln!("  Waiting for joins... (Ctrl+C to stop)");
         eprintln!();
 
-        // Block here listening for joins (DB opened per-request, no lock held)
-        let accepted = fabric::ops::listen_for_peers(
-            &result.pin,
-            peering_port,
-            3600, // 1 hour timeout
-        )
-        .await?;
+        // Block here listening for joins (DB opened per-request, no lock held).
+        // P2/#281: `init --peering` is the bootstrap-then-accept-unlimited-
+        // joins flow, so we explicitly request unlimited mode (0) with the
+        // legacy 1-hour idle timeout. The standalone `nauka hypervisor
+        // peering` command defaults to 1-join-then-exit instead.
+        let accepted = fabric::ops::listen_for_peers(&result.pin, peering_port, 3600, 0).await?;
 
         eprintln!("  {} node(s) joined.", accepted);
 
@@ -820,11 +828,22 @@ async fn handle_join(req: OperationRequest) -> anyhow::Result<OperationResponse>
 }
 
 async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationResponse> {
+    // P2/#281: default to accepting ONE join then exiting. The
+    // operator-intuitive model is "run this, wait for a join, get
+    // your shell back". Unlimited-accept mode is still available via
+    // `--max-joins 0` for scripted bulk-join workflows. Default idle
+    // timeout is also dropped from 1 h to 5 min so a forgotten
+    // listener cleans up quickly instead of parking resources.
     let timeout_secs: u64 = req
         .fields
         .get("timeout")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3600);
+        .unwrap_or(300);
+    let max_joins: usize = req
+        .fields
+        .get("max-joins")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
 
     let db = open_db().await?;
     let state = fabric::state::FabricState::load(&db)
@@ -844,14 +863,21 @@ async fn handle_peering(req: OperationRequest) -> anyhow::Result<OperationRespon
     eprintln!();
     eprintln!("  Peering active on port {peering_port}");
     eprintln!("  PIN: {pin}");
+    if max_joins > 0 {
+        eprintln!(
+            "  Accepting up to {max_joins} join{} (idle timeout {timeout_secs}s)",
+            if max_joins == 1 { "" } else { "s" }
+        );
+    } else {
+        eprintln!("  Accepting unlimited joins (idle timeout {timeout_secs}s)");
+    }
     eprintln!();
     eprintln!("  Nodes can join with:");
     eprintln!("    nauka hypervisor join --target <this-ip>:{peering_port} --pin {pin}");
     eprintln!();
-    eprintln!("  Waiting for joins... (Ctrl+C to stop)");
-    eprintln!();
 
-    let accepted = fabric::ops::listen_for_peers(&pin, peering_port, timeout_secs).await?;
+    let accepted =
+        fabric::ops::listen_for_peers(&pin, peering_port, timeout_secs, max_joins).await?;
 
     Ok(OperationResponse::Message(format!(
         "{accepted} node(s) joined."

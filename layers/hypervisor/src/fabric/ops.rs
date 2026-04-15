@@ -152,6 +152,7 @@ pub async fn listen_for_peers(
     pin: &str,
     peering_port: u16,
     timeout_secs: u64,
+    max_joins: usize,
 ) -> Result<usize, NaukaError> {
     let bind_addr = format!("[::]:{peering_port}")
         .parse()
@@ -159,43 +160,61 @@ pub async fn listen_for_peers(
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    // Start health check loop in background
-    tokio::spawn(async move {
-        super::health::run_loop(
-            open_db,
-            super::health::DEFAULT_INTERVAL_SECS,
-            super::health::DEFAULT_STALE_THRESHOLD_SECS,
-        )
-        .await;
-    });
+    // P2/#281: only spawn the long-running background helpers (health
+    // loop, announce listener, periodic mesh reconciliation) in the
+    // explicit unlimited-accept mode (`max_joins == 0`), which is what
+    // `hypervisor init --peering` uses for a bootstrap-then-daemon
+    // flow. In one-shot mode (`max_joins > 0`, the new default for
+    // standalone `nauka hypervisor peering`) we skip them entirely so
+    // the process can exit cleanly after the listen loop returns — a
+    // detached `tokio::spawn` keeps the runtime alive indefinitely
+    // otherwise, which is exactly how #281 manifested. The helpers
+    // are also redundant in that mode because `nauka-announce` is
+    // already installed as a systemd service by `init` / `join` and
+    // runs continuously in the background.
+    if max_joins == 0 {
+        // Start health check loop in background
+        tokio::spawn(async move {
+            super::health::run_loop(
+                open_db,
+                super::health::DEFAULT_INTERVAL_SECS,
+                super::health::DEFAULT_STALE_THRESHOLD_SECS,
+            )
+            .await;
+        });
 
-    // Start announce listener in background (peering_port + 1 = announce port)
-    let announce_port = peering_port + 1;
-    let announce_addr: std::net::SocketAddr = format!("[::]:{announce_port}")
-        .parse()
-        .map_err(|_| NaukaError::internal("invalid announce bind address"))?;
-    tokio::spawn(async move {
-        if let Err(e) = super::announce::listen(open_db, announce_addr).await {
-            tracing::warn!(error = %e, "announce listener stopped");
-        }
-    });
+        // Start announce listener in background (peering_port + 1 = announce port)
+        let announce_port = peering_port + 1;
+        let announce_addr: std::net::SocketAddr = format!("[::]:{announce_port}")
+            .parse()
+            .map_err(|_| NaukaError::internal("invalid announce bind address"))?;
+        tokio::spawn(async move {
+            if let Err(e) = super::announce::listen(open_db, announce_addr).await {
+                tracing::warn!(error = %e, "announce listener stopped");
+            }
+        });
 
-    // Start periodic mesh reconciliation in background.
-    // Every 30s, re-read the full peer list and announce every peer to every
-    // other peer. This is idempotent (known peers are skipped) and guarantees
-    // full mesh convergence even after concurrent joins.
-    let reconcile_wg_port = peering_port - 1; // wg_port = peering_port - 1
-    tokio::spawn(async move {
-        // Initial delay — let the first joins settle
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        loop {
-            reconcile_mesh(reconcile_wg_port).await;
+        // Start periodic mesh reconciliation in background.
+        // Every 30s, re-read the full peer list and announce every peer to every
+        // other peer. This is idempotent (known peers are skipped) and guarantees
+        // full mesh convergence even after concurrent joins.
+        let reconcile_wg_port = peering_port - 1; // wg_port = peering_port - 1
+        tokio::spawn(async move {
+            // Initial delay — let the first joins settle
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
-    });
+            loop {
+                reconcile_mesh(reconcile_wg_port).await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+    }
 
-    // Main peering listener (blocks)
-    super::peering_server::listen(open_db, pin, bind_addr, timeout, 0).await
+    // Main peering listener (blocks until `max_joins` is reached or
+    // the idle timeout elapses). P2/#281: the previous hard-coded
+    // `0` here meant "accept forever", turning every `nauka hypervisor
+    // peering` invocation into a long-lived daemon that had to be
+    // killed manually.
+    super::peering_server::listen(open_db, pin, bind_addr, timeout, max_joins).await
 }
 
 /// Reconciliation interval in seconds (matches the sleep in the spawned task).
