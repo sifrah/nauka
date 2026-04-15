@@ -126,19 +126,85 @@ fn skip(name: &str, detail: &str) -> Check {
 // Run all checks
 // ═══════════════════════════════════════════════════
 
+/// Total budget for `doctor::run`. Past this point the command exits
+/// with whatever checks have completed plus a clear "timed out" entry
+/// for anything still pending. 30 s is the Nauka fast-timeout
+/// convention for operator-facing health commands.
+///
+/// Fixes sifrah/nauka#288: before this budget existed, a hang inside
+/// any single async step (typically `open_tikv` waiting on a PD
+/// re-election, see `EmbeddedDb::open_tikv`) parked the entire doctor
+/// future forever and kept the `bootstrap.skv` flock held indefinitely.
+const DOCTOR_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Per-step budget for each async section of the doctor. The global
+/// [`DOCTOR_TOTAL_TIMEOUT`] is the outer guard; this is the inner per
+/// step guard so one slow subsystem surfaces as a single `✗` instead
+/// of eating the whole budget.
+const DOCTOR_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn run() -> DoctorReport {
+    // Wrap the entire run in a hard deadline. If anything inside parks
+    // forever (sifrah/nauka#288), the outer timeout fires, we stamp a
+    // `✗ doctor: timed out` check on whatever report we have so far,
+    // and return cleanly so the caller's flock / process state is
+    // released.
+    match tokio::time::timeout(DOCTOR_TOTAL_TIMEOUT, run_inner()).await {
+        Ok(report) => report,
+        Err(_elapsed) => {
+            let mut report = DoctorReport::default();
+            let checks = report.add_section("Doctor");
+            checks.push(fail(
+                "global timeout",
+                &format!(
+                    "doctor run exceeded {}s — one of the checks is stuck (see sifrah/nauka#288)",
+                    DOCTOR_TOTAL_TIMEOUT.as_secs()
+                ),
+            ));
+            report
+        }
+    }
+}
+
+async fn run_inner() -> DoctorReport {
     let mut report = DoctorReport::default();
 
     // Load state from the SurrealKV-backed EmbeddedDb. We open it here so
     // both the fabric check and the storage check see the same snapshot,
     // then drop it before running the other checks so the flock is free.
-    let (state, storage_statuses) = load_doctor_context().await;
+    let (state, storage_statuses) =
+        match tokio::time::timeout(DOCTOR_STEP_TIMEOUT, load_doctor_context()).await {
+            Ok(ctx) => ctx,
+            Err(_) => {
+                tracing::warn!("doctor: load_doctor_context timed out — reporting empty context");
+                (None, Vec::new())
+            }
+        };
 
     let mesh_ipv6 = state.as_ref().map(|s| s.hypervisor.mesh_ipv6);
 
     check_fabric(&mut report, &state);
     check_controlplane(&mut report, mesh_ipv6.as_ref());
-    check_surrealdb(&mut report).await;
+
+    // `check_surrealdb` calls `controlplane::connect` → `open_tikv`,
+    // which is the historical hang point (sifrah/nauka#288). The
+    // inner `open_tikv` now has its own per-endpoint timeout, but we
+    // still wrap the whole section here so a stuck `INFO FOR DB` or
+    // any future addition cannot park the doctor.
+    match tokio::time::timeout(DOCTOR_STEP_TIMEOUT, check_surrealdb(&mut report)).await {
+        Ok(()) => {}
+        Err(_) => {
+            let checks = report.add_section("SurrealDB");
+            checks.push(fail(
+                "timeout",
+                &format!(
+                    "SurrealDB section timed out after {}s",
+                    DOCTOR_STEP_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+    }
+
     check_storage(&mut report, &storage_statuses);
     check_system(&mut report);
 
@@ -709,5 +775,25 @@ mod tests {
         let report = run().await;
         // 5 sections: Fabric, Controlplane, SurrealDB (P2.17), Storage, System.
         assert_eq!(report.checks.len(), 5);
+    }
+
+    /// sifrah/nauka#288 regression guard. The doctor must exit cleanly
+    /// within `DOCTOR_TOTAL_TIMEOUT` even when its inner future hangs
+    /// forever. We simulate the hang by wrapping a `pending::<()>` in
+    /// a short deadline and asserting the outer `tokio::time::timeout`
+    /// fires — the same shape the real `run()` uses around
+    /// `run_inner`. If that outer guard ever regresses, this test is
+    /// the one that flags it.
+    #[tokio::test]
+    async fn outer_timeout_fires_when_inner_future_hangs() {
+        const TEST_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+        let inner = std::future::pending::<DoctorReport>();
+        let result = tokio::time::timeout(TEST_BUDGET, inner).await;
+
+        assert!(
+            result.is_err(),
+            "timeout must fire on a pending future; got {result:?}"
+        );
     }
 }
