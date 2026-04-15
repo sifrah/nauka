@@ -189,16 +189,16 @@ async fn parallel_joins_plus_concurrent_state_reads() {
     );
 
     // Wait for concurrent readers and check they never saw a lock
-    // error.
+    // error. Snapshot the errors into an owned Vec before any await
+    // so the std Mutex guard doesn't live across an await point.
     for h in read_handles {
         h.await.unwrap();
     }
-    let errs = read_errors.lock().unwrap();
+    let errs: Vec<String> = read_errors.lock().unwrap().clone();
     assert!(
         errs.is_empty(),
         "concurrent FabricState::load calls should never fail while joins are in flight, but: {errs:?}"
     );
-    drop(errs);
 
     // State reflects all joiners — proves the write_lock around
     // `handle_join` prevents the load→modify→save race that
