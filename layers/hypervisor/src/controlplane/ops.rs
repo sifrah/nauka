@@ -620,6 +620,123 @@ pub fn leave() -> Result<(), NaukaError> {
     service::uninstall()
 }
 
+/// Resolve the set of real, currently-reachable PD endpoints for the TiKV
+/// SDK, given a naive per-peer candidate list.
+///
+/// The caller (post-join storage setup) builds `candidates` by mapping
+/// every fabric peer to `http://[<mesh_ipv6>]:2379`. That list contains:
+///  - real PD members (good),
+///  - synthesized URLs for TiKV-only peers (bad: no PD listening on 2379),
+///  - possibly real PDs whose WireGuard peer propagation hasn't caught up
+///    on this node yet (typical during rapid joins — the new node
+///    received all peers via the join response, but an existing peer may
+///    not have received the PeerAnnounce broadcast yet).
+///
+/// Passing such a list straight to `open_tikv` wastes its 10 s
+/// per-endpoint timeout on every bad entry, and in the common case the
+/// SDK picks a bad one first and the whole join fails with
+/// `open_tikv: handshake to [<ip>]:2379 timed out after 10s`
+/// (sifrah/nauka#293).
+///
+/// This helper solves it in two passes:
+///
+/// 1. Find any one reachable endpoint in `candidates` (polling with a
+///    short interval until `max_wait_secs` elapses). As soon as one
+///    responds, query it for the authoritative PD member list via
+///    `/pd/api/v1/members`.
+/// 2. Wait until every member in that authoritative list is also
+///    reachable, up to the remaining deadline. Return whatever subset
+///    became reachable — never less than the one seed endpoint, and
+///    usually the full set.
+///
+/// Returns an empty vec only if no endpoint ever answers within the
+/// deadline. The caller must handle that as a hard error.
+pub fn wait_reachable_pds(candidates: &[String], max_wait_secs: u64) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_wait_secs);
+
+    // Pass 1: find a single reachable candidate and use it to fetch the
+    // real member list. We loop because a freshly-joined node may need
+    // a few seconds for WG to carry the first packet to even one peer.
+    let mut seed: Option<(String, Vec<String>)> = None;
+    while seed.is_none() && std::time::Instant::now() < deadline {
+        for url in candidates {
+            let client = super::pd_client::PdClient::new(vec![url.clone()]);
+            if !client.ping() {
+                continue;
+            }
+            match client.get_members() {
+                Ok(members) => {
+                    let real: Vec<String> = members
+                        .iter()
+                        .flat_map(|m| m.client_urls.iter().cloned())
+                        .collect();
+                    tracing::debug!(
+                        seed = %url,
+                        members = real.len(),
+                        "wait_reachable_pds: fetched authoritative member list"
+                    );
+                    seed = Some((url.clone(), real));
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        endpoint = %url,
+                        error = %e,
+                        "wait_reachable_pds: ping ok but get_members failed, trying next"
+                    );
+                }
+            }
+        }
+        if seed.is_none() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    let (seed_url, real_endpoints) = match seed {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                candidates_count = candidates.len(),
+                "wait_reachable_pds: no PD endpoint answered within deadline"
+            );
+            return Vec::new();
+        }
+    };
+
+    // Pass 2: wait for every real member to be reachable. The seed is
+    // already known-good, so we add it straight to the reachable set.
+    let mut pending: Vec<String> = real_endpoints
+        .iter()
+        .filter(|e| *e != &seed_url)
+        .cloned()
+        .collect();
+    let mut reachable: Vec<String> = vec![seed_url];
+
+    while !pending.is_empty() && std::time::Instant::now() < deadline {
+        pending.retain(|url: &String| {
+            let client = super::pd_client::PdClient::new(vec![url.clone()]);
+            if client.ping() {
+                reachable.push(url.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !pending.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    if !pending.is_empty() {
+        tracing::warn!(
+            unreachable = ?pending,
+            reachable_count = reachable.len(),
+            "wait_reachable_pds: deadline reached, proceeding with reachable subset"
+        );
+    }
+    reachable
+}
+
 /// Wait for mesh connectivity to a PD endpoint (HTTP health check).
 fn wait_mesh_connectivity(pd_url: &str, timeout_secs: u64) -> Result<(), NaukaError> {
     let client = super::pd_client::PdClient::new(vec![pd_url.to_string()]);
