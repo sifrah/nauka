@@ -16,7 +16,7 @@ use nauka_core::error::NaukaError;
 use nauka_state::EmbeddedDb;
 
 use super::peer::Peer;
-use super::peering::{PeerAnnounce, PeerInfo, PeerRemove, StateChange};
+use super::peering::{PeerAnnounce, PeerInfo, PeerRemove, PromoteToPd, StateChange};
 use super::peering_server::{read_json, write_json};
 use super::service;
 
@@ -30,6 +30,8 @@ pub enum AnnounceMessage {
     Remove(PeerRemove),
     #[serde(rename = "state_change")]
     StateChange(StateChange),
+    #[serde(rename = "promote_to_pd")]
+    PromoteToPd(PromoteToPd),
 }
 
 /// Default announce port offset from WireGuard port.
@@ -105,6 +107,18 @@ pub async fn broadcast_new_peer(
     }
 
     (successes, failures)
+}
+
+/// Send a PD promotion request to a TiKV-only peer (used during scale-up).
+///
+/// `addr` is "[ipv6]:announce_port" of the receiving peer. Best-effort:
+/// caller must verify the promotion took effect (e.g. by polling PD members).
+pub async fn send_promote_to_pd(
+    addr: &str,
+    promote: &PromoteToPd,
+) -> Result<(), NaukaError> {
+    let msg = AnnounceMessage::PromoteToPd(promote.clone());
+    send_message(addr, &msg).await
 }
 
 /// Send an announce message to one peer (over TLS).
@@ -313,7 +327,70 @@ async fn handle_message(
         AnnounceMessage::Announce(announce) => handle_peer_announce(announce, db).await,
         AnnounceMessage::Remove(remove) => handle_peer_remove(remove, db).await,
         AnnounceMessage::StateChange(change) => handle_state_change(change, db).await,
+        AnnounceMessage::PromoteToPd(promote) => handle_promote_to_pd(promote, db).await,
     }
+}
+
+/// Handle a PromoteToPd — install PD locally and join the existing cluster.
+///
+/// Validates that `promote.target_name` matches our own name (defence against
+/// a misdirected or replayed message), checks that PD isn't already running
+/// (idempotency), then delegates to `controlplane::ops::promote_self_to_pd`
+/// which rewrites the systemd units and starts PD in `--join` mode.
+///
+/// The promotion work is sync and blocks on `systemctl` + a PD readiness
+/// probe. It runs on a `spawn_blocking` task so the announce listener's
+/// async runtime isn't stalled.
+async fn handle_promote_to_pd(
+    promote: PromoteToPd,
+    db: &EmbeddedDb,
+) -> Result<String, NaukaError> {
+    super::peering_server::validate_peer_field(&promote.target_name, "target_name")?;
+
+    let state = super::state::FabricState::load(db)
+        .await
+        .map_err(|e| NaukaError::internal(e.to_string()))?
+        .ok_or_else(|| NaukaError::precondition("not initialized"))?;
+
+    if state.hypervisor.name != promote.target_name {
+        return Err(NaukaError::precondition(format!(
+            "promote_to_pd targets '{}' but we are '{}'",
+            promote.target_name, state.hypervisor.name
+        )));
+    }
+
+    if crate::controlplane::service::pd_is_active() {
+        tracing::info!(
+            node = %state.hypervisor.name,
+            "promote_to_pd: PD already active, skipping"
+        );
+        return Ok(format!("{} already PD", state.hypervisor.name));
+    }
+
+    let node_name = state.hypervisor.name.clone();
+    let mesh_ipv6 = state.hypervisor.mesh_ipv6;
+    let primary_pd = promote.primary_pd_url.clone();
+    let pd_endpoints = promote.pd_endpoints.clone();
+    let requested_by = promote.requested_by.clone();
+
+    tracing::info!(
+        node = %node_name,
+        by = %requested_by,
+        "promote_to_pd: starting local PD promotion"
+    );
+
+    tokio::task::spawn_blocking(move || {
+        crate::controlplane::ops::promote_self_to_pd(
+            &node_name,
+            &mesh_ipv6,
+            &primary_pd,
+            &pd_endpoints,
+        )
+    })
+    .await
+    .map_err(|e| NaukaError::internal(format!("promote task join: {e}")))??;
+
+    Ok(format!("{} promoted to PD", state.hypervisor.name))
 }
 
 /// Handle a PeerRemove — remove a leaving peer.
