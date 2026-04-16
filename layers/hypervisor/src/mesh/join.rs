@@ -253,16 +253,27 @@ async fn handle_connection(
         let req: RemoveRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
 
+        // Parse as a WireGuard key to reject anything that isn't a pubkey
+        // (including SurQL-breaking characters) before touching the DB.
+        let canonical_pk = match Key::from_str(&req.remove_public_key) {
+            Ok(k) => k.to_string(),
+            Err(_) => {
+                let _ = writer
+                    .write_all(b"{\"error\":\"invalid public key\"}\n")
+                    .await;
+                return Err(MeshError::InvalidKey);
+            }
+        };
+
         let surql = format!(
-            "DELETE hypervisor WHERE public_key = '{}'",
-            req.remove_public_key
+            "DELETE hypervisor WHERE public_key = '{canonical_pk}'"
         );
         if let Err(e) = raft.write(surql).await {
             eprintln!("  ! raft remove failed: {e}");
             let _ = writer.write_all(b"{\"error\":\"raft write failed\"}\n").await;
         } else {
             let _ = writer.write_all(b"{\"ok\":true}\n").await;
-            println!("  - peer removed: {}", req.remove_public_key);
+            println!("  - peer removed: {canonical_pk}");
         }
     }
 
@@ -373,4 +384,48 @@ pub fn request_peer_removal(join_port: u16, public_key: &str) -> Result<(), Mesh
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The validation in handle_connection (remove path) relies on
+    // `Key::from_str` to reject anything that isn't a canonical WireGuard
+    // public key before the value enters a SurQL literal. These tests lock
+    // in that assumption — if the key crate ever starts accepting looser
+    // inputs, the `DELETE hypervisor WHERE public_key = '...'` path would
+    // become injectable again.
+    const VALID_WG_PUBKEY: &str = "PQgVf+YiO+S7LTaOqtGSEUxXpmEb5hPEb+g5mTwQdC0=";
+
+    #[test]
+    fn key_from_str_rejects_surql_injection() {
+        let attacks = [
+            "'; DROP TABLE hypervisor; --",
+            "' OR 1=1; --",
+            "abc'; DELETE hypervisor; '",
+            "\"injected\"",
+            "", // empty
+            "not base64 at all",
+        ];
+        for a in attacks {
+            assert!(
+                Key::from_str(a).is_err(),
+                "Key::from_str should reject {a:?} but accepted it"
+            );
+        }
+    }
+
+    #[test]
+    fn key_from_str_accepts_canonical_pubkey_and_roundtrips() {
+        let k = Key::from_str(VALID_WG_PUBKEY).expect("valid pubkey should parse");
+        assert_eq!(k.to_string(), VALID_WG_PUBKEY);
+    }
+
+    #[test]
+    fn key_from_str_rejects_wrong_length_base64() {
+        // Valid base64 but wrong size for a 32-byte WG key.
+        assert!(Key::from_str("dGVzdA==").is_err()); // 4 bytes
+        assert!(Key::from_str("AA==").is_err()); // 1 byte
+    }
 }
