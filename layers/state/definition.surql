@@ -10,3 +10,10 @@ DEFINE FIELD hypervisor ON _raft_log TYPE int;
 DEFINE FIELD log_index  ON _raft_log TYPE int;
 DEFINE FIELD entry      ON _raft_log TYPE string;
 DEFINE INDEX raft_log_idx ON _raft_log FIELDS hypervisor, log_index UNIQUE;
+
+DEFINE TABLE _raft_snapshot SCHEMAFULL;
+DEFINE FIELD hypervisor      ON _raft_snapshot TYPE int;
+DEFINE FIELD snapshot_id     ON _raft_snapshot TYPE string;
+DEFINE FIELD last_applied    ON _raft_snapshot TYPE option<string>;
+DEFINE FIELD last_membership ON _raft_snapshot TYPE string;
+DEFINE FIELD data            ON _raft_snapshot TYPE string;

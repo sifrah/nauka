@@ -52,7 +52,9 @@ impl RaftNode {
         let log_store = LogStore::<TypeConfig>::open(db.clone(), node_id)
             .await
             .map_err(|e| StateError::Raft(format!("open raft log: {e}")))?;
-        let state_machine = StateMachineStore::<TypeConfig>::new(db);
+        let state_machine = StateMachineStore::<TypeConfig>::new(db, node_id)
+            .await
+            .map_err(|e| StateError::Raft(format!("open state machine: {e}")))?;
         let network = NetworkFactory;
 
         let raft = openraft::Raft::new(node_id, config, network, log_store, state_machine)

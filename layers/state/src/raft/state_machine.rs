@@ -4,13 +4,19 @@ use std::sync::Arc;
 
 use futures::lock::Mutex;
 use futures::{Stream, TryStreamExt};
-use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder, RaftTypeConfig};
 use openraft::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::storage::{EntryResponder, RaftStateMachine};
+use openraft::{EntryPayload, OptionalSend, RaftSnapshotBuilder, RaftTypeConfig};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use surrealdb::types::SurrealValue;
 
 use super::types::{SurqlCommand, SurqlResponse};
 use crate::db::Database;
+
+fn db_err(e: impl std::fmt::Display) -> io::Error {
+    io::Error::other(e.to_string())
+}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct SmData {
@@ -44,10 +50,20 @@ struct StoredSnapshot<C: RaftTypeConfig> {
     data: Vec<u8>,
 }
 
+#[derive(Deserialize, SurrealValue)]
+struct SnapshotRecord {
+    snapshot_id: String,
+    #[serde(default)]
+    last_applied: Option<String>,
+    last_membership: String,
+    data: String,
+}
+
 #[derive(Debug)]
 pub struct StateMachineStore<C: RaftTypeConfig> {
     inner: Arc<Mutex<SmInner<C>>>,
     db: Arc<Database>,
+    node_id: u64,
 }
 
 impl<C: RaftTypeConfig> Clone for StateMachineStore<C> {
@@ -55,16 +71,111 @@ impl<C: RaftTypeConfig> Clone for StateMachineStore<C> {
         Self {
             inner: self.inner.clone(),
             db: self.db.clone(),
+            node_id: self.node_id,
         }
     }
 }
 
-impl<C: RaftTypeConfig> StateMachineStore<C> {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(SmInner::default())),
-            db,
+impl<C: RaftTypeConfig> StateMachineStore<C>
+where
+    LogIdOf<C>: Serialize + DeserializeOwned,
+    StoredMembershipOf<C>: Serialize + DeserializeOwned,
+{
+    pub async fn new(db: Arc<Database>, node_id: u64) -> Result<Self, io::Error> {
+        let mut inner = SmInner::default();
+
+        // Load persisted snapshot if one exists
+        let surql = format!(
+            "SELECT snapshot_id, last_applied, last_membership, data FROM _raft_snapshot:{}",
+            node_id
+        );
+        if let Ok(records) = db.query_take::<SnapshotRecord>(&surql).await {
+            if let Some(rec) = records.into_iter().next() {
+                let last_applied: Option<LogIdOf<C>> = rec
+                    .last_applied
+                    .map(|s| serde_json::from_str(&s))
+                    .transpose()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+                let last_membership: StoredMembershipOf<C> =
+                    serde_json::from_str(&rec.last_membership)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+                let data: SmData = serde_json::from_str(&rec.data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+                let raw = rec.data.into_bytes();
+
+                let meta = SnapshotMetaOf::<C> {
+                    last_log_id: last_applied.clone(),
+                    last_membership: last_membership.clone(),
+                    snapshot_id: rec.snapshot_id,
+                };
+
+                inner.last_applied_log = last_applied;
+                inner.last_membership = last_membership;
+                inner.data = data;
+                inner.snapshot = Some(StoredSnapshot {
+                    meta,
+                    data: raw,
+                });
+
+                eprintln!(
+                    "  sm: restored snapshot (applied up to {:?})",
+                    inner.last_applied_log.as_ref().map(|l| l.index())
+                );
+            }
         }
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+            db,
+            node_id,
+        })
+    }
+
+    async fn persist_snapshot(
+        &self,
+        meta: &SnapshotMetaOf<C>,
+        data: &[u8],
+    ) -> Result<(), io::Error> {
+        let last_applied = meta
+            .last_log_id
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let last_membership = serde_json::to_string(&meta.last_membership)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let data_str = String::from_utf8_lossy(data);
+
+        let last_applied_val = match last_applied {
+            Some(_) => "$last_applied".to_string(),
+            None => "NONE".to_string(),
+        };
+
+        let mut q = self
+            .db
+            .inner()
+            .query(format!(
+                "UPSERT _raft_snapshot:{} SET \
+                 hypervisor = {}, \
+                 snapshot_id = $snap_id, \
+                 last_applied = {last_applied_val}, \
+                 last_membership = $membership, \
+                 data = $data",
+                self.node_id, self.node_id as i64
+            ))
+            .bind(("snap_id", meta.snapshot_id.clone()))
+            .bind(("membership", last_membership))
+            .bind(("data", data_str.into_owned()));
+
+        if let Some(ref la) = last_applied {
+            q = q.bind(("last_applied", la.clone()));
+        }
+
+        q.await.map_err(db_err)?.check().map_err(db_err)?;
+        Ok(())
     }
 }
 
@@ -75,6 +186,8 @@ where
         R = SurqlResponse,
         SnapshotData = Cursor<Vec<u8>>,
     >,
+    LogIdOf<C>: Serialize + DeserializeOwned,
+    StoredMembershipOf<C>: Serialize + DeserializeOwned,
 {
     async fn build_snapshot(&mut self) -> Result<SnapshotOf<C>, io::Error> {
         let mut inner = self.inner.lock().await;
@@ -99,6 +212,9 @@ where
             data: data.clone(),
         });
 
+        drop(inner);
+        self.persist_snapshot(&meta, &data).await?;
+
         Ok(SnapshotOf::<C> {
             meta,
             snapshot: Cursor::new(data),
@@ -114,6 +230,8 @@ where
         SnapshotData = Cursor<Vec<u8>>,
         Entry = openraft::alias::DefaultEntryOf<C>,
     >,
+    LogIdOf<C>: Serialize + DeserializeOwned,
+    StoredMembershipOf<C>: Serialize + DeserializeOwned,
 {
     type SnapshotBuilder = Self;
 
@@ -186,7 +304,6 @@ where
         inner.last_applied_log = meta.last_log_id.clone();
         inner.last_membership = meta.last_membership.clone();
 
-        // Replay all queries to rebuild SurrealDB state
         for query in &new_data.applied_queries {
             if let Err(e) = self.db.query(query).await {
                 tracing::error!(query = %query, error = %e, "snapshot replay failed");
@@ -196,8 +313,11 @@ where
         inner.data = new_data;
         inner.snapshot = Some(StoredSnapshot {
             meta: meta.clone(),
-            data: raw,
+            data: raw.clone(),
         });
+
+        drop(inner);
+        self.persist_snapshot(meta, &raw).await?;
 
         Ok(())
     }
