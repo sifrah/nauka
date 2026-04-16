@@ -8,6 +8,17 @@ use serde::Deserialize;
 use surrealdb::types::SurrealValue;
 use tokio::signal;
 
+/// Read the snapshot threshold from `NAUKA_SNAPSHOT_THRESHOLD` if set,
+/// otherwise fall back to the production default. Lets ops tune (or CI
+/// tests force) how often Raft snapshots fire.
+fn snapshot_threshold() -> u64 {
+    std::env::var("NAUKA_SNAPSHOT_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(nauka_state::raft::SNAPSHOT_THRESHOLD)
+}
+
 use crate::mesh::{
     certs, generate_pin, join_mesh, mesh_listener, whoami, KeyPair, Mesh, MeshError, MeshId,
     MeshState, DEFAULT_JOIN_PORT,
@@ -94,7 +105,7 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
     println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
     println!("  join pin:   {pin}");
 
-    let raft_node = RaftNode::new(node_id, db.clone(), tls)
+    let raft_node = RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     raft_node
@@ -221,7 +232,7 @@ pub async fn run_daemon_join(
     println!("  raft:       {raft_addr}");
     println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
 
-    let raft_node = RaftNode::new(node_id, db.clone(), tls)
+    let raft_node = RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
@@ -278,7 +289,7 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     println!("  raft:       {raft_addr}");
     println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
 
-    let raft_node = RaftNode::new(node_id, db.clone(), tls)
+    let raft_node = RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
