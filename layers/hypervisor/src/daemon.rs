@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
@@ -161,19 +162,39 @@ pub async fn run_daemon_join(
 
     let tls = build_tls(&state);
 
-    // Save bootstrap hypervisors to local DB so reconciler picks them up
+    // Save bootstrap hypervisors to local DB so reconciler picks them up.
+    // Validate every field before interpolating — the bootstrap server is
+    // trusted by the PIN, but we still refuse to pass un-parseable strings
+    // into SurQL.
     for p in &bootstrap_peers {
+        let canonical_pk = match defguard_wireguard_rs::key::Key::from_str(&p.public_key) {
+            Ok(k) => k.to_string(),
+            Err(_) => {
+                eprintln!("  ! bootstrap peer: invalid public_key, skipping");
+                continue;
+            }
+        };
+        let endpoint: std::net::SocketAddr = match p.endpoint.parse() {
+            Ok(a) => a,
+            Err(_) => {
+                eprintln!("  ! bootstrap peer {canonical_pk}: invalid endpoint, skipping");
+                continue;
+            }
+        };
+        let mesh_addr_mask: defguard_wireguard_rs::net::IpAddrMask = match p.mesh_address.parse() {
+            Ok(m) => m,
+            Err(_) => {
+                eprintln!("  ! bootstrap peer {canonical_pk}: invalid mesh_address, skipping");
+                continue;
+            }
+        };
         let surql = format!(
             "CREATE hypervisor SET \
-             public_key = '{}', node_id = {}, address = '{}', \
-             endpoint = '{}', allowed_ips = ['{}'], keepalive = 25, \
-             raft_addr = '[{}]:4001'",
-            p.public_key,
-            node_id_from_key(&p.public_key) as i64,
-            p.mesh_address,
-            p.endpoint,
-            p.mesh_address,
-            p.mesh_address.split('/').next().unwrap_or(""),
+             public_key = '{canonical_pk}', node_id = {node_id}, address = '{mesh_addr_mask}', \
+             endpoint = '{endpoint}', allowed_ips = ['{mesh_addr_mask}'], keepalive = 25, \
+             raft_addr = '[{ip}]:4001'",
+            node_id = node_id_from_key(&canonical_pk) as i64,
+            ip = mesh_addr_mask.address,
         );
         let _ = db.query(&surql).await;
     }
