@@ -23,8 +23,6 @@ struct MeshRecord {
     interface_name: String,
     listen_port: i64,
     mesh_id: String,
-    address: String,
-    public_key: String,
     private_key: String,
     #[serde(default)]
     ca_cert: Option<String>,
@@ -43,8 +41,6 @@ impl MeshState {
             "interface_name": self.interface_name,
             "listen_port": self.listen_port as i64,
             "mesh_id": self.mesh_id.to_string(),
-            "address": self.address,
-            "public_key": self.keypair.public_key(),
             "private_key": enc_private,
         });
         let obj = record.as_object_mut().unwrap();
@@ -87,6 +83,9 @@ impl MeshState {
         let dec_private = crypto::decrypt_secret(&row.private_key)?;
         let keypair = KeyPair::from_private(&dec_private)?;
         let mesh_id: MeshId = row.mesh_id.parse()?;
+        let address = mesh_id
+            .node_address(&keypair.public_key_raw()?)
+            .to_string();
 
         let ca_key = row
             .ca_key
@@ -102,7 +101,7 @@ impl MeshState {
             keypair,
             listen_port: row.listen_port as u16,
             mesh_id,
-            address: row.address,
+            address,
             ca_cert: row.ca_cert,
             ca_key,
             tls_cert: row.tls_cert,

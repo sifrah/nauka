@@ -3,8 +3,6 @@ DEFINE TABLE mesh SCHEMAFULL;
 DEFINE FIELD interface_name ON mesh TYPE string;
 DEFINE FIELD listen_port    ON mesh TYPE int;
 DEFINE FIELD mesh_id        ON mesh TYPE string;
-DEFINE FIELD address        ON mesh TYPE string;
-DEFINE FIELD public_key     ON mesh TYPE string;
 DEFINE FIELD private_key    ON mesh TYPE string;
 DEFINE FIELD ca_cert        ON mesh TYPE option<string>;
 DEFINE FIELD ca_key         ON mesh TYPE option<string>;
