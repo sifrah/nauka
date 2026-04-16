@@ -331,6 +331,11 @@ mod impl_log_store {
 
             let json = serde_json::to_string(&log_id)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            tracing::info!(
+                node_id = self.node_id,
+                up_to_index = idx,
+                "raft: purged log entries"
+            );
             self.update_meta_field("purged", &json).await
         }
 

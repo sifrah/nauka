@@ -9,6 +9,15 @@ use nauka_state::Database;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Init tracing. Defaults to `info` level; override via `RUST_LOG`.
+    // Output goes to stderr so it coexists with println! on stdout.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+
     let app = Command::new("nauka")
         .about("Nauka — turn dedicated servers into a programmable cloud")
         .version(option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))

@@ -37,6 +37,10 @@ fn pick_free_port() -> u16 {
 }
 
 async fn spawn_node(node_id: u64) -> TestNode {
+    spawn_node_with_threshold(node_id, nauka_state::raft::SNAPSHOT_THRESHOLD).await
+}
+
+async fn spawn_node_with_threshold(node_id: u64, threshold: u64) -> TestNode {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("raft.db");
     let db = Arc::new(
@@ -51,7 +55,7 @@ async fn spawn_node(node_id: u64) -> TestNode {
     let addr = format!("127.0.0.1:{port}");
 
     let raft = Arc::new(
-        RaftNode::new(node_id, db.clone(), None)
+        RaftNode::new_with_snapshot_threshold(node_id, db.clone(), None, threshold)
             .await
             .expect("raft node"),
     );
@@ -177,6 +181,58 @@ async fn follower_write_is_forwarded_to_leader() {
             .unwrap_or_else(|| panic!("forwarded write not replicated to node {}", i + 1));
         assert_eq!(row.value, "ok");
     }
+}
+
+#[tokio::test]
+async fn writes_past_threshold_trigger_snapshot_and_log_purge() {
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct Count {
+        count: i64,
+    }
+
+    const THRESHOLD: u64 = 5;
+    let n1 = spawn_node_with_threshold(5000, THRESHOLD).await;
+    n1.raft.init_cluster(&n1.addr).await.expect("init_cluster");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Write well past the threshold — openraft builds a snapshot and the
+    // log_store purges committed entries in the background.
+    for i in 0..(THRESHOLD as usize * 4) {
+        n1.raft
+            .write(format!(
+                "CREATE kv SET key = 'snap-{i}', value = '{i}'"
+            ))
+            .await
+            .expect("write");
+    }
+
+    // Give the snapshot + purge tasks a moment to run.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // A snapshot row should exist in _raft_snapshot for our node_id.
+    let snaps: Vec<Count> = n1
+        .db
+        .query_take("SELECT count() AS count FROM _raft_snapshot GROUP ALL")
+        .await
+        .expect("count snapshots");
+    let snap_count = snaps.first().map(|c| c.count).unwrap_or(0);
+    assert!(
+        snap_count >= 1,
+        "expected at least one snapshot row, got {snap_count}"
+    );
+
+    // And the log should have been purged: fewer live _raft_log rows than
+    // total writes (we wrote THRESHOLD*4 entries plus membership ones).
+    let logs: Vec<Count> = n1
+        .db
+        .query_take("SELECT count() AS count FROM _raft_log GROUP ALL")
+        .await
+        .expect("count logs");
+    let log_count = logs.first().map(|c| c.count).unwrap_or(0);
+    assert!(
+        log_count < (THRESHOLD as i64 * 4),
+        "expected log to be purged below write count, got {log_count}"
+    );
 }
 
 #[tokio::test]
