@@ -11,8 +11,8 @@ mod state;
 pub use address::MeshId;
 pub use error::MeshError;
 pub use join::{
-    generate_pin, join_mesh, mesh_listener, request_peer_removal, PeerInfo, DEFAULT_JOIN_PORT,
-    DEFAULT_PEERING_TIMEOUT,
+    generate_pin, join_mesh, mesh_listener, request_peer_removal, whoami, PeerInfo,
+    DEFAULT_JOIN_PORT, DEFAULT_PEERING_TIMEOUT,
 };
 pub use key::KeyPair;
 pub use peer::MeshPeer;

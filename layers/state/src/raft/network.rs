@@ -44,7 +44,7 @@ pub struct NetworkClient {
     tls: Option<TlsConfig>,
 }
 
-async fn rpc_over<S, Req, Resp>(stream: S, uri: &str, req: &Req) -> Result<Resp, io::Error>
+pub(super) async fn rpc_over<S, Req, Resp>(stream: S, uri: &str, req: &Req) -> Result<Resp, io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     Req: Serialize,

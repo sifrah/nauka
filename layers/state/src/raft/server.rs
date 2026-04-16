@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::TcpListener;
 
 use super::tls::TlsConfig;
-use super::types::TypeConfig;
+use super::types::{SurqlCommand, TypeConfig};
 use super::Raft;
 use crate::StateError;
 
@@ -91,6 +91,18 @@ async fn handle_rpc<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 .await
                 .map_err(|e| format!("install_full_snapshot: {e}"))?;
             serde_json::to_string(&resp)?
+        }
+        "app_write" => {
+            // Followers forward application writes to the leader via this RPC.
+            // On the leader, client_write actually commits the entry. On a
+            // non-leader receiver, client_write still returns an error — we
+            // surface it so the caller can retry somewhere else.
+            let cmd: SurqlCommand = serde_json::from_value(body.clone())?;
+            let resp = raft
+                .client_write(cmd)
+                .await
+                .map_err(|e| format!("client_write: {e}"))?;
+            serde_json::to_string(resp.response())?
         }
         other => return Err(format!("unknown rpc: {other}").into()),
     };
