@@ -244,6 +244,62 @@ log "    final alive: $final_alive / $NODE_COUNT"
 [[ $final_alive -eq $NODE_COUNT ]] || die "some nodes died during recovery"
 ok "cluster fully recovered — $final_alive/$NODE_COUNT nodes alive"
 
+# ═══════════════════════════════════════════════════════════════════
+# CHAOS PHASE 4: functional consensus check
+# Prove the cluster can still do Raft writes post-recovery:
+# 1. remove a peer via CLI (issues DELETE hypervisor through Raft)
+# 2. verify every non-victim node's reconciler picks up the change
+# ═══════════════════════════════════════════════════════════════════
+log ""
+log "═══ CHAOS PHASE 4: functional consensus check ═══"
+
+VICTIM_IDX=$((NODE_COUNT - 1))
+VICTIM_IP=${IPS[$VICTIM_IDX]}
+VICTIM_PK=$(ssh_node "$VICTIM_IP" \
+    "grep -hoP 'public key:\s+\K\S+' /tmp/nauka.log /tmp/nauka-restart.log 2>/dev/null | head -1")
+[[ -n $VICTIM_PK ]] || die "could not read victim pubkey"
+log "  victim: node-$((VICTIM_IDX + 1)) ($VICTIM_IP) pk=$VICTIM_PK"
+
+# Raft writes must land on the leader; post-chaos the leader is whichever
+# node won the re-election, not necessarily node-1. Daemons today don't
+# forward to the leader (separate concern), so we try every non-victim
+# node until one — the leader — accepts.
+log "  ▶ nauka mesh peer remove (probing every node for the leader)"
+remove_ok=false
+for i in "${!IPS[@]}"; do
+    [[ $i -eq $VICTIM_IDX ]] && continue
+    ip=${IPS[$i]}
+    wait_port "$ip" 51821 2>/dev/null || continue
+    if ssh_node "$ip" "nauka mesh peer remove --public-key '$VICTIM_PK'" 2>&1 \
+        | tee -a "$RUN_DIR/remove-attempts.log" \
+        | grep -q '^peer removal requested'; then
+        ok "  peer remove accepted by node-$((i + 1)) (leader)"
+        remove_ok=true
+        break
+    fi
+done
+$remove_ok || die "no node accepted the peer-remove — Raft write rejected everywhere"
+
+# Each node's reconciler polls every 5s — give 2 cycles for apply+reconcile
+log "  waiting 12s for Raft apply + reconciler cycle..."
+sleep 12
+
+# Every non-victim node must have dropped the victim from its WG peer list.
+# The victim still sees its old peers — with its own record deleted, its
+# reconciler has nothing to diff against. Skipping the victim is intentional.
+log "  ▶ checking WG peer counts on non-victim nodes"
+expected=$((NODE_COUNT - 2))   # self already excluded; victim now excluded too
+for i in "${!IPS[@]}"; do
+    [[ $i -eq $VICTIM_IDX ]] && continue
+    ip=${IPS[$i]}
+    count=$(ssh_node "$ip" "nauka mesh status 2>/dev/null | grep -c ': Peer {'" \
+        2>/dev/null || echo -1)
+    log "    node-$((i + 1)): $count peers (want $expected)"
+    [[ $count -eq $expected ]] || \
+        die "node-$((i + 1)) still has $count peers after peer-remove (expected $expected)"
+done
+ok "post-recovery Raft write replicated to all $((NODE_COUNT - 1)) non-victim nodes"
+
 # ─── Collect logs ────────────────────────────────────────────────────
 log "▶ collecting logs"
 for i in "${!IPS[@]}"; do
