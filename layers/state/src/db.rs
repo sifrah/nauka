@@ -24,7 +24,7 @@ impl Database {
     }
 
     pub async fn query(&self, surql: &str) -> Result<(), StateError> {
-        self.db.query(surql).await?;
+        self.db.query(surql).await?.check()?;
         Ok(())
     }
 
@@ -38,5 +38,54 @@ impl Database {
 
     pub fn inner(&self) -> &Surreal<surrealdb::engine::local::Db> {
         &self.db
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn open_tmp() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(Some(path.to_str().unwrap())).await.unwrap();
+        (db, dir)
+    }
+
+    #[tokio::test]
+    async fn query_propagates_schema_violation() {
+        let (db, _dir) = open_tmp().await;
+        db.query(
+            "DEFINE TABLE t SCHEMAFULL; \
+             DEFINE FIELD name ON t TYPE string; \
+             DEFINE INDEX t_name ON t FIELDS name UNIQUE;",
+        )
+        .await
+        .unwrap();
+
+        db.query("CREATE t SET name = 'foo'").await.unwrap();
+        let result = db.query("CREATE t SET name = 'foo'").await;
+        assert!(
+            result.is_err(),
+            "expected unique-constraint error, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_propagates_missing_required_field() {
+        let (db, _dir) = open_tmp().await;
+        db.query(
+            "DEFINE TABLE t SCHEMAFULL; \
+             DEFINE FIELD name ON t TYPE string;",
+        )
+        .await
+        .unwrap();
+
+        // Missing required `name` field
+        let result = db.query("CREATE t SET other = 'x'").await;
+        assert!(
+            result.is_err(),
+            "expected schema-violation error, got: {result:?}"
+        );
     }
 }
