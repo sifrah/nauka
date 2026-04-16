@@ -2524,9 +2524,11 @@ dependencies = [
 name = "nauka-hypervisor"
 version = "2.0.0"
 dependencies = [
+ "base64",
  "defguard_wireguard_rs",
  "nauka-state",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",

@@ -2,6 +2,7 @@ use nauka_state::Database;
 use serde::Deserialize;
 use surrealdb::types::SurrealValue;
 
+use super::crypto;
 use super::{KeyPair, MeshError, MeshId};
 
 #[derive(Debug, Clone)]
@@ -37,26 +38,29 @@ struct MeshRecord {
 
 impl MeshState {
     pub async fn save(&self, db: &Database) -> Result<(), MeshError> {
+        let enc_private = crypto::encrypt_secret(self.keypair.private_key())?;
         let mut record = serde_json::json!({
             "interface_name": self.interface_name,
             "listen_port": self.listen_port as i64,
             "mesh_id": self.mesh_id.to_string(),
             "address": self.address,
             "public_key": self.keypair.public_key(),
-            "private_key": self.keypair.private_key(),
+            "private_key": enc_private,
         });
         let obj = record.as_object_mut().unwrap();
         if let Some(ref v) = self.ca_cert {
             obj.insert("ca_cert".into(), serde_json::Value::String(v.clone()));
         }
         if let Some(ref v) = self.ca_key {
-            obj.insert("ca_key".into(), serde_json::Value::String(v.clone()));
+            let enc = crypto::encrypt_secret(v)?;
+            obj.insert("ca_key".into(), serde_json::Value::String(enc));
         }
         if let Some(ref v) = self.tls_cert {
             obj.insert("tls_cert".into(), serde_json::Value::String(v.clone()));
         }
         if let Some(ref v) = self.tls_key {
-            obj.insert("tls_key".into(), serde_json::Value::String(v.clone()));
+            let enc = crypto::encrypt_secret(v)?;
+            obj.insert("tls_key".into(), serde_json::Value::String(enc));
         }
 
         let surql = format!(
@@ -80,8 +84,18 @@ impl MeshState {
             .next()
             .ok_or_else(|| MeshError::State("no mesh found — run 'nauka mesh up' first".into()))?;
 
-        let keypair = KeyPair::from_private(&row.private_key)?;
+        let dec_private = crypto::decrypt_secret(&row.private_key)?;
+        let keypair = KeyPair::from_private(&dec_private)?;
         let mesh_id: MeshId = row.mesh_id.parse()?;
+
+        let ca_key = row
+            .ca_key
+            .map(|v| crypto::decrypt_secret(&v))
+            .transpose()?;
+        let tls_key = row
+            .tls_key
+            .map(|v| crypto::decrypt_secret(&v))
+            .transpose()?;
 
         Ok(Self {
             interface_name: row.interface_name,
@@ -90,9 +104,9 @@ impl MeshState {
             mesh_id,
             address: row.address,
             ca_cert: row.ca_cert,
-            ca_key: row.ca_key,
+            ca_key,
             tls_cert: row.tls_cert,
-            tls_key: row.tls_key,
+            tls_key,
         })
     }
 

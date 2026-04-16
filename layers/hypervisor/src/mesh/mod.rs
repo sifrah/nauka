@@ -1,5 +1,6 @@
 mod address;
 pub mod certs;
+pub mod crypto;
 mod error;
 mod join;
 mod key;
