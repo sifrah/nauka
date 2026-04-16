@@ -34,24 +34,30 @@ async fn reconcile(
 
     let api = WGApi::<Kernel>::new(interface_name.to_string())?;
     let host = api.read_interface_data()?;
-    let wg_keys: std::collections::HashSet<String> =
-        host.peers.keys().map(|k| k.to_string()).collect();
 
     let db_keys: std::collections::HashSet<String> =
         db_hypervisors.iter().map(|p| p.public_key.clone()).collect();
 
-    // Add hypervisors in DB but not in WG
+    // Add hypervisors in DB but not in WG, or update WG peers whose endpoint
+    // no longer matches the DB record (happens after another node restarts
+    // with a new public IP).
     for record in &db_hypervisors {
         if record.public_key == own_public_key {
-            continue;
-        }
-        if wg_keys.contains(&record.public_key) {
             continue;
         }
 
         let Ok(key) = defguard_wireguard_rs::key::Key::from_str(&record.public_key) else {
             continue;
         };
+
+        let existing = host.peers.get(&key);
+        let wg_endpoint_str = existing
+            .and_then(|p| p.endpoint)
+            .map(|e| e.to_string());
+        if existing.is_some() && wg_endpoint_str == record.endpoint {
+            continue; // already configured with the right endpoint
+        }
+
         let mut peer = defguard_wireguard_rs::peer::Peer::new(key);
         if let Some(ref ep) = record.endpoint {
             let _ = peer.set_endpoint(ep);
@@ -64,7 +70,11 @@ async fn reconcile(
         }
         if api.configure_peer(&peer).is_ok() {
             let _ = api.configure_peer_routing(&[peer]);
-            eprintln!("  reconciler: +peer {}", record.public_key);
+            let verb = if existing.is_some() { "update" } else { "add" };
+            eprintln!(
+                "  reconciler: {verb} peer {} endpoint={:?}",
+                record.public_key, record.endpoint
+            );
         }
     }
 

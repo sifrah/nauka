@@ -1,15 +1,24 @@
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
+use serde::Deserialize;
+use surrealdb::types::SurrealValue;
 use tokio::signal;
 
 use crate::mesh::{
-    certs, generate_pin, join_mesh, mesh_listener, KeyPair, Mesh, MeshError, MeshId, MeshState,
-    DEFAULT_JOIN_PORT,
+    certs, generate_pin, join_mesh, mesh_listener, whoami, KeyPair, Mesh, MeshError, MeshId,
+    MeshState, DEFAULT_JOIN_PORT,
 };
 
 use crate::mesh::reconciler;
+
+#[derive(Deserialize, SurrealValue)]
+struct EndpointRow {
+    endpoint: Option<String>,
+}
 
 pub struct DaemonConfig {
     pub interface_name: String,
@@ -284,7 +293,7 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     });
 
     let listener_handle = tokio::spawn(mesh_listener(
-        Some(raft),
+        Some(raft.clone()),
         mesh.mesh_id().clone(),
         mesh.keypair().clone(),
         mesh.address().to_string(),
@@ -296,14 +305,120 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
         state.ca_key,
     ));
 
+    let refresh_handle = tokio::spawn(refresh_own_endpoint(
+        db.clone(),
+        raft.clone(),
+        own_pk.clone(),
+        state.listen_port,
+    ));
+
     println!("\n  ctrl+c to stop\n");
     signal::ctrl_c().await.map_err(|e| MeshError::State(e.to_string()))?;
 
     listener_handle.abort();
     reconciler_handle.abort();
+    refresh_handle.abort();
     mesh.down()?;
     println!("\ndaemon stopped (state preserved)");
     Ok(())
+}
+
+/// Discover our public endpoint via `whoami` to a peer, then, if it differs
+/// from what's currently in the hypervisor table, UPDATE via Raft so every
+/// node's reconciler can refresh its WG peer endpoint for us.
+///
+/// Runs in a background task after `run_daemon_restart` brings Raft up,
+/// because restart is the only flow where our IP might have changed while
+/// peers still hold the old one.
+async fn refresh_own_endpoint(
+    db: Arc<Database>,
+    raft: Arc<RaftNode>,
+    own_pk: String,
+    listen_port: u16,
+) {
+    // Let Raft elect a leader before we try to write.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Find a peer with a known public endpoint.
+    let peer_ip = match pick_peer_ip(&db, &own_pk).await {
+        Ok(Some(ip)) => ip,
+        Ok(None) => {
+            eprintln!("  endpoint refresh: no peer with endpoint yet — skipping");
+            return;
+        }
+        Err(e) => {
+            eprintln!("  endpoint refresh: pick peer failed: {e}");
+            return;
+        }
+    };
+
+    // Ask the peer what IP it sees us on.
+    let observed_ip = match whoami(&peer_ip, DEFAULT_JOIN_PORT).await {
+        Ok(ip) => ip,
+        Err(e) => {
+            eprintln!("  endpoint refresh: whoami {peer_ip} failed: {e}");
+            return;
+        }
+    };
+    let new_endpoint = SocketAddr::new(observed_ip, listen_port).to_string();
+
+    // Compare with the value currently in the table.
+    let current_ep = match read_own_endpoint(&db, &own_pk).await {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("  endpoint refresh: read own endpoint failed: {e}");
+            return;
+        }
+    };
+    if current_ep.as_deref() == Some(new_endpoint.as_str()) {
+        println!("  endpoint refresh: {new_endpoint} (unchanged)");
+        return;
+    }
+
+    println!(
+        "  endpoint refresh: {:?} -> {new_endpoint}",
+        current_ep.as_deref().unwrap_or("NONE")
+    );
+    let surql = format!(
+        "UPDATE hypervisor SET endpoint = '{new_endpoint}' WHERE public_key = '{own_pk}'"
+    );
+    match raft.write(surql).await {
+        Ok(_) => println!("  endpoint refresh: propagated via Raft"),
+        Err(e) => eprintln!("  endpoint refresh: raft write failed: {e}"),
+    }
+}
+
+async fn pick_peer_ip(db: &Database, own_pk: &str) -> Result<Option<String>, MeshError> {
+    #[derive(Deserialize, SurrealValue)]
+    struct PeerRow {
+        public_key: String,
+        endpoint: Option<String>,
+    }
+    let peers: Vec<PeerRow> = db
+        .query_take("SELECT public_key, endpoint FROM hypervisor")
+        .await
+        .map_err(|e| MeshError::State(e.to_string()))?;
+    for p in peers {
+        if p.public_key == own_pk {
+            continue;
+        }
+        if let Some(ep) = p.endpoint {
+            if let Ok(sa) = ep.parse::<SocketAddr>() {
+                return Ok(Some(sa.ip().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn read_own_endpoint(db: &Database, own_pk: &str) -> Result<Option<String>, MeshError> {
+    let rows: Vec<EndpointRow> = db
+        .query_take(&format!(
+            "SELECT endpoint FROM hypervisor WHERE public_key = '{own_pk}'"
+        ))
+        .await
+        .map_err(|e| MeshError::State(e.to_string()))?;
+    Ok(rows.into_iter().next().and_then(|r| r.endpoint))
 }
 
 /// Explicit teardown — removes state from DB

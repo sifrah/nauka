@@ -153,7 +153,14 @@ async fn handle_connection(
     let v: serde_json::Value =
         serde_json::from_str(&line).map_err(|e| MeshError::Join(e.to_string()))?;
 
-    if v.get("pin").is_some() {
+    if v.get("whoami").is_some() {
+        // --- Observability: tell the caller what public IP we see them on.
+        // Used by restarted nodes to detect their current public address
+        // without depending on external STUN-like services.
+        let resp = format!("{{\"observed_ip\":\"{}\"}}\n", peer_addr.ip());
+        let _ = writer.write_all(resp.as_bytes()).await;
+        return Ok(());
+    } else if v.get("pin").is_some() {
         // --- Join request ---
         let pin = peering_pin.ok_or_else(|| MeshError::Join("peering not enabled".into()))?;
         let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
@@ -361,6 +368,36 @@ pub fn join_mesh(
     };
 
     Ok((mesh, all_peers, tls_certs))
+}
+
+/// Ask a remote peer what IP it observes us on. Used by restart flow to
+/// learn our current public endpoint without an external STUN-like service.
+pub async fn whoami(peer_ip: &str, join_port: u16) -> Result<std::net::IpAddr, MeshError> {
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::net::TcpStream;
+    let addr = format!("{peer_ip}:{join_port}");
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| MeshError::Join(format!("whoami connect {addr}: {e}")))?;
+    let (reader, mut writer) = stream.into_split();
+    tokio::io::AsyncWriteExt::write_all(&mut writer, b"{\"whoami\":true}\n")
+        .await
+        .map_err(|e| MeshError::Join(format!("whoami write: {e}")))?;
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let line = lines
+        .next_line()
+        .await
+        .map_err(|e| MeshError::Join(format!("whoami read: {e}")))?
+        .ok_or_else(|| MeshError::Join("whoami empty response".into()))?;
+    let v: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|e| MeshError::Join(format!("whoami parse: {e}")))?;
+    let ip_str = v
+        .get("observed_ip")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| MeshError::Join("whoami: missing observed_ip".into()))?;
+    ip_str
+        .parse()
+        .map_err(|_| MeshError::Join(format!("whoami: invalid ip {ip_str}")))
 }
 
 /// Send a remove-peer command to the local daemon
