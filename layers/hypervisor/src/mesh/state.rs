@@ -67,7 +67,7 @@ impl MeshState {
     }
 
     pub async fn delete(db: &Database) -> Result<(), MeshError> {
-        db.query("DELETE mesh; DELETE hypervisor;")
+        db.query("DELETE mesh; DELETE hypervisor; DELETE _raft_meta; DELETE _raft_log;")
             .await
             .map_err(|e| MeshError::State(e.to_string()))?;
         Ok(())
