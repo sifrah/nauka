@@ -12,6 +12,7 @@ use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
 use openraft::BasicNode;
 use openraft::ChangeMembers;
 use openraft::Config;
+use openraft::SnapshotPolicy;
 use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 
@@ -25,6 +26,13 @@ use self::tls::{TlsConfig, RAFT_TLS_SAN};
 use self::types::{SurqlCommand, SurqlResponse, TypeConfig};
 
 pub type Raft = openraft::Raft<TypeConfig, StateMachineStore<TypeConfig>>;
+
+/// How many committed log entries accumulate before a snapshot is built
+/// and the preceding log entries are purged from SurrealDB. Tuned for a
+/// cluster with mostly-idle steady-state writes (joins/removes/endpoint
+/// refreshes) — fast enough that a new follower doesn't stream forever
+/// to catch up, slow enough that we aren't snapshotting constantly.
+pub const SNAPSHOT_THRESHOLD: u64 = 1000;
 
 pub fn node_id_from_key(public_key: &str) -> u64 {
     let bytes = public_key.as_bytes();
@@ -47,10 +55,27 @@ impl RaftNode {
         db: Arc<Database>,
         tls: Option<TlsConfig>,
     ) -> Result<Self, StateError> {
+        Self::new_with_snapshot_threshold(node_id, db, tls, SNAPSHOT_THRESHOLD).await
+    }
+
+    /// Test-friendly constructor that accepts an arbitrary snapshot
+    /// threshold. Production callers should use `new` and inherit
+    /// `SNAPSHOT_THRESHOLD`.
+    pub async fn new_with_snapshot_threshold(
+        node_id: u64,
+        db: Arc<Database>,
+        tls: Option<TlsConfig>,
+        snapshot_threshold: u64,
+    ) -> Result<Self, StateError> {
         let config = Config {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
             election_timeout_max: 3000,
+            snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_threshold),
+            // Keep one snapshot-window worth of logs around past the most
+            // recent snapshot so a catching-up follower can stream from log
+            // instead of downloading a fresh snapshot every time.
+            max_in_snapshot_log_to_keep: snapshot_threshold,
             ..Default::default()
         };
         let config = Arc::new(
