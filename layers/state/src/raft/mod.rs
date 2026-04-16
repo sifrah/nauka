@@ -109,7 +109,11 @@ impl RaftNode {
             .client_write(SurqlCommand { query })
             .await
             .map_err(|e| StateError::Raft(format!("client_write: {e}")))?;
-        Ok(resp.response().clone())
+        let response = resp.response().clone();
+        if let Some(ref err) = response.error {
+            return Err(StateError::Raft(format!("state machine: {err}")));
+        }
+        Ok(response)
     }
 
     pub async fn start_server(&self, bind_addr: String) -> tokio::task::JoinHandle<()> {
