@@ -195,13 +195,14 @@ pub async fn run_daemon_join(
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
+    let raft = Arc::new(raft_node);
 
     let db2 = db.clone();
     let iface = interface_name.clone();
     let own_pk2 = own_pk.clone();
 
     let listener_handle = tokio::spawn(mesh_listener(
-        None,
+        Some(raft),
         mesh.mesh_id().clone(),
         mesh.keypair().clone(),
         mesh.address().to_string(),
@@ -251,6 +252,7 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
+    let raft = Arc::new(raft_node);
 
     let db2 = db.clone();
     let iface = state.interface_name.clone();
@@ -261,7 +263,7 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     });
 
     let listener_handle = tokio::spawn(mesh_listener(
-        None,
+        Some(raft),
         mesh.mesh_id().clone(),
         mesh.keypair().clone(),
         mesh.address().to_string(),
