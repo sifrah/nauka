@@ -1,0 +1,17 @@
+[package]
+name = "nauka-hypervisor"
+description = "Nauka hypervisor layer — WireGuard mesh networking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+defguard_wireguard_rs.workspace = true
+nauka-state.workspace = true
+surrealdb.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

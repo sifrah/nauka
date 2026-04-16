@@ -1,0 +1,61 @@
+use openraft::raft::{AppendEntriesRequest, VoteRequest};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+
+use super::types::TypeConfig;
+use super::Raft;
+use crate::StateError;
+
+pub async fn start_raft_server(raft: Raft, bind_addr: &str) -> Result<(), StateError> {
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| StateError::Network(format!("raft bind {bind_addr}: {e}")))?;
+
+    eprintln!("  raft server listening on {bind_addr}");
+
+    loop {
+        let (stream, peer) = listener
+            .accept()
+            .await
+            .map_err(|e| StateError::Network(e.to_string()))?;
+
+        let raft = raft.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_rpc(stream, raft).await {
+                eprintln!("  raft rpc error from {peer}: {e}");
+            }
+        });
+    }
+}
+
+async fn handle_rpc(
+    stream: tokio::net::TcpStream,
+    raft: Raft,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let line = lines.next_line().await?.ok_or("empty request")?;
+
+    let msg: serde_json::Value = serde_json::from_str(&line)?;
+    let rpc = msg["rpc"].as_str().unwrap_or("");
+    let body = &msg["body"];
+
+    let response = match rpc {
+        "append" => {
+            let req: AppendEntriesRequest<TypeConfig> = serde_json::from_value(body.clone())?;
+            let resp = raft.append_entries(req).await?;
+            serde_json::to_string(&resp)?
+        }
+        "vote" => {
+            let req: VoteRequest<TypeConfig> = serde_json::from_value(body.clone())?;
+            let resp = raft.vote(req).await?;
+            serde_json::to_string(&resp)?
+        }
+        other => return Err(format!("unknown rpc: {other}").into()),
+    };
+
+    writer.write_all(response.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    Ok(())
+}
