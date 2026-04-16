@@ -207,6 +207,7 @@ where
             snapshot_id,
         };
 
+        let applied_query_count = inner.data.applied_queries.len();
         inner.snapshot = Some(StoredSnapshot {
             meta: meta.clone(),
             data: data.clone(),
@@ -214,6 +215,14 @@ where
 
         drop(inner);
         self.persist_snapshot(&meta, &data).await?;
+
+        tracing::info!(
+            node_id = self.node_id,
+            snapshot_id = %meta.snapshot_id,
+            applied_queries = applied_query_count,
+            bytes = data.len(),
+            "raft: built snapshot"
+        );
 
         Ok(SnapshotOf::<C> {
             meta,
