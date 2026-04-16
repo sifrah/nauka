@@ -1,4 +1,5 @@
 mod address;
+pub mod certs;
 mod error;
 mod join;
 mod key;
@@ -70,6 +71,10 @@ impl Mesh {
             listen_port: self.listen_port,
             mesh_id: self.mesh_id.clone(),
             address: self.address.to_string(),
+            ca_cert: None,
+            ca_key: None,
+            tls_cert: None,
+            tls_key: None,
         }
     }
 

@@ -22,5 +22,9 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 surrealdb = { version = "3", default-features = false, features = ["kv-surrealkv"] }
 openraft = { version = "0.10.0-alpha.17", features = ["serde", "type-alias"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pemfile = "2"
 nauka-hypervisor = { path = "layers/hypervisor" }
 nauka-state = { path = "layers/state" }

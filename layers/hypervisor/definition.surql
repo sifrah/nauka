@@ -6,6 +6,10 @@ DEFINE FIELD mesh_id        ON mesh TYPE string;
 DEFINE FIELD address        ON mesh TYPE string;
 DEFINE FIELD public_key     ON mesh TYPE string;
 DEFINE FIELD private_key    ON mesh TYPE string;
+DEFINE FIELD ca_cert        ON mesh TYPE option<string>;
+DEFINE FIELD ca_key         ON mesh TYPE option<string>;
+DEFINE FIELD tls_cert       ON mesh TYPE option<string>;
+DEFINE FIELD tls_key        ON mesh TYPE option<string>;
 DEFINE FIELD created_at     ON mesh TYPE datetime DEFAULT time::now();
 
 -- Mesh hypervisors (replicated via Raft consensus)

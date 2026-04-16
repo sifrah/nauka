@@ -35,6 +35,12 @@ struct JoinResponse {
     mesh_address: String,
     raft_addr: String,
     peers: Vec<PeerInfo>,
+    #[serde(default)]
+    ca_cert: Option<String>,
+    #[serde(default)]
+    tls_cert: Option<String>,
+    #[serde(default)]
+    tls_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +83,8 @@ pub async fn mesh_listener(
     wg_port: u16,
     peering_pin: Option<String>,
     join_port: u16,
+    ca_cert: Option<String>,
+    ca_key: Option<String>,
 ) {
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", join_port)).await {
         Ok(l) => l,
@@ -104,11 +112,13 @@ pub async fn mesh_listener(
         let pin = peering_pin.clone();
         let peers = known_peers.clone();
         let ra = raft_addr.clone();
+        let ca_c = ca_cert.clone();
+        let ca_k = ca_key.clone();
 
         tokio::spawn(async move {
             let _ = handle_connection(
                 stream, peer_addr, raft, &mesh_id, &keypair, &mesh_address, &iface, wg_port,
-                pin.as_deref(), &peers, &ra,
+                pin.as_deref(), &peers, &ra, ca_c.as_deref(), ca_k.as_deref(),
             )
             .await;
         });
@@ -128,6 +138,8 @@ async fn handle_connection(
     peering_pin: Option<&str>,
     known_peers: &tokio::sync::Mutex<Vec<PeerInfo>>,
     raft_addr: &str,
+    ca_cert: Option<&str>,
+    ca_key: Option<&str>,
 ) -> Result<(), MeshError> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = tokio::io::BufReader::new(reader).lines();
@@ -159,6 +171,20 @@ async fn handle_connection(
 
         let peers_snapshot = known_peers.lock().await.clone();
 
+        // Sign a TLS cert for the joiner if we have the CA
+        let (joiner_tls_cert, joiner_tls_key) =
+            if let (Some(ca_c), Some(ca_k)) = (ca_cert, ca_key) {
+                match super::certs::sign_node_cert(ca_c, ca_k) {
+                    Ok((cert, key)) => (Some(cert), Some(key)),
+                    Err(e) => {
+                        eprintln!("  ! sign node cert: {e}");
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
         let resp = JoinResponse {
             mesh_id: mesh_id.to_string(),
             public_key: keypair.public_key().to_string(),
@@ -166,6 +192,9 @@ async fn handle_connection(
             mesh_address: mesh_address.to_string(),
             raft_addr: raft_addr.to_string(),
             peers: peers_snapshot,
+            ca_cert: ca_cert.map(|s| s.to_string()),
+            tls_cert: joiner_tls_cert,
+            tls_key: joiner_tls_key,
         };
         let resp_json = serde_json::to_string(&resp).expect("serialize");
         writer
@@ -242,13 +271,15 @@ async fn handle_connection(
 
 // --- Sync join client (bootstrap, before daemon starts) ---
 
+pub use super::certs::TlsCerts;
+
 pub fn join_mesh(
     host: &str,
     pin: &str,
     interface_name: String,
     listen_port: u16,
     join_port: u16,
-) -> Result<(Mesh, Vec<PeerInfo>), MeshError> {
+) -> Result<(Mesh, Vec<PeerInfo>, Option<TlsCerts>), MeshError> {
     let keypair = KeyPair::generate();
 
     let addr = format!("{host}:{join_port}");
@@ -309,7 +340,16 @@ pub fn join_mesh(
     let mut all_peers = vec![server_info];
     all_peers.extend(resp.peers);
 
-    Ok((mesh, all_peers))
+    let tls_certs = match (resp.ca_cert, resp.tls_cert, resp.tls_key) {
+        (Some(ca), Some(cert), Some(key)) => Some(TlsCerts {
+            ca_cert: ca,
+            tls_cert: cert,
+            tls_key: key,
+        }),
+        _ => None,
+    };
+
+    Ok((mesh, all_peers, tls_certs))
 }
 
 /// Send a remove-peer command to the local daemon

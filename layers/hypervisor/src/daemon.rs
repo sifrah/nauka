@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use nauka_state::{node_id_from_key, Database, RaftNode};
+use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
 use tokio::signal;
 
 use crate::mesh::{
-    generate_pin, join_mesh, mesh_listener, KeyPair, Mesh, MeshError, MeshId, MeshState,
+    certs, generate_pin, join_mesh, mesh_listener, KeyPair, Mesh, MeshError, MeshId, MeshState,
     DEFAULT_JOIN_PORT,
 };
 
@@ -32,6 +32,20 @@ impl Default for DaemonConfig {
     }
 }
 
+fn build_tls(state: &MeshState) -> Option<TlsConfig> {
+    let (ca, cert, key) = match (&state.ca_cert, &state.tls_cert, &state.tls_key) {
+        (Some(ca), Some(cert), Some(key)) => (ca, cert, key),
+        _ => return None,
+    };
+    match TlsConfig::new(ca, cert, key) {
+        Ok(tls) => Some(tls),
+        Err(e) => {
+            eprintln!("  ! tls config failed: {e}");
+            None
+        }
+    }
+}
+
 pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), MeshError> {
     let mut mesh = Mesh::new(
         config.interface_name.clone(),
@@ -41,7 +55,19 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
         None,
     )?;
     mesh.up()?;
-    mesh.to_state().save(&db).await?;
+
+    // Generate mesh CA + node TLS cert
+    let (ca_cert, ca_key) = certs::generate_ca()?;
+    let (tls_cert, tls_key) = certs::sign_node_cert(&ca_cert, &ca_key)?;
+
+    let mut state = mesh.to_state();
+    state.ca_cert = Some(ca_cert.clone());
+    state.ca_key = Some(ca_key.clone());
+    state.tls_cert = Some(tls_cert.clone());
+    state.tls_key = Some(tls_key.clone());
+    state.save(&db).await?;
+
+    let tls = build_tls(&state);
 
     let pin = config.peering_pin.unwrap_or_else(generate_pin);
     let node_id = node_id_from_key(mesh.public_key());
@@ -55,9 +81,10 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
     println!("  public key: {}", mesh.public_key());
     println!("  port:       {}", config.listen_port);
     println!("  raft:       {raft_addr}");
+    println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
     println!("  join pin:   {pin}");
 
-    let raft_node = RaftNode::new(node_id, db.clone())
+    let raft_node = RaftNode::new(node_id, db.clone(), tls)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     raft_node
@@ -95,6 +122,8 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
         config.listen_port,
         Some(pin),
         config.join_port,
+        Some(ca_cert),
+        Some(ca_key),
     ));
 
     let reconciler_handle = tokio::spawn(async move {
@@ -119,9 +148,18 @@ pub async fn run_daemon_join(
     listen_port: u16,
     join_port: u16,
 ) -> Result<(), MeshError> {
-    let (mesh, bootstrap_peers) =
+    let (mesh, bootstrap_peers, tls_certs) =
         join_mesh(host, pin, interface_name.clone(), listen_port, join_port)?;
-    mesh.to_state().save(&db).await?;
+
+    let mut state = mesh.to_state();
+    if let Some(ref certs) = tls_certs {
+        state.ca_cert = Some(certs.ca_cert.clone());
+        state.tls_cert = Some(certs.tls_cert.clone());
+        state.tls_key = Some(certs.tls_key.clone());
+    }
+    state.save(&db).await?;
+
+    let tls = build_tls(&state);
 
     // Save bootstrap hypervisors to local DB so reconciler picks them up
     for p in &bootstrap_peers {
@@ -151,8 +189,9 @@ pub async fn run_daemon_join(
     println!("  public key: {}", mesh.public_key());
     println!("  port:       {listen_port}");
     println!("  raft:       {raft_addr}");
+    println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
 
-    let raft_node = RaftNode::new(node_id, db.clone())
+    let raft_node = RaftNode::new(node_id, db.clone(), tls)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
@@ -170,6 +209,8 @@ pub async fn run_daemon_join(
         listen_port,
         None,
         join_port,
+        None,
+        None,
     ));
 
     let reconciler_handle = tokio::spawn(async move {
@@ -191,6 +232,8 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     let mut mesh = Mesh::from_state(&state)?;
     mesh.up()?;
 
+    let tls = build_tls(&state);
+
     let own_pk = mesh.public_key().to_string();
     let node_id = node_id_from_key(&own_pk);
     let raft_addr = format!("[{}]:4001", mesh.address().address);
@@ -202,8 +245,9 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     println!("  public key: {}", mesh.public_key());
     println!("  port:       {}", mesh.listen_port());
     println!("  raft:       {raft_addr}");
+    println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
 
-    let raft_node = RaftNode::new(node_id, db.clone())
+    let raft_node = RaftNode::new(node_id, db.clone(), tls)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
@@ -225,6 +269,8 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
         state.listen_port,
         None,
         DEFAULT_JOIN_PORT,
+        state.ca_cert,
+        state.ca_key,
     ));
 
     println!("\n  ctrl+c to stop\n");

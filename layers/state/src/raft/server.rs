@@ -2,19 +2,26 @@ use std::io::Cursor;
 
 use openraft::alias::{SnapshotMetaOf, SnapshotOf, VoteOf};
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
+use super::tls::TlsConfig;
 use super::types::TypeConfig;
 use super::Raft;
 use crate::StateError;
 
-pub async fn start_raft_server(raft: Raft, bind_addr: &str) -> Result<(), StateError> {
+pub async fn start_raft_server(
+    raft: Raft,
+    bind_addr: &str,
+    tls: Option<TlsConfig>,
+) -> Result<(), StateError> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| StateError::Network(format!("raft bind {bind_addr}: {e}")))?;
 
-    eprintln!("  raft server listening on {bind_addr}");
+    let acceptor = tls.map(|t| tokio_rustls::TlsAcceptor::from(t.server));
+
+    eprintln!("  raft server listening on {bind_addr} (tls={})", acceptor.is_some());
 
     loop {
         let (stream, peer) = listener
@@ -23,19 +30,33 @@ pub async fn start_raft_server(raft: Raft, bind_addr: &str) -> Result<(), StateE
             .map_err(|e| StateError::Network(e.to_string()))?;
 
         let raft = raft.clone();
+        let acceptor = acceptor.clone();
+
         tokio::spawn(async move {
-            if let Err(e) = handle_rpc(stream, raft).await {
+            let result = if let Some(ref acc) = acceptor {
+                match acc.accept(stream).await {
+                    Ok(tls_stream) => handle_rpc(tls_stream, raft).await,
+                    Err(e) => {
+                        eprintln!("  raft tls handshake failed from {peer}: {e}");
+                        return;
+                    }
+                }
+            } else {
+                handle_rpc(stream, raft).await
+            };
+
+            if let Err(e) = result {
                 eprintln!("  raft rpc error from {peer}: {e}");
             }
         });
     }
 }
 
-async fn handle_rpc(
-    stream: tokio::net::TcpStream,
+async fn handle_rpc<S: AsyncRead + AsyncWrite + Unpin + Send>(
+    stream: S,
     raft: Raft,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
     let line = lines.next_line().await?.ok_or("empty request")?;

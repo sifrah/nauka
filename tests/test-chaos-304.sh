@@ -199,6 +199,7 @@ ok "4 followers survived leader death"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ CHAOS PHASE 3: restarting killed nodes ═══"
+sleep 5
 
 # Restart the 3 killed followers first
 for ki in "${KILL_INDICES[@]}"; do
