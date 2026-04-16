@@ -55,8 +55,15 @@ pub fn enable_and_start() -> Result<(), MeshError> {
 }
 
 pub fn stop_and_disable() -> Result<(), MeshError> {
-    // Both failures are non-fatal for the teardown path — log and continue.
-    let _ = run_systemctl(&["disable", "--now", UNIT_NAME]);
+    // If the unit file isn't there (e.g. leave on a node that never
+    // successfully init'd/joined), `systemctl disable --now` fails with
+    // "Unit file does not exist". That's a no-op from our perspective,
+    // not an error — swallow it. Other failures (daemon refusing to
+    // stop, systemctl not installed) still propagate.
+    if !std::path::Path::new(UNIT_PATH).exists() {
+        return Ok(());
+    }
+    run_systemctl(&["disable", "--now", UNIT_NAME])?;
     let _ = run_systemctl(&["reset-failed", UNIT_NAME]);
     Ok(())
 }

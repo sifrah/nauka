@@ -246,21 +246,16 @@ async fn write_bootstrap_peers(db: &Database, peers: &[PeerInfo]) {
     }
 }
 
-/// Teardown helper called after the daemon is already stopped. Opens the
-/// DB (which is unlocked now), wipes local state, removes the WG
-/// interface, and removes the systemd unit file. The CLI is responsible
-/// for the IPC leave notification and the systemctl stop that precede
-/// this call.
+/// Teardown helper called after the daemon is already stopped. Removes
+/// the WG interface, nukes the whole SurrealKV directory, removes the
+/// systemd unit file. The CLI is responsible for the IPC leave
+/// notification and the `systemctl stop` that precede this call.
 pub async fn leave_hypervisor(interface_name: &str) -> Result<(), MeshError> {
-    let db = Arc::new(
-        Database::open(None)
-            .await
-            .map_err(|e| MeshError::State(e.to_string()))?,
-    );
-    let _ = MeshState::delete(&db).await;
-    drop(db);
-
     let _ = Mesh::down_interface(interface_name);
+    // Remove the whole DB directory rather than DELETE records — a later
+    // `init`/`join` should start from a truly blank slate, with no stale
+    // SurrealKV LSM files hanging around.
+    let _ = std::fs::remove_dir_all("/var/lib/nauka/db");
     crate::systemd::remove_unit_file()?;
     println!("hypervisor left mesh — systemd unit removed, local state wiped");
     Ok(())

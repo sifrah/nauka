@@ -10,7 +10,7 @@ use nauka_hypervisor::systemd;
 use nauka_state::Database;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     // stderr so it coexists with println! on stdout. Level overridable via RUST_LOG.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -19,6 +19,21 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let exit_code = match run().await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            1
+        }
+    };
+    // One-shot CLIs: exit immediately instead of waiting for SurrealDB's
+    // background tasks to drain. Without this, `init`/`join` hang after
+    // printing "service: … (running)" on some hosts while SurrealKV's
+    // async shutdown deadlocks on the dying tokio runtime.
+    std::process::exit(exit_code);
+}
+
+async fn run() -> Result<()> {
     let app = Command::new("nauka")
         .about("Nauka — turn dedicated servers into a programmable cloud")
         .version(option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
@@ -147,6 +162,7 @@ fn parse_setup(sub: &clap::ArgMatches) -> Result<SetupConfig> {
 }
 
 async fn cmd_init(sub: &clap::ArgMatches) -> Result<()> {
+    check_not_already_in_mesh()?;
     let db = open_db().await?;
     let config = parse_setup(sub)?;
     let summary = init_hypervisor(db, config)
@@ -173,6 +189,7 @@ async fn cmd_init(sub: &clap::ArgMatches) -> Result<()> {
 }
 
 async fn cmd_join(sub: &clap::ArgMatches) -> Result<()> {
+    check_not_already_in_mesh()?;
     let db = open_db().await?;
     let config = parse_setup(sub)?;
     let host = sub.get_one::<String>("host").unwrap().clone();
@@ -203,6 +220,20 @@ async fn cmd_join(sub: &clap::ArgMatches) -> Result<()> {
 /// internal async tasks may still be winding down — give them a beat.
 async fn drop_db_and_wait() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+/// Bail early with a clear message if this node already has a service
+/// installed, instead of letting SurrealKV's "Database already locked"
+/// error leak to the user. Only checks the unit file — `/var/lib/nauka`
+/// can exist from a previously-failed attempt without meaning the node
+/// is actually in a mesh.
+fn check_not_already_in_mesh() -> Result<()> {
+    if std::path::Path::new("/etc/systemd/system/nauka-hypervisor.service").exists() {
+        anyhow::bail!(
+            "this node already has hypervisor state — run 'nauka hypervisor leave' first"
+        );
+    }
+    Ok(())
 }
 
 fn install_and_start_service() -> Result<()> {

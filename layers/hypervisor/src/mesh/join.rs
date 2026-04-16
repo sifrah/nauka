@@ -171,7 +171,15 @@ async fn handle_connection(
         return Ok(());
     } else if v.get("pin").is_some() {
         // --- Join request ---
-        let pin = peering_pin.ok_or_else(|| MeshError::Join("peering not enabled".into()))?;
+        let pin = match peering_pin {
+            Some(p) => p,
+            None => {
+                let _ = writer
+                    .write_all(b"{\"error\":\"peering not enabled on this node\"}\n")
+                    .await;
+                return Err(MeshError::Join("peering not enabled".into()));
+            }
+        };
         let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
 
         let req: JoinRequest =
@@ -495,12 +503,19 @@ pub fn request_status(join_port: u16) -> Result<serde_json::Value, MeshError> {
 
 /// Tell the local daemon to raft.write a DELETE for this node's own
 /// hypervisor record. The daemon keeps running — the CLI is expected to
-/// stop the systemd service next.
+/// stop the systemd service next. Bounded read timeout so a daemon that's
+/// stuck (no leader, election loop) doesn't block teardown forever.
 pub fn request_leave(join_port: u16) -> Result<(), MeshError> {
     let addr = format!("127.0.0.1:{join_port}");
-    let mut stream =
+    let stream =
         TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
-    writeln!(stream, "{}", serde_json::json!({ "leave": true }))
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| MeshError::Join(format!("set read timeout: {e}")))?;
+    let mut s = stream
+        .try_clone()
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    writeln!(s, "{}", serde_json::json!({ "leave": true }))
         .map_err(|e| MeshError::Join(e.to_string()))?;
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();

@@ -109,23 +109,88 @@ impl RaftNode {
         Ok(())
     }
 
-    /// Add a node as a Raft learner. Learners receive all replicated log entries.
+    /// Add a node as a Raft learner. Learners receive all replicated log
+    /// entries. If invoked on a follower, forwards the call to the current
+    /// leader over the mTLS Raft channel.
     pub async fn add_learner(&self, node_id: u64, addr: &str) -> Result<(), StateError> {
-        self.raft
+        match self
+            .raft
             .add_learner(node_id, BasicNode::new(addr), true)
             .await
-            .map_err(|e| StateError::Raft(format!("add_learner: {e}")))?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(ftl))) => {
+                self.forward_membership(
+                    &ftl,
+                    serde_json::json!({
+                        "op": "add_learner",
+                        "node_id": node_id,
+                        "addr": addr,
+                    }),
+                )
+                .await
+            }
+            Err(e) => Err(StateError::Raft(format!("add_learner: {e}"))),
+        }
     }
 
     /// Promote a learner to voter so it participates in leader elections.
+    /// Forwards to the leader on followers, same as `add_learner`.
     pub async fn promote_voter(&self, node_id: u64) -> Result<(), StateError> {
         let mut ids = BTreeSet::new();
         ids.insert(node_id);
-        self.raft
+        match self
+            .raft
             .change_membership(ChangeMembers::AddVoterIds(ids), true)
             .await
-            .map_err(|e| StateError::Raft(format!("promote_voter: {e}")))?;
+        {
+            Ok(_) => Ok(()),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(ftl))) => {
+                self.forward_membership(
+                    &ftl,
+                    serde_json::json!({
+                        "op": "promote_voter",
+                        "node_id": node_id,
+                    }),
+                )
+                .await
+            }
+            Err(e) => Err(StateError::Raft(format!("promote_voter: {e}"))),
+        }
+    }
+
+    async fn forward_membership(
+        &self,
+        ftl: &ForwardToLeader<TypeConfig>,
+        payload: serde_json::Value,
+    ) -> Result<(), StateError> {
+        let Some(ref leader) = ftl.leader_node else {
+            return Err(StateError::Raft("no leader elected yet".into()));
+        };
+        let addr = leader.addr.clone();
+        let tcp = TcpStream::connect(&addr)
+            .await
+            .map_err(|e| StateError::Network(format!("connect leader {addr}: {e}")))?;
+
+        let body: serde_json::Value = if let Some(ref tls) = self.tls {
+            let server_name = ServerName::try_from(RAFT_TLS_SAN)
+                .map_err(|e| StateError::Network(e.to_string()))?;
+            let connector = tokio_rustls::TlsConnector::from(tls.client.clone());
+            let stream = connector
+                .connect(server_name, tcp)
+                .await
+                .map_err(|e| StateError::Network(e.to_string()))?;
+            rpc_over(stream, "membership", &payload)
+                .await
+                .map_err(|e| StateError::Raft(format!("forward membership: {e}")))?
+        } else {
+            rpc_over(tcp, "membership", &payload)
+                .await
+                .map_err(|e| StateError::Raft(format!("forward membership: {e}")))?
+        };
+        if let Some(err) = body.get("error").and_then(|e| e.as_str()) {
+            return Err(StateError::Raft(format!("leader rejected: {err}")));
+        }
         Ok(())
     }
 
