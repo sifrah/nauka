@@ -48,6 +48,11 @@ struct RemoveRequest {
     remove_public_key: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct RaftWriteRequest {
+    query: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -282,6 +287,31 @@ async fn handle_connection(
             let _ = writer.write_all(b"{\"ok\":true}\n").await;
             println!("  - peer removed: {canonical_pk}");
         }
+    } else if v.get("raft_write").is_some() {
+        // Debug escape hatch: write arbitrary SurQL through Raft. Restricted
+        // to loopback so an attacker on the public peering port can't
+        // corrupt cluster state. Used by operators (and test-issue-315.sh)
+        // to simulate scenarios like stale endpoints.
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"raft_write requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback raft_write".into()));
+        }
+        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: RaftWriteRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match raft.write(req.query.clone()).await {
+            Ok(_) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                println!("  # raft_write ok: {}", req.query);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                eprintln!("  ! raft_write failed: {e}");
+            }
+        }
     }
 
     Ok(())
@@ -368,6 +398,28 @@ pub fn join_mesh(
     };
 
     Ok((mesh, all_peers, tls_certs))
+}
+
+/// Debug escape hatch: send an arbitrary SurQL write to the local daemon,
+/// which forwards it to the Raft leader. Connects over loopback only; any
+/// non-loopback peer trying the same thing is rejected by the listener.
+pub fn request_raft_write(join_port: u16, query: &str) -> Result<(), MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+
+    let req = serde_json::json!({ "raft_write": true, "query": query });
+    writeln!(stream, "{req}").map_err(|e| MeshError::Join(e.to_string()))?;
+
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+    if let Some(Ok(line)) = lines.next() {
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+            return Err(MeshError::Join(err.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Ask a remote peer what IP it observes us on. Used by restart flow to

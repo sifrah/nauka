@@ -82,6 +82,20 @@ fn mesh_cmd() -> Command {
                         ),
                 ),
         )
+        .subcommand(
+            Command::new("debug")
+                .about("Operator escape hatches — not part of the stable CLI")
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("raft-write")
+                        .about("Send arbitrary SurQL through Raft (loopback only)")
+                        .arg(
+                            Arg::new("query")
+                                .required(true)
+                                .help("SurQL statement, e.g. \"UPDATE hypervisor SET ...\""),
+                        ),
+                ),
+        )
 }
 
 async fn handle_mesh(matches: &clap::ArgMatches) -> Result<()> {
@@ -145,6 +159,18 @@ async fn handle_mesh(matches: &clap::ArgMatches) -> Result<()> {
                 Ok(())
             }
             _ => anyhow::bail!("unknown peer subcommand"),
+        },
+        Some(("debug", sub)) => match sub.subcommand() {
+            Some(("raft-write", rw)) => {
+                let query = rw.get_one::<String>("query").unwrap();
+                nauka_hypervisor::mesh::request_raft_write(
+                    nauka_hypervisor::mesh::DEFAULT_JOIN_PORT,
+                    query,
+                )?;
+                println!("raft write ok");
+                Ok(())
+            }
+            _ => anyhow::bail!("unknown debug subcommand"),
         },
         _ => anyhow::bail!("unknown mesh subcommand"),
     }

@@ -247,11 +247,28 @@ ok "cluster fully recovered — $final_alive/$NODE_COUNT nodes alive"
 # ═══════════════════════════════════════════════════════════════════
 # CHAOS PHASE 4: functional consensus check
 # Prove the cluster can still do Raft writes post-recovery:
+# 0. a new leader was elected post-restart (state-machine applies ran)
 # 1. remove a peer via CLI (issues DELETE hypervisor through Raft)
 # 2. verify every non-victim node's reconciler picks up the change
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ CHAOS PHASE 4: functional consensus check ═══"
+
+# A new leader emits a blank entry on election; every node then applies it
+# through its state machine. If no leader was elected, nothing applies and
+# grep returns 0. Time-bound: by this point in the test we've already slept
+# 15s for stabilization, so any missing applies here are a real failure.
+log "  ▶ verifying a leader was elected after restart"
+leader_elected=false
+for ip in "${IPS[@]}"; do
+    if ssh_node "$ip" "grep -q 'sm: apply' /tmp/nauka-restart.log 2>/dev/null"; then
+        leader_elected=true
+        break
+    fi
+done
+$leader_elected \
+    || die "no 'sm: apply' found on any node post-restart — no leader was elected within the stabilization window"
+ok "  leader election confirmed (state-machine applied post-restart)"
 
 VICTIM_IDX=$((NODE_COUNT - 1))
 VICTIM_IP=${IPS[$VICTIM_IDX]}
@@ -260,10 +277,9 @@ VICTIM_PK=$(ssh_node "$VICTIM_IP" \
 [[ -n $VICTIM_PK ]] || die "could not read victim pubkey"
 log "  victim: node-$((VICTIM_IDX + 1)) ($VICTIM_IP) pk=$VICTIM_PK"
 
-# Raft writes must land on the leader; post-chaos the leader is whichever
-# node won the re-election, not necessarily node-1. Daemons today don't
-# forward to the leader (separate concern), so we try every non-victim
-# node until one — the leader — accepts.
+# The peer-remove CLI talks to the local daemon, which forwards the write
+# to the leader via the Raft RPC channel (#315). Any node should accept.
+# We still probe each one so the test prints which node is the leader.
 log "  ▶ nauka mesh peer remove (probing every node for the leader)"
 remove_ok=false
 for i in "${!IPS[@]}"; do
