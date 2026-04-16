@@ -23,14 +23,29 @@ impl fmt::Display for SurqlCommand {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SurqlResponse {
     pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 impl SurqlResponse {
     pub fn ok() -> Self {
-        Self { success: true }
+        Self {
+            success: true,
+            error: None,
+        }
     }
 
     pub fn none() -> Self {
-        Self { success: false }
+        Self {
+            success: false,
+            error: None,
+        }
+    }
+
+    pub fn err(msg: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            error: Some(msg.into()),
+        }
     }
 }

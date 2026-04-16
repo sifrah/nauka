@@ -258,15 +258,15 @@ where
                 }
                 EntryPayload::Normal(cmd) => {
                     eprintln!("  sm: apply query: {}", cmd.query);
-                    inner.data.applied_queries.push(cmd.query.clone());
                     match self.db.query(&cmd.query).await {
                         Ok(_) => {
                             eprintln!("  sm: query OK");
+                            inner.data.applied_queries.push(cmd.query.clone());
                             SurqlResponse::ok()
                         }
                         Err(e) => {
                             eprintln!("  sm: query FAILED: {e}");
-                            SurqlResponse::none()
+                            SurqlResponse::err(e.to_string())
                         }
                     }
                 }
