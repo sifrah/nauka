@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nauka_state::{node_id_from_key, Database, RaftNode, DEFAULT_RAFT_DIR};
+use nauka_state::{node_id_from_key, Database, RaftNode};
 use tokio::signal;
 
 use crate::mesh::{
@@ -57,15 +57,30 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
     println!("  raft:       {raft_addr}");
     println!("  join pin:   {pin}");
 
-    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
+    let raft_node = RaftNode::new(node_id, db.clone())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     raft_node
         .init_cluster(&raft_addr)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
-    let _raft_server = raft_node.start_server(raft_addr).await;
+    let _raft_server = raft_node.start_server(raft_addr.clone()).await;
     let raft = Arc::new(raft_node);
+
+    // Register self as hypervisor via Raft consensus
+    let surql = format!(
+        "CREATE hypervisor SET \
+         public_key = '{}', node_id = {}, address = '{}', \
+         endpoint = NONE, allowed_ips = ['{}'], keepalive = 25, \
+         raft_addr = '{raft_addr}'",
+        own_pk,
+        node_id as i64,
+        mesh.address(),
+        mesh.address(),
+    );
+    if let Err(e) = raft.write(surql).await {
+        eprintln!("  ! raft write (register self): {e}");
+    }
 
     let iface = config.interface_name.clone();
     let db2 = db.clone();
@@ -108,11 +123,19 @@ pub async fn run_daemon_join(
         join_mesh(host, pin, interface_name.clone(), listen_port, join_port)?;
     mesh.to_state().save(&db).await?;
 
-    // Save bootstrap peers to local DB so reconciler doesn't remove them
+    // Save bootstrap hypervisors to local DB so reconciler picks them up
     for p in &bootstrap_peers {
         let surql = format!(
-            "CREATE peer SET public_key = '{}', endpoint = '{}', allowed_ips = ['{}'], keepalive = 25",
-            p.public_key, p.endpoint, p.mesh_address
+            "CREATE hypervisor SET \
+             public_key = '{}', node_id = {}, address = '{}', \
+             endpoint = '{}', allowed_ips = ['{}'], keepalive = 25, \
+             raft_addr = '[{}]:4001'",
+            p.public_key,
+            node_id_from_key(&p.public_key) as i64,
+            p.mesh_address,
+            p.endpoint,
+            p.mesh_address,
+            p.mesh_address.split('/').next().unwrap_or(""),
         );
         let _ = db.query(&surql).await;
     }
@@ -129,7 +152,7 @@ pub async fn run_daemon_join(
     println!("  port:       {listen_port}");
     println!("  raft:       {raft_addr}");
 
-    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
+    let raft_node = RaftNode::new(node_id, db.clone())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
@@ -180,7 +203,7 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     println!("  port:       {}", mesh.listen_port());
     println!("  raft:       {raft_addr}");
 
-    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
+    let raft_node = RaftNode::new(node_id, db.clone())
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;

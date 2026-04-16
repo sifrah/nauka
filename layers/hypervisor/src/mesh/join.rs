@@ -181,18 +181,22 @@ async fn handle_connection(
         };
         add_peer_to_wg(interface_name, &new_peer);
 
-        // Write to DB through Raft — replicates to all nodes
+        // Register joiner as hypervisor via Raft — replicates to all nodes
+        let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
+        let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
         let surql = format!(
-            "CREATE peer SET public_key = '{}', endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25",
-            req.public_key, peer_ip, req.listen_port, joiner_address
+            "CREATE hypervisor SET \
+             public_key = '{}', node_id = {}, address = '{}', \
+             endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
+             raft_addr = '{joiner_raft_addr}'",
+            req.public_key, joiner_node_id as i64, joiner_address,
+            peer_ip, req.listen_port, joiner_address
         );
         if let Err(e) = raft.write(surql).await {
             eprintln!("  ! raft write failed: {e}");
         }
 
         // Add joiner to Raft cluster as learner — retry in background
-        let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
-        let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
         let raft_clone = Arc::clone(raft);
         tokio::spawn(async move {
             for attempt in 1..=15 {
@@ -200,6 +204,10 @@ async fn handle_connection(
                 match raft_clone.add_learner(joiner_node_id, &joiner_raft_addr).await {
                     Ok(_) => {
                         eprintln!("  + raft learner: {joiner_raft_addr} (attempt {attempt})");
+                        match raft_clone.promote_voter(joiner_node_id).await {
+                            Ok(_) => eprintln!("  + raft voter: {joiner_raft_addr}"),
+                            Err(e) => eprintln!("  ! raft voter promotion failed: {e}"),
+                        }
                         return;
                     }
                     Err(_) if attempt < 15 => continue,
@@ -217,7 +225,7 @@ async fn handle_connection(
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
 
         let surql = format!(
-            "DELETE peer WHERE public_key = '{}'",
+            "DELETE hypervisor WHERE public_key = '{}'",
             req.remove_public_key
         );
         if let Err(e) = raft.write(surql).await {

@@ -5,7 +5,7 @@ use std::str::FromStr;
 use surrealdb::types::SurrealValue;
 
 #[derive(Deserialize, SurrealValue, Debug)]
-struct PeerRecord {
+struct HypervisorRecord {
     public_key: String,
     endpoint: Option<String>,
     #[serde(default)]
@@ -27,8 +27,8 @@ async fn reconcile(
     interface_name: &str,
     own_public_key: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let db_peers: Vec<PeerRecord> = db
-        .query_take("SELECT * FROM peer")
+    let db_hypervisors: Vec<HypervisorRecord> = db
+        .query_take("SELECT public_key, endpoint, allowed_ips, keepalive FROM hypervisor")
         .await
         .unwrap_or_default();
 
@@ -38,10 +38,10 @@ async fn reconcile(
         host.peers.keys().map(|k| k.to_string()).collect();
 
     let db_keys: std::collections::HashSet<String> =
-        db_peers.iter().map(|p| p.public_key.clone()).collect();
+        db_hypervisors.iter().map(|p| p.public_key.clone()).collect();
 
-    // Add peers in DB but not in WG
-    for record in &db_peers {
+    // Add hypervisors in DB but not in WG
+    for record in &db_hypervisors {
         if record.public_key == own_public_key {
             continue;
         }
@@ -68,13 +68,11 @@ async fn reconcile(
         }
     }
 
-    // Remove peers in WG but not in DB (peer removal propagation)
-    for (wg_key, _) in &host.peers {
+    // Remove WG peers not in DB
+    for wg_key in host.peers.keys() {
         let key_str = wg_key.to_string();
-        if !db_keys.contains(&key_str) {
-            if api.remove_peer(wg_key).is_ok() {
-                eprintln!("  reconciler: -peer {key_str}");
-            }
+        if !db_keys.contains(&key_str) && api.remove_peer(wg_key).is_ok() {
+            eprintln!("  reconciler: -peer {key_str}");
         }
     }
 

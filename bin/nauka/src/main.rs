@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
 
 async fn open_db() -> Result<Arc<Database>> {
     let db = Arc::new(Database::open(None).await?);
-    nauka_state::load_schemas(&db, &[nauka_hypervisor::SCHEMA]).await?;
+    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, nauka_hypervisor::SCHEMA]).await?;
     Ok(db)
 }
 

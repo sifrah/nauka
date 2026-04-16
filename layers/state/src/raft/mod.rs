@@ -4,10 +4,11 @@ pub mod server;
 pub mod state_machine;
 pub mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openraft::BasicNode;
+use openraft::ChangeMembers;
 use openraft::Config;
 
 use crate::db::Database;
@@ -17,8 +18,6 @@ use self::log_store::LogStore;
 use self::network::NetworkFactory;
 use self::state_machine::StateMachineStore;
 use self::types::{SurqlCommand, SurqlResponse, TypeConfig};
-
-pub use self::log_store::DEFAULT_RAFT_DIR;
 
 pub type Raft = openraft::Raft<TypeConfig, StateMachineStore<TypeConfig>>;
 
@@ -37,11 +36,7 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    pub async fn new(
-        node_id: u64,
-        db: Arc<Database>,
-        raft_dir: &str,
-    ) -> Result<Self, StateError> {
+    pub async fn new(node_id: u64, db: Arc<Database>) -> Result<Self, StateError> {
         let config = Config {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
@@ -54,7 +49,8 @@ impl RaftNode {
                 .map_err(|e| StateError::Raft(e.to_string()))?,
         );
 
-        let log_store = LogStore::<TypeConfig>::open(raft_dir)
+        let log_store = LogStore::<TypeConfig>::open(db.clone(), node_id)
+            .await
             .map_err(|e| StateError::Raft(format!("open raft log: {e}")))?;
         let state_machine = StateMachineStore::<TypeConfig>::new(db);
         let network = NetworkFactory;
@@ -82,6 +78,17 @@ impl RaftNode {
             .add_learner(node_id, BasicNode::new(addr), true)
             .await
             .map_err(|e| StateError::Raft(format!("add_learner: {e}")))?;
+        Ok(())
+    }
+
+    /// Promote a learner to voter so it participates in leader elections.
+    pub async fn promote_voter(&self, node_id: u64) -> Result<(), StateError> {
+        let mut ids = BTreeSet::new();
+        ids.insert(node_id);
+        self.raft
+            .change_membership(ChangeMembers::AddVoterIds(ids), true)
+            .await
+            .map_err(|e| StateError::Raft(format!("promote_voter: {e}")))?;
         Ok(())
     }
 
