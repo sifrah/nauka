@@ -18,6 +18,8 @@ use self::network::NetworkFactory;
 use self::state_machine::StateMachineStore;
 use self::types::{SurqlCommand, SurqlResponse, TypeConfig};
 
+pub use self::log_store::DEFAULT_RAFT_DIR;
+
 pub type Raft = openraft::Raft<TypeConfig, StateMachineStore<TypeConfig>>;
 
 pub fn node_id_from_key(public_key: &str) -> u64 {
@@ -35,7 +37,11 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    pub async fn new(node_id: u64, db: Arc<Database>) -> Result<Self, StateError> {
+    pub async fn new(
+        node_id: u64,
+        db: Arc<Database>,
+        raft_dir: &str,
+    ) -> Result<Self, StateError> {
         let config = Config {
             heartbeat_interval: 500,
             election_timeout_min: 1500,
@@ -48,7 +54,8 @@ impl RaftNode {
                 .map_err(|e| StateError::Raft(e.to_string()))?,
         );
 
-        let log_store = LogStore::<TypeConfig>::default();
+        let log_store = LogStore::<TypeConfig>::open(raft_dir)
+            .map_err(|e| StateError::Raft(format!("open raft log: {e}")))?;
         let state_machine = StateMachineStore::<TypeConfig>::new(db);
         let network = NetworkFactory;
 

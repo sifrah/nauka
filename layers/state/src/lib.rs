@@ -5,5 +5,5 @@ pub mod schema;
 
 pub use db::Database;
 pub use error::StateError;
-pub use raft::{node_id_from_key, RaftNode};
+pub use raft::{node_id_from_key, RaftNode, DEFAULT_RAFT_DIR};
 pub use schema::load_schemas;

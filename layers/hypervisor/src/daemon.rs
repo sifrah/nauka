@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nauka_state::{node_id_from_key, Database, RaftNode};
+use nauka_state::{node_id_from_key, Database, RaftNode, DEFAULT_RAFT_DIR};
 use tokio::signal;
 
 use crate::mesh::{
@@ -57,7 +57,7 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
     println!("  raft:       {raft_addr}");
     println!("  join pin:   {pin}");
 
-    let raft_node = RaftNode::new(node_id, db.clone())
+    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     raft_node
@@ -92,7 +92,6 @@ pub async fn run_daemon(db: Arc<Database>, config: DaemonConfig) -> Result<(), M
     listener_handle.abort();
     reconciler_handle.abort();
     mesh.down()?;
-    // State stays in DB — `mesh start` can restore
     println!("\ndaemon stopped (state preserved — use 'mesh start' to restart, 'mesh down' to teardown)");
     Ok(())
 }
@@ -130,7 +129,7 @@ pub async fn run_daemon_join(
     println!("  port:       {listen_port}");
     println!("  raft:       {raft_addr}");
 
-    let raft_node = RaftNode::new(node_id, db.clone())
+    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
@@ -170,6 +169,8 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     mesh.up()?;
 
     let own_pk = mesh.public_key().to_string();
+    let node_id = node_id_from_key(&own_pk);
+    let raft_addr = format!("[{}]:4001", mesh.address().address);
 
     println!("nauka daemon (restart)");
     println!("  interface:  {}", mesh.interface_name());
@@ -177,6 +178,12 @@ pub async fn run_daemon_restart(db: Arc<Database>) -> Result<(), MeshError> {
     println!("  address:    {}", mesh.address());
     println!("  public key: {}", mesh.public_key());
     println!("  port:       {}", mesh.listen_port());
+    println!("  raft:       {raft_addr}");
+
+    let raft_node = RaftNode::new(node_id, db.clone(), DEFAULT_RAFT_DIR)
+        .await
+        .map_err(|e| MeshError::State(e.to_string()))?;
+    let _raft_server = raft_node.start_server(raft_addr).await;
 
     let db2 = db.clone();
     let iface = state.interface_name.clone();

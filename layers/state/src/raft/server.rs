@@ -1,3 +1,6 @@
+use std::io::Cursor;
+
+use openraft::alias::{SnapshotMetaOf, SnapshotOf, VoteOf};
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -50,6 +53,22 @@ async fn handle_rpc(
         "vote" => {
             let req: VoteRequest<TypeConfig> = serde_json::from_value(body.clone())?;
             let resp = raft.vote(req).await?;
+            serde_json::to_string(&resp)?
+        }
+        "snapshot" => {
+            let vote: VoteOf<TypeConfig> = serde_json::from_value(body["vote"].clone())?;
+            let meta: SnapshotMetaOf<TypeConfig> = serde_json::from_value(body["meta"].clone())?;
+            let data: Vec<u8> = serde_json::from_value(body["data"].clone())?;
+
+            let snapshot = SnapshotOf::<TypeConfig> {
+                meta,
+                snapshot: Cursor::new(data),
+            };
+
+            let resp = raft
+                .install_full_snapshot(vote, snapshot)
+                .await
+                .map_err(|e| format!("install_full_snapshot: {e}"))?;
             serde_json::to_string(&resp)?
         }
         other => return Err(format!("unknown rpc: {other}").into()),
