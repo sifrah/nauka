@@ -16,6 +16,10 @@ pub struct MeshState {
     pub ca_key: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// Set on the node that accepted the `hypervisor init` command; the
+    /// daemon reads it on startup to know whether to accept incoming joins.
+    /// `None` on joiners.
+    pub peering_pin: Option<String>,
 }
 
 #[derive(Deserialize, SurrealValue)]
@@ -32,6 +36,8 @@ struct MeshRecord {
     tls_cert: Option<String>,
     #[serde(default)]
     tls_key: Option<String>,
+    #[serde(default)]
+    peering_pin: Option<String>,
 }
 
 impl MeshState {
@@ -57,6 +63,9 @@ impl MeshState {
         if let Some(ref v) = self.tls_key {
             let enc = crypto::encrypt_secret(v)?;
             obj.insert("tls_key".into(), serde_json::Value::String(enc));
+        }
+        if let Some(ref v) = self.peering_pin {
+            obj.insert("peering_pin".into(), serde_json::Value::String(v.clone()));
         }
 
         let surql = format!(
@@ -106,6 +115,7 @@ impl MeshState {
             ca_key,
             tls_cert: row.tls_cert,
             tls_key,
+            peering_pin: row.peering_pin,
         })
     }
 
