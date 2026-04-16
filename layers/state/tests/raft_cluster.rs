@@ -151,6 +151,35 @@ async fn invalid_surql_surfaces_error_to_caller() {
 }
 
 #[tokio::test]
+async fn follower_write_is_forwarded_to_leader() {
+    let n1 = spawn_node(1000).await;
+    let n2 = spawn_node(2000).await;
+    let n3 = spawn_node(3000).await;
+
+    n1.raft.init_cluster(&n1.addr).await.expect("init_cluster");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    add_and_promote(&n1.raft, 2000, &n2.addr).await;
+    add_and_promote(&n1.raft, 3000, &n3.addr).await;
+
+    // Give followers a moment to sync their view of the leader.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // n1 is the leader; n2 is a follower. Writing on n2 must still land.
+    n2.raft
+        .write("CREATE kv SET key = 'from-follower', value = 'ok'".into())
+        .await
+        .expect("follower write via forwarding");
+
+    for (i, node) in [&n1, &n2, &n3].iter().enumerate() {
+        let row = poll_kv(&node.db, "from-follower", Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| panic!("forwarded write not replicated to node {}", i + 1));
+        assert_eq!(row.value, "ok");
+    }
+}
+
+#[tokio::test]
 async fn followers_see_writes_committed_before_they_joined() {
     let n1 = spawn_node(100).await;
     n1.raft.init_cluster(&n1.addr).await.expect("init_cluster");

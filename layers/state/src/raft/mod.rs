@@ -8,17 +8,20 @@ pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
 use openraft::BasicNode;
 use openraft::ChangeMembers;
 use openraft::Config;
+use rustls::pki_types::ServerName;
+use tokio::net::TcpStream;
 
 use crate::db::Database;
 use crate::StateError;
 
 use self::log_store::LogStore;
-use self::network::NetworkFactory;
+use self::network::{rpc_over, NetworkFactory};
 use self::state_machine::StateMachineStore;
-use self::tls::TlsConfig;
+use self::tls::{TlsConfig, RAFT_TLS_SAN};
 use self::types::{SurqlCommand, SurqlResponse, TypeConfig};
 
 pub type Raft = openraft::Raft<TypeConfig, StateMachineStore<TypeConfig>>;
@@ -102,16 +105,58 @@ impl RaftNode {
     }
 
     /// Write a SurrealQL command through Raft consensus.
-    /// Replicates to all nodes before returning.
+    /// On a follower, forwards to the current leader over the Raft RPC
+    /// channel (reusing the same mTLS) and returns the leader's response.
     pub async fn write(&self, query: String) -> Result<SurqlResponse, StateError> {
-        let resp = self
-            .raft
-            .client_write(SurqlCommand { query })
+        let cmd = SurqlCommand { query };
+        match self.raft.client_write(cmd.clone()).await {
+            Ok(resp) => {
+                let response = resp.response().clone();
+                if let Some(ref err) = response.error {
+                    return Err(StateError::Raft(format!("state machine: {err}")));
+                }
+                Ok(response)
+            }
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(ftl))) => {
+                self.forward_write(&ftl, cmd).await
+            }
+            Err(e) => Err(StateError::Raft(format!("client_write: {e}"))),
+        }
+    }
+
+    async fn forward_write(
+        &self,
+        ftl: &ForwardToLeader<TypeConfig>,
+        cmd: SurqlCommand,
+    ) -> Result<SurqlResponse, StateError> {
+        let Some(ref leader) = ftl.leader_node else {
+            return Err(StateError::Raft("no leader elected yet".into()));
+        };
+        let addr = leader.addr.clone();
+
+        let tcp = TcpStream::connect(&addr)
             .await
-            .map_err(|e| StateError::Raft(format!("client_write: {e}")))?;
-        let response = resp.response().clone();
+            .map_err(|e| StateError::Network(format!("connect leader {addr}: {e}")))?;
+
+        let response: SurqlResponse = if let Some(ref tls) = self.tls {
+            let server_name = ServerName::try_from(RAFT_TLS_SAN)
+                .map_err(|e| StateError::Network(e.to_string()))?;
+            let connector = tokio_rustls::TlsConnector::from(tls.client.clone());
+            let stream = connector
+                .connect(server_name, tcp)
+                .await
+                .map_err(|e| StateError::Network(e.to_string()))?;
+            rpc_over(stream, "app_write", &cmd)
+                .await
+                .map_err(|e| StateError::Raft(format!("forward to {addr}: {e}")))?
+        } else {
+            rpc_over(tcp, "app_write", &cmd)
+                .await
+                .map_err(|e| StateError::Raft(format!("forward to {addr}: {e}")))?
+        };
+
         if let Some(ref err) = response.error {
-            return Err(StateError::Raft(format!("state machine: {err}")));
+            return Err(StateError::Raft(format!("state machine (leader): {err}")));
         }
         Ok(response)
     }
