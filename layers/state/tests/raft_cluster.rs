@@ -362,3 +362,108 @@ async fn hypervisor_write_is_byte_identical_across_nodes() {
     let expected: Datetime = joined_at.parse().expect("parse expected joined_at");
     assert_eq!(row_n1.joined_at, expected, "joined_at changed on apply");
 }
+
+/// Regression test for #330: when a late joiner receives a snapshot, the
+/// snapshot replay used to hit the `hypervisor_pubkey` UNIQUE index and log
+/// `"snapshot replay failed"` while silently continuing — leaving the new
+/// node's state machine divergent from the leader's. `install_snapshot`
+/// now wipes Raft-replicated tables first, and replay errors propagate.
+#[tokio::test]
+async fn late_joiner_snapshot_install_matches_leader() {
+    const THRESHOLD: u64 = 5;
+    let n1 = spawn_node_with_threshold(8001, THRESHOLD).await;
+    let n2 = spawn_node_with_threshold(8002, THRESHOLD).await;
+    let n3 = spawn_node_with_threshold(8003, THRESHOLD).await;
+
+    for node in [&n1, &n2, &n3] {
+        node.db
+            .query(HYPERVISOR_SCHEMA)
+            .await
+            .expect("hypervisor schema");
+    }
+
+    n1.raft.init_cluster(&n1.addr).await.expect("init_cluster");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    add_and_promote(&n1.raft, 8002, &n2.addr).await;
+    add_and_promote(&n1.raft, 8003, &n3.addr).await;
+
+    // Write past the threshold so openraft builds a snapshot and purges the
+    // log. A later joiner then *has* to replay via install_snapshot.
+    let write_count = (THRESHOLD as usize) * 3;
+    for i in 0..write_count {
+        let ts = format!("2026-04-17T10:00:{:02}.000000000Z", i);
+        let surql = format!(
+            "CREATE hypervisor SET \
+             public_key = 'pk-snap-{i}', node_id = {i}, address = 'fd00::{i:x}', \
+             endpoint = NONE, allowed_ips = ['fd00::{i:x}'], keepalive = 25, \
+             raft_addr = '[fd00::{i:x}]:4001', joined_at = d'{ts}'"
+        );
+        n1.raft.write(surql).await.expect("write");
+    }
+
+    // Give snapshot + log-purge tasks time to run.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Now bring up the late joiner. It has no log, so openraft has to ship
+    // it a snapshot rather than a log-replay catchup.
+    let n4 = spawn_node_with_threshold(8004, THRESHOLD).await;
+    n4.db
+        .query(HYPERVISOR_SCHEMA)
+        .await
+        .expect("hypervisor schema");
+
+    // Pre-populate n4's hypervisor table with a row whose public_key matches
+    // one the snapshot will replay. This simulates the real-world case the
+    // issue describes: a node whose state machine has applied rows from log
+    // entries before receiving a snapshot that re-contains those same rows.
+    // Without the install_snapshot fix, the UNIQUE index on `public_key`
+    // fires during replay and the node silently diverges.
+    n4.db
+        .query(
+            "CREATE hypervisor SET \
+             public_key = 'pk-snap-0', node_id = 999, address = 'fd00::pre', \
+             endpoint = NONE, allowed_ips = ['fd00::pre'], keepalive = 25, \
+             raft_addr = '[fd00::pre]:4001', \
+             joined_at = d'2020-01-01T00:00:00.000000000Z'",
+        )
+        .await
+        .expect("pre-populate n4");
+
+    add_and_promote(&n1.raft, 8004, &n4.addr).await;
+
+    // Wait until the late joiner has caught up.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let want_count = write_count as i64;
+    loop {
+        #[derive(Deserialize, SurrealValue)]
+        struct Count {
+            count: i64,
+        }
+        let rows: Vec<Count> = n4
+            .db
+            .query_take("SELECT count() AS count FROM hypervisor GROUP ALL")
+            .await
+            .unwrap_or_default();
+        let got = rows.first().map(|c| c.count).unwrap_or(0);
+        if got == want_count {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("n4 never converged: got {got}, want {want_count}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Compare n1 and n4 row-by-row — every column must match.
+    let select_all = "SELECT public_key, node_id, address, endpoint, allowed_ips, \
+                      keepalive, raft_addr, joined_at \
+                      FROM hypervisor ORDER BY public_key";
+    let rows_n1: Vec<HypervisorRow> = n1.db.query_take(select_all).await.expect("n1 select");
+    let rows_n4: Vec<HypervisorRow> = n4.db.query_take(select_all).await.expect("n4 select");
+
+    assert_eq!(rows_n1.len(), write_count, "n1 missing rows");
+    assert_eq!(
+        rows_n1, rows_n4,
+        "n4 (post-snapshot-install) diverges from leader n1"
+    );
+}

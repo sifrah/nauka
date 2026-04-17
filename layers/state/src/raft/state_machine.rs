@@ -313,10 +313,26 @@ where
         inner.last_applied_log = meta.last_log_id.clone();
         inner.last_membership = meta.last_membership.clone();
 
+        // Wipe Raft-replicated state before replaying the snapshot's queries.
+        // The receiving node's state machine usually has rows from log entries
+        // it applied before getting this snapshot; without the wipe, a CREATE
+        // in `applied_queries` hits the UNIQUE index and the replay silently
+        // diverges from the leader. `_raft_meta` / `_raft_log` are intentionally
+        // NOT touched — those are per-node state openraft manages. `mesh` is
+        // local-only and never in the snapshot.
+        self.db
+            .query("DELETE hypervisor")
+            .await
+            .map_err(|e| io::Error::other(format!("wipe pre-replay: {e}")))?;
+
+        // Surface replay errors: an error here means the receiving node's DB
+        // is out of sync with the leader, which is a correctness bug, not
+        // something to log-and-continue.
         for query in &new_data.applied_queries {
-            if let Err(e) = self.db.query(query).await {
-                tracing::error!(query = %query, error = %e, "snapshot replay failed");
-            }
+            self.db
+                .query(query)
+                .await
+                .map_err(|e| io::Error::other(format!("snapshot replay: {e}")))?;
         }
 
         inner.data = new_data;
