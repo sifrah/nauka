@@ -11,8 +11,9 @@ mod state;
 pub use address::MeshId;
 pub use error::MeshError;
 pub use join::{
-    generate_pin, join_mesh, mesh_listener, request_peer_removal, request_raft_write, whoami,
-    PeerInfo, DEFAULT_JOIN_PORT, DEFAULT_PEERING_TIMEOUT,
+    generate_pin, join_mesh, mesh_listener, request_leave, request_peer_removal,
+    request_raft_write, request_status, whoami, PeerInfo, DEFAULT_JOIN_PORT,
+    DEFAULT_PEERING_TIMEOUT,
 };
 pub use key::KeyPair;
 pub use peer::MeshPeer;
@@ -76,6 +77,7 @@ impl Mesh {
             ca_key: None,
             tls_cert: None,
             tls_key: None,
+            peering_pin: None,
         }
     }
 

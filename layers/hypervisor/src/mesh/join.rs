@@ -1,11 +1,12 @@
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::{Kernel, WGApi, WireguardInterfaceApi};
-use nauka_state::RaftNode;
+use nauka_state::{Database, RaftNode};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
+use surrealdb::types::SurrealValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use super::{KeyPair, Mesh, MeshError, MeshId, MeshPeer};
@@ -81,6 +82,7 @@ fn add_peer_to_wg(interface_name: &str, info: &PeerInfo) {
 #[allow(clippy::too_many_arguments)]
 pub async fn mesh_listener(
     raft: Option<Arc<RaftNode>>,
+    db: Arc<Database>,
     mesh_id: MeshId,
     keypair: KeyPair,
     mesh_address: String,
@@ -110,6 +112,7 @@ pub async fn mesh_listener(
         };
 
         let raft = raft.clone();
+        let db = db.clone();
         let mesh_id = mesh_id.clone();
         let keypair = keypair.clone();
         let mesh_address = mesh_address.clone();
@@ -122,7 +125,7 @@ pub async fn mesh_listener(
 
         tokio::spawn(async move {
             let _ = handle_connection(
-                stream, peer_addr, raft, &mesh_id, &keypair, &mesh_address, &iface, wg_port,
+                stream, peer_addr, raft, &db, &mesh_id, &keypair, &mesh_address, &iface, wg_port,
                 pin.as_deref(), &peers, &ra, ca_c.as_deref(), ca_k.as_deref(),
             )
             .await;
@@ -135,6 +138,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     peer_addr: SocketAddr,
     raft: Option<Arc<RaftNode>>,
+    db: &Database,
     mesh_id: &MeshId,
     keypair: &KeyPair,
     mesh_address: &str,
@@ -167,7 +171,15 @@ async fn handle_connection(
         return Ok(());
     } else if v.get("pin").is_some() {
         // --- Join request ---
-        let pin = peering_pin.ok_or_else(|| MeshError::Join("peering not enabled".into()))?;
+        let pin = match peering_pin {
+            Some(p) => p,
+            None => {
+                let _ = writer
+                    .write_all(b"{\"error\":\"peering not enabled on this node\"}\n")
+                    .await;
+                return Err(MeshError::Join("peering not enabled".into()));
+            }
+        };
         let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
 
         let req: JoinRequest =
@@ -312,9 +324,76 @@ async fn handle_connection(
                 eprintln!("  ! raft_write failed: {e}");
             }
         }
+    } else if v.get("status").is_some() {
+        // Read-only status: local state snapshot + replicated hypervisor
+        // list. Loopback-only since it reveals internal topology.
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"status requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback status".into()));
+        }
+        let hypervisors: Vec<serde_json::Value> = db
+            .query_take::<HypervisorListRow>(
+                "SELECT public_key, address, endpoint FROM hypervisor ORDER BY public_key",
+            )
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "public_key": r.public_key,
+                            "address": r.address,
+                            "endpoint": r.endpoint,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let resp = serde_json::json!({
+            "mesh_id": mesh_id.to_string(),
+            "public_key": keypair.public_key().to_string(),
+            "address": mesh_address,
+            "peering_open": peering_pin.is_some(),
+            "hypervisors": hypervisors,
+        });
+        let _ = writer
+            .write_all(format!("{resp}\n").as_bytes())
+            .await;
+    } else if v.get("leave").is_some() {
+        // Graceful leave: raft.write DELETE for self so other nodes drop
+        // us from their tables and WG peers. Loopback-only — a remote
+        // attacker shouldn't be able to remove us from the cluster.
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"leave requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback leave".into()));
+        }
+        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let own_pk = keypair.public_key().to_string();
+        let surql = format!("DELETE hypervisor WHERE public_key = '{own_pk}'");
+        match raft.write(surql).await {
+            Ok(_) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                println!("  # leave: broadcast DELETE for self");
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                eprintln!("  ! leave failed: {e}");
+            }
+        }
     }
 
     Ok(())
+}
+
+#[derive(Deserialize, SurrealValue)]
+struct HypervisorListRow {
+    public_key: String,
+    address: String,
+    endpoint: Option<String>,
 }
 
 // --- Sync join client (bootstrap, before daemon starts) ---
@@ -398,6 +477,55 @@ pub fn join_mesh(
     };
 
     Ok((mesh, all_peers, tls_certs))
+}
+
+/// Query the local daemon for its view of the cluster. Returns raw JSON
+/// so the CLI can pretty-print. Connects over loopback only.
+pub fn request_status(join_port: u16) -> Result<serde_json::Value, MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+    writeln!(stream, "{}", serde_json::json!({ "status": true }))
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| MeshError::Join("no status response".into()))?
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    let v: serde_json::Value = serde_json::from_str(&line)
+        .map_err(|e| MeshError::Join(format!("status parse: {e}")))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(MeshError::Join(err.to_string()));
+    }
+    Ok(v)
+}
+
+/// Tell the local daemon to raft.write a DELETE for this node's own
+/// hypervisor record. The daemon keeps running — the CLI is expected to
+/// stop the systemd service next. Bounded read timeout so a daemon that's
+/// stuck (no leader, election loop) doesn't block teardown forever.
+pub fn request_leave(join_port: u16) -> Result<(), MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| MeshError::Join(format!("set read timeout: {e}")))?;
+    let mut s = stream
+        .try_clone()
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    writeln!(s, "{}", serde_json::json!({ "leave": true }))
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+    if let Some(Ok(line)) = lines.next() {
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+            return Err(MeshError::Join(err.to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// Debug escape hatch: send an arbitrary SurQL write to the local daemon,

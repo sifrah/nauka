@@ -1,7 +1,10 @@
 use std::io::Cursor;
 
+use std::collections::BTreeSet;
+
 use openraft::alias::{SnapshotMetaOf, SnapshotOf, VoteOf};
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
+use openraft::{BasicNode, ChangeMembers};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
@@ -103,6 +106,40 @@ async fn handle_rpc<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 .await
                 .map_err(|e| format!("client_write: {e}"))?;
             serde_json::to_string(resp.response())?
+        }
+        "membership" => {
+            // Followers forward membership changes (add_learner,
+            // promote_voter) to the leader the same way app_write works.
+            let op = body["op"].as_str().unwrap_or("");
+            let node_id = body["node_id"].as_u64().ok_or("missing node_id")?;
+            match op {
+                "add_learner" => {
+                    let addr = body["addr"].as_str().ok_or("missing addr")?;
+                    match raft.add_learner(node_id, BasicNode::new(addr), true).await {
+                        Ok(_) => serde_json::json!({ "ok": true }).to_string(),
+                        Err(e) => {
+                            serde_json::json!({ "error": e.to_string() }).to_string()
+                        }
+                    }
+                }
+                "promote_voter" => {
+                    let mut ids = BTreeSet::new();
+                    ids.insert(node_id);
+                    match raft
+                        .change_membership(ChangeMembers::AddVoterIds(ids), true)
+                        .await
+                    {
+                        Ok(_) => serde_json::json!({ "ok": true }).to_string(),
+                        Err(e) => {
+                            serde_json::json!({ "error": e.to_string() }).to_string()
+                        }
+                    }
+                }
+                other => {
+                    serde_json::json!({ "error": format!("unknown membership op: {other}") })
+                        .to_string()
+                }
+            }
         }
         other => return Err(format!("unknown rpc: {other}").into()),
     };
