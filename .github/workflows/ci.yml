@@ -44,64 +44,29 @@ jobs:
           fi
           echo "All critical patterns present in .gitignore"
 
-  # ── Format check (workspace-wide, once) ──────────────────
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
-
-  # ── Discover all crates dynamically ──────────────────────
-  discover:
-    name: Discover crates
-    runs-on: ubuntu-latest
-    outputs:
-      crates: ${{ steps.find.outputs.crates }}
-    steps:
-      - uses: actions/checkout@v4
-      - id: find
-        run: |
-          # Find all Cargo.toml in layers/ and bin/, extract crate names
-          crates="[]"
-          for toml in $(find layers bin -name Cargo.toml 2>/dev/null | sort); do
-            dir=$(dirname "$toml")
-            name=$(grep '^name' "$toml" | head -1 | sed 's/name *= *"\(.*\)"/\1/')
-            if [ -n "$name" ]; then
-              crates=$(echo "$crates" | jq -c --arg name "$name" --arg dir "$dir" '. + [{"name": $name, "dir": $dir}]')
-            fi
-          done
-          echo "crates=$crates" >> "$GITHUB_OUTPUT"
-          echo "Found crates:"
-          echo "$crates" | jq .
-
-  # ── Clippy + Test per crate (parallel) ───────────────────
+  # ── fmt + clippy + test in one job ───────────────────────
+  # One job, one cache, one compile: clippy warms the workspace's check
+  # artifacts, then `cargo test --workspace` reuses them. The previous
+  # per-crate matrix rebuilt shared deps (nauka-state) three times.
+  # Note: integration tests requiring root/WireGuard are #[ignore]d and
+  # not run in CI. Run locally with: sudo cargo test -- --ignored
   check:
-    name: ${{ matrix.crate.name }}
-    needs: [fmt, discover]
+    name: fmt + clippy + test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: ${{ fromJson(needs.discover.outputs.crates) }}
     steps:
       - uses: actions/checkout@v4
       - name: Install cmake
         run: sudo apt-get update && sudo apt-get install -y cmake
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.crate.name }}
 
-      - name: Clippy
-        run: cargo clippy -p ${{ matrix.crate.name }} --all-targets -- -D warnings
+      - name: cargo fmt --check
+        run: cargo fmt --check
 
-      - name: Test
-        run: cargo test -p ${{ matrix.crate.name }}
-        # Note: integration tests requiring root/WireGuard are #[ignore]d
-        # and not run in CI. Run locally with: sudo cargo test -- --ignored
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
