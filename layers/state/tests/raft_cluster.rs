@@ -138,17 +138,35 @@ async fn write_replicates_to_all_nodes() {
     add_and_promote(&n1.raft, 2, &n2.addr).await;
     add_and_promote(&n1.raft, 3, &n3.addr).await;
 
-    n1.raft
-        .write("CREATE kv SET key = 'hello', value = 'world'".into())
-        .await
-        .expect("write");
-
-    for (i, node) in [&n1, &n2, &n3].iter().enumerate() {
-        let row = poll_kv(&node.db, "hello", Duration::from_secs(5))
+    // Capture events while the write replicates and followers apply
+    // the entry. Asserting on any `raft.*` event avoids depending on
+    // openraft's task-scheduling details (some events fire from
+    // spawned tasks whose thread-local default subscriber was set
+    // before `capture` installed its own) — the point is to
+    // demonstrate `capture` integrates with the replication path and
+    // catches nauka-emitted events.
+    let ((), events) = nauka_core::logging::test::capture(async {
+        n1.raft
+            .write("CREATE kv SET key = 'hello', value = 'world'".into())
             .await
-            .unwrap_or_else(|| panic!("record not replicated to node {}", i + 1));
-        assert_eq!(row.value, "world");
-    }
+            .expect("write");
+
+        for (i, node) in [&n1, &n2, &n3].iter().enumerate() {
+            let row = poll_kv(&node.db, "hello", Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|| panic!("record not replicated to node {}", i + 1));
+            assert_eq!(row.value, "world");
+        }
+    })
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event().is_some_and(|n| n.starts_with("raft."))),
+        "expected at least one raft.* event during replication, saw: {:?}",
+        events.iter().filter_map(|e| e.event()).collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -429,30 +447,45 @@ async fn late_joiner_snapshot_install_matches_leader() {
         .await
         .expect("pre-populate n4");
 
-    add_and_promote(&n1.raft, 8004, &n4.addr).await;
+    // Capture events while adding n4 and waiting for convergence — the
+    // install_snapshot path fires on n4 during catch-up. Asserting on
+    // `raft.snapshot.install.end` protects against a regression where
+    // the method silently stops logging a lifecycle event.
+    let ((), events) = nauka_core::logging::test::capture(async {
+        add_and_promote(&n1.raft, 8004, &n4.addr).await;
 
-    // Wait until the late joiner has caught up.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let want_count = write_count as i64;
-    loop {
-        #[derive(Deserialize, SurrealValue)]
-        struct Count {
-            count: i64,
+        // Wait until the late joiner has caught up.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let want_count = write_count as i64;
+        loop {
+            #[derive(Deserialize, SurrealValue)]
+            struct Count {
+                count: i64,
+            }
+            let rows: Vec<Count> = n4
+                .db
+                .query_take("SELECT count() AS count FROM hypervisor GROUP ALL")
+                .await
+                .unwrap_or_default();
+            let got = rows.first().map(|c| c.count).unwrap_or(0);
+            if got == want_count {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("n4 never converged: got {got}, want {want_count}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let rows: Vec<Count> = n4
-            .db
-            .query_take("SELECT count() AS count FROM hypervisor GROUP ALL")
-            .await
-            .unwrap_or_default();
-        let got = rows.first().map(|c| c.count).unwrap_or(0);
-        if got == want_count {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("n4 never converged: got {got}, want {want_count}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event() == Some("raft.snapshot.install.end")),
+        "expected raft.snapshot.install.end event, saw: {:?}",
+        events.iter().filter_map(|e| e.event()).collect::<Vec<_>>()
+    );
 
     // Compare n1 and n4 row-by-row — every column must match.
     let select_all = "SELECT public_key, node_id, address, endpoint, allowed_ips, \

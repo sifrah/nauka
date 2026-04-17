@@ -354,6 +354,140 @@ macro_rules! bail_log {
     }};
 }
 
+/// Test-only helpers for asserting on the events an async block
+/// emits. See [`test::capture`].
+pub mod test {
+    use std::collections::BTreeMap;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+
+    /// One captured event with its level, structured fields, and
+    /// message. Field values are rendered as they'd appear in a log
+    /// line, minus surrounding quotes.
+    #[derive(Debug, Clone)]
+    pub struct CapturedEvent {
+        pub level: Level,
+        pub fields: BTreeMap<String, String>,
+        pub message: String,
+    }
+
+    impl CapturedEvent {
+        /// Shortcut for `fields.get("event").map(|s| s.as_str())` —
+        /// matches the `event = "domain.object.action"` convention
+        /// every nauka event follows.
+        pub fn event(&self) -> Option<&str> {
+            self.fields.get("event").map(|s| s.as_str())
+        }
+    }
+
+    /// Run `fut` with a capture subscriber installed as the
+    /// thread-local default, then return `(fut's output, every
+    /// event emitted)`.
+    ///
+    /// Intended for `#[tokio::test]` (current-thread runtime) so
+    /// events from spawned tasks are captured through the same
+    /// thread-local dispatch. Multi-threaded runtimes may see gaps
+    /// if tasks migrate off the caller's thread.
+    pub async fn capture<F, T>(fut: F) -> (T, Vec<CapturedEvent>)
+    where
+        F: Future<Output = T>,
+    {
+        let events: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: events.clone(),
+        });
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        let result = fut.await;
+        drop(guard);
+        let captured = events.lock().expect("poisoned events lock").clone();
+        (result, captured)
+    }
+
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = BTreeMap::new();
+            let mut message = String::new();
+            let mut visitor = CaptureVisitor {
+                fields: &mut fields,
+                message: &mut message,
+            };
+            event.record(&mut visitor);
+            if let Ok(mut vec) = self.events.lock() {
+                vec.push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    fields,
+                    message,
+                });
+            }
+        }
+    }
+
+    struct CaptureVisitor<'a> {
+        fields: &'a mut BTreeMap<String, String>,
+        message: &'a mut String,
+    }
+
+    impl<'a> CaptureVisitor<'a> {
+        fn set(&mut self, field: &Field, value: String) {
+            if field.name() == "message" {
+                *self.message = value;
+            } else {
+                self.fields.insert(field.name().to_string(), value);
+            }
+        }
+    }
+
+    impl Visit for CaptureVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.set(field, value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            // tracing routes `String`/`Display`-via-`%` values
+            // through `record_debug`; strip the surrounding quotes
+            // so assertions read as the logical value, not the
+            // Debug-format of it.
+            let raw = format!("{value:?}");
+            let stripped = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+                raw[1..raw.len() - 1].to_string()
+            } else {
+                raw
+            };
+            self.set(field, stripped);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn captures_an_info_event_with_fields_and_message() {
+            let ((), events) = capture(async {
+                tracing::info!(event = "test.capture.smoke", x = 42, "hello");
+            })
+            .await;
+
+            assert_eq!(events.len(), 1);
+            let e = &events[0];
+            assert_eq!(e.level, Level::INFO);
+            assert_eq!(e.event(), Some("test.capture.smoke"));
+            assert_eq!(e.fields.get("x").map(|s| s.as_str()), Some("42"));
+            assert_eq!(e.message, "hello");
+        }
+    }
+}
+
 /// Generate a fresh trace_id — a UUID v4 string suitable for
 /// `tracing::info_span!("...", trace_id = %new_trace_id())` at any
 /// entry point where an operation starts outside of [`instrument_op`]
