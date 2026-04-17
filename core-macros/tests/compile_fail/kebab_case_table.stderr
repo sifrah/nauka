@@ -1,0 +1,5 @@
+error: table name `my-table` must be snake_case (lowercase ASCII letters, digits, and `_` only)
+ --> tests/compile_fail/kebab_case_table.rs:5:20
+  |
+5 | #[resource(table = "my-table", scope = "local")]
+  |                    ^^^^^^^^^^

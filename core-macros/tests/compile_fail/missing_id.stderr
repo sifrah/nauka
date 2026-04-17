@@ -1,0 +1,7 @@
+error: `#[resource]` requires exactly one field marked `#[id]` — the natural key
+ --> tests/compile_fail/missing_id.rs:7:1
+  |
+7 | / struct NoId {
+8 | |     pub name: String,
+9 | | }
+  | |_^

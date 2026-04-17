@@ -1,0 +1,5 @@
+error: table name `MyTable` must start with a lowercase ASCII letter (snake_case)
+ --> tests/compile_fail/pascal_case_table.rs:5:20
+  |
+5 | #[resource(table = "MyTable", scope = "local")]
+  |                    ^^^^^^^^^

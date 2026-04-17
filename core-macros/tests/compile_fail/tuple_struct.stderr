@@ -1,0 +1,5 @@
+error: `#[resource]` requires a struct with named fields
+ --> tests/compile_fail/tuple_struct.rs:7:11
+  |
+7 | struct Tup(String, u64);
+  |           ^^^^^^^^^^^^^

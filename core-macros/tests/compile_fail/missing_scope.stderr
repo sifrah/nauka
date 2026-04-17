@@ -1,0 +1,7 @@
+error: `#[resource]` requires `scope = "local"` or `scope = "cluster"`
+ --> tests/compile_fail/missing_scope.rs:5:1
+  |
+5 | #[resource(table = "no_scope")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `resource` (in Nightly builds, run with -Z macro-backtrace for more info)
