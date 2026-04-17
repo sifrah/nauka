@@ -88,86 +88,89 @@ pub async fn init_hypervisor(
     db: Arc<Database>,
     config: SetupConfig,
 ) -> Result<InitSummary, MeshError> {
-    let mut mesh = Mesh::new(
-        config.interface_name.clone(),
-        config.listen_port,
-        None,
-        None,
-        None,
-    )?;
-    mesh.up()?;
+    nauka_core::instrument_op("mesh.init", async move {
+        let mut mesh = Mesh::new(
+            config.interface_name.clone(),
+            config.listen_port,
+            None,
+            None,
+            None,
+        )?;
+        mesh.up()?;
 
-    let (ca_cert, ca_key) = certs::generate_ca()?;
-    let (tls_cert, tls_key) = certs::sign_node_cert(&ca_cert, &ca_key)?;
-    let pin = generate_pin();
+        let (ca_cert, ca_key) = certs::generate_ca()?;
+        let (tls_cert, tls_key) = certs::sign_node_cert(&ca_cert, &ca_key)?;
+        let pin = generate_pin();
 
-    let mut state = mesh.to_state();
-    state.ca_cert = Some(ca_cert);
-    state.ca_key = Some(ca_key);
-    state.tls_cert = Some(tls_cert);
-    state.tls_key = Some(tls_key);
-    state.peering_pin = Some(pin.clone());
-    state.save(&db).await?;
+        let mut state = mesh.to_state();
+        state.ca_cert = Some(ca_cert);
+        state.ca_key = Some(ca_key);
+        state.tls_cert = Some(tls_cert);
+        state.tls_key = Some(tls_key);
+        state.peering_pin = Some(pin.clone());
+        state.save(&db).await?;
 
-    let tls = build_tls(&state);
-    let node_id = node_id_from_key(mesh.public_key());
-    let raft_addr = format!("[{}]:4001", mesh.address().address);
-    let own_pk = mesh.public_key().to_string();
+        let tls = build_tls(&state);
+        let node_id = node_id_from_key(mesh.public_key());
+        let raft_addr = format!("[{}]:4001", mesh.address().address);
+        let own_pk = mesh.public_key().to_string();
 
-    // Init the cluster as a single-node voter. No Raft server needed — with
-    // one voter, client_write commits locally; the daemon brings the server
-    // up later.
-    let raft =
-        RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
+        // Init the cluster as a single-node voter. No Raft server needed — with
+        // one voter, client_write commits locally; the daemon brings the server
+        // up later.
+        let raft =
+            RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
+                .await
+                .map_err(|e| MeshError::State(e.to_string()))?;
+
+        // Start the Raft server before initializing the cluster. Even though a
+        // single-node cluster doesn't use RPC, openraft's internal task setup
+        // appears to need the server task alive for vote persistence to
+        // complete cleanly.
+        let server_handle = raft.start_server(raft_addr.clone()).await;
+
+        raft.init_cluster(&raft_addr)
             .await
             .map_err(|e| MeshError::State(e.to_string()))?;
 
-    // Start the Raft server before initializing the cluster. Even though a
-    // single-node cluster doesn't use RPC, openraft's internal task setup
-    // appears to need the server task alive for vote persistence to
-    // complete cleanly.
-    let server_handle = raft.start_server(raft_addr.clone()).await;
+        // Let the initial vote + blank entry fully apply before we write.
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-    raft.init_cluster(&raft_addr)
-        .await
-        .map_err(|e| MeshError::State(e.to_string()))?;
+        // Format `joined_at` in Rust (here on the leader) rather than letting
+        // `time::now()` default run on every node's state machine — the latter
+        // diverges by clock drift and breaks Raft determinism.
+        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let surql = format!(
+            "CREATE hypervisor SET \
+             public_key = '{own_pk}', node_id = {node_id}, address = '{addr}', \
+             endpoint = NONE, allowed_ips = ['{addr}'], keepalive = 25, \
+             raft_addr = '{raft_addr}', joined_at = d'{joined_at}'",
+            node_id = node_id as i64,
+            addr = mesh.address(),
+        );
+        raft.write(surql)
+            .await
+            .map_err(|e| MeshError::State(format!("register self: {e}")))?;
 
-    // Let the initial vote + blank entry fully apply before we write.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+        // Tear the in-process Raft down cleanly so the systemd-launched daemon
+        // can acquire the SurrealKV LOCK file — otherwise it crash-loops on
+        // "Database is already locked by another process".
+        server_handle.abort();
+        raft.raft
+            .shutdown()
+            .await
+            .map_err(|e| MeshError::State(format!("raft shutdown: {e}")))?;
+        drop(raft);
 
-    // Format `joined_at` in Rust (here on the leader) rather than letting
-    // `time::now()` default run on every node's state machine — the latter
-    // diverges by clock drift and breaks Raft determinism.
-    let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-    let surql = format!(
-        "CREATE hypervisor SET \
-         public_key = '{own_pk}', node_id = {node_id}, address = '{addr}', \
-         endpoint = NONE, allowed_ips = ['{addr}'], keepalive = 25, \
-         raft_addr = '{raft_addr}', joined_at = d'{joined_at}'",
-        node_id = node_id as i64,
-        addr = mesh.address(),
-    );
-    raft.write(surql)
-        .await
-        .map_err(|e| MeshError::State(format!("register self: {e}")))?;
-
-    // Tear the in-process Raft down cleanly so the systemd-launched daemon
-    // can acquire the SurrealKV LOCK file — otherwise it crash-loops on
-    // "Database is already locked by another process".
-    server_handle.abort();
-    raft.raft
-        .shutdown()
-        .await
-        .map_err(|e| MeshError::State(format!("raft shutdown: {e}")))?;
-    drop(raft);
-
-    Ok(InitSummary {
-        mesh_id: mesh.mesh_id().clone(),
-        public_key: own_pk,
-        address: mesh.address().to_string(),
-        pin,
-        raft_addr,
+        Ok(InitSummary {
+            mesh_id: mesh.mesh_id().clone(),
+            public_key: own_pk,
+            address: mesh.address().to_string(),
+            pin,
+            raft_addr,
+        })
     })
+    .await
 }
 
 /// One-shot: contact an existing node, receive the mesh config + TLS cert,

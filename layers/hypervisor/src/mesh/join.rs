@@ -188,151 +188,155 @@ async fn handle_connection(
         return Ok(());
     } else if v.get("pin").is_some() {
         // --- Join request ---
-        let pin = match peering_pin {
-            Some(p) => p,
-            None => {
-                let _ = writer
-                    .write_all(b"{\"error\":\"peering not enabled on this node\"}\n")
-                    .await;
-                return Err(MeshError::Join("peering not enabled".into()));
-            }
-        };
-        let raft = raft
-            .as_ref()
-            .ok_or_else(|| MeshError::Join("no raft".into()))?;
-
-        let req: JoinRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        if req.pin != pin {
-            let _ = writer.write_all(b"{\"error\":\"invalid pin\"}\n").await;
-            return Err(MeshError::Join("invalid pin".into()));
-        }
-
-        let joiner_pk = Key::from_str(&req.public_key).map_err(|_| MeshError::InvalidKey)?;
-        let joiner_address = mesh_id.node_address(&joiner_pk);
-        let peer_ip = peer_addr.ip().to_string();
-
-        let peers_snapshot = known_peers.lock().await.clone();
-
-        // Sign a TLS cert for the joiner if we have the CA
-        let (joiner_tls_cert, joiner_tls_key) = if let (Some(ca_c), Some(ca_k)) = (ca_cert, ca_key)
-        {
-            match super::certs::sign_node_cert(ca_c, ca_k) {
-                Ok((cert, key)) => (Some(cert), Some(key)),
-                Err(e) => {
-                    tracing::warn!(
-                        event = "peer.join.sign_cert_failed",
-                        error = %e,
-                        "sign node cert failed"
-                    );
-                    (None, None)
+        return nauka_core::instrument_op("peer.join", async {
+            let pin = match peering_pin {
+                Some(p) => p,
+                None => {
+                    let _ = writer
+                        .write_all(b"{\"error\":\"peering not enabled on this node\"}\n")
+                        .await;
+                    return Err(MeshError::Join("peering not enabled".into()));
                 }
+            };
+            let raft = raft
+                .as_ref()
+                .ok_or_else(|| MeshError::Join("no raft".into()))?;
+
+            let req: JoinRequest =
+                serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+            if req.pin != pin {
+                let _ = writer.write_all(b"{\"error\":\"invalid pin\"}\n").await;
+                return Err(MeshError::Join("invalid pin".into()));
             }
-        } else {
-            (None, None)
-        };
 
-        let resp = JoinResponse {
-            mesh_id: mesh_id.to_string(),
-            public_key: keypair.public_key().to_string(),
-            listen_port: wg_port,
-            mesh_address: mesh_address.to_string(),
-            raft_addr: raft_addr.to_string(),
-            peers: peers_snapshot,
-            ca_cert: ca_cert.map(|s| s.to_string()),
-            tls_cert: joiner_tls_cert,
-            tls_key: joiner_tls_key,
-        };
-        let resp_json = serde_json::to_string(&resp).expect("serialize");
-        writer
-            .write_all(format!("{resp_json}\n").as_bytes())
-            .await
-            .map_err(|e| MeshError::Join(e.to_string()))?;
+            let joiner_pk = Key::from_str(&req.public_key).map_err(|_| MeshError::InvalidKey)?;
+            let joiner_address = mesh_id.node_address(&joiner_pk);
+            let peer_ip = peer_addr.ip().to_string();
 
-        // Add to local WG immediately
-        let new_peer = PeerInfo {
-            public_key: req.public_key.clone(),
-            endpoint: format!("{peer_ip}:{}", req.listen_port),
-            mesh_address: joiner_address.to_string(),
-        };
-        add_peer_to_wg(interface_name, &new_peer);
+            let peers_snapshot = known_peers.lock().await.clone();
 
-        // Register joiner as hypervisor via Raft — replicates to all nodes.
-        // `joined_at` is computed here (on the leader) so every node's state
-        // machine applies the same byte-identical value; a schema-level
-        // `DEFAULT time::now()` would diverge by clock drift.
-        let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
-        let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
-        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        let surql = format!(
-            "CREATE hypervisor SET \
-             public_key = '{}', node_id = {}, address = '{}', \
-             endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
-             raft_addr = '{joiner_raft_addr}', joined_at = d'{joined_at}'",
-            req.public_key,
-            joiner_node_id as i64,
-            joiner_address,
-            peer_ip,
-            req.listen_port,
-            joiner_address
-        );
-        if let Err(e) = raft.write(surql).await {
-            tracing::warn!(
-                event = "peer.join.raft_write_failed",
-                error = %e,
-                "raft write to register joiner failed"
-            );
-        }
-
-        // Add joiner to Raft cluster as learner — retry in background
-        let raft_clone = Arc::clone(raft);
-        tokio::spawn(async move {
-            for attempt in 1..=15 {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                match raft_clone
-                    .add_learner(joiner_node_id, &joiner_raft_addr)
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(
-                            event = "raft.learner.added",
-                            raft_addr = %joiner_raft_addr,
-                            attempt,
-                            "raft learner added"
-                        );
-                        match raft_clone.promote_voter(joiner_node_id).await {
-                            Ok(_) => tracing::info!(
-                                event = "raft.voter.promoted",
-                                raft_addr = %joiner_raft_addr,
-                                "raft voter promoted"
-                            ),
-                            Err(e) => tracing::warn!(
-                                event = "raft.voter.promote_failed",
-                                raft_addr = %joiner_raft_addr,
+            // Sign a TLS cert for the joiner if we have the CA
+            let (joiner_tls_cert, joiner_tls_key) =
+                if let (Some(ca_c), Some(ca_k)) = (ca_cert, ca_key) {
+                    match super::certs::sign_node_cert(ca_c, ca_k) {
+                        Ok((cert, key)) => (Some(cert), Some(key)),
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "peer.join.sign_cert_failed",
                                 error = %e,
-                                "raft voter promotion failed"
-                            ),
+                                "sign node cert failed"
+                            );
+                            (None, None)
                         }
-                        return;
                     }
-                    Err(_) if attempt < 15 => continue,
-                    Err(e) => tracing::warn!(
-                        event = "raft.learner.add_failed",
-                        raft_addr = %joiner_raft_addr,
-                        error = %e,
-                        "raft learner add failed"
-                    ),
-                }
-            }
-        });
+                } else {
+                    (None, None)
+                };
 
-        known_peers.lock().await.push(new_peer);
-        tracing::info!(
-            event = "peer.join",
-            joiner_address = %joiner_address,
-            peer_ip = %peer_ip,
-            "peer joined"
-        );
+            let resp = JoinResponse {
+                mesh_id: mesh_id.to_string(),
+                public_key: keypair.public_key().to_string(),
+                listen_port: wg_port,
+                mesh_address: mesh_address.to_string(),
+                raft_addr: raft_addr.to_string(),
+                peers: peers_snapshot,
+                ca_cert: ca_cert.map(|s| s.to_string()),
+                tls_cert: joiner_tls_cert,
+                tls_key: joiner_tls_key,
+            };
+            let resp_json = serde_json::to_string(&resp).expect("serialize");
+            writer
+                .write_all(format!("{resp_json}\n").as_bytes())
+                .await
+                .map_err(|e| MeshError::Join(e.to_string()))?;
+
+            // Add to local WG immediately
+            let new_peer = PeerInfo {
+                public_key: req.public_key.clone(),
+                endpoint: format!("{peer_ip}:{}", req.listen_port),
+                mesh_address: joiner_address.to_string(),
+            };
+            add_peer_to_wg(interface_name, &new_peer);
+
+            // Register joiner as hypervisor via Raft — replicates to all nodes.
+            // `joined_at` is computed here (on the leader) so every node's state
+            // machine applies the same byte-identical value; a schema-level
+            // `DEFAULT time::now()` would diverge by clock drift.
+            let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
+            let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
+            let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+            let surql = format!(
+                "CREATE hypervisor SET \
+                 public_key = '{}', node_id = {}, address = '{}', \
+                 endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
+                 raft_addr = '{joiner_raft_addr}', joined_at = d'{joined_at}'",
+                req.public_key,
+                joiner_node_id as i64,
+                joiner_address,
+                peer_ip,
+                req.listen_port,
+                joiner_address
+            );
+            if let Err(e) = raft.write(surql).await {
+                tracing::warn!(
+                    event = "peer.join.raft_write_failed",
+                    error = %e,
+                    "raft write to register joiner failed"
+                );
+            }
+
+            // Add joiner to Raft cluster as learner — retry in background
+            let raft_clone = Arc::clone(raft);
+            tokio::spawn(async move {
+                for attempt in 1..=15 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    match raft_clone
+                        .add_learner(joiner_node_id, &joiner_raft_addr)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                event = "raft.learner.added",
+                                raft_addr = %joiner_raft_addr,
+                                attempt,
+                                "raft learner added"
+                            );
+                            match raft_clone.promote_voter(joiner_node_id).await {
+                                Ok(_) => tracing::info!(
+                                    event = "raft.voter.promoted",
+                                    raft_addr = %joiner_raft_addr,
+                                    "raft voter promoted"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    event = "raft.voter.promote_failed",
+                                    raft_addr = %joiner_raft_addr,
+                                    error = %e,
+                                    "raft voter promotion failed"
+                                ),
+                            }
+                            return;
+                        }
+                        Err(_) if attempt < 15 => continue,
+                        Err(e) => tracing::warn!(
+                            event = "raft.learner.add_failed",
+                            raft_addr = %joiner_raft_addr,
+                            error = %e,
+                            "raft learner add failed"
+                        ),
+                    }
+                }
+            });
+
+            known_peers.lock().await.push(new_peer);
+            tracing::info!(
+                event = "peer.join",
+                joiner_address = %joiner_address,
+                peer_ip = %peer_ip,
+                "peer joined"
+            );
+            Ok(())
+        })
+        .await;
     } else if v.get("remove_public_key").is_some() {
         // --- Peer removal request ---
         let raft = raft

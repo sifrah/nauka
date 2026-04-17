@@ -185,44 +185,47 @@ where
     StoredMembershipOf<C>: Serialize + DeserializeOwned,
 {
     async fn build_snapshot(&mut self) -> Result<SnapshotOf<C>, io::Error> {
-        let mut inner = self.inner.lock().await;
-        let data = serde_json::to_vec(&inner.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        nauka_core::instrument_op("raft.snapshot.build", async {
+            let mut inner = self.inner.lock().await;
+            let data = serde_json::to_vec(&inner.data)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        inner.snapshot_idx += 1;
-        let snapshot_id = if let Some(ref last) = inner.last_applied_log {
-            format!("{}-{}", last.index(), inner.snapshot_idx)
-        } else {
-            format!("0-{}", inner.snapshot_idx)
-        };
+            inner.snapshot_idx += 1;
+            let snapshot_id = if let Some(ref last) = inner.last_applied_log {
+                format!("{}-{}", last.index(), inner.snapshot_idx)
+            } else {
+                format!("0-{}", inner.snapshot_idx)
+            };
 
-        let meta = SnapshotMetaOf::<C> {
-            last_log_id: inner.last_applied_log.clone(),
-            last_membership: inner.last_membership.clone(),
-            snapshot_id,
-        };
+            let meta = SnapshotMetaOf::<C> {
+                last_log_id: inner.last_applied_log.clone(),
+                last_membership: inner.last_membership.clone(),
+                snapshot_id,
+            };
 
-        let applied_query_count = inner.data.applied_queries.len();
-        inner.snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: data.clone(),
-        });
+            let applied_query_count = inner.data.applied_queries.len();
+            inner.snapshot = Some(StoredSnapshot {
+                meta: meta.clone(),
+                data: data.clone(),
+            });
 
-        drop(inner);
-        self.persist_snapshot(&meta, &data).await?;
+            drop(inner);
+            self.persist_snapshot(&meta, &data).await?;
 
-        tracing::info!(
-            node_id = self.node_id,
-            snapshot_id = %meta.snapshot_id,
-            applied_queries = applied_query_count,
-            bytes = data.len(),
-            "raft: built snapshot"
-        );
+            tracing::info!(
+                node_id = self.node_id,
+                snapshot_id = %meta.snapshot_id,
+                applied_queries = applied_query_count,
+                bytes = data.len(),
+                "raft: built snapshot"
+            );
 
-        Ok(SnapshotOf::<C> {
-            meta,
-            snapshot: Cursor::new(data),
+            Ok(SnapshotOf::<C> {
+                meta,
+                snapshot: Cursor::new(data),
+            })
         })
+        .await
     }
 }
 
@@ -312,46 +315,49 @@ where
         meta: &SnapshotMetaOf<C>,
         snapshot: C::SnapshotData,
     ) -> Result<(), io::Error> {
-        let raw = snapshot.into_inner();
-        let new_data: SmData = serde_json::from_slice(&raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        nauka_core::instrument_op("raft.snapshot.install", async {
+            let raw = snapshot.into_inner();
+            let new_data: SmData = serde_json::from_slice(&raw)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let mut inner = self.inner.lock().await;
-        inner.last_applied_log = meta.last_log_id.clone();
-        inner.last_membership = meta.last_membership.clone();
+            let mut inner = self.inner.lock().await;
+            inner.last_applied_log = meta.last_log_id.clone();
+            inner.last_membership = meta.last_membership.clone();
 
-        // Wipe Raft-replicated state before replaying the snapshot's queries.
-        // The receiving node's state machine usually has rows from log entries
-        // it applied before getting this snapshot; without the wipe, a CREATE
-        // in `applied_queries` hits the UNIQUE index and the replay silently
-        // diverges from the leader. `_raft_meta` / `_raft_log` are intentionally
-        // NOT touched — those are per-node state openraft manages. `mesh` is
-        // local-only and never in the snapshot.
-        self.db
-            .query("DELETE hypervisor")
-            .await
-            .map_err(|e| io::Error::other(format!("wipe pre-replay: {e}")))?;
-
-        // Surface replay errors: an error here means the receiving node's DB
-        // is out of sync with the leader, which is a correctness bug, not
-        // something to log-and-continue.
-        for query in &new_data.applied_queries {
+            // Wipe Raft-replicated state before replaying the snapshot's queries.
+            // The receiving node's state machine usually has rows from log entries
+            // it applied before getting this snapshot; without the wipe, a CREATE
+            // in `applied_queries` hits the UNIQUE index and the replay silently
+            // diverges from the leader. `_raft_meta` / `_raft_log` are intentionally
+            // NOT touched — those are per-node state openraft manages. `mesh` is
+            // local-only and never in the snapshot.
             self.db
-                .query(query)
+                .query("DELETE hypervisor")
                 .await
-                .map_err(|e| io::Error::other(format!("snapshot replay: {e}")))?;
-        }
+                .map_err(|e| io::Error::other(format!("wipe pre-replay: {e}")))?;
 
-        inner.data = new_data;
-        inner.snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data: raw.clone(),
-        });
+            // Surface replay errors: an error here means the receiving node's DB
+            // is out of sync with the leader, which is a correctness bug, not
+            // something to log-and-continue.
+            for query in &new_data.applied_queries {
+                self.db
+                    .query(query)
+                    .await
+                    .map_err(|e| io::Error::other(format!("snapshot replay: {e}")))?;
+            }
 
-        drop(inner);
-        self.persist_snapshot(meta, &raw).await?;
+            inner.data = new_data;
+            inner.snapshot = Some(StoredSnapshot {
+                meta: meta.clone(),
+                data: raw.clone(),
+            });
 
-        Ok(())
+            drop(inner);
+            self.persist_snapshot(meta, &raw).await?;
+
+            Ok(())
+        })
+        .await
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<C>>, io::Error> {

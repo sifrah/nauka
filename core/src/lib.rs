@@ -2,4 +2,4 @@
 
 pub mod logging;
 
-pub use logging::{init, install_panic_hook, LogErr, LogMode};
+pub use logging::{init, install_panic_hook, instrument_op, LogErr, LogMode};

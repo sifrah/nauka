@@ -6,7 +6,10 @@
 //! `RUST_LOG` overrides the default in every mode.
 
 use std::fmt::Display;
+use std::future::Future;
+use std::time::Instant;
 
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 
 /// Which surface the process is — picks the default filter and format.
@@ -133,4 +136,48 @@ impl<T, E: Display> LogErr<T, E> for Result<T, E> {
             }
         }
     }
+}
+
+/// Wrap an async operation with a span + duration + lifecycle events.
+///
+/// Emits `<name>.start` at the beginning, `<name>.end` with `elapsed_ms`
+/// on success, `<name>.failed` with `elapsed_ms` + `error` on failure.
+/// Every inner event inherits the `op` span so `trace_id` and other
+/// span fields propagate automatically.
+///
+/// Use for operations you'd want to measure or correlate in
+/// `journalctl` — init, join, snapshot build/install, peer remove,
+/// etc. Cheap enough to wrap anywhere an error is worth noting; too
+/// verbose for per-tick work (reconciler sweep, raft apply).
+pub async fn instrument_op<F, T, E>(name: &'static str, fut: F) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+    E: Display,
+{
+    let span = tracing::info_span!("op", name = name);
+    async move {
+        let start = Instant::now();
+        tracing::info!(event = format!("{name}.start"), "op start");
+        match fut.await {
+            Ok(v) => {
+                tracing::info!(
+                    event = format!("{name}.end"),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "op end"
+                );
+                Ok(v)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    event = format!("{name}.failed"),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    error = %e,
+                    "op failed"
+                );
+                Err(e)
+            }
+        }
+    }
+    .instrument(span)
+    .await
 }
