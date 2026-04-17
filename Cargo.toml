@@ -31,6 +31,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 rustls-pemfile = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
+linkme = "0.3"
 nauka-core = { path = "core" }
 nauka-hypervisor = { path = "layers/hypervisor" }
 nauka-state = { path = "layers/state" }
