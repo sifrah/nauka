@@ -71,12 +71,38 @@ A new resource that violates the contract **does not compile**.
    refuses `DEFAULT time::now()`, `DEFAULT rand::*`, and any expression
    that could evaluate differently on two state-machine apply paths.
    This single rule closes the Raft-determinism footgun for good.
-9. **All CRUD goes through generated helpers.** `Resource::create`,
-   `::update`, `::delete`, `::get`, `::list` — typed, single
-   implementation, auto-bumps `updated_at`/`version`, emits lifecycle
-   events through `instrument_op` (ADR 0005). Raw `db.query("CREATE
-   {table} …")` against a known resource table is rejected by a CI grep
-   check.
+9. **One file per resource, always `definition.rs`.** Every resource
+   has its own `src/definition.rs`, colocated with the module that
+   owns it. The file contains **only** the `#[resource(…)]` struct
+   plus its derives (`Serialize`, `Deserialize`, `SurrealValue`,
+   `Debug`, `Clone`) — no methods, conversions, or helpers. An audit
+   of the cloud's schema is therefore `find . -name definition.rs`.
+   Example layouts:
+   ```
+   layers/hypervisor/src/
+   ├── definition.rs          # Hypervisor
+   ├── daemon.rs
+   └── mesh/
+       ├── mod.rs
+       ├── definition.rs      # Mesh
+       └── …
+   layers/compute/src/
+   ├── vm/
+   │   ├── mod.rs
+   │   ├── definition.rs      # Vm
+   │   └── ops.rs
+   ├── volume/
+   │   ├── definition.rs      # Volume
+   │   └── …
+   └── …
+   ```
+10. **All CRUD goes through `nauka_state::Writer` + generated
+    `ResourceOps`.** `Writer::create`, `::update`, `::delete` route
+    to `RaftNode::write` (cluster) or `Database::query` (local) based
+    on `R::SCOPE`. Reads are read-local: inherent helpers on
+    `Database` (`get::<R>`, `list::<R>`). Raw
+    `db.query("CREATE {table} …")` against a known resource table is
+    rejected by a CI grep check.
 
 ### Trait surface
 

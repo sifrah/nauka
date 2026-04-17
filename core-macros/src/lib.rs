@@ -129,6 +129,12 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
         "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL;\n{user_ddl}{base_ddl}{unique_ddl}"
     );
 
+    // Build the SET-clause expression list *before* adding base fields
+    // so we can append them (with their own Datetime/u64 emitters)
+    // explicitly and keep a stable ordering.
+    let user_set_exprs = build_set_exprs(&item)?;
+    let base_set_exprs = build_base_set_exprs();
+
     inject_base_fields(&mut item);
     strip_macro_attrs(&mut item);
 
@@ -139,6 +145,14 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
     };
 
     let static_name = format_ident!("__NAUKA_RES_{}", struct_name.to_string().to_uppercase());
+
+    let all_set_exprs = user_set_exprs
+        .into_iter()
+        .chain(base_set_exprs)
+        .collect::<Vec<_>>();
+
+    let create_body = build_create_body(&table, &id_field_name, &all_set_exprs);
+    let update_body = build_update_body(&table, &id_field_name, &all_set_exprs);
 
     Ok(quote! {
         #item
@@ -167,6 +181,16 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
             }
         }
 
+        impl ::nauka_core::resource::ResourceOps for #struct_name {
+            fn create_query(&self) -> ::std::string::String {
+                #create_body
+            }
+
+            fn update_query(&self) -> ::std::string::String {
+                #update_body
+            }
+        }
+
         #[::nauka_core::resource::__macro_support::linkme::distributed_slice(
             ::nauka_core::resource::ALL_RESOURCES
         )]
@@ -179,6 +203,148 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
                 ddl: #full_ddl,
             };
     })
+}
+
+/// Produce `Vec<TokenStream>` where each element evaluates at
+/// runtime to the string `"field_name = surql_literal"` for one user
+/// field of the struct.
+fn build_set_exprs(item: &ItemStruct) -> syn::Result<Vec<TokenStream2>> {
+    let Fields::Named(named) = &item.fields else {
+        return Ok(Vec::new());
+    };
+    named
+        .named
+        .iter()
+        .map(|f| {
+            let name = f.ident.as_ref().expect("named field has ident");
+            let name_str = name.to_string();
+            let value_expr = emit_literal_expr(&f.ty, &quote!(self.#name))
+                .map_err(|e| syn::Error::new_spanned(&f.ty, e))?;
+            Ok(quote! {
+                format!("{} = {}", #name_str, { #value_expr })
+            })
+        })
+        .collect()
+}
+
+/// Emitters for the three base fields the macro injected. These
+/// know their types directly and do not need Rust→SurrealQL
+/// inference.
+fn build_base_set_exprs() -> Vec<TokenStream2> {
+    vec![
+        quote! {
+            format!(
+                "created_at = <datetime>\"{}\"",
+                self.created_at.to_string()
+            )
+        },
+        quote! {
+            format!(
+                "updated_at = <datetime>\"{}\"",
+                self.updated_at.to_string()
+            )
+        },
+        quote! {
+            format!("version = {}", self.version as i64)
+        },
+    ]
+}
+
+fn build_create_body(
+    table: &str,
+    id_field: &Ident,
+    set_exprs: &[TokenStream2],
+) -> TokenStream2 {
+    quote! {
+        let set_parts: ::std::vec::Vec<::std::string::String> =
+            vec![ #(#set_exprs),* ];
+        let id_str = self.#id_field.to_string();
+        format!(
+            "CREATE {}:\u{27E8}{}\u{27E9} SET {}",
+            #table,
+            ::nauka_core::resource::escape_record_id(&id_str),
+            set_parts.join(", "),
+        )
+    }
+}
+
+fn build_update_body(
+    table: &str,
+    id_field: &Ident,
+    set_exprs: &[TokenStream2],
+) -> TokenStream2 {
+    quote! {
+        let set_parts: ::std::vec::Vec<::std::string::String> =
+            vec![ #(#set_exprs),* ];
+        let id_str = self.#id_field.to_string();
+        format!(
+            "UPDATE {}:\u{27E8}{}\u{27E9} SET {}",
+            #table,
+            ::nauka_core::resource::escape_record_id(&id_str),
+            set_parts.join(", "),
+        )
+    }
+}
+
+/// Produce a `TokenStream` that, when spliced into generated code,
+/// evaluates at runtime to a `String` holding the SurrealQL literal
+/// for `access` (an expression of type `ty`).
+///
+/// Supports the same type closed-set as [`rust_to_surql_type`] —
+/// unsupported types are rejected at macro expansion so the mismatch
+/// shows up at compile time, not at runtime.
+fn emit_literal_expr(ty: &Type, access: &TokenStream2) -> Result<TokenStream2, String> {
+    let Type::Path(tp) = ty else {
+        return Err("only path types are supported in `#[resource]` fields".into());
+    };
+    let seg = tp
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| "empty type path".to_string())?;
+    let name = seg.ident.to_string();
+
+    match name.as_str() {
+        "String" => Ok(quote! {
+            format!("\"{}\"", ::nauka_core::resource::escape_surql_string(&#access))
+        }),
+        "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" => {
+            Ok(quote! { (#access as i64).to_string() })
+        }
+        "f32" | "f64" => Ok(quote! { (#access as f64).to_string() }),
+        "bool" => Ok(quote! { #access.to_string() }),
+        "Datetime" => Ok(quote! {
+            format!("<datetime>\"{}\"", #access.to_string())
+        }),
+        "Uuid" => Ok(quote! {
+            format!("<uuid>\"{}\"", #access.to_string())
+        }),
+        "Option" => {
+            let inner = first_type_arg(seg).map_err(|e| e.to_string())?;
+            let inner_expr = emit_literal_expr(inner, &quote!(v))?;
+            Ok(quote! {
+                match &#access {
+                    ::std::option::Option::Some(v) => { #inner_expr },
+                    ::std::option::Option::None => "NONE".to_string(),
+                }
+            })
+        }
+        "Vec" => {
+            let inner = first_type_arg(seg).map_err(|e| e.to_string())?;
+            let inner_expr = emit_literal_expr(inner, &quote!(v))?;
+            Ok(quote! {
+                {
+                    let items: ::std::vec::Vec<::std::string::String> =
+                        (&#access).iter().map(|v| { #inner_expr }).collect();
+                    format!("[{}]", items.join(","))
+                }
+            })
+        }
+        other => Err(format!(
+            "unsupported type `{other}` — supported: `String`, integer types, `f32`/`f64`, \
+             `bool`, `Datetime`, `Uuid`, `Option<T>`, `Vec<T>`"
+        )),
+    }
 }
 
 // -------- validators --------

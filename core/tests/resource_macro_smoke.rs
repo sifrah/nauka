@@ -9,12 +9,14 @@
 //! 5. Is included in the appropriate `local_schemas()` /
 //!    `cluster_schemas()` output.
 
-use nauka_core::resource::{cluster_schemas, local_schemas, Datetime, Resource, Scope};
+use nauka_core::resource::{
+    cluster_schemas, local_schemas, Datetime, Resource, ResourceOps, Scope, SurrealValue,
+};
 use nauka_core_macros::resource;
 use serde::{Deserialize, Serialize};
 
 #[resource(table = "test_widget", scope = "cluster")]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, SurrealValue)]
 pub struct TestWidget {
     #[id]
     pub key: String,
@@ -26,7 +28,7 @@ pub struct TestWidget {
 }
 
 #[resource(table = "test_local_thing", scope = "local")]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, SurrealValue)]
 pub struct TestLocalThing {
     #[id]
     pub name: String,
@@ -112,4 +114,91 @@ fn registered_in_global_slice_under_correct_scope() {
     // Cross-scope leakage check.
     assert!(!cluster.contains("test_local_thing"));
     assert!(!local.contains("test_widget"));
+}
+
+#[test]
+fn create_query_emits_record_id_syntax_and_all_set_clauses() {
+    let widget = TestWidget {
+        key: "alpha".into(),
+        serial: 42,
+        label: r#"label with "quotes" and \backslash"#.into(),
+        tags: vec!["a".into(), "b".into()],
+        note: None,
+        created_at: Datetime::default(),
+        updated_at: Datetime::default(),
+        version: 0,
+    };
+
+    let q = widget.create_query();
+
+    assert!(q.starts_with("CREATE test_widget:\u{27E8}alpha\u{27E9} SET "));
+    assert!(q.contains(r#"key = "alpha""#));
+    assert!(q.contains("serial = 42"));
+    assert!(q.contains(r#"label = "label with \"quotes\" and \\backslash""#));
+    assert!(q.contains(r#"tags = ["a","b"]"#));
+    assert!(q.contains("note = NONE"));
+    assert!(q.contains("version = 0"));
+    assert!(q.contains("created_at = <datetime>\""));
+    assert!(q.contains("updated_at = <datetime>\""));
+}
+
+#[test]
+fn update_query_uses_update_verb_on_same_record() {
+    let widget = TestWidget {
+        key: "beta".into(),
+        serial: 7,
+        label: "x".into(),
+        tags: vec![],
+        note: Some("hi".into()),
+        created_at: Datetime::default(),
+        updated_at: Datetime::default(),
+        version: 3,
+    };
+
+    let q = widget.update_query();
+    assert!(q.starts_with("UPDATE test_widget:\u{27E8}beta\u{27E9} SET "));
+    assert!(q.contains(r#"note = "hi""#));
+    assert!(q.contains("version = 3"));
+}
+
+#[test]
+fn delete_get_list_queries_match_convention() {
+    assert_eq!(
+        <TestWidget as ResourceOps>::delete_query(&"gamma".to_string()),
+        "DELETE test_widget:\u{27E8}gamma\u{27E9}"
+    );
+    assert_eq!(
+        <TestWidget as ResourceOps>::get_query(&"delta".to_string()),
+        "SELECT * FROM test_widget:\u{27E8}delta\u{27E9}"
+    );
+    assert_eq!(TestWidget::list_query(), "SELECT * FROM test_widget");
+}
+
+#[test]
+fn record_id_escaping_blocks_injection() {
+    // A hostile id that tries to close the ⟨…⟩ and append a second
+    // statement must be escaped inside the record-id payload so
+    // SurrealDB parses the whole prefix as one record literal.
+    let injected = TestWidget {
+        key: "x\u{27E9}; DELETE test_widget;".into(),
+        serial: 1,
+        label: "l".into(),
+        tags: vec![],
+        note: None,
+        created_at: Datetime::default(),
+        updated_at: Datetime::default(),
+        version: 0,
+    };
+
+    let q = injected.create_query();
+
+    // Expect the id payload to carry an escaped `\⟩` and end with a
+    // single unescaped `⟩ SET ` — that single unescaped bracket is
+    // the real record-id terminator.
+    let expected_prefix =
+        "CREATE test_widget:\u{27E8}x\\\u{27E9}; DELETE test_widget;\u{27E9} SET ";
+    assert!(
+        q.starts_with(expected_prefix),
+        "query did not escape ⟩ in record id payload: {q}"
+    );
 }

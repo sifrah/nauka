@@ -15,11 +15,40 @@ use linkme::distributed_slice;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Display;
 
-pub use surrealdb::types::Datetime;
+pub use surrealdb::types::{Datetime, SurrealValue};
 
 #[doc(hidden)]
 pub mod __macro_support {
     pub use linkme;
+}
+
+/// Escape a string for use inside a SurrealQL double-quoted string
+/// literal. Escapes `"` and `\`.
+pub fn escape_surql_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape a value for use inside a SurrealDB `⟨…⟩` record-id
+/// payload. Escapes `\` and the closing bracket `⟩` so an attacker
+/// controlling an id string cannot break out of the record literal.
+pub fn escape_record_id(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\u{27E9}' => out.push_str("\\\u{27E9}"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Where a resource lives.
@@ -67,7 +96,9 @@ pub static ALL_RESOURCES: [&'static ResourceDescriptor] = [..];
 /// Normally derived through the `#[resource(…)]` attribute macro;
 /// hand-written impls are possible but discouraged because they
 /// bypass the compile-time invariant checks.
-pub trait Resource: Serialize + DeserializeOwned + Send + Sync + 'static {
+pub trait Resource:
+    Serialize + DeserializeOwned + SurrealValue + Send + Sync + 'static
+{
     /// SurrealDB table name. snake_case singular.
     const TABLE: &'static str;
 
@@ -95,6 +126,57 @@ pub trait Resource: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// `0` on create, `+1` on every successful update. Provides
     /// optimistic concurrency and a deterministic ordering of writes.
     fn version(&self) -> u64;
+}
+
+/// SurrealQL statement factory for a [`Resource`]. The `#[resource]`
+/// attribute macro emits an `impl ResourceOps for …` that provides
+/// the two per-field methods ([`create_query`](ResourceOps::create_query)
+/// and [`update_query`](ResourceOps::update_query)); the rest are
+/// default methods that only need `Self::TABLE` and `Self::Id`.
+///
+/// `nauka_state::Writer` consumes these strings and routes them to
+/// either `RaftNode::write` (for [`Scope::Cluster`]) or
+/// `Database::query` (for [`Scope::Local`]), so call sites never pick
+/// the transport themselves.
+pub trait ResourceOps: Resource + Sized {
+    /// SurrealQL `CREATE` statement for this value. Uses the natural
+    /// key as the record id: `CREATE {table}:⟨{id}⟩ SET …`.
+    ///
+    /// Emitted by `#[resource]`; no default implementation because
+    /// the body is per-field.
+    fn create_query(&self) -> String;
+
+    /// SurrealQL `UPDATE` statement setting every field on the
+    /// record identified by this value's natural key. The caller is
+    /// responsible for having bumped `updated_at` / `version` before
+    /// calling — this is not done inside the generated method, so
+    /// callers that need deterministic timestamps (Raft leaders) can
+    /// set them explicitly.
+    fn update_query(&self) -> String;
+
+    /// SurrealQL `DELETE` for the record with this id.
+    fn delete_query(id: &Self::Id) -> String {
+        format!(
+            "DELETE {}:\u{27E8}{}\u{27E9}",
+            Self::TABLE,
+            escape_record_id(&id.to_string())
+        )
+    }
+
+    /// SurrealQL `SELECT *` for the single record with this id.
+    fn get_query(id: &Self::Id) -> String {
+        format!(
+            "SELECT * FROM {}:\u{27E8}{}\u{27E9}",
+            Self::TABLE,
+            escape_record_id(&id.to_string())
+        )
+    }
+
+    /// SurrealQL `SELECT *` for every record in this resource's
+    /// table.
+    fn list_query() -> String {
+        format!("SELECT * FROM {}", Self::TABLE)
+    }
 }
 
 /// Concatenated DDL for every [`Scope::Local`] resource, ready to
