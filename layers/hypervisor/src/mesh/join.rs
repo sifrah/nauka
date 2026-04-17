@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use surrealdb::types::SurrealValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tracing::Instrument;
 
 use super::{KeyPair, Mesh, MeshError, MeshId, MeshPeer};
 
@@ -128,25 +129,37 @@ pub async fn mesh_listener(
         let ca_c = ca_cert.clone();
         let ca_k = ca_key.clone();
 
-        tokio::spawn(async move {
-            let _ = handle_connection(
-                stream,
-                peer_addr,
-                raft,
-                &db,
-                &mesh_id,
-                &keypair,
-                &mesh_address,
-                &iface,
-                wg_port,
-                pin.as_deref(),
-                &peers,
-                &ra,
-                ca_c.as_deref(),
-                ca_k.as_deref(),
-            )
-            .await;
-        });
+        // One trace_id per incoming connection, so every event produced
+        // while handling this TCP stream (including nested instrument_op
+        // scopes like peer.join) is greppable as one unit in journalctl.
+        let trace_id = nauka_core::new_trace_id();
+        let span = tracing::info_span!(
+            "peer_conn",
+            trace_id = %trace_id,
+            peer = %peer_addr,
+        );
+        tokio::spawn(
+            async move {
+                let _ = handle_connection(
+                    stream,
+                    peer_addr,
+                    raft,
+                    &db,
+                    &mesh_id,
+                    &keypair,
+                    &mesh_address,
+                    &iface,
+                    wg_port,
+                    pin.as_deref(),
+                    &peers,
+                    &ra,
+                    ca_c.as_deref(),
+                    ca_k.as_deref(),
+                )
+                .await;
+            }
+            .instrument(span),
+        );
     }
 }
 

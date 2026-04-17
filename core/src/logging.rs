@@ -138,12 +138,25 @@ impl<T, E: Display> LogErr<T, E> for Result<T, E> {
     }
 }
 
+/// Generate a fresh trace_id — a UUID v4 string suitable for
+/// `tracing::info_span!("...", trace_id = %new_trace_id())` at any
+/// entry point where an operation starts outside of [`instrument_op`]
+/// (CLI dispatch, TCP accept loop, Raft RPC handler).
+///
+/// Operations inside [`instrument_op`] already get their own
+/// trace_id; the outer span's trace_id stays in the breadcrumb, so
+/// `journalctl … | grep trace_id=<uuid>` picks up everything
+/// under it.
+pub fn new_trace_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Wrap an async operation with a span + duration + lifecycle events.
 ///
 /// Emits `<name>.start` at the beginning, `<name>.end` with `elapsed_ms`
 /// on success, `<name>.failed` with `elapsed_ms` + `error` on failure.
-/// Every inner event inherits the `op` span so `trace_id` and other
-/// span fields propagate automatically.
+/// The span carries `name` and a fresh `trace_id` (UUID v4) so every
+/// inner event is greppable via `trace_id=<uuid>` in journalctl.
 ///
 /// Use for operations you'd want to measure or correlate in
 /// `journalctl` — init, join, snapshot build/install, peer remove,
@@ -154,7 +167,8 @@ where
     F: Future<Output = Result<T, E>>,
     E: Display,
 {
-    let span = tracing::info_span!("op", name = name);
+    let trace_id = new_trace_id();
+    let span = tracing::info_span!("op", name = name, trace_id = %trace_id);
     async move {
         let start = Instant::now();
         tracing::info!(event = format!("{name}.start"), "op start");

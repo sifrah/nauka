@@ -11,6 +11,7 @@ use nauka_hypervisor::daemon::{
 use nauka_hypervisor::mesh;
 use nauka_hypervisor::systemd;
 use nauka_state::Database;
+use tracing::Instrument;
 
 #[tokio::main]
 async fn main() {
@@ -25,7 +26,14 @@ async fn main() {
     };
     logging::init(mode);
 
-    let exit_code = match run().await {
+    // One trace_id per CLI/daemon invocation. Every event under `run`
+    // inherits it via the span breadcrumb, so
+    // `journalctl | grep trace_id=<uuid>` returns the full story of
+    // this invocation.
+    let trace_id = nauka_core::new_trace_id();
+    let span = tracing::info_span!("cli", trace_id = %trace_id);
+
+    let exit_code = match run().instrument(span).await {
         Ok(()) => 0,
         Err(e) => {
             cli_out::error(format_args!("{e:#}"));

@@ -2537,6 +2537,7 @@ version = "2.0.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

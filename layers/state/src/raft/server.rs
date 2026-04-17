@@ -7,6 +7,7 @@ use openraft::raft::{AppendEntriesRequest, VoteRequest};
 use openraft::{BasicNode, ChangeMembers};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tracing::Instrument;
 
 use super::tls::TlsConfig;
 use super::types::{SurqlCommand, TypeConfig};
@@ -40,33 +41,46 @@ pub async fn start_raft_server(
         let raft = raft.clone();
         let acceptor = acceptor.clone();
 
-        tokio::spawn(async move {
-            let result = if let Some(ref acc) = acceptor {
-                match acc.accept(stream).await {
-                    Ok(tls_stream) => handle_rpc(tls_stream, raft).await,
-                    Err(e) => {
-                        tracing::warn!(
-                            event = "raft.server.tls.handshake_failed",
-                            peer = %peer,
-                            error = %e,
-                            "raft tls handshake failed"
-                        );
-                        return;
+        // One trace_id per Raft RPC — a single vote/append_entries/
+        // snapshot install is one operation and every event it emits
+        // (tls handshake, handler logs, downstream instrument_op
+        // scopes like raft.snapshot.install) should share the same id.
+        let trace_id = nauka_core::new_trace_id();
+        let span = tracing::info_span!(
+            "raft_rpc",
+            trace_id = %trace_id,
+            peer = %peer,
+        );
+        tokio::spawn(
+            async move {
+                let result = if let Some(ref acc) = acceptor {
+                    match acc.accept(stream).await {
+                        Ok(tls_stream) => handle_rpc(tls_stream, raft).await,
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "raft.server.tls.handshake_failed",
+                                peer = %peer,
+                                error = %e,
+                                "raft tls handshake failed"
+                            );
+                            return;
+                        }
                     }
-                }
-            } else {
-                handle_rpc(stream, raft).await
-            };
+                } else {
+                    handle_rpc(stream, raft).await
+                };
 
-            if let Err(e) = result {
-                tracing::warn!(
-                    event = "raft.server.rpc.error",
-                    peer = %peer,
-                    error = %e,
-                    "raft rpc error"
-                );
+                if let Err(e) = result {
+                    tracing::warn!(
+                        event = "raft.server.rpc.error",
+                        peer = %peer,
+                        error = %e,
+                        "raft rpc error"
+                    );
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }
 
