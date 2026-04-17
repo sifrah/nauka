@@ -19,7 +19,7 @@ DEFINE FIELD IF NOT EXISTS value ON kv TYPE string;\
 DEFINE INDEX IF NOT EXISTS kv_key ON kv FIELDS key UNIQUE;\
 ";
 
-// Mirror of the Raft-replicated portion of `layers/hypervisor/definition.surql`.
+// Mirror of the Raft-replicated portion of `layers/hypervisor/src/definition.surql`.
 // Kept inline to avoid the state crate reaching across layer boundaries; if
 // the hypervisor schema changes, update here too — the point of this test is
 // to catch non-deterministic defaults being reintroduced.
