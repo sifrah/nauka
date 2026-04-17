@@ -326,6 +326,20 @@ fn emit_literal_expr(ty: &Type, access: &TokenStream2) -> Result<TokenStream2, S
         "Uuid" => Ok(quote! {
             format!("<uuid>\"{}\"", (#access).to_string())
         }),
+        "Ref" => {
+            // Emit a bare record literal `{table}:⟨{id}⟩`. Record-id
+            // characters are escaped against bracket-escape injection.
+            let inner = first_type_arg(seg).map_err(|e| e.to_string())?;
+            let target_ident = ref_target_ident(inner)?;
+            let target_table = pascal_to_snake(&target_ident);
+            Ok(quote! {
+                format!(
+                    "{}:\u{27E8}{}\u{27E9}",
+                    #target_table,
+                    ::nauka_core::resource::escape_record_id((#access).id())
+                )
+            })
+        }
         "Option" => {
             let inner = first_type_arg(seg).map_err(|e| e.to_string())?;
             let inner_expr = emit_literal_expr(inner, &quote!(v))?;
@@ -552,6 +566,15 @@ fn rust_to_surql_type(ty: &Type) -> Result<String, String> {
         "bool" => Ok("bool".into()),
         "Datetime" => Ok("datetime".into()),
         "Uuid" => Ok("uuid".into()),
+        "Ref" => {
+            // `Ref<TargetType>` → `record<target_type>`. The target
+            // type's PascalCase → snake_case mapping is what links
+            // the reference to the other resource's table, without
+            // the author writing the name twice.
+            let inner = first_type_arg(seg)?;
+            let target_ident = ref_target_ident(inner)?;
+            Ok(format!("record<{}>", pascal_to_snake(&target_ident)))
+        }
         "Option" => {
             let inner = first_type_arg(seg)?;
             Ok(format!("option<{}>", rust_to_surql_type(inner)?))
@@ -562,9 +585,41 @@ fn rust_to_surql_type(ty: &Type) -> Result<String, String> {
         }
         other => Err(format!(
             "unsupported type `{other}` — supported: `String`, integer types, `f32`/`f64`, \
-             `bool`, `Datetime`, `Uuid`, `Option<T>`, `Vec<T>`"
+             `bool`, `Datetime`, `Uuid`, `Ref<T>`, `Option<T>`, `Vec<T>`"
         )),
     }
+}
+
+/// Given the inner type of a `Ref<T>`, extract the last path segment
+/// as a string — e.g. `crate::Hypervisor` → `"Hypervisor"`.
+fn ref_target_ident(inner: &Type) -> Result<String, String> {
+    let Type::Path(tp) = inner else {
+        return Err("`Ref<T>` requires a path type as the target (e.g. `Ref<Hypervisor>`)".into());
+    };
+    tp.path
+        .segments
+        .last()
+        .map(|s| s.ident.to_string())
+        .ok_or_else(|| "empty path inside `Ref<…>`".to_string())
+}
+
+/// PascalCase → snake_case — same rule as
+/// `nauka_core::resource::pascal_to_snake`. Duplicated here so the
+/// macro can run at expansion time without cross-crate coupling at
+/// build time.
+fn pascal_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for (i, c) in s.char_indices() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn first_type_arg(seg: &PathSegment) -> Result<&Type, String> {

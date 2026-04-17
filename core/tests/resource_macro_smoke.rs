@@ -10,7 +10,7 @@
 //!    `cluster_schemas()` output.
 
 use nauka_core::resource::{
-    cluster_schemas, local_schemas, Datetime, Resource, ResourceOps, Scope, SurrealValue,
+    cluster_schemas, local_schemas, Datetime, Ref, Resource, ResourceOps, Scope, SurrealValue,
 };
 use nauka_core_macros::resource;
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,81 @@ fn delete_get_list_queries_match_convention() {
         "SELECT * FROM test_widget:\u{27E8}delta\u{27E9}"
     );
     assert_eq!(TestWidget::list_query(), "SELECT * FROM test_widget");
+}
+
+// --- Cross-resource references ---
+
+#[resource(table = "test_parent", scope = "cluster")]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestParent {
+    #[id]
+    pub name: String,
+    pub note: String,
+}
+
+#[resource(table = "test_child", scope = "cluster")]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestChild {
+    #[id]
+    pub slug: String,
+    pub parent: Ref<TestParent>,
+    pub siblings: Vec<Ref<TestParent>>,
+    pub preferred: Option<Ref<TestParent>>,
+}
+
+#[test]
+fn reference_fields_become_record_types_in_ddl() {
+    let ddl = TestChild::DDL;
+    assert!(
+        ddl.contains("parent ON test_child TYPE record<test_parent>"),
+        "missing record<test_parent> for `parent`: {ddl}"
+    );
+    assert!(
+        ddl.contains("siblings ON test_child TYPE array<record<test_parent>>"),
+        "missing array<record<test_parent>> for `siblings`: {ddl}"
+    );
+    assert!(
+        ddl.contains("preferred ON test_child TYPE option<record<test_parent>>"),
+        "missing option<record<test_parent>> for `preferred`: {ddl}"
+    );
+}
+
+#[test]
+fn create_query_emits_bare_record_literals_for_refs() {
+    let child = TestChild {
+        slug: "c1".into(),
+        parent: Ref::new("p1"),
+        siblings: vec![Ref::new("p2"), Ref::new("p3")],
+        preferred: None,
+        created_at: Datetime::default(),
+        updated_at: Datetime::default(),
+        version: 0,
+    };
+
+    let q = child.create_query();
+
+    // Record refs must NOT be emitted as quoted strings — the DDL
+    // says `record<test_parent>` so the value side must produce a
+    // bare record literal.
+    assert!(
+        q.contains("parent = test_parent:\u{27E8}p1\u{27E9}"),
+        "parent ref not a bare record literal: {q}"
+    );
+    assert!(
+        q.contains("siblings = [test_parent:\u{27E8}p2\u{27E9},test_parent:\u{27E8}p3\u{27E9}]"),
+        "siblings array wrong: {q}"
+    );
+    assert!(q.contains("preferred = NONE"));
+}
+
+#[test]
+fn ref_is_type_safe_across_resources() {
+    // A `Ref<TestParent>` cannot be used where a `Ref<TestWidget>`
+    // is expected — compile-time guarantee, no runtime check.
+    // Verify the Ref value carries the right table in its Display.
+    let r: Ref<TestParent> = Ref::new("foo");
+    assert_eq!(r.id(), "foo");
+    assert_eq!(format!("{r}"), "test_parent:foo");
 }
 
 #[test]

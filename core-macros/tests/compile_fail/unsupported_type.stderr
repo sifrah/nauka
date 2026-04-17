@@ -1,4 +1,4 @@
-error: unsupported type `CustomThing` — supported: `String`, integer types, `f32`/`f64`, `bool`, `Datetime`, `Uuid`, `Option<T>`, `Vec<T>`
+error: unsupported type `CustomThing` — supported: `String`, integer types, `f32`/`f64`, `bool`, `Datetime`, `Uuid`, `Ref<T>`, `Option<T>`, `Vec<T>`
   --> tests/compile_fail/unsupported_type.rs:12:16
    |
 12 |     pub thing: CustomThing,
