@@ -2583,6 +2583,7 @@ dependencies = [
  "chrono",
  "defguard_wireguard_rs",
  "nauka-core",
+ "nauka-core-macros",
  "nauka-state",
  "rcgen",
  "ring",

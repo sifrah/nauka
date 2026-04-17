@@ -218,7 +218,7 @@ fn build_set_exprs(item: &ItemStruct) -> syn::Result<Vec<TokenStream2>> {
         .map(|f| {
             let name = f.ident.as_ref().expect("named field has ident");
             let name_str = name.to_string();
-            let value_expr = emit_literal_expr(&f.ty, &quote!(self.#name))
+            let value_expr = emit_literal_expr(&f.ty, &quote!(&self.#name))
                 .map_err(|e| syn::Error::new_spanned(&f.ty, e))?;
             Ok(quote! {
                 format!("{} = {}", #name_str, { #value_expr })
@@ -235,13 +235,13 @@ fn build_base_set_exprs() -> Vec<TokenStream2> {
         quote! {
             format!(
                 "created_at = <datetime>\"{}\"",
-                self.created_at.to_string()
+                (&self.created_at).to_string()
             )
         },
         quote! {
             format!(
                 "updated_at = <datetime>\"{}\"",
-                self.updated_at.to_string()
+                (&self.updated_at).to_string()
             )
         },
         quote! {
@@ -288,7 +288,11 @@ fn build_update_body(
 
 /// Produce a `TokenStream` that, when spliced into generated code,
 /// evaluates at runtime to a `String` holding the SurrealQL literal
-/// for `access` (an expression of type `ty`).
+/// for the value borrowed by `access`.
+///
+/// The caller passes `access` as a `&T` expression — this keeps the
+/// recursive `Option`/`Vec` cases uniform (the inner binding is also
+/// a `&T`).
 ///
 /// Supports the same type closed-set as [`rust_to_surql_type`] —
 /// unsupported types are rejected at macro expansion so the mismatch
@@ -304,26 +308,29 @@ fn emit_literal_expr(ty: &Type, access: &TokenStream2) -> Result<TokenStream2, S
         .ok_or_else(|| "empty type path".to_string())?;
     let name = seg.ident.to_string();
 
+    // All branches parenthesize `#access` because callers may splice
+    // in an expression like `&self.field`, and Rust's precedence
+    // makes `&self.field.method()` parse as `&(self.field.method())`.
     match name.as_str() {
         "String" => Ok(quote! {
-            format!("\"{}\"", ::nauka_core::resource::escape_surql_string(&#access))
+            format!("\"{}\"", ::nauka_core::resource::escape_surql_string((#access)))
         }),
         "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" => {
-            Ok(quote! { (#access as i64).to_string() })
+            Ok(quote! { (*(#access) as i64).to_string() })
         }
-        "f32" | "f64" => Ok(quote! { (#access as f64).to_string() }),
-        "bool" => Ok(quote! { #access.to_string() }),
+        "f32" | "f64" => Ok(quote! { (*(#access) as f64).to_string() }),
+        "bool" => Ok(quote! { (#access).to_string() }),
         "Datetime" => Ok(quote! {
-            format!("<datetime>\"{}\"", #access.to_string())
+            format!("<datetime>\"{}\"", (#access).to_string())
         }),
         "Uuid" => Ok(quote! {
-            format!("<uuid>\"{}\"", #access.to_string())
+            format!("<uuid>\"{}\"", (#access).to_string())
         }),
         "Option" => {
             let inner = first_type_arg(seg).map_err(|e| e.to_string())?;
             let inner_expr = emit_literal_expr(inner, &quote!(v))?;
             Ok(quote! {
-                match &#access {
+                match (#access) {
                     ::std::option::Option::Some(v) => { #inner_expr },
                     ::std::option::Option::None => "NONE".to_string(),
                 }
@@ -335,7 +342,7 @@ fn emit_literal_expr(ty: &Type, access: &TokenStream2) -> Result<TokenStream2, S
             Ok(quote! {
                 {
                     let items: ::std::vec::Vec<::std::string::String> =
-                        (&#access).iter().map(|v| { #inner_expr }).collect();
+                        (#access).iter().map(|v| { #inner_expr }).collect();
                     format!("[{}]", items.join(","))
                 }
             })

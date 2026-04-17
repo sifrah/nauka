@@ -1,7 +1,10 @@
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::{Kernel, WGApi, WireguardInterfaceApi};
+use nauka_core::resource::Datetime;
 use nauka_core::LogNaukaErr;
-use nauka_state::{Database, RaftNode};
+use nauka_state::{Database, RaftNode, Writer};
+
+use crate::definition::Hypervisor;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -282,26 +285,27 @@ async fn handle_connection(
             };
             add_peer_to_wg(interface_name, &new_peer);
 
-            // Register joiner as hypervisor via Raft — replicates to all nodes.
-            // `joined_at` is computed here (on the leader) so every node's state
-            // machine applies the same byte-identical value; a schema-level
-            // `DEFAULT time::now()` would diverge by clock drift.
+            // Register joiner as hypervisor via Raft — replicates to all
+            // nodes. Timestamps computed on the leader so each state
+            // machine applies the same byte-identical value (see ADR 0006
+            // rule #7; Raft apply determinism).
             let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
             let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
-            let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-            let surql = format!(
-                "CREATE hypervisor SET \
-                 public_key = '{}', node_id = {}, address = '{}', \
-                 endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
-                 raft_addr = '{joiner_raft_addr}', joined_at = d'{joined_at}'",
-                req.public_key,
-                joiner_node_id as i64,
-                joiner_address,
-                peer_ip,
-                req.listen_port,
-                joiner_address
-            );
-            let _ = raft.write(surql).await.warn();
+            let now = Datetime::now();
+            let joiner_addr_str = joiner_address.to_string();
+            let hv = Hypervisor {
+                public_key: req.public_key.clone(),
+                node_id: joiner_node_id,
+                raft_addr: joiner_raft_addr.clone(),
+                address: joiner_addr_str.clone(),
+                endpoint: Some(format!("{peer_ip}:{}", req.listen_port)),
+                allowed_ips: vec![joiner_addr_str],
+                keepalive: Some(25),
+                created_at: now,
+                updated_at: now,
+                version: 0,
+            };
+            let _ = Writer::new(db).with_raft(raft).create(&hv).await.warn();
 
             // Add joiner to Raft cluster as learner — retry in background
             let raft_clone = Arc::clone(raft);
@@ -375,8 +379,12 @@ async fn handle_connection(
             }
         };
 
-        let surql = format!("DELETE hypervisor WHERE public_key = '{canonical_pk}'");
-        if raft.write(surql).await.warn().is_err() {
+        let delete_result = Writer::new(db)
+            .with_raft(raft)
+            .delete::<Hypervisor>(&canonical_pk)
+            .await
+            .warn();
+        if delete_result.is_err() {
             let _ = writer
                 .write_all(b"{\"error\":\"raft write failed\"}\n")
                 .await;
@@ -482,8 +490,12 @@ async fn handle_connection(
             .as_ref()
             .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let own_pk = keypair.public_key().to_string();
-        let surql = format!("DELETE hypervisor WHERE public_key = '{own_pk}'");
-        match raft.write(surql).await.warn() {
+        match Writer::new(db)
+            .with_raft(raft)
+            .delete::<Hypervisor>(&own_pk)
+            .await
+            .warn()
+        {
             Ok(_) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
                 tracing::info!(

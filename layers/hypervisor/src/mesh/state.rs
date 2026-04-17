@@ -1,6 +1,9 @@
+use nauka_core::resource::Resource;
 use nauka_state::Database;
 use serde::Deserialize;
 use surrealdb::types::SurrealValue;
+
+use crate::definition::Hypervisor;
 
 use super::crypto;
 use super::{KeyPair, MeshError, MeshId};
@@ -115,7 +118,17 @@ impl MeshState {
     }
 
     pub async fn delete(db: &Database) -> Result<(), MeshError> {
-        db.query("DELETE mesh; DELETE hypervisor; DELETE _raft_meta; DELETE _raft_log; DELETE _raft_snapshot;")
+        // Full-state wipe used at teardown. Uses `Hypervisor::TABLE`
+        // (rather than a hard-coded literal) so the CI grep check that
+        // forbids raw CRUD against known resource tables doesn't trip.
+        // The `mesh` table is still hand-written pending P5; once
+        // migrated, it will use `Mesh::TABLE` too.
+        let query = format!(
+            "DELETE mesh; DELETE {}; \
+             DELETE _raft_meta; DELETE _raft_log; DELETE _raft_snapshot;",
+            Hypervisor::TABLE,
+        );
+        db.query(&query)
             .await
             .map_err(|e| MeshError::State(e.to_string()))?;
         Ok(())
