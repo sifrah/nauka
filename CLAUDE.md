@@ -9,7 +9,7 @@ Open-source platform that turns bare-metal servers into a programmable cloud.
 - `cd docs && npx astro build` — build docs site
 
 ## Repository Structure
-- `layers/core` — `nauka-core`: Resource framework, typed IDs, crypto, addressing, API gen, UI, config (no I/O, no async)
+- `core` — `nauka-core`: Shared cross-cutting infrastructure (logging, errors, typed IDs, utilities). Lives at repo root, NOT under `layers/`.
 - `layers/state` — `nauka-state`: Embedded persistence (redb), typed tables, TTL, CAS, watch
 - `layers/hypervisor` — `nauka-hypervisor`: WireGuard mesh (fabric), peering protocol, service lifecycle, handlers
 - `bin/nauka` — CLI binary that composes all layers (zero logic)
