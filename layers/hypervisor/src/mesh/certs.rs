@@ -29,10 +29,7 @@ pub fn generate_ca() -> Result<(String, String), MeshError> {
     Ok((ca_cert.pem(), ca_key.serialize_pem()))
 }
 
-pub fn sign_node_cert(
-    _ca_cert_pem: &str,
-    ca_key_pem: &str,
-) -> Result<(String, String), MeshError> {
+pub fn sign_node_cert(_ca_cert_pem: &str, ca_key_pem: &str) -> Result<(String, String), MeshError> {
     // Reconstruct the CA from its key — same public key, so verification works
     let ca_key = KeyPair::from_pem(ca_key_pem)
         .map_err(|e| MeshError::State(format!("parse CA key: {e}")))?;

@@ -92,14 +92,9 @@ impl MeshState {
         let dec_private = crypto::decrypt_secret(&row.private_key)?;
         let keypair = KeyPair::from_private(&dec_private)?;
         let mesh_id: MeshId = row.mesh_id.parse()?;
-        let address = mesh_id
-            .node_address(&keypair.public_key_raw()?)
-            .to_string();
+        let address = mesh_id.node_address(&keypair.public_key_raw()?).to_string();
 
-        let ca_key = row
-            .ca_key
-            .map(|v| crypto::decrypt_secret(&v))
-            .transpose()?;
+        let ca_key = row.ca_key.map(|v| crypto::decrypt_secret(&v)).transpose()?;
         let tls_key = row
             .tls_key
             .map(|v| crypto::decrypt_secret(&v))

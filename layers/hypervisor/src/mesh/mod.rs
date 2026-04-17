@@ -49,11 +49,20 @@ impl Mesh {
             None => mesh_id.node_address(&keypair.public_key_raw()?),
         };
         let api = WGApi::<Kernel>::new(interface_name.clone())?;
-        Ok(Self { interface_name, keypair, listen_port, mesh_id, address, api })
+        Ok(Self {
+            interface_name,
+            keypair,
+            listen_port,
+            mesh_id,
+            address,
+            api,
+        })
     }
 
     pub fn from_state(state: &MeshState) -> Result<Self, MeshError> {
-        let address: IpAddrMask = state.address.parse()
+        let address: IpAddrMask = state
+            .address
+            .parse()
             .map_err(|_| MeshError::InvalidAddress(state.address.clone()))?;
         let api = WGApi::<Kernel>::new(state.interface_name.clone())?;
         Ok(Self {
@@ -109,8 +118,8 @@ impl Mesh {
         }
         peer.persistent_keepalive_interval = mesh_peer.persistent_keepalive;
         for cidr in &mesh_peer.allowed_ips {
-            let addr = IpAddrMask::from_str(cidr)
-                .map_err(|_| MeshError::InvalidAddress(cidr.clone()))?;
+            let addr =
+                IpAddrMask::from_str(cidr).map_err(|_| MeshError::InvalidAddress(cidr.clone()))?;
             peer.allowed_ips.push(addr);
         }
         self.api.configure_peer(&peer)?;
@@ -122,12 +131,24 @@ impl Mesh {
         Ok(self.api.read_interface_data()?)
     }
 
-    pub fn public_key(&self) -> &str { self.keypair.public_key() }
-    pub fn keypair(&self) -> &KeyPair { &self.keypair }
-    pub fn interface_name(&self) -> &str { &self.interface_name }
-    pub fn mesh_id(&self) -> &MeshId { &self.mesh_id }
-    pub fn address(&self) -> &IpAddrMask { &self.address }
-    pub fn listen_port(&self) -> u16 { self.listen_port }
+    pub fn public_key(&self) -> &str {
+        self.keypair.public_key()
+    }
+    pub fn keypair(&self) -> &KeyPair {
+        &self.keypair
+    }
+    pub fn interface_name(&self) -> &str {
+        &self.interface_name
+    }
+    pub fn mesh_id(&self) -> &MeshId {
+        &self.mesh_id
+    }
+    pub fn address(&self) -> &IpAddrMask {
+        &self.address
+    }
+    pub fn listen_port(&self) -> u16 {
+        self.listen_port
+    }
 
     pub fn down_interface(interface_name: &str) -> Result<(), MeshError> {
         let api = WGApi::<Kernel>::new(interface_name.to_string())?;

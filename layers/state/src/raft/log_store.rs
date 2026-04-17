@@ -4,11 +4,11 @@ use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use openraft::LogState;
-use openraft::RaftTypeConfig;
 use openraft::alias::{LogIdOf, VoteOf};
 use openraft::entry::RaftEntry;
 use openraft::storage::IOFlushed;
+use openraft::LogState;
+use openraft::RaftTypeConfig;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use surrealdb::types::SurrealValue;
@@ -71,9 +71,7 @@ where
         // CREATE if not exists; ignore "already exists" error on restart
         let _ = db
             .inner()
-            .query(format!(
-                "CREATE _raft_meta:{node_id} SET hypervisor = {hv}"
-            ))
+            .query(format!("CREATE _raft_meta:{node_id} SET hypervisor = {hv}"))
             .await;
 
         Ok(Self {
@@ -232,10 +230,7 @@ mod impl_log_store {
             })
         }
 
-        async fn save_committed(
-            &mut self,
-            committed: Option<LogIdOf<C>>,
-        ) -> Result<(), io::Error> {
+        async fn save_committed(&mut self, committed: Option<LogIdOf<C>>) -> Result<(), io::Error> {
             match committed {
                 Some(ref c) => {
                     let json = serde_json::to_string(c)
@@ -264,11 +259,7 @@ mod impl_log_store {
             self.update_meta_field("vote", &json).await
         }
 
-        async fn append<I>(
-            &mut self,
-            entries: I,
-            callback: IOFlushed<C>,
-        ) -> Result<(), io::Error>
+        async fn append<I>(&mut self, entries: I, callback: IOFlushed<C>) -> Result<(), io::Error>
         where
             I: IntoIterator<Item = C::Entry>,
         {
@@ -503,4 +494,3 @@ mod tests {
         assert_eq!(state.last_log_id, None);
     }
 }
-

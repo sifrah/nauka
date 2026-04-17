@@ -216,9 +216,7 @@ async fn writes_past_threshold_trigger_snapshot_and_log_purge() {
     // log_store purges committed entries in the background.
     for i in 0..(THRESHOLD as usize * 4) {
         n1.raft
-            .write(format!(
-                "CREATE kv SET key = 'snap-{i}', value = '{i}'"
-            ))
+            .write(format!("CREATE kv SET key = 'snap-{i}', value = '{i}'"))
             .await
             .expect("write");
     }

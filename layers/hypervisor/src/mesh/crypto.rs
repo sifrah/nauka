@@ -76,6 +76,5 @@ pub fn decrypt_secret(stored: &str) -> Result<String, MeshError> {
         .open_in_place(nonce, aead::Aad::empty(), &mut ciphertext)
         .map_err(|_| MeshError::State("decrypt failed".into()))?;
 
-    String::from_utf8(plaintext.to_vec())
-        .map_err(|e| MeshError::State(format!("utf8 decode: {e}")))
+    String::from_utf8(plaintext.to_vec()).map_err(|e| MeshError::State(format!("utf8 decode: {e}")))
 }

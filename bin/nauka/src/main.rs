@@ -60,21 +60,37 @@ fn hypervisor_cmd() -> Command {
             Command::new("init")
                 .about("Create a new mesh and start the hypervisor service")
                 .arg(Arg::new("port").long("port").default_value("51820"))
-                .arg(Arg::new("interface").long("interface").default_value("nauka0")),
+                .arg(
+                    Arg::new("interface")
+                        .long("interface")
+                        .default_value("nauka0"),
+                ),
         )
         .subcommand(
             Command::new("join")
                 .about("Join an existing mesh and start the hypervisor service")
-                .arg(Arg::new("host").required(true).help("Public IP of an existing node"))
+                .arg(
+                    Arg::new("host")
+                        .required(true)
+                        .help("Public IP of an existing node"),
+                )
                 .arg(Arg::new("pin").long("pin").required(true))
                 .arg(Arg::new("port").long("port").default_value("51820"))
-                .arg(Arg::new("interface").long("interface").default_value("nauka0")),
+                .arg(
+                    Arg::new("interface")
+                        .long("interface")
+                        .default_value("nauka0"),
+                ),
         )
         .subcommand(Command::new("status").about("Show cluster membership and local state"))
         .subcommand(
             Command::new("leave")
                 .about("Leave the mesh — stop service, wipe state, remove unit file")
-                .arg(Arg::new("interface").long("interface").default_value("nauka0")),
+                .arg(
+                    Arg::new("interface")
+                        .long("interface")
+                        .default_value("nauka0"),
+                ),
         )
         .subcommand(
             Command::new("daemon")
@@ -94,7 +110,11 @@ fn hypervisor_cmd() -> Command {
                 .subcommand(
                     Command::new("status")
                         .about("Show the WireGuard interface status")
-                        .arg(Arg::new("interface").long("interface").default_value("nauka0")),
+                        .arg(
+                            Arg::new("interface")
+                                .long("interface")
+                                .default_value("nauka0"),
+                        ),
                 )
                 .subcommand(Command::new("restart").about("Restart the hypervisor service"))
                 .subcommand(Command::new("stop").about("Stop the hypervisor service")),
@@ -252,7 +272,10 @@ async fn cmd_status() -> Result<()> {
     let mesh_id = v.get("mesh_id").and_then(|x| x.as_str()).unwrap_or("?");
     let pk = v.get("public_key").and_then(|x| x.as_str()).unwrap_or("?");
     let addr = v.get("address").and_then(|x| x.as_str()).unwrap_or("?");
-    let peering_open = v.get("peering_open").and_then(|x| x.as_bool()).unwrap_or(false);
+    let peering_open = v
+        .get("peering_open")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     let empty = Vec::<serde_json::Value>::new();
     let hypervisors = v
         .get("hypervisors")
@@ -264,7 +287,11 @@ async fn cmd_status() -> Result<()> {
     println!("address:    {addr}");
     println!(
         "peering:    {}",
-        if peering_open { "open (accepts joins)" } else { "closed" }
+        if peering_open {
+            "open (accepts joins)"
+        } else {
+            "closed"
+        }
     );
     println!();
     println!("hypervisors ({}):", hypervisors.len());

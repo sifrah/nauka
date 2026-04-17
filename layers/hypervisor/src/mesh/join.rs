@@ -125,8 +125,20 @@ pub async fn mesh_listener(
 
         tokio::spawn(async move {
             let _ = handle_connection(
-                stream, peer_addr, raft, &db, &mesh_id, &keypair, &mesh_address, &iface, wg_port,
-                pin.as_deref(), &peers, &ra, ca_c.as_deref(), ca_k.as_deref(),
+                stream,
+                peer_addr,
+                raft,
+                &db,
+                &mesh_id,
+                &keypair,
+                &mesh_address,
+                &iface,
+                wg_port,
+                pin.as_deref(),
+                &peers,
+                &ra,
+                ca_c.as_deref(),
+                ca_k.as_deref(),
             )
             .await;
         });
@@ -180,7 +192,9 @@ async fn handle_connection(
                 return Err(MeshError::Join("peering not enabled".into()));
             }
         };
-        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
 
         let req: JoinRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
@@ -196,18 +210,18 @@ async fn handle_connection(
         let peers_snapshot = known_peers.lock().await.clone();
 
         // Sign a TLS cert for the joiner if we have the CA
-        let (joiner_tls_cert, joiner_tls_key) =
-            if let (Some(ca_c), Some(ca_k)) = (ca_cert, ca_key) {
-                match super::certs::sign_node_cert(ca_c, ca_k) {
-                    Ok((cert, key)) => (Some(cert), Some(key)),
-                    Err(e) => {
-                        eprintln!("  ! sign node cert: {e}");
-                        (None, None)
-                    }
+        let (joiner_tls_cert, joiner_tls_key) = if let (Some(ca_c), Some(ca_k)) = (ca_cert, ca_key)
+        {
+            match super::certs::sign_node_cert(ca_c, ca_k) {
+                Ok((cert, key)) => (Some(cert), Some(key)),
+                Err(e) => {
+                    eprintln!("  ! sign node cert: {e}");
+                    (None, None)
                 }
-            } else {
-                (None, None)
-            };
+            }
+        } else {
+            (None, None)
+        };
 
         let resp = JoinResponse {
             mesh_id: mesh_id.to_string(),
@@ -246,8 +260,12 @@ async fn handle_connection(
              public_key = '{}', node_id = {}, address = '{}', \
              endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
              raft_addr = '{joiner_raft_addr}', joined_at = d'{joined_at}'",
-            req.public_key, joiner_node_id as i64, joiner_address,
-            peer_ip, req.listen_port, joiner_address
+            req.public_key,
+            joiner_node_id as i64,
+            joiner_address,
+            peer_ip,
+            req.listen_port,
+            joiner_address
         );
         if let Err(e) = raft.write(surql).await {
             eprintln!("  ! raft write failed: {e}");
@@ -258,7 +276,10 @@ async fn handle_connection(
         tokio::spawn(async move {
             for attempt in 1..=15 {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                match raft_clone.add_learner(joiner_node_id, &joiner_raft_addr).await {
+                match raft_clone
+                    .add_learner(joiner_node_id, &joiner_raft_addr)
+                    .await
+                {
                     Ok(_) => {
                         eprintln!("  + raft learner: {joiner_raft_addr} (attempt {attempt})");
                         match raft_clone.promote_voter(joiner_node_id).await {
@@ -277,7 +298,9 @@ async fn handle_connection(
         println!("  + peer joined: {} ({})", joiner_address, peer_ip);
     } else if v.get("remove_public_key").is_some() {
         // --- Peer removal request ---
-        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let req: RemoveRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
 
@@ -293,12 +316,12 @@ async fn handle_connection(
             }
         };
 
-        let surql = format!(
-            "DELETE hypervisor WHERE public_key = '{canonical_pk}'"
-        );
+        let surql = format!("DELETE hypervisor WHERE public_key = '{canonical_pk}'");
         if let Err(e) = raft.write(surql).await {
             eprintln!("  ! raft remove failed: {e}");
-            let _ = writer.write_all(b"{\"error\":\"raft write failed\"}\n").await;
+            let _ = writer
+                .write_all(b"{\"error\":\"raft write failed\"}\n")
+                .await;
         } else {
             let _ = writer.write_all(b"{\"ok\":true}\n").await;
             println!("  - peer removed: {canonical_pk}");
@@ -314,7 +337,9 @@ async fn handle_connection(
                 .await;
             return Err(MeshError::Join("non-loopback raft_write".into()));
         }
-        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let req: RaftWriteRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
         match raft.write(req.query.clone()).await {
@@ -361,9 +386,7 @@ async fn handle_connection(
             "peering_open": peering_pin.is_some(),
             "hypervisors": hypervisors,
         });
-        let _ = writer
-            .write_all(format!("{resp}\n").as_bytes())
-            .await;
+        let _ = writer.write_all(format!("{resp}\n").as_bytes()).await;
     } else if v.get("leave").is_some() {
         // Graceful leave: raft.write DELETE for self so other nodes drop
         // us from their tables and WG peers. Loopback-only — a remote
@@ -374,7 +397,9 @@ async fn handle_connection(
                 .await;
             return Err(MeshError::Join("non-loopback leave".into()));
         }
-        let raft = raft.as_ref().ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let own_pk = keypair.public_key().to_string();
         let surql = format!("DELETE hypervisor WHERE public_key = '{own_pk}'");
         match raft.write(surql).await {
@@ -422,10 +447,18 @@ pub fn join_mesh(
         public_key: keypair.public_key().to_string(),
         listen_port,
     };
-    writeln!(stream, "{}", serde_json::to_string(&req).expect("serialize"))
-        .map_err(|e| MeshError::Join(e.to_string()))?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::to_string(&req).expect("serialize")
+    )
+    .map_err(|e| MeshError::Join(e.to_string()))?;
 
-    let reader = BufReader::new(stream.try_clone().map_err(|e| MeshError::Join(e.to_string()))?);
+    let reader = BufReader::new(
+        stream
+            .try_clone()
+            .map_err(|e| MeshError::Join(e.to_string()))?,
+    );
     let mut lines = reader.lines();
     let line = lines
         .next()
@@ -441,7 +474,13 @@ pub fn join_mesh(
         serde_json::from_value(v).map_err(|e| MeshError::Join(format!("bad response: {e}")))?;
 
     let mesh_id: MeshId = resp.mesh_id.parse()?;
-    let mut mesh = Mesh::new(interface_name, listen_port, Some(mesh_id), Some(keypair), None)?;
+    let mut mesh = Mesh::new(
+        interface_name,
+        listen_port,
+        Some(mesh_id),
+        Some(keypair),
+        None,
+    )?;
     mesh.up()?;
 
     let server_info = PeerInfo {
@@ -497,8 +536,8 @@ pub fn request_status(join_port: u16) -> Result<serde_json::Value, MeshError> {
         .next()
         .ok_or_else(|| MeshError::Join("no status response".into()))?
         .map_err(|e| MeshError::Join(e.to_string()))?;
-    let v: serde_json::Value = serde_json::from_str(&line)
-        .map_err(|e| MeshError::Join(format!("status parse: {e}")))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&line).map_err(|e| MeshError::Join(format!("status parse: {e}")))?;
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         return Err(MeshError::Join(err.to_string()));
     }
@@ -573,8 +612,8 @@ pub async fn whoami(peer_ip: &str, join_port: u16) -> Result<std::net::IpAddr, M
         .await
         .map_err(|e| MeshError::Join(format!("whoami read: {e}")))?
         .ok_or_else(|| MeshError::Join("whoami empty response".into()))?;
-    let v: serde_json::Value = serde_json::from_str(&line)
-        .map_err(|e| MeshError::Join(format!("whoami parse: {e}")))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&line).map_err(|e| MeshError::Join(format!("whoami parse: {e}")))?;
     let ip_str = v
         .get("observed_ip")
         .and_then(|x| x.as_str())
@@ -593,8 +632,12 @@ pub fn request_peer_removal(join_port: u16, public_key: &str) -> Result<(), Mesh
     let req = RemoveRequest {
         remove_public_key: public_key.to_string(),
     };
-    writeln!(stream, "{}", serde_json::to_string(&req).expect("serialize"))
-        .map_err(|e| MeshError::Join(e.to_string()))?;
+    writeln!(
+        stream,
+        "{}",
+        serde_json::to_string(&req).expect("serialize")
+    )
+    .map_err(|e| MeshError::Join(e.to_string()))?;
 
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();

@@ -15,11 +15,11 @@ use serde::Deserialize;
 use surrealdb::types::SurrealValue;
 use tokio::signal::unix::{signal, SignalKind};
 
+use crate::mesh::reconciler;
 use crate::mesh::{
     certs, generate_pin, join_mesh, mesh_listener, whoami, Mesh, MeshError, MeshId, MeshState,
     PeerInfo, DEFAULT_JOIN_PORT,
 };
-use crate::mesh::reconciler;
 
 /// Read the snapshot threshold from `NAUKA_SNAPSHOT_THRESHOLD` if set,
 /// otherwise fall back to the production default. Lets ops tune (or CI
@@ -122,14 +122,10 @@ pub async fn init_hypervisor(
     // Init the cluster as a single-node voter. No Raft server needed — with
     // one voter, client_write commits locally; the daemon brings the server
     // up later.
-    let raft = RaftNode::new_with_snapshot_threshold(
-        node_id,
-        db.clone(),
-        tls,
-        snapshot_threshold(),
-    )
-    .await
-    .map_err(|e| MeshError::State(e.to_string()))?;
+    let raft =
+        RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
+            .await
+            .map_err(|e| MeshError::State(e.to_string()))?;
 
     // Start the Raft server before initializing the cluster. Even though a
     // single-node cluster doesn't use RPC, openraft's internal task setup
@@ -290,20 +286,23 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
     println!("  public key: {}", mesh.public_key());
     println!("  port:       {}", mesh.listen_port());
     println!("  raft:       {raft_addr}");
-    println!("  tls:        {}", if tls.is_some() { "enabled" } else { "disabled" });
+    println!(
+        "  tls:        {}",
+        if tls.is_some() { "enabled" } else { "disabled" }
+    );
     println!(
         "  peering:    {}",
-        if state.peering_pin.is_some() { "accepting joins" } else { "closed" }
+        if state.peering_pin.is_some() {
+            "accepting joins"
+        } else {
+            "closed"
+        }
     );
 
-    let raft_node = RaftNode::new_with_snapshot_threshold(
-        node_id,
-        db.clone(),
-        tls,
-        snapshot_threshold(),
-    )
-    .await
-    .map_err(|e| MeshError::State(e.to_string()))?;
+    let raft_node =
+        RaftNode::new_with_snapshot_threshold(node_id, db.clone(), tls, snapshot_threshold())
+            .await
+            .map_err(|e| MeshError::State(e.to_string()))?;
     let _raft_server = raft_node.start_server(raft_addr).await;
     let raft = Arc::new(raft_node);
 
@@ -403,9 +402,8 @@ async fn refresh_own_endpoint(
         "  endpoint refresh: {:?} -> {new_endpoint}",
         current_ep.as_deref().unwrap_or("NONE")
     );
-    let surql = format!(
-        "UPDATE hypervisor SET endpoint = '{new_endpoint}' WHERE public_key = '{own_pk}'"
-    );
+    let surql =
+        format!("UPDATE hypervisor SET endpoint = '{new_endpoint}' WHERE public_key = '{own_pk}'");
     match raft.write(surql).await {
         Ok(_) => println!("  endpoint refresh: propagated via Raft"),
         Err(e) => eprintln!("  endpoint refresh: raft write failed: {e}"),
@@ -443,11 +441,9 @@ pub struct HypervisorSummary {
 }
 
 pub async fn list_hypervisors(db: &Database) -> Result<Vec<HypervisorSummary>, MeshError> {
-    db.query_take(
-        "SELECT public_key, address, endpoint FROM hypervisor ORDER BY public_key",
-    )
-    .await
-    .map_err(|e| MeshError::State(e.to_string()))
+    db.query_take("SELECT public_key, address, endpoint FROM hypervisor ORDER BY public_key")
+        .await
+        .map_err(|e| MeshError::State(e.to_string()))
 }
 
 async fn read_own_endpoint(db: &Database, own_pk: &str) -> Result<Option<String>, MeshError> {

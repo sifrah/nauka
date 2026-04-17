@@ -15,8 +15,7 @@ pub const UNIT_PATH: &str = "/etc/systemd/system/nauka-hypervisor.service";
 /// the invoking binary's location (`/proc/self/exe`) so the service runs
 /// whichever nauka binary the operator just used.
 pub fn write_unit_file() -> Result<(), MeshError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| MeshError::State(format!("current_exe: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| MeshError::State(format!("current_exe: {e}")))?;
     let exe_path = exe.to_string_lossy();
 
     let unit = format!(

@@ -24,7 +24,10 @@ pub async fn start_raft_server(
 
     let acceptor = tls.map(|t| tokio_rustls::TlsAcceptor::from(t.server));
 
-    eprintln!("  raft server listening on {bind_addr} (tls={})", acceptor.is_some());
+    eprintln!(
+        "  raft server listening on {bind_addr} (tls={})",
+        acceptor.is_some()
+    );
 
     loop {
         let (stream, peer) = listener
@@ -117,9 +120,7 @@ async fn handle_rpc<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     let addr = body["addr"].as_str().ok_or("missing addr")?;
                     match raft.add_learner(node_id, BasicNode::new(addr), true).await {
                         Ok(_) => serde_json::json!({ "ok": true }).to_string(),
-                        Err(e) => {
-                            serde_json::json!({ "error": e.to_string() }).to_string()
-                        }
+                        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                     }
                 }
                 "promote_voter" => {
@@ -130,15 +131,11 @@ async fn handle_rpc<S: AsyncRead + AsyncWrite + Unpin + Send>(
                         .await
                     {
                         Ok(_) => serde_json::json!({ "ok": true }).to_string(),
-                        Err(e) => {
-                            serde_json::json!({ "error": e.to_string() }).to_string()
-                        }
+                        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                     }
                 }
-                other => {
-                    serde_json::json!({ "error": format!("unknown membership op: {other}") })
-                        .to_string()
-                }
+                other => serde_json::json!({ "error": format!("unknown membership op: {other}") })
+                    .to_string(),
             }
         }
         other => return Err(format!("unknown rpc: {other}").into()),

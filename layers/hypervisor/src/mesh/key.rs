@@ -19,8 +19,7 @@ impl KeyPair {
     }
 
     pub fn from_private(private_b64: &str) -> Result<Self, super::MeshError> {
-        let private: Key =
-            Key::from_str(private_b64).map_err(|_| super::MeshError::InvalidKey)?;
+        let private: Key = Key::from_str(private_b64).map_err(|_| super::MeshError::InvalidKey)?;
         let public = private.public_key();
         Ok(Self {
             private_key: private.to_string(),

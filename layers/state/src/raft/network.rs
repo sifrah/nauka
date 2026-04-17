@@ -44,7 +44,11 @@ pub struct NetworkClient {
     tls: Option<TlsConfig>,
 }
 
-pub(super) async fn rpc_over<S, Req, Resp>(stream: S, uri: &str, req: &Req) -> Result<Resp, io::Error>
+pub(super) async fn rpc_over<S, Req, Resp>(
+    stream: S,
+    uri: &str,
+    req: &Req,
+) -> Result<Resp, io::Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     Req: Serialize,
@@ -64,8 +68,7 @@ where
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no response"))?;
 
-    serde_json::from_str(&resp_line)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&resp_line).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 impl NetworkClient {

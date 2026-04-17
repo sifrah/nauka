@@ -115,10 +115,7 @@ where
                 inner.last_applied_log = last_applied;
                 inner.last_membership = last_membership;
                 inner.data = data;
-                inner.snapshot = Some(StoredSnapshot {
-                    meta,
-                    data: raw,
-                });
+                inner.snapshot = Some(StoredSnapshot { meta, data: raw });
 
                 eprintln!(
                     "  sm: restored snapshot (applied up to {:?})",
@@ -181,11 +178,7 @@ where
 
 impl<C> RaftSnapshotBuilder<C> for StateMachineStore<C>
 where
-    C: RaftTypeConfig<
-        D = SurqlCommand,
-        R = SurqlResponse,
-        SnapshotData = Cursor<Vec<u8>>,
-    >,
+    C: RaftTypeConfig<D = SurqlCommand, R = SurqlResponse, SnapshotData = Cursor<Vec<u8>>>,
     LogIdOf<C>: Serialize + DeserializeOwned,
     StoredMembershipOf<C>: Serialize + DeserializeOwned,
 {
@@ -248,7 +241,10 @@ where
         &mut self,
     ) -> Result<(Option<LogIdOf<C>>, StoredMembershipOf<C>), io::Error> {
         let inner = self.inner.lock().await;
-        Ok((inner.last_applied_log.clone(), inner.last_membership.clone()))
+        Ok((
+            inner.last_applied_log.clone(),
+            inner.last_membership.clone(),
+        ))
     }
 
     async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
@@ -281,10 +277,8 @@ where
                 }
                 EntryPayload::Membership(mem) => {
                     eprintln!("  sm: apply membership change");
-                    inner.last_membership = StoredMembershipOf::<C>::new(
-                        Some(entry.log_id.clone()),
-                        mem.clone(),
-                    );
+                    inner.last_membership =
+                        StoredMembershipOf::<C>::new(Some(entry.log_id.clone()), mem.clone());
                     SurqlResponse::none()
                 }
             };
