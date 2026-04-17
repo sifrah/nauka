@@ -96,7 +96,12 @@ pub async fn mesh_listener(
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", join_port)).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("  mesh listener bind failed: {e}");
+            tracing::error!(
+                event = "mesh.listener.bind_failed",
+                join_port,
+                error = %e,
+                "mesh listener bind failed"
+            );
             return;
         }
     };
@@ -215,7 +220,11 @@ async fn handle_connection(
             match super::certs::sign_node_cert(ca_c, ca_k) {
                 Ok((cert, key)) => (Some(cert), Some(key)),
                 Err(e) => {
-                    eprintln!("  ! sign node cert: {e}");
+                    tracing::warn!(
+                        event = "peer.join.sign_cert_failed",
+                        error = %e,
+                        "sign node cert failed"
+                    );
                     (None, None)
                 }
             }
@@ -268,7 +277,11 @@ async fn handle_connection(
             joiner_address
         );
         if let Err(e) = raft.write(surql).await {
-            eprintln!("  ! raft write failed: {e}");
+            tracing::warn!(
+                event = "peer.join.raft_write_failed",
+                error = %e,
+                "raft write to register joiner failed"
+            );
         }
 
         // Add joiner to Raft cluster as learner — retry in background
@@ -281,21 +294,45 @@ async fn handle_connection(
                     .await
                 {
                     Ok(_) => {
-                        eprintln!("  + raft learner: {joiner_raft_addr} (attempt {attempt})");
+                        tracing::info!(
+                            event = "raft.learner.added",
+                            raft_addr = %joiner_raft_addr,
+                            attempt,
+                            "raft learner added"
+                        );
                         match raft_clone.promote_voter(joiner_node_id).await {
-                            Ok(_) => eprintln!("  + raft voter: {joiner_raft_addr}"),
-                            Err(e) => eprintln!("  ! raft voter promotion failed: {e}"),
+                            Ok(_) => tracing::info!(
+                                event = "raft.voter.promoted",
+                                raft_addr = %joiner_raft_addr,
+                                "raft voter promoted"
+                            ),
+                            Err(e) => tracing::warn!(
+                                event = "raft.voter.promote_failed",
+                                raft_addr = %joiner_raft_addr,
+                                error = %e,
+                                "raft voter promotion failed"
+                            ),
                         }
                         return;
                     }
                     Err(_) if attempt < 15 => continue,
-                    Err(e) => eprintln!("  ! raft learner failed: {e}"),
+                    Err(e) => tracing::warn!(
+                        event = "raft.learner.add_failed",
+                        raft_addr = %joiner_raft_addr,
+                        error = %e,
+                        "raft learner add failed"
+                    ),
                 }
             }
         });
 
         known_peers.lock().await.push(new_peer);
-        println!("  + peer joined: {} ({})", joiner_address, peer_ip);
+        tracing::info!(
+            event = "peer.join",
+            joiner_address = %joiner_address,
+            peer_ip = %peer_ip,
+            "peer joined"
+        );
     } else if v.get("remove_public_key").is_some() {
         // --- Peer removal request ---
         let raft = raft
@@ -318,13 +355,22 @@ async fn handle_connection(
 
         let surql = format!("DELETE hypervisor WHERE public_key = '{canonical_pk}'");
         if let Err(e) = raft.write(surql).await {
-            eprintln!("  ! raft remove failed: {e}");
+            tracing::warn!(
+                event = "peer.remove.raft_write_failed",
+                public_key = %canonical_pk,
+                error = %e,
+                "raft remove failed"
+            );
             let _ = writer
                 .write_all(b"{\"error\":\"raft write failed\"}\n")
                 .await;
         } else {
             let _ = writer.write_all(b"{\"ok\":true}\n").await;
-            println!("  - peer removed: {canonical_pk}");
+            tracing::info!(
+                event = "peer.remove",
+                public_key = %canonical_pk,
+                "peer removed"
+            );
         }
     } else if v.get("raft_write").is_some() {
         // Debug escape hatch: write arbitrary SurQL through Raft. Restricted
@@ -345,12 +391,21 @@ async fn handle_connection(
         match raft.write(req.query.clone()).await {
             Ok(_) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
-                println!("  # raft_write ok: {}", req.query);
+                tracing::info!(
+                    event = "debug.raft_write.ok",
+                    query = %req.query,
+                    "raft_write ok"
+                );
             }
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-                eprintln!("  ! raft_write failed: {e}");
+                tracing::warn!(
+                    event = "debug.raft_write.fail",
+                    query = %req.query,
+                    error = %e,
+                    "raft_write failed"
+                );
             }
         }
     } else if v.get("status").is_some() {
@@ -405,12 +460,20 @@ async fn handle_connection(
         match raft.write(surql).await {
             Ok(_) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
-                println!("  # leave: broadcast DELETE for self");
+                tracing::info!(
+                    event = "hypervisor.leave.broadcast",
+                    public_key = %own_pk,
+                    "leave: broadcast DELETE for self"
+                );
             }
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-                eprintln!("  ! leave failed: {e}");
+                tracing::warn!(
+                    event = "hypervisor.leave.raft_write_failed",
+                    error = %e,
+                    "leave: raft write failed"
+                );
             }
         }
     }

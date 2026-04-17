@@ -1,7 +1,10 @@
+mod cli_out;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Command};
+use nauka_core::logging::{self, LogMode};
 use nauka_hypervisor::daemon::{
     init_hypervisor, join_hypervisor, leave_hypervisor, run_daemon, SetupConfig,
 };
@@ -11,18 +14,21 @@ use nauka_state::Database;
 
 #[tokio::main]
 async fn main() {
-    // stderr so it coexists with println! on stdout. Level overridable via RUST_LOG.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
+    // Peek at args to pick the logging mode: the systemd-run daemon
+    // subcommand needs INFO from nauka crates (lifecycle → journald);
+    // every other invocation is a short-lived CLI that should stay
+    // quiet and let `cli_out` own user-facing output.
+    let mode = if std::env::args().any(|a| a == "daemon") {
+        LogMode::Daemon
+    } else {
+        LogMode::Cli
+    };
+    logging::init(mode);
 
     let exit_code = match run().await {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("Error: {e:#}");
+            cli_out::error(format_args!("{e:#}"));
             1
         }
     };
@@ -195,16 +201,19 @@ async fn cmd_init(sub: &clap::ArgMatches) -> Result<()> {
 
     install_and_start_service().context("install systemd unit")?;
 
-    println!("mesh created");
-    println!("  mesh:       {}", summary.mesh_id);
-    println!("  public key: {}", summary.public_key);
-    println!("  address:    {}", summary.address);
-    println!("  raft:       {}", summary.raft_addr);
-    println!();
-    println!("  join pin:   {}", summary.pin);
-    println!();
-    println!("service: {} (running)", systemd::UNIT_NAME);
-    println!("logs:    journalctl -u {} -f", systemd::UNIT_NAME);
+    cli_out::say("mesh created");
+    cli_out::pair("mesh", &summary.mesh_id);
+    cli_out::pair("public key", &summary.public_key);
+    cli_out::pair("address", &summary.address);
+    cli_out::pair("raft", &summary.raft_addr);
+    cli_out::blank();
+    cli_out::pair("join pin", &summary.pin);
+    cli_out::blank();
+    cli_out::say(format_args!("service: {} (running)", systemd::UNIT_NAME));
+    cli_out::say(format_args!(
+        "logs:    journalctl -u {} -f",
+        systemd::UNIT_NAME
+    ));
     Ok(())
 }
 
@@ -222,14 +231,17 @@ async fn cmd_join(sub: &clap::ArgMatches) -> Result<()> {
 
     install_and_start_service().context("install systemd unit")?;
 
-    println!("joined mesh");
-    println!("  mesh:       {}", summary.mesh_id);
-    println!("  public key: {}", summary.public_key);
-    println!("  address:    {}", summary.address);
-    println!("  raft:       {}", summary.raft_addr);
-    println!();
-    println!("service: {} (running)", systemd::UNIT_NAME);
-    println!("logs:    journalctl -u {} -f", systemd::UNIT_NAME);
+    cli_out::say("joined mesh");
+    cli_out::pair("mesh", &summary.mesh_id);
+    cli_out::pair("public key", &summary.public_key);
+    cli_out::pair("address", &summary.address);
+    cli_out::pair("raft", &summary.raft_addr);
+    cli_out::blank();
+    cli_out::say(format_args!("service: {} (running)", systemd::UNIT_NAME));
+    cli_out::say(format_args!(
+        "logs:    journalctl -u {} -f",
+        systemd::UNIT_NAME
+    ));
     Ok(())
 }
 
@@ -282,25 +294,24 @@ async fn cmd_status() -> Result<()> {
         .and_then(|x| x.as_array())
         .unwrap_or(&empty);
 
-    println!("mesh:       {mesh_id}");
-    println!("public key: {pk}");
-    println!("address:    {addr}");
-    println!(
-        "peering:    {}",
+    cli_out::pair("mesh", mesh_id);
+    cli_out::pair("public key", pk);
+    cli_out::pair("address", addr);
+    cli_out::pair(
+        "peering",
         if peering_open {
             "open (accepts joins)"
         } else {
             "closed"
-        }
+        },
     );
-    println!();
-    println!("hypervisors ({}):", hypervisors.len());
+    cli_out::section(&format!("hypervisors ({}):", hypervisors.len()));
     for h in hypervisors {
         let hpk = h.get("public_key").and_then(|x| x.as_str()).unwrap_or("?");
         let haddr = h.get("address").and_then(|x| x.as_str()).unwrap_or("?");
         let ep = h.get("endpoint").and_then(|x| x.as_str()).unwrap_or("-");
         let is_self = if hpk == pk { " (self)" } else { "" };
-        println!("  {hpk} at {haddr} via {ep}{is_self}");
+        cli_out::say(format_args!("  {hpk} at {haddr} via {ep}{is_self}"));
     }
     Ok(())
 }
@@ -310,7 +321,11 @@ async fn cmd_leave(sub: &clap::ArgMatches) -> Result<()> {
     // Ask the daemon to broadcast a DELETE for self + wait briefly for
     // Raft to replicate. Best-effort — the daemon may already be down.
     if let Err(e) = mesh::request_leave(mesh::DEFAULT_JOIN_PORT) {
-        eprintln!("  ! cluster leave notification failed (continuing): {e}");
+        tracing::warn!(
+            event = "hypervisor.leave.notify",
+            error = %e,
+            "cluster leave notification failed (continuing)"
+        );
     } else {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -321,7 +336,9 @@ async fn cmd_leave(sub: &clap::ArgMatches) -> Result<()> {
     // Now safe to open the DB and wipe state.
     leave_hypervisor(&iface)
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::say("hypervisor left mesh — systemd unit removed, local state wiped");
+    Ok(())
 }
 
 async fn cmd_daemon() -> Result<()> {
@@ -334,7 +351,7 @@ async fn cmd_mesh(sub: &clap::ArgMatches) -> Result<()> {
         Some(("status", s)) => {
             let iface = s.get_one::<String>("interface").unwrap();
             let status = mesh::Mesh::interface_status(iface)?;
-            println!("{status:#?}");
+            cli_out::say(format_args!("{status:#?}"));
             Ok(())
         }
         Some(("restart", _)) => {
@@ -360,7 +377,7 @@ async fn cmd_peer(sub: &clap::ArgMatches) -> Result<()> {
         Some(("remove", rm)) => {
             let pk = rm.get_one::<String>("public-key").unwrap();
             mesh::request_peer_removal(mesh::DEFAULT_JOIN_PORT, pk)?;
-            println!("peer removal requested");
+            cli_out::say("peer removal requested");
             Ok(())
         }
         _ => anyhow::bail!("unknown peer subcommand"),
@@ -372,7 +389,7 @@ async fn cmd_debug(sub: &clap::ArgMatches) -> Result<()> {
         Some(("raft-write", rw)) => {
             let query = rw.get_one::<String>("query").unwrap();
             mesh::request_raft_write(mesh::DEFAULT_JOIN_PORT, query)?;
-            println!("raft write ok");
+            cli_out::say("raft write ok");
             Ok(())
         }
         _ => anyhow::bail!("unknown debug subcommand"),

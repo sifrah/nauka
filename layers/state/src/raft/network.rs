@@ -28,9 +28,11 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = NetworkClient;
 
     async fn new_client(&mut self, target: u64, node: &BasicNode) -> Self::Network {
-        eprintln!(
-            "  raft network: new_client target={target} addr={}",
-            node.addr
+        tracing::debug!(
+            event = "raft.network.new_client",
+            target,
+            addr = %node.addr,
+            "raft network: new client"
         );
         NetworkClient {
             addr: node.addr.clone(),
@@ -106,10 +108,19 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         req: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
-        eprintln!("  raft: sending append_entries to {}", self.addr);
+        tracing::debug!(
+            event = "raft.rpc.append_entries",
+            addr = %self.addr,
+            "sending append_entries"
+        );
         let result = self.rpc("append", &req).await;
         if let Err(ref e) = result {
-            eprintln!("  raft: append_entries failed: {e}");
+            tracing::warn!(
+                event = "raft.rpc.append_entries.fail",
+                addr = %self.addr,
+                error = %e,
+                "append_entries failed"
+            );
         }
         result
     }
@@ -119,7 +130,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         req: VoteRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
-        eprintln!("  raft: sending vote to {}", self.addr);
+        tracing::debug!(event = "raft.rpc.vote", addr = %self.addr, "sending vote");
         self.rpc("vote", &req).await
     }
 

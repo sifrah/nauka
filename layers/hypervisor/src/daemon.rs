@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nauka_core::LogErr;
 use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
 use serde::Deserialize;
 use surrealdb::types::SurrealValue;
@@ -74,13 +75,7 @@ fn build_tls(state: &MeshState) -> Option<TlsConfig> {
         (Some(ca), Some(cert), Some(key)) => (ca, cert, key),
         _ => return None,
     };
-    match TlsConfig::new(ca, cert, key) {
-        Ok(tls) => Some(tls),
-        Err(e) => {
-            eprintln!("  ! tls config failed: {e}");
-            None
-        }
-    }
+    TlsConfig::new(ca, cert, key).ok_or_warn("tls.config")
 }
 
 /// One-shot: generate a fresh mesh, persist state + CA + PIN, initialize
@@ -216,21 +211,35 @@ async fn write_bootstrap_peers(db: &Database, peers: &[PeerInfo]) {
         let canonical_pk = match defguard_wireguard_rs::key::Key::from_str(&p.public_key) {
             Ok(k) => k.to_string(),
             Err(_) => {
-                eprintln!("  ! bootstrap peer: invalid public_key, skipping");
+                tracing::warn!(
+                    event = "bootstrap.peer.invalid_public_key",
+                    public_key = %p.public_key,
+                    "bootstrap peer: invalid public_key, skipping"
+                );
                 continue;
             }
         };
         let endpoint: SocketAddr = match p.endpoint.parse() {
             Ok(a) => a,
             Err(_) => {
-                eprintln!("  ! bootstrap peer {canonical_pk}: invalid endpoint, skipping");
+                tracing::warn!(
+                    event = "bootstrap.peer.invalid_endpoint",
+                    public_key = %canonical_pk,
+                    endpoint = %p.endpoint,
+                    "bootstrap peer: invalid endpoint, skipping"
+                );
                 continue;
             }
         };
         let mesh_addr_mask: defguard_wireguard_rs::net::IpAddrMask = match p.mesh_address.parse() {
             Ok(m) => m,
             Err(_) => {
-                eprintln!("  ! bootstrap peer {canonical_pk}: invalid mesh_address, skipping");
+                tracing::warn!(
+                    event = "bootstrap.peer.invalid_mesh_address",
+                    public_key = %canonical_pk,
+                    mesh_address = %p.mesh_address,
+                    "bootstrap peer: invalid mesh_address, skipping"
+                );
                 continue;
             }
         };
@@ -247,9 +256,7 @@ async fn write_bootstrap_peers(db: &Database, peers: &[PeerInfo]) {
             node_id = node_id_from_key(&canonical_pk) as i64,
             ip = mesh_addr_mask.address,
         );
-        if let Err(e) = db.query(&surql).await {
-            eprintln!("  ! bootstrap peer {canonical_pk}: {e}");
-        }
+        let _ = db.query(&surql).await.warn_if_err("bootstrap.peer.write");
     }
 }
 
@@ -264,7 +271,10 @@ pub async fn leave_hypervisor(interface_name: &str) -> Result<(), MeshError> {
     // SurrealKV LSM files hanging around.
     let _ = std::fs::remove_dir_all("/var/lib/nauka/db");
     crate::systemd::remove_unit_file()?;
-    println!("hypervisor left mesh — systemd unit removed, local state wiped");
+    tracing::info!(
+        event = "hypervisor.leave.done",
+        "hypervisor left mesh — systemd unit removed, local state wiped"
+    );
     Ok(())
 }
 
@@ -279,24 +289,17 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
     let node_id = node_id_from_key(&own_pk);
     let raft_addr = format!("[{}]:4001", mesh.address().address);
 
-    println!("nauka hypervisor daemon");
-    println!("  interface:  {}", mesh.interface_name());
-    println!("  mesh:       {}", mesh.mesh_id());
-    println!("  address:    {}", mesh.address());
-    println!("  public key: {}", mesh.public_key());
-    println!("  port:       {}", mesh.listen_port());
-    println!("  raft:       {raft_addr}");
-    println!(
-        "  tls:        {}",
-        if tls.is_some() { "enabled" } else { "disabled" }
-    );
-    println!(
-        "  peering:    {}",
-        if state.peering_pin.is_some() {
-            "accepting joins"
-        } else {
-            "closed"
-        }
+    tracing::info!(
+        event = "daemon.start",
+        interface = %mesh.interface_name(),
+        mesh = %mesh.mesh_id(),
+        address = %mesh.address(),
+        public_key = %mesh.public_key(),
+        listen_port = mesh.listen_port(),
+        raft_addr = %raft_addr,
+        tls = tls.is_some(),
+        peering_open = state.peering_pin.is_some(),
+        "nauka hypervisor daemon starting"
     );
 
     let raft_node =
@@ -342,15 +345,15 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
     let mut sigterm =
         signal(SignalKind::terminate()).map_err(|e| MeshError::State(e.to_string()))?;
     tokio::select! {
-        _ = sigint.recv() => eprintln!("\n  received SIGINT"),
-        _ = sigterm.recv() => eprintln!("\n  received SIGTERM"),
+        _ = sigint.recv() => tracing::info!(event = "daemon.signal", signal = "SIGINT", "received SIGINT"),
+        _ = sigterm.recv() => tracing::info!(event = "daemon.signal", signal = "SIGTERM", "received SIGTERM"),
     }
 
     listener_handle.abort();
     reconciler_handle.abort();
     refresh_handle.abort();
     mesh.down()?;
-    println!("daemon stopped (state preserved)");
+    tracing::info!(event = "daemon.stop", "daemon stopped (state preserved)");
     Ok(())
 }
 
@@ -368,11 +371,18 @@ async fn refresh_own_endpoint(
     let peer_ip = match pick_peer_ip(&db, &own_pk).await {
         Ok(Some(ip)) => ip,
         Ok(None) => {
-            eprintln!("  endpoint refresh: no peer with endpoint yet — skipping");
+            tracing::debug!(
+                event = "endpoint.refresh.no_peer",
+                "endpoint refresh: no peer with endpoint yet — skipping"
+            );
             return;
         }
         Err(e) => {
-            eprintln!("  endpoint refresh: pick peer failed: {e}");
+            tracing::warn!(
+                event = "endpoint.refresh.pick_peer_failed",
+                error = %e,
+                "endpoint refresh: pick peer failed"
+            );
             return;
         }
     };
@@ -380,7 +390,12 @@ async fn refresh_own_endpoint(
     let observed_ip = match whoami(&peer_ip, DEFAULT_JOIN_PORT).await {
         Ok(ip) => ip,
         Err(e) => {
-            eprintln!("  endpoint refresh: whoami {peer_ip} failed: {e}");
+            tracing::warn!(
+                event = "endpoint.refresh.whoami_failed",
+                peer_ip = %peer_ip,
+                error = %e,
+                "endpoint refresh: whoami failed"
+            );
             return;
         }
     };
@@ -389,24 +404,41 @@ async fn refresh_own_endpoint(
     let current_ep = match read_own_endpoint(&db, &own_pk).await {
         Ok(ep) => ep,
         Err(e) => {
-            eprintln!("  endpoint refresh: read own endpoint failed: {e}");
+            tracing::warn!(
+                event = "endpoint.refresh.read_own_failed",
+                error = %e,
+                "endpoint refresh: read own endpoint failed"
+            );
             return;
         }
     };
     if current_ep.as_deref() == Some(new_endpoint.as_str()) {
-        println!("  endpoint refresh: {new_endpoint} (unchanged)");
+        tracing::debug!(
+            event = "endpoint.refresh.unchanged",
+            endpoint = %new_endpoint,
+            "endpoint refresh: unchanged"
+        );
         return;
     }
 
-    println!(
-        "  endpoint refresh: {:?} -> {new_endpoint}",
-        current_ep.as_deref().unwrap_or("NONE")
+    tracing::info!(
+        event = "endpoint.refresh.change",
+        from = %current_ep.as_deref().unwrap_or("NONE"),
+        to = %new_endpoint,
+        "endpoint refresh: changed"
     );
     let surql =
         format!("UPDATE hypervisor SET endpoint = '{new_endpoint}' WHERE public_key = '{own_pk}'");
     match raft.write(surql).await {
-        Ok(_) => println!("  endpoint refresh: propagated via Raft"),
-        Err(e) => eprintln!("  endpoint refresh: raft write failed: {e}"),
+        Ok(_) => tracing::info!(
+            event = "endpoint.refresh.propagated",
+            "endpoint refresh: propagated via Raft"
+        ),
+        Err(e) => tracing::warn!(
+            event = "endpoint.refresh.raft_write_failed",
+            error = %e,
+            "endpoint refresh: raft write failed"
+        ),
     }
 }
 

@@ -1,4 +1,5 @@
 use defguard_wireguard_rs::{Kernel, WGApi, WireguardInterfaceApi};
+use nauka_core::LogErr;
 use nauka_state::Database;
 use serde::Deserialize;
 use std::str::FromStr;
@@ -15,9 +16,9 @@ struct HypervisorRecord {
 
 pub async fn run(db: &Database, interface_name: &str, own_public_key: &str) {
     loop {
-        if let Err(e) = reconcile(db, interface_name, own_public_key).await {
-            eprintln!("  reconciler error: {e}");
-        }
+        let _ = reconcile(db, interface_name, own_public_key)
+            .await
+            .warn_if_err("reconciler");
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
@@ -70,10 +71,13 @@ async fn reconcile(
         }
         if api.configure_peer(&peer).is_ok() {
             let _ = api.configure_peer_routing(&[peer]);
-            let verb = if existing.is_some() { "update" } else { "add" };
-            eprintln!(
-                "  reconciler: {verb} peer {} endpoint={:?}",
-                record.public_key, record.endpoint
+            let action = if existing.is_some() { "update" } else { "add" };
+            tracing::info!(
+                event = "reconciler.peer.upsert",
+                action,
+                public_key = %record.public_key,
+                endpoint = ?record.endpoint,
+                "reconciler upserted peer"
             );
         }
     }
@@ -82,7 +86,11 @@ async fn reconcile(
     for wg_key in host.peers.keys() {
         let key_str = wg_key.to_string();
         if !db_keys.contains(&key_str) && api.remove_peer(wg_key).is_ok() {
-            eprintln!("  reconciler: -peer {key_str}");
+            tracing::info!(
+                event = "reconciler.peer.remove",
+                public_key = %key_str,
+                "reconciler removed peer"
+            );
         }
     }
 

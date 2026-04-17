@@ -3,6 +3,8 @@
 //! Spins up in-process 3-node clusters over loopback TCP and exercises
 //! `RaftNode::write` — the same path used by the daemon.
 
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

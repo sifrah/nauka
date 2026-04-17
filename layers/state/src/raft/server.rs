@@ -24,9 +24,11 @@ pub async fn start_raft_server(
 
     let acceptor = tls.map(|t| tokio_rustls::TlsAcceptor::from(t.server));
 
-    eprintln!(
-        "  raft server listening on {bind_addr} (tls={})",
-        acceptor.is_some()
+    tracing::info!(
+        event = "raft.server.listen",
+        bind_addr,
+        tls = acceptor.is_some(),
+        "raft server listening"
     );
 
     loop {
@@ -43,7 +45,12 @@ pub async fn start_raft_server(
                 match acc.accept(stream).await {
                     Ok(tls_stream) => handle_rpc(tls_stream, raft).await,
                     Err(e) => {
-                        eprintln!("  raft tls handshake failed from {peer}: {e}");
+                        tracing::warn!(
+                            event = "raft.server.tls.handshake_failed",
+                            peer = %peer,
+                            error = %e,
+                            "raft tls handshake failed"
+                        );
                         return;
                     }
                 }
@@ -52,7 +59,12 @@ pub async fn start_raft_server(
             };
 
             if let Err(e) = result {
-                eprintln!("  raft rpc error from {peer}: {e}");
+                tracing::warn!(
+                    event = "raft.server.rpc.error",
+                    peer = %peer,
+                    error = %e,
+                    "raft rpc error"
+                );
             }
         });
     }

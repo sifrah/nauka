@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 defguard_wireguard_rs.workspace = true
+nauka-core.workspace = true
 nauka-state.workspace = true
 surrealdb.workspace = true
 tokio.workspace = true

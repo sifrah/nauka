@@ -117,9 +117,11 @@ where
                 inner.data = data;
                 inner.snapshot = Some(StoredSnapshot { meta, data: raw });
 
-                eprintln!(
-                    "  sm: restored snapshot (applied up to {:?})",
-                    inner.last_applied_log.as_ref().map(|l| l.index())
+                tracing::info!(
+                    event = "raft.snapshot.restore",
+                    node_id,
+                    last_applied = ?inner.last_applied_log.as_ref().map(|l| l.index()),
+                    "restored snapshot"
                 );
             }
         }
@@ -258,25 +260,36 @@ where
 
             let response = match &entry.payload {
                 EntryPayload::Blank => {
-                    eprintln!("  sm: apply blank entry");
+                    tracing::debug!(event = "raft.sm.apply.blank", "apply blank entry");
                     SurqlResponse::none()
                 }
                 EntryPayload::Normal(cmd) => {
-                    eprintln!("  sm: apply query: {}", cmd.query);
+                    tracing::debug!(
+                        event = "raft.sm.apply.query",
+                        query = %cmd.query,
+                        "apply query"
+                    );
                     match self.db.query(&cmd.query).await {
                         Ok(_) => {
-                            eprintln!("  sm: query OK");
+                            tracing::debug!(event = "raft.sm.apply.query.ok", "query ok");
                             inner.data.applied_queries.push(cmd.query.clone());
                             SurqlResponse::ok()
                         }
                         Err(e) => {
-                            eprintln!("  sm: query FAILED: {e}");
+                            tracing::warn!(
+                                event = "raft.sm.apply.query.fail",
+                                error = %e,
+                                "query failed"
+                            );
                             SurqlResponse::err(e.to_string())
                         }
                     }
                 }
                 EntryPayload::Membership(mem) => {
-                    eprintln!("  sm: apply membership change");
+                    tracing::debug!(
+                        event = "raft.sm.apply.membership",
+                        "apply membership change"
+                    );
                     inner.last_membership =
                         StoredMembershipOf::<C>::new(Some(entry.log_id.clone()), mem.clone());
                     SurqlResponse::none()

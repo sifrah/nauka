@@ -129,7 +129,7 @@ done
 
 log "▶ waiting 30s for voter promotions"
 sleep 30
-VOTERS=$(ssh_node "${IPS[0]}" 'journalctl -u nauka-hypervisor.service --no-pager | grep -c "raft voter:"' || echo 0)
+VOTERS=$(ssh_node "${IPS[0]}" 'journalctl -u nauka-hypervisor.service --no-pager | grep -c "raft.voter.promoted"' || echo 0)
 log "    voter promotions on node-1: $VOTERS (want $((NODE_COUNT - 1)))"
 [[ $VOTERS -ge $((NODE_COUNT - 1)) ]] \
     || die "only $VOTERS/$((NODE_COUNT - 1)) promotions — some joiners never became voters"

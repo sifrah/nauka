@@ -2523,17 +2523,21 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "nauka-core",
  "nauka-hypervisor",
  "nauka-state",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "nauka-core"
 version = "2.0.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "nauka-hypervisor"
@@ -2542,6 +2546,7 @@ dependencies = [
  "base64",
  "chrono",
  "defguard_wireguard_rs",
+ "nauka-core",
  "nauka-state",
  "rcgen",
  "ring",
@@ -2560,6 +2565,7 @@ name = "nauka-state"
 version = "2.0.0"
 dependencies = [
  "futures",
+ "nauka-core",
  "openraft",
  "rustls",
  "rustls-pemfile",
