@@ -29,5 +29,6 @@ ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls-pemfile = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 nauka-hypervisor = { path = "layers/hypervisor" }
 nauka-state = { path = "layers/state" }

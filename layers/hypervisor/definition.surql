@@ -20,6 +20,9 @@ DEFINE FIELD IF NOT EXISTS endpoint       ON hypervisor TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS allowed_ips    ON hypervisor TYPE array<string>;
 DEFINE FIELD IF NOT EXISTS keepalive      ON hypervisor TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS raft_addr      ON hypervisor TYPE string;
-DEFINE FIELD IF NOT EXISTS joined_at      ON hypervisor TYPE datetime DEFAULT time::now();
+-- `joined_at` is set explicitly by the writer (in Rust, before raft.write)
+-- rather than via `DEFAULT time::now()`, which would evaluate independently
+-- on each node's state machine and break Raft determinism.
+DEFINE FIELD IF NOT EXISTS joined_at      ON hypervisor TYPE datetime;
 
 DEFINE INDEX IF NOT EXISTS hypervisor_pubkey ON hypervisor FIELDS public_key UNIQUE;

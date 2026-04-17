@@ -8,13 +8,30 @@ use std::time::{Duration, Instant};
 
 use nauka_state::{Database, RaftNode};
 use serde::Deserialize;
-use surrealdb::types::SurrealValue;
+use surrealdb::types::{Datetime, SurrealValue};
 
 const TEST_SCHEMA: &str = "\
 DEFINE TABLE IF NOT EXISTS kv SCHEMAFULL;\
 DEFINE FIELD IF NOT EXISTS key ON kv TYPE string;\
 DEFINE FIELD IF NOT EXISTS value ON kv TYPE string;\
 DEFINE INDEX IF NOT EXISTS kv_key ON kv FIELDS key UNIQUE;\
+";
+
+// Mirror of the Raft-replicated portion of `layers/hypervisor/definition.surql`.
+// Kept inline to avoid the state crate reaching across layer boundaries; if
+// the hypervisor schema changes, update here too — the point of this test is
+// to catch non-deterministic defaults being reintroduced.
+const HYPERVISOR_SCHEMA: &str = "\
+DEFINE TABLE IF NOT EXISTS hypervisor SCHEMAFULL;\
+DEFINE FIELD IF NOT EXISTS public_key  ON hypervisor TYPE string;\
+DEFINE FIELD IF NOT EXISTS node_id     ON hypervisor TYPE int;\
+DEFINE FIELD IF NOT EXISTS address     ON hypervisor TYPE string;\
+DEFINE FIELD IF NOT EXISTS endpoint    ON hypervisor TYPE option<string>;\
+DEFINE FIELD IF NOT EXISTS allowed_ips ON hypervisor TYPE array<string>;\
+DEFINE FIELD IF NOT EXISTS keepalive   ON hypervisor TYPE option<int>;\
+DEFINE FIELD IF NOT EXISTS raft_addr   ON hypervisor TYPE string;\
+DEFINE FIELD IF NOT EXISTS joined_at   ON hypervisor TYPE datetime;\
+DEFINE INDEX IF NOT EXISTS hypervisor_pubkey ON hypervisor FIELDS public_key UNIQUE;\
 ";
 
 #[derive(Deserialize, SurrealValue, Debug)]
@@ -253,4 +270,95 @@ async fn followers_see_writes_committed_before_they_joined() {
         .await
         .expect("late joiner missed the pre-join write");
     assert_eq!(row.value, "1");
+}
+
+#[derive(Deserialize, SurrealValue, Debug, PartialEq, Eq)]
+struct HypervisorRow {
+    public_key: String,
+    node_id: i64,
+    address: String,
+    endpoint: Option<String>,
+    allowed_ips: Vec<String>,
+    keepalive: Option<i64>,
+    raft_addr: String,
+    joined_at: Datetime,
+}
+
+async fn poll_hypervisor(
+    db: &Database,
+    public_key: &str,
+    timeout: Duration,
+) -> Option<HypervisorRow> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let rows: Vec<HypervisorRow> = db
+            .query_take(&format!(
+                "SELECT public_key, node_id, address, endpoint, allowed_ips, \
+                 keepalive, raft_addr, joined_at \
+                 FROM hypervisor WHERE public_key = '{public_key}'"
+            ))
+            .await
+            .unwrap_or_default();
+        if let Some(row) = rows.into_iter().next() {
+            return Some(row);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Regression test for #329: Raft state-machine determinism for the
+/// `hypervisor` table. Before the fix, `DEFINE FIELD joined_at ... DEFAULT
+/// time::now()` caused each node to evaluate `time::now()` at apply time,
+/// so the same logical record ended up with different `joined_at` values
+/// on each node. The daemon now formats `joined_at` into the SurQL literal
+/// on the leader, so every node's state machine writes byte-identical data.
+#[tokio::test]
+async fn hypervisor_write_is_byte_identical_across_nodes() {
+    let n1 = spawn_node(7001).await;
+    let n2 = spawn_node(7002).await;
+    let n3 = spawn_node(7003).await;
+
+    for node in [&n1, &n2, &n3] {
+        node.db
+            .query(HYPERVISOR_SCHEMA)
+            .await
+            .expect("hypervisor schema");
+    }
+
+    n1.raft.init_cluster(&n1.addr).await.expect("init_cluster");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    add_and_promote(&n1.raft, 7002, &n2.addr).await;
+    add_and_promote(&n1.raft, 7003, &n3.addr).await;
+
+    // Caller formats joined_at up front so every node's apply writes the
+    // same literal — the point of the fix.
+    let joined_at = "2026-04-17T12:34:56.123456789Z";
+    let surql = format!(
+        "CREATE hypervisor SET \
+         public_key = 'pk-deterministic', node_id = 42, address = 'fd00::1', \
+         endpoint = '203.0.113.5:51820', allowed_ips = ['fd00::1', 'fd00::2'], \
+         keepalive = 25, raft_addr = '[fd00::1]:4001', \
+         joined_at = d'{joined_at}'"
+    );
+    n1.raft.write(surql).await.expect("write");
+
+    let row_n1 = poll_hypervisor(&n1.db, "pk-deterministic", Duration::from_secs(5))
+        .await
+        .expect("record not present on n1");
+    let row_n2 = poll_hypervisor(&n2.db, "pk-deterministic", Duration::from_secs(5))
+        .await
+        .expect("record not replicated to n2");
+    let row_n3 = poll_hypervisor(&n3.db, "pk-deterministic", Duration::from_secs(5))
+        .await
+        .expect("record not replicated to n3");
+
+    assert_eq!(row_n1, row_n2, "n1 and n2 diverge");
+    assert_eq!(row_n1, row_n3, "n1 and n3 diverge");
+
+    // Extra guard: if anyone re-adds `DEFAULT time::now()`, this equality
+    // catches it because the Datetime would reflect apply-time wall clock,
+    // not the caller-supplied literal.
+    let expected: Datetime = joined_at.parse().expect("parse expected joined_at");
+    assert_eq!(row_n1.joined_at, expected, "joined_at changed on apply");
 }

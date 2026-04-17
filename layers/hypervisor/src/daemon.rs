@@ -144,11 +144,15 @@ pub async fn init_hypervisor(
     // Let the initial vote + blank entry fully apply before we write.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // Format `joined_at` in Rust (here on the leader) rather than letting
+    // `time::now()` default run on every node's state machine — the latter
+    // diverges by clock drift and breaks Raft determinism.
+    let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     let surql = format!(
         "CREATE hypervisor SET \
          public_key = '{own_pk}', node_id = {node_id}, address = '{addr}', \
          endpoint = NONE, allowed_ips = ['{addr}'], keepalive = 25, \
-         raft_addr = '{raft_addr}'",
+         raft_addr = '{raft_addr}', joined_at = d'{joined_at}'",
         node_id = node_id as i64,
         addr = mesh.address(),
     );
@@ -234,15 +238,22 @@ async fn write_bootstrap_peers(db: &Database, peers: &[PeerInfo]) {
                 continue;
             }
         };
+        // `joined_at` has no schema default (removed to keep Raft apply
+        // deterministic); every CREATE hypervisor must set it explicitly.
+        // This write is local-only, not Raft-replicated, so the timestamp
+        // doesn't need to match any other node — just be present.
+        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let surql = format!(
             "CREATE hypervisor SET \
              public_key = '{canonical_pk}', node_id = {node_id}, address = '{mesh_addr_mask}', \
              endpoint = '{endpoint}', allowed_ips = ['{mesh_addr_mask}'], keepalive = 25, \
-             raft_addr = '[{ip}]:4001'",
+             raft_addr = '[{ip}]:4001', joined_at = d'{joined_at}'",
             node_id = node_id_from_key(&canonical_pk) as i64,
             ip = mesh_addr_mask.address,
         );
-        let _ = db.query(&surql).await;
+        if let Err(e) = db.query(&surql).await {
+            eprintln!("  ! bootstrap peer {canonical_pk}: {e}");
+        }
     }
 }
 

@@ -234,14 +234,18 @@ async fn handle_connection(
         };
         add_peer_to_wg(interface_name, &new_peer);
 
-        // Register joiner as hypervisor via Raft — replicates to all nodes
+        // Register joiner as hypervisor via Raft — replicates to all nodes.
+        // `joined_at` is computed here (on the leader) so every node's state
+        // machine applies the same byte-identical value; a schema-level
+        // `DEFAULT time::now()` would diverge by clock drift.
         let joiner_node_id = nauka_state::node_id_from_key(&req.public_key);
         let joiner_raft_addr = format!("[{}]:4001", joiner_address.address);
+        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let surql = format!(
             "CREATE hypervisor SET \
              public_key = '{}', node_id = {}, address = '{}', \
              endpoint = '{}:{}', allowed_ips = ['{}'], keepalive = 25, \
-             raft_addr = '{joiner_raft_addr}'",
+             raft_addr = '{joiner_raft_addr}', joined_at = d'{joined_at}'",
             req.public_key, joiner_node_id as i64, joiner_address,
             peer_ip, req.listen_port, joiner_address
         );
