@@ -209,7 +209,12 @@ async fn handle_connection(
                     let _ = writer
                         .write_all(b"{\"error\":\"peering not enabled on this node\"}\n")
                         .await;
-                    return Err(MeshError::Join("peering not enabled".into()));
+                    nauka_core::bail_log!(
+                        MeshError::Join("peering not enabled".into()),
+                        event = "peer.join.peering_not_enabled",
+                        peer = %peer_addr,
+                        "peering not enabled on this node"
+                    );
                 }
             };
             let raft = raft
@@ -220,7 +225,12 @@ async fn handle_connection(
                 serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
             if req.pin != pin {
                 let _ = writer.write_all(b"{\"error\":\"invalid pin\"}\n").await;
-                return Err(MeshError::Join("invalid pin".into()));
+                nauka_core::bail_log!(
+                    MeshError::Join("invalid pin".into()),
+                    event = "peer.join.pin_mismatch",
+                    peer = %peer_addr,
+                    "invalid pin"
+                );
             }
 
             let joiner_pk = Key::from_str(&req.public_key).map_err(|_| MeshError::InvalidKey)?;
@@ -387,7 +397,12 @@ async fn handle_connection(
             let _ = writer
                 .write_all(b"{\"error\":\"raft_write requires loopback\"}\n")
                 .await;
-            return Err(MeshError::Join("non-loopback raft_write".into()));
+            nauka_core::bail_log!(
+                MeshError::Join("non-loopback raft_write".into()),
+                event = "debug.raft_write.non_loopback_rejected",
+                peer = %peer_addr,
+                "raft_write requires loopback"
+            );
         }
         let raft = raft
             .as_ref()
@@ -456,7 +471,12 @@ async fn handle_connection(
             let _ = writer
                 .write_all(b"{\"error\":\"leave requires loopback\"}\n")
                 .await;
-            return Err(MeshError::Join("non-loopback leave".into()));
+            nauka_core::bail_log!(
+                MeshError::Join("non-loopback leave".into()),
+                event = "hypervisor.leave.non_loopback_rejected",
+                peer = %peer_addr,
+                "leave requires loopback"
+            );
         }
         let raft = raft
             .as_ref()

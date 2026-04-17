@@ -316,6 +316,44 @@ impl<T, E: NaukaError> LogNaukaErr<T, E> for Result<T, E> {
     }
 }
 
+/// Emit a `tracing::warn!` with the given fields and
+/// `return Err($err.into())` in a single call — the "log then return"
+/// idiom in one line so the two concerns can't drift apart.
+///
+/// The first argument is the error to return (`.into()`-converted so
+/// it works with any return type that has a `From` impl for the
+/// error — `anyhow::Error`, thiserror enums, etc.). Remaining
+/// arguments are passed straight through to `tracing::warn!` —
+/// structured fields like `event = "foo.bar"` or `peer = %socket_addr`,
+/// optionally followed by a message.
+///
+/// Error-first, comma-separated: the macro matcher can't reliably
+/// disambiguate a `;` separator from a `tt` field, so we put the
+/// error in the fixed leading position instead.
+///
+/// The call-site crate must depend on `tracing` (all nauka crates
+/// already do); the macro expands to `::tracing::warn!`.
+///
+/// # Example
+///
+/// ```ignore
+/// if req.pin != expected {
+///     nauka_core::bail_log!(
+///         MeshError::Join("invalid pin".into()),
+///         event = "peer.join.pin_mismatch",
+///         peer = %peer_addr,
+///         "invalid pin"
+///     );
+/// }
+/// ```
+#[macro_export]
+macro_rules! bail_log {
+    ($err:expr, $($fields:tt)+) => {{
+        ::tracing::warn!($($fields)+);
+        return ::std::result::Result::Err(::std::convert::From::from($err));
+    }};
+}
+
 /// Generate a fresh trace_id — a UUID v4 string suitable for
 /// `tracing::info_span!("...", trace_id = %new_trace_id())` at any
 /// entry point where an operation starts outside of [`instrument_op`]
