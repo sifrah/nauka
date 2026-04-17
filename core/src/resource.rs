@@ -14,7 +14,13 @@
 use linkme::distributed_slice;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Display;
-use surrealdb::types::Datetime;
+
+pub use surrealdb::types::Datetime;
+
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use linkme;
+}
 
 /// Where a resource lives.
 ///

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["bin/nauka", "core", "layers/hypervisor", "layers/state"]
+members = ["bin/nauka", "core", "core-macros", "layers/hypervisor", "layers/state"]
 
 [workspace.package]
 version = "2.0.0"
@@ -32,6 +32,10 @@ rustls-pemfile = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 linkme = "0.3"
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
 nauka-core = { path = "core" }
+nauka-core-macros = { path = "core-macros" }
 nauka-hypervisor = { path = "layers/hypervisor" }
 nauka-state = { path = "layers/state" }

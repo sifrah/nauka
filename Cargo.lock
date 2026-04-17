@@ -2556,12 +2556,22 @@ name = "nauka-core"
 version = "2.0.0"
 dependencies = [
  "linkme",
+ "nauka-core-macros",
  "serde",
  "surrealdb",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "nauka-core-macros"
+version = "2.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

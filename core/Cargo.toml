@@ -16,3 +16,4 @@ surrealdb.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+nauka-core-macros = { workspace = true }
