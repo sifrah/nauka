@@ -1,3 +1,4 @@
+use nauka_core::NaukaError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -13,4 +14,15 @@ pub enum StateError {
 
     #[error("network: {0}")]
     Network(String),
+}
+
+impl NaukaError for StateError {
+    fn event_name(&self) -> &'static str {
+        match self {
+            StateError::Db(_) => "state.db",
+            StateError::Schema(_) => "state.schema",
+            StateError::Raft(_) => "state.raft",
+            StateError::Network(_) => "state.network",
+        }
+    }
 }

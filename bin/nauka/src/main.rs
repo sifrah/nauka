@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Arg, ArgAction, Command};
 use nauka_core::logging::{self, LogMode};
+use nauka_core::LogNaukaErr;
 use nauka_hypervisor::daemon::{
     init_hypervisor, join_hypervisor, leave_hypervisor, run_daemon, SetupConfig,
 };
@@ -328,13 +329,7 @@ async fn cmd_leave(sub: &clap::ArgMatches) -> Result<()> {
     let iface = sub.get_one::<String>("interface").unwrap().clone();
     // Ask the daemon to broadcast a DELETE for self + wait briefly for
     // Raft to replicate. Best-effort — the daemon may already be down.
-    if let Err(e) = mesh::request_leave(mesh::DEFAULT_JOIN_PORT) {
-        tracing::warn!(
-            event = "hypervisor.leave.notify",
-            error = %e,
-            "cluster leave notification failed (continuing)"
-        );
-    } else {
+    if mesh::request_leave(mesh::DEFAULT_JOIN_PORT).warn().is_ok() {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
     systemd::stop_and_disable().map_err(|e| anyhow::anyhow!("{e}"))?;

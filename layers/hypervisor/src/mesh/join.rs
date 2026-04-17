@@ -1,5 +1,6 @@
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::{Kernel, WGApi, WireguardInterfaceApi};
+use nauka_core::LogNaukaErr;
 use nauka_state::{Database, RaftNode};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -290,13 +291,7 @@ async fn handle_connection(
                 req.listen_port,
                 joiner_address
             );
-            if let Err(e) = raft.write(surql).await {
-                tracing::warn!(
-                    event = "peer.join.raft_write_failed",
-                    error = %e,
-                    "raft write to register joiner failed"
-                );
-            }
+            let _ = raft.write(surql).await.warn();
 
             // Add joiner to Raft cluster as learner — retry in background
             let raft_clone = Arc::clone(raft);
@@ -371,13 +366,7 @@ async fn handle_connection(
         };
 
         let surql = format!("DELETE hypervisor WHERE public_key = '{canonical_pk}'");
-        if let Err(e) = raft.write(surql).await {
-            tracing::warn!(
-                event = "peer.remove.raft_write_failed",
-                public_key = %canonical_pk,
-                error = %e,
-                "raft remove failed"
-            );
+        if raft.write(surql).await.warn().is_err() {
             let _ = writer
                 .write_all(b"{\"error\":\"raft write failed\"}\n")
                 .await;
@@ -474,7 +463,7 @@ async fn handle_connection(
             .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let own_pk = keypair.public_key().to_string();
         let surql = format!("DELETE hypervisor WHERE public_key = '{own_pk}'");
-        match raft.write(surql).await {
+        match raft.write(surql).await.warn() {
             Ok(_) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
                 tracing::info!(
@@ -486,11 +475,6 @@ async fn handle_connection(
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-                tracing::warn!(
-                    event = "hypervisor.leave.raft_write_failed",
-                    error = %e,
-                    "leave: raft write failed"
-                );
             }
         }
     }

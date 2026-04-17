@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nauka_core::LogErr;
+use nauka_core::{LogErr, LogNaukaErr};
 use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
 use serde::Deserialize;
 use surrealdb::types::SurrealValue;
@@ -75,7 +75,7 @@ fn build_tls(state: &MeshState) -> Option<TlsConfig> {
         (Some(ca), Some(cert), Some(key)) => (ca, cert, key),
         _ => return None,
     };
-    TlsConfig::new(ca, cert, key).ok_or_warn("tls.config")
+    TlsConfig::new(ca, cert, key).ok_warn()
 }
 
 /// One-shot: generate a fresh mesh, persist state + CA + PIN, initialize

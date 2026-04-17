@@ -268,6 +268,54 @@ impl<T, E: Display> LogErr<T, E> for Result<T, E> {
     }
 }
 
+/// Errors that carry their own `event` name.
+///
+/// The name is a property of the error variant, not the call site,
+/// so renaming a variant or adding a new one updates every log event
+/// that surfaces it — impossible to leave two call sites emitting
+/// divergent event strings for the same underlying error.
+///
+/// Use `"domain.object.cause"` form (`mesh.join.invalid_pin`,
+/// `state.raft.write_failed`). Returned string is `&'static str` so
+/// it never allocates at log time.
+pub trait NaukaError: std::error::Error {
+    fn event_name(&self) -> &'static str;
+}
+
+/// Log a [`NaukaError`] using its own `event_name` — no caller-
+/// supplied context string needed.
+///
+/// Sister trait to [`LogErr`]: method names differ on purpose
+/// (`warn` / `ok_warn` vs `warn_if_err` / `ok_or_warn`) so both
+/// traits can be `use`d in the same file without ambiguity.
+pub trait LogNaukaErr<T, E> {
+    /// Emit a `warn!(event = e.event_name(), error = %e)` if `self`
+    /// is `Err`, then return `self` unchanged.
+    fn warn(self) -> Result<T, E>;
+    /// Emit a `warn!(event = e.event_name(), error = %e)` if `self`
+    /// is `Err`, then collapse to an `Option`.
+    fn ok_warn(self) -> Option<T>;
+}
+
+impl<T, E: NaukaError> LogNaukaErr<T, E> for Result<T, E> {
+    fn warn(self) -> Result<T, E> {
+        if let Err(ref e) = self {
+            tracing::warn!(event = e.event_name(), error = %e, "swallowed error");
+        }
+        self
+    }
+
+    fn ok_warn(self) -> Option<T> {
+        match self {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(event = e.event_name(), error = %e, "swallowed error");
+                None
+            }
+        }
+    }
+}
+
 /// Generate a fresh trace_id — a UUID v4 string suitable for
 /// `tracing::info_span!("...", trace_id = %new_trace_id())` at any
 /// entry point where an operation starts outside of [`instrument_op`]

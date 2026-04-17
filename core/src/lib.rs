@@ -4,5 +4,5 @@ pub mod logging;
 
 pub use logging::{
     init, install_panic_hook, instrument_op, new_trace_id, set_node_id, LogErr, LogMode,
-    NaukaFormat,
+    LogNaukaErr, NaukaError, NaukaFormat,
 };
