@@ -5,12 +5,36 @@
 //! `EnvFilter` default, formatter, and panic hook are installed for you.
 //! `RUST_LOG` overrides the default in every mode.
 
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use tracing::Instrument;
+use tracing::{Event, Instrument, Level, Subscriber};
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
+use tracing_subscriber::fmt::{FmtContext, FormattedFields};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
+
+/// `service` field stamped on every event — the product name.
+const SERVICE: &str = "nauka";
+/// `version` field stamped on every event — the binary's
+/// `CARGO_PKG_VERSION` (matches workspace.package.version).
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Process-wide `node_id`, populated by [`set_node_id`] once the
+/// daemon computes it. `0` means "not yet known" — the field is
+/// omitted from output in that case, since the CLI doesn't have one
+/// until after `hypervisor init`/`join`.
+static NODE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Stamp this process's `node_id` so every subsequent event carries
+/// it. Call once at daemon startup after hashing the public key into
+/// a node id. Safe to call multiple times — last writer wins.
+pub fn set_node_id(id: u64) {
+    NODE_ID.store(id, Ordering::Relaxed);
+}
 
 /// Which surface the process is — picks the default filter and format.
 #[derive(Debug, Clone, Copy)]
@@ -50,21 +74,127 @@ pub fn init(mode: LogMode) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(mode.default_filter()));
 
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr);
-
-    let _ = match mode {
+    let format = match mode {
         // CLI output is ephemeral — drop timestamps and targets so any
         // warning we do emit reads clean next to cli_out output.
-        LogMode::Cli => builder.without_time().with_target(false).try_init(),
+        LogMode::Cli => NaukaFormat::new().without_time().without_target(),
         // Daemon output goes to journald; keep timestamps + targets.
-        LogMode::Daemon => builder.try_init(),
-        // Tests: capture-friendly writer, debug for our crates.
+        // Tests share the daemon format — full detail for failing tests.
+        LogMode::Daemon | LogMode::Test => NaukaFormat::new(),
+    };
+
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .event_format(format);
+
+    let _ = match mode {
+        LogMode::Cli | LogMode::Daemon => builder.try_init(),
         LogMode::Test => builder.with_test_writer().try_init(),
     };
 
     install_panic_hook();
+}
+
+/// Custom [`FormatEvent`] that replicates tracing-subscriber's full
+/// format (time · level · span breadcrumb · target · fields) and
+/// injects `service=nauka version=<pkg> node_id=<N>?` immediately
+/// before the event's own fields on every line.
+///
+/// The injection is a FormatEvent concern, not a Layer concern —
+/// tracing's Layer API can observe events but not modify them. A
+/// custom FormatEvent is the supported seam for "every event gets
+/// these fields".
+pub struct NaukaFormat {
+    with_time: bool,
+    with_target: bool,
+}
+
+impl NaukaFormat {
+    pub const fn new() -> Self {
+        Self {
+            with_time: true,
+            with_target: true,
+        }
+    }
+
+    pub const fn without_time(mut self) -> Self {
+        self.with_time = false;
+        self
+    }
+
+    pub const fn without_target(mut self) -> Self {
+        self.with_target = false;
+        self
+    }
+}
+
+impl Default for NaukaFormat {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for NaukaFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        if self.with_time {
+            SystemTime.format_time(&mut writer)?;
+            write!(writer, "  ")?;
+        }
+
+        match *event.metadata().level() {
+            Level::TRACE => write!(writer, "TRACE ")?,
+            Level::DEBUG => write!(writer, "DEBUG ")?,
+            Level::INFO => write!(writer, " INFO ")?,
+            Level::WARN => write!(writer, " WARN ")?,
+            Level::ERROR => write!(writer, "ERROR ")?,
+        }
+
+        // Span breadcrumb, root → leaf, each as `name{fields}`.
+        if let Some(scope) = ctx.event_scope() {
+            let mut first = true;
+            for span in scope.from_root() {
+                if !first {
+                    write!(writer, ":")?;
+                }
+                first = false;
+                write!(writer, "{}", span.name())?;
+                let ext = span.extensions();
+                if let Some(fields) = ext.get::<FormattedFields<N>>() {
+                    if !fields.fields.is_empty() {
+                        write!(writer, "{{{}}}", fields.fields)?;
+                    }
+                }
+            }
+            if !first {
+                write!(writer, ": ")?;
+            }
+        }
+
+        if self.with_target {
+            write!(writer, "{}: ", event.metadata().target())?;
+        }
+
+        // Nauka context fields on every event.
+        write!(writer, "service={SERVICE} version={VERSION}")?;
+        let node_id = NODE_ID.load(Ordering::Relaxed);
+        if node_id != 0 {
+            write!(writer, " node_id={node_id}")?;
+        }
+        write!(writer, " ")?;
+
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
 }
 
 /// Route panics through `tracing::error!` with structured fields, then

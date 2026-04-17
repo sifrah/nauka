@@ -290,6 +290,7 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
     let tls = build_tls(&state);
     let own_pk = mesh.public_key().to_string();
     let node_id = node_id_from_key(&own_pk);
+    nauka_core::set_node_id(node_id);
     let raft_addr = format!("[{}]:4001", mesh.address().address);
 
     tracing::info!(
