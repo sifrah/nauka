@@ -23,3 +23,6 @@ ring.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

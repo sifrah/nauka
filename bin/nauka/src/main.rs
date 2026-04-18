@@ -164,7 +164,7 @@ fn hypervisor_cmd() -> Command {
                         .arg(
                             Arg::new("query")
                                 .required(true)
-                                .help("SurQL statement, e.g. \"UPDATE hypervisor SET ...\""),
+                                .help("SurQL statement, e.g. \"UPDATE <table> SET ...\""),
                         ),
                 ),
         )
