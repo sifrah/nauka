@@ -1,11 +1,10 @@
-use nauka_core::resource::Resource;
-use nauka_state::Database;
-use serde::Deserialize;
-use surrealdb::types::SurrealValue;
+use nauka_core::resource::{Datetime, Resource, ResourceOps, Scope};
+use nauka_state::{Database, Writer};
 
 use crate::definition::Hypervisor;
 
 use super::crypto;
+use super::definition::Mesh;
 use super::{KeyPair, MeshError, MeshId};
 
 #[derive(Debug, Clone)]
@@ -25,72 +24,62 @@ pub struct MeshState {
     pub peering_pin: Option<String>,
 }
 
-#[derive(Deserialize, SurrealValue)]
-struct MeshRecord {
-    interface_name: String,
-    listen_port: i64,
-    mesh_id: String,
-    private_key: String,
-    #[serde(default)]
-    ca_cert: Option<String>,
-    #[serde(default)]
-    ca_key: Option<String>,
-    #[serde(default)]
-    tls_cert: Option<String>,
-    #[serde(default)]
-    tls_key: Option<String>,
-    #[serde(default)]
-    peering_pin: Option<String>,
-}
-
 impl MeshState {
     pub async fn save(&self, db: &Database) -> Result<(), MeshError> {
         let enc_private = crypto::encrypt_secret(self.keypair.private_key())?;
-        let mut record = serde_json::json!({
-            "interface_name": self.interface_name,
-            "listen_port": self.listen_port as i64,
-            "mesh_id": self.mesh_id.to_string(),
-            "private_key": enc_private,
-        });
-        let obj = record.as_object_mut().unwrap();
-        if let Some(ref v) = self.ca_cert {
-            obj.insert("ca_cert".into(), serde_json::Value::String(v.clone()));
-        }
-        if let Some(ref v) = self.ca_key {
-            let enc = crypto::encrypt_secret(v)?;
-            obj.insert("ca_key".into(), serde_json::Value::String(enc));
-        }
-        if let Some(ref v) = self.tls_cert {
-            obj.insert("tls_cert".into(), serde_json::Value::String(v.clone()));
-        }
-        if let Some(ref v) = self.tls_key {
-            let enc = crypto::encrypt_secret(v)?;
-            obj.insert("tls_key".into(), serde_json::Value::String(enc));
-        }
-        if let Some(ref v) = self.peering_pin {
-            obj.insert("peering_pin".into(), serde_json::Value::String(v.clone()));
-        }
+        let enc_ca_key = self
+            .ca_key
+            .as_deref()
+            .map(crypto::encrypt_secret)
+            .transpose()?;
+        let enc_tls_key = self
+            .tls_key
+            .as_deref()
+            .map(crypto::encrypt_secret)
+            .transpose()?;
 
-        let surql = format!(
-            "DELETE mesh:default; CREATE mesh:default CONTENT {}",
-            serde_json::to_string(&record).expect("serialize mesh record")
-        );
-        db.query(&surql)
+        let now = Datetime::now();
+        let mesh = Mesh {
+            mesh_id: self.mesh_id.to_string(),
+            interface_name: self.interface_name.clone(),
+            listen_port: self.listen_port,
+            private_key: enc_private,
+            ca_cert: self.ca_cert.clone(),
+            ca_key: enc_ca_key,
+            tls_cert: self.tls_cert.clone(),
+            tls_key: enc_tls_key,
+            peering_pin: self.peering_pin.clone(),
+            created_at: now,
+            updated_at: now,
+            version: 0,
+        };
+
+        // The `mesh` table is a per-node singleton — there is only
+        // ever one row. Wipe any prior row before the create so a
+        // re-init after a half-finished setup doesn't collide on the
+        // natural-key record id. Both statements run as one
+        // transaction so the table is never empty for callers racing
+        // us on a read.
+        Writer::new(db)
+            .transaction(|tx| {
+                tx.raw(Scope::Local, format!("DELETE {}", Mesh::TABLE))?;
+                tx.create(&mesh)?;
+                Ok(())
+            })
             .await
-            .map_err(|e| MeshError::State(e.to_string()))?;
-        Ok(())
+            .map_err(|e| MeshError::State(e.to_string()))
     }
 
     pub async fn load(db: &Database) -> Result<Self, MeshError> {
-        let rows: Vec<MeshRecord> = db
-            .query_take("SELECT * FROM mesh:default")
+        let rows: Vec<Mesh> = db
+            .query_take(&Mesh::list_query())
             .await
             .map_err(|e| MeshError::State(e.to_string()))?;
 
         let row = rows
             .into_iter()
             .next()
-            .ok_or_else(|| MeshError::State("no mesh found — run 'nauka mesh up' first".into()))?;
+            .ok_or_else(|| MeshError::State("no mesh found — run 'nauka hypervisor init' first".into()))?;
 
         let dec_private = crypto::decrypt_secret(&row.private_key)?;
         let keypair = KeyPair::from_private(&dec_private)?;
@@ -106,7 +95,7 @@ impl MeshState {
         Ok(Self {
             interface_name: row.interface_name,
             keypair,
-            listen_port: row.listen_port as u16,
+            listen_port: row.listen_port,
             mesh_id,
             address,
             ca_cert: row.ca_cert,
@@ -118,15 +107,15 @@ impl MeshState {
     }
 
     pub async fn delete(db: &Database) -> Result<(), MeshError> {
-        // Full-state wipe used at teardown. Uses `Hypervisor::TABLE`
-        // (rather than a hard-coded literal) so the CI grep check that
-        // forbids raw CRUD against known resource tables doesn't trip.
-        // The `mesh` table is still hand-written pending P5; once
-        // migrated, it will use `Mesh::TABLE` too.
+        // Full-state wipe used at teardown. Uses `Mesh::TABLE` and
+        // `Hypervisor::TABLE` (rather than literal table names) so
+        // the CI grep check that forbids raw CRUD against known
+        // resource tables doesn't trip.
         let query = format!(
-            "DELETE mesh; DELETE {}; \
+            "DELETE {mesh}; DELETE {hv}; \
              DELETE _raft_meta; DELETE _raft_log; DELETE _raft_snapshot;",
-            Hypervisor::TABLE,
+            mesh = Mesh::TABLE,
+            hv = Hypervisor::TABLE,
         );
         db.query(&query)
             .await

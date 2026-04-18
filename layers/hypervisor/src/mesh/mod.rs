@@ -1,6 +1,7 @@
 mod address;
 pub mod certs;
 pub mod crypto;
+pub mod definition;
 mod error;
 mod join;
 mod key;
@@ -9,6 +10,7 @@ pub mod reconciler;
 mod state;
 
 pub use address::MeshId;
+pub use definition::Mesh as MeshRecord;
 pub use error::MeshError;
 pub use join::{
     generate_pin, join_mesh, mesh_listener, request_leave, request_peer_removal,

@@ -63,21 +63,12 @@ async fn run() -> Result<()> {
 
 async fn open_db() -> Result<Arc<Database>> {
     let db = Arc::new(Database::open(None).await?);
-    // `nauka_hypervisor::SCHEMA` still covers the hand-written `mesh`
-    // table (see P5). Everything `#[resource]`-annotated lands in
-    // `nauka_core::cluster_schemas()` / `local_schemas()` via linkme.
+    // The only hand-written schema left is `nauka_state::SCHEMA`
+    // (Raft's internal `_raft_*` tables). Every user-facing resource
+    // flows through `#[resource]` + `ALL_RESOURCES`.
     let cluster = nauka_core::cluster_schemas();
     let local = nauka_core::local_schemas();
-    nauka_state::load_schemas(
-        &db,
-        &[
-            nauka_state::SCHEMA,
-            nauka_hypervisor::SCHEMA,
-            &cluster,
-            &local,
-        ],
-    )
-    .await?;
+    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local]).await?;
     Ok(db)
 }
 
