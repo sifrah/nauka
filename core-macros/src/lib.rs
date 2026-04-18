@@ -44,37 +44,56 @@ pub fn resource(args: TokenStream, input: TokenStream) -> TokenStream {
 struct ResourceArgs {
     table: LitStr,
     scope: LitStr,
+    /// `cascade_delete = "field1, field2"` — local Ref-typed fields
+    /// whose referenced records are deleted when this resource is
+    /// deleted.
+    cascade_delete: Option<LitStr>,
+    /// `restrict_delete = "table:field, table2:field2"` — external
+    /// (table, field) pairs. Deleting this resource fails if any of
+    /// those fields point at the deleted id.
+    restrict_delete: Option<LitStr>,
+    /// `set_null_on_delete = "table:field, …"` — external fields
+    /// that get set to `NONE` when this resource is deleted. Target
+    /// field MUST be `Option<Ref<_>>` at the DDL layer, but the
+    /// macro cannot verify cross-crate.
+    set_null_on_delete: Option<LitStr>,
 }
 
 impl Parse for ResourceArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut table: Option<LitStr> = None;
         let mut scope: Option<LitStr> = None;
+        let mut cascade_delete: Option<LitStr> = None;
+        let mut restrict_delete: Option<LitStr> = None;
+        let mut set_null_on_delete: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
             let value: LitStr = input.parse()?;
-            match key.to_string().as_str() {
-                "table" => {
-                    if table.is_some() {
-                        return Err(syn::Error::new(key.span(), "`table` specified more than once"));
-                    }
-                    table = Some(value);
-                }
-                "scope" => {
-                    if scope.is_some() {
-                        return Err(syn::Error::new(key.span(), "`scope` specified more than once"));
-                    }
-                    scope = Some(value);
-                }
+            let slot = match key.to_string().as_str() {
+                "table" => &mut table,
+                "scope" => &mut scope,
+                "cascade_delete" => &mut cascade_delete,
+                "restrict_delete" => &mut restrict_delete,
+                "set_null_on_delete" => &mut set_null_on_delete,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown attribute key `{other}` (allowed: `table`, `scope`)"),
+                        format!(
+                            "unknown attribute key `{other}` (allowed: `table`, `scope`, \
+                             `cascade_delete`, `restrict_delete`, `set_null_on_delete`)"
+                        ),
                     ));
                 }
+            };
+            if slot.is_some() {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("`{}` specified more than once", key),
+                ));
             }
+            *slot = Some(value);
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
             }
@@ -93,8 +112,57 @@ impl Parse for ResourceArgs {
             )
         })?;
 
-        Ok(ResourceArgs { table, scope })
+        Ok(ResourceArgs {
+            table,
+            scope,
+            cascade_delete,
+            restrict_delete,
+            set_null_on_delete,
+        })
     }
+}
+
+/// Comma-separated list of `"table:field"` pairs. Each entry reads
+/// as the external `(table, field)` tuple the `on_delete` rule
+/// applies to.
+fn parse_table_field_pairs(lit: &LitStr) -> syn::Result<Vec<(String, String)>> {
+    let raw = lit.value();
+    let mut out = Vec::new();
+    for (i, part) in raw.split(',').map(|s| s.trim()).enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let (table, field) = part.split_once(':').ok_or_else(|| {
+            syn::Error::new(
+                lit.span(),
+                format!(
+                    "entry #{} `{part}` is not in `table:field` form — \
+                     e.g. `\"vm:host, backup:vm\"`",
+                    i + 1
+                ),
+            )
+        })?;
+        let table = table.trim();
+        let field = field.trim();
+        if table.is_empty() || field.is_empty() {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!("entry #{} `{part}` has an empty table or field", i + 1),
+            ));
+        }
+        out.push((table.to_string(), field.to_string()));
+    }
+    Ok(out)
+}
+
+/// Comma-separated list of local field names.
+fn parse_field_list(lit: &LitStr) -> syn::Result<Vec<String>> {
+    Ok(lit
+        .value()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
 }
 
 #[derive(Clone, Copy)]
@@ -122,11 +190,29 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
     validate_unique_fields(&item)?;
     validate_no_base_field_collision(&item)?;
 
+    let cascade_fields = match &args.cascade_delete {
+        Some(lit) => {
+            let names = parse_field_list(lit)?;
+            validate_cascade_targets(&item, &names, lit)?;
+            names
+        }
+        None => Vec::new(),
+    };
+    let restrict_pairs = match &args.restrict_delete {
+        Some(lit) => parse_table_field_pairs(lit)?,
+        None => Vec::new(),
+    };
+    let set_null_pairs = match &args.set_null_on_delete {
+        Some(lit) => parse_table_field_pairs(lit)?,
+        None => Vec::new(),
+    };
+
     let user_ddl = generate_user_field_ddl(&table, &item)?;
     let unique_ddl = generate_unique_indexes(&table, &item);
     let base_ddl = generate_base_field_ddl(&table);
+    let event_ddl = generate_on_delete_event(&table, &cascade_fields, &restrict_pairs, &set_null_pairs);
     let full_ddl = format!(
-        "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL;\n{user_ddl}{base_ddl}{unique_ddl}"
+        "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL;\n{user_ddl}{base_ddl}{unique_ddl}{event_ddl}"
     );
 
     // Build the SET-clause expression list *before* adding base fields
@@ -514,11 +600,40 @@ fn generate_user_field_ddl(table: &str, item: &ItemStruct) -> syn::Result<String
         let name = field.ident.as_ref().expect("named field has ident");
         let surql_type = rust_to_surql_type(&field.ty)
             .map_err(|e| syn::Error::new_spanned(&field.ty, e))?;
+        let assert_clause = extract_assert(field)?;
         out.push_str(&format!(
-            "DEFINE FIELD IF NOT EXISTS {name} ON {table} TYPE {surql_type};\n"
+            "DEFINE FIELD IF NOT EXISTS {name} ON {table} TYPE {surql_type}{assert_clause};\n"
         ));
     }
     Ok(out)
+}
+
+/// Pull the inner SurrealQL predicate out of a `#[assert("…")]`
+/// field attribute. At most one `#[assert]` per field.
+fn extract_assert(field: &Field) -> syn::Result<String> {
+    let mut found: Option<LitStr> = None;
+    for attr in &field.attrs {
+        if !attr.path().is_ident("assert") {
+            continue;
+        }
+        if found.is_some() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[assert]` may appear at most once per field",
+            ));
+        }
+        let lit: LitStr = attr.parse_args().map_err(|_| {
+            syn::Error::new_spanned(
+                attr,
+                "`#[assert]` takes one string literal — e.g. `#[assert(\"$value > 0\")]`",
+            )
+        })?;
+        found = Some(lit);
+    }
+    Ok(match found {
+        Some(lit) => format!(" ASSERT {}", lit.value()),
+        None => String::new(),
+    })
 }
 
 fn generate_base_field_ddl(table: &str) -> String {
@@ -526,6 +641,108 @@ fn generate_base_field_ddl(table: &str) -> String {
         "DEFINE FIELD IF NOT EXISTS created_at ON {table} TYPE datetime;\n\
          DEFINE FIELD IF NOT EXISTS updated_at ON {table} TYPE datetime;\n\
          DEFINE FIELD IF NOT EXISTS version    ON {table} TYPE int;\n"
+    )
+}
+
+/// Check that each name in `cascade_fields` is a real field of the
+/// struct whose type is `Ref<T>`, `Vec<Ref<T>>`, or `Option<Ref<T>>`.
+/// Cascading on a non-reference field makes no sense and would emit
+/// invalid SurrealQL.
+fn validate_cascade_targets(
+    item: &ItemStruct,
+    cascade_fields: &[String],
+    lit: &LitStr,
+) -> syn::Result<()> {
+    let Fields::Named(named) = &item.fields else {
+        return Ok(());
+    };
+
+    for name in cascade_fields {
+        let field = named
+            .named
+            .iter()
+            .find(|f| f.ident.as_ref().map(|i| i == name).unwrap_or(false))
+            .ok_or_else(|| {
+                syn::Error::new(
+                    lit.span(),
+                    format!(
+                        "`cascade_delete` names field `{name}` which does not exist \
+                         on this struct"
+                    ),
+                )
+            })?;
+
+        if !is_ref_or_container_of_ref(&field.ty) {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!(
+                    "`cascade_delete = \"{name}\"` targets a field that is not a \
+                     `Ref<T>` / `Vec<Ref<T>>` / `Option<Ref<T>>` — cascading only \
+                     makes sense on reference fields"
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// `Ref<T>` / `Option<Ref<T>>` / `Vec<Ref<T>>`.
+fn is_ref_or_container_of_ref(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    match seg.ident.to_string().as_str() {
+        "Ref" => true,
+        "Option" | "Vec" => first_type_arg(seg)
+            .map(is_ref_or_container_of_ref)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn generate_on_delete_event(
+    table: &str,
+    cascade_fields: &[String],
+    restrict_pairs: &[(String, String)],
+    set_null_pairs: &[(String, String)],
+) -> String {
+    if cascade_fields.is_empty() && restrict_pairs.is_empty() && set_null_pairs.is_empty() {
+        return String::new();
+    }
+
+    let mut body = String::new();
+
+    // --- cascade: delete owned children ---
+    for field in cascade_fields {
+        body.push_str(&format!("    DELETE $before.{field};\n"));
+    }
+
+    // --- restrict: fail if anything still references us ---
+    for (other_table, other_field) in restrict_pairs {
+        body.push_str(&format!(
+            "    IF (SELECT VALUE count() FROM {other_table} \
+             WHERE {other_field} = $before.id GROUP ALL)[0] > 0 {{\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20THROW \"cannot delete {table}: still referenced \
+             by {other_table}.{other_field}\";\n\
+             \x20\x20\x20\x20}};\n"
+        ));
+    }
+
+    // --- set_null: null out back-references ---
+    for (other_table, other_field) in set_null_pairs {
+        body.push_str(&format!(
+            "    UPDATE {other_table} SET {other_field} = NONE \
+             WHERE {other_field} = $before.id;\n"
+        ));
+    }
+
+    format!(
+        "DEFINE EVENT IF NOT EXISTS {table}_on_delete ON {table} \
+         WHEN $event = \"DELETE\" THEN {{\n{body}}};\n"
     )
 }
 
@@ -660,8 +877,10 @@ fn strip_macro_attrs(item: &mut ItemStruct) {
         return;
     };
     for field in &mut named.named {
-        field
-            .attrs
-            .retain(|a| !a.path().is_ident("id") && !a.path().is_ident("unique"));
+        field.attrs.retain(|a| {
+            !a.path().is_ident("id")
+                && !a.path().is_ident("unique")
+                && !a.path().is_ident("assert")
+        });
     }
 }

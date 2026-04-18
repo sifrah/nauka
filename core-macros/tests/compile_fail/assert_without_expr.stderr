@@ -1,0 +1,5 @@
+error: `#[assert]` takes one string literal — e.g. `#[assert("$value > 0")]`
+  --> tests/compile_fail/assert_without_expr.rs:10:5
+   |
+10 |     #[assert]
+   |     ^^^^^^^^^

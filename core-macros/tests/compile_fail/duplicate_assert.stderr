@@ -1,0 +1,5 @@
+error: `#[assert]` may appear at most once per field
+  --> tests/compile_fail/duplicate_assert.rs:10:5
+   |
+10 |     #[assert("$value < 100")]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^

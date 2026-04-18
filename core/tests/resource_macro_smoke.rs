@@ -239,6 +239,78 @@ fn create_query_emits_bare_record_literals_for_refs() {
     assert!(q.contains("preferred = NONE"));
 }
 
+// --- Cascade / restrict / set_null / assert ---
+
+#[resource(
+    table = "test_vm",
+    scope = "cluster",
+    cascade_delete = "attached",
+    restrict_delete = "test_snapshot:vm",
+    set_null_on_delete = "test_policy:preferred_vm"
+)]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestVm {
+    #[id]
+    pub name: String,
+    #[assert("$value BETWEEN 1 AND 128")]
+    pub cpu: u32,
+    pub attached: Vec<Ref<TestParent>>,
+}
+
+#[test]
+fn on_delete_event_includes_cascade_restrict_and_set_null() {
+    let ddl = TestVm::DDL;
+    assert!(
+        ddl.contains("DEFINE EVENT IF NOT EXISTS test_vm_on_delete ON test_vm"),
+        "missing DEFINE EVENT: {ddl}"
+    );
+    assert!(ddl.contains("WHEN $event = \"DELETE\""), "{ddl}");
+    assert!(
+        ddl.contains("DELETE $before.attached"),
+        "missing cascade delete: {ddl}"
+    );
+    assert!(
+        ddl.contains("count() FROM test_snapshot WHERE vm = $before.id"),
+        "missing restrict check: {ddl}"
+    );
+    assert!(
+        ddl.contains("THROW \"cannot delete test_vm: still referenced by test_snapshot.vm\""),
+        "missing restrict THROW: {ddl}"
+    );
+    assert!(
+        ddl.contains("UPDATE test_policy SET preferred_vm = NONE"),
+        "missing set_null UPDATE: {ddl}"
+    );
+}
+
+#[test]
+fn assert_attribute_appends_to_define_field() {
+    let ddl = TestVm::DDL;
+    assert!(
+        ddl.contains("cpu ON test_vm TYPE int ASSERT $value BETWEEN 1 AND 128"),
+        "cpu missing ASSERT clause: {ddl}"
+    );
+    // Fields without #[assert] must NOT carry a trailing ASSERT.
+    assert!(
+        ddl.contains("name ON test_vm TYPE string;"),
+        "name field has unexpected trailing clause: {ddl}"
+    );
+}
+
+#[test]
+fn resource_without_on_delete_emits_no_event() {
+    // TestWidget / TestParent / TestChild above don't use on_delete.
+    assert!(
+        !TestWidget::DDL.contains("DEFINE EVENT"),
+        "unexpected DEFINE EVENT for TestWidget: {}",
+        TestWidget::DDL
+    );
+    assert!(
+        !TestParent::DDL.contains("DEFINE EVENT"),
+        "unexpected DEFINE EVENT for TestParent"
+    );
+}
+
 #[test]
 fn ref_is_type_safe_across_resources() {
     // A `Ref<TestParent>` cannot be used where a `Ref<TestWidget>`
