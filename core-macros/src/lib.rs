@@ -210,7 +210,8 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
     let user_ddl = generate_user_field_ddl(&table, &item)?;
     let unique_ddl = generate_unique_indexes(&table, &item);
     let base_ddl = generate_base_field_ddl(&table);
-    let event_ddl = generate_on_delete_event(&table, &cascade_fields, &restrict_pairs, &set_null_pairs);
+    let event_ddl =
+        generate_on_delete_event(&table, &cascade_fields, &restrict_pairs, &set_null_pairs);
     let full_ddl = format!(
         "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL;\n{user_ddl}{base_ddl}{unique_ddl}{event_ddl}"
     );
@@ -336,11 +337,7 @@ fn build_base_set_exprs() -> Vec<TokenStream2> {
     ]
 }
 
-fn build_create_body(
-    table: &str,
-    id_field: &Ident,
-    set_exprs: &[TokenStream2],
-) -> TokenStream2 {
+fn build_create_body(table: &str, id_field: &Ident, set_exprs: &[TokenStream2]) -> TokenStream2 {
     quote! {
         let set_parts: ::std::vec::Vec<::std::string::String> =
             vec![ #(#set_exprs),* ];
@@ -354,11 +351,7 @@ fn build_create_body(
     }
 }
 
-fn build_update_body(
-    table: &str,
-    id_field: &Ident,
-    set_exprs: &[TokenStream2],
-) -> TokenStream2 {
+fn build_update_body(table: &str, id_field: &Ident, set_exprs: &[TokenStream2]) -> TokenStream2 {
     quote! {
         let set_parts: ::std::vec::Vec<::std::string::String> =
             vec![ #(#set_exprs),* ];
@@ -579,9 +572,7 @@ fn validate_no_base_field_collision(item: &ItemStruct) -> syn::Result<()> {
         if matches!(name.as_str(), "created_at" | "updated_at" | "version") {
             return Err(syn::Error::new_spanned(
                 field,
-                format!(
-                    "`{name}` is injected by `#[resource]` and must not be declared manually"
-                ),
+                format!("`{name}` is injected by `#[resource]` and must not be declared manually"),
             ));
         }
     }
@@ -598,8 +589,8 @@ fn generate_user_field_ddl(table: &str, item: &ItemStruct) -> syn::Result<String
     let mut out = String::new();
     for field in &named.named {
         let name = field.ident.as_ref().expect("named field has ident");
-        let surql_type = rust_to_surql_type(&field.ty)
-            .map_err(|e| syn::Error::new_spanned(&field.ty, e))?;
+        let surql_type =
+            rust_to_surql_type(&field.ty).map_err(|e| syn::Error::new_spanned(&field.ty, e))?;
         let assert_clause = extract_assert(field)?;
         out.push_str(&format!(
             "DEFINE FIELD IF NOT EXISTS {name} ON {table} TYPE {surql_type}{assert_clause};\n"
@@ -878,9 +869,7 @@ fn strip_macro_attrs(item: &mut ItemStruct) {
     };
     for field in &mut named.named {
         field.attrs.retain(|a| {
-            !a.path().is_ident("id")
-                && !a.path().is_ident("unique")
-                && !a.path().is_ident("assert")
+            !a.path().is_ident("id") && !a.path().is_ident("unique") && !a.path().is_ident("assert")
         });
     }
 }

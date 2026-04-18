@@ -240,9 +240,7 @@ pub static ALL_RESOURCES: [&'static ResourceDescriptor] = [..];
 /// Normally derived through the `#[resource(…)]` attribute macro;
 /// hand-written impls are possible but discouraged because they
 /// bypass the compile-time invariant checks.
-pub trait Resource:
-    Serialize + DeserializeOwned + SurrealValue + Send + Sync + 'static
-{
+pub trait Resource: Serialize + DeserializeOwned + SurrealValue + Send + Sync + 'static {
     /// SurrealDB table name. snake_case singular.
     const TABLE: &'static str;
 

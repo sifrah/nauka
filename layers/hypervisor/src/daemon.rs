@@ -509,7 +509,10 @@ pub async fn list_hypervisors(db: &Database) -> Result<Vec<HypervisorSummary>, M
         .map_err(|e| MeshError::State(e.to_string()))
 }
 
-async fn fetch_hypervisor(db: &Database, public_key: &str) -> Result<Option<Hypervisor>, MeshError> {
+async fn fetch_hypervisor(
+    db: &Database,
+    public_key: &str,
+) -> Result<Option<Hypervisor>, MeshError> {
     let query = Hypervisor::get_query(&public_key.to_string());
     let rows: Vec<Hypervisor> = db
         .query_take(&query)

@@ -76,10 +76,9 @@ impl MeshState {
             .await
             .map_err(|e| MeshError::State(e.to_string()))?;
 
-        let row = rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| MeshError::State("no mesh found — run 'nauka hypervisor init' first".into()))?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MeshError::State("no mesh found — run 'nauka hypervisor init' first".into())
+        })?;
 
         let dec_private = crypto::decrypt_secret(&row.private_key)?;
         let keypair = KeyPair::from_private(&dec_private)?;
