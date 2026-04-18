@@ -63,7 +63,12 @@ async fn run() -> Result<()> {
 
 async fn open_db() -> Result<Arc<Database>> {
     let db = Arc::new(Database::open(None).await?);
-    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, nauka_hypervisor::SCHEMA]).await?;
+    // The only hand-written schema left is `nauka_state::SCHEMA`
+    // (Raft's internal `_raft_*` tables). Every user-facing resource
+    // flows through `#[resource]` + `ALL_RESOURCES`.
+    let cluster = nauka_core::cluster_schemas();
+    let local = nauka_core::local_schemas();
+    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local]).await?;
     Ok(db)
 }
 
@@ -159,7 +164,7 @@ fn hypervisor_cmd() -> Command {
                         .arg(
                             Arg::new("query")
                                 .required(true)
-                                .help("SurQL statement, e.g. \"UPDATE hypervisor SET ...\""),
+                                .help("SurQL statement, e.g. \"UPDATE <table> SET ...\""),
                         ),
                 ),
         )

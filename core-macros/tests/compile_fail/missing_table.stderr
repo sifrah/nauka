@@ -1,0 +1,7 @@
+error: `#[resource]` requires `table = "…"`
+ --> tests/compile_fail/missing_table.rs:5:1
+  |
+5 | #[resource(scope = "local")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `resource` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,6 @@
+error: `#[unique]` cannot be used on `Option` — UNIQUE indexes only make sense on scalar fields
+  --> tests/compile_fail/unique_on_option.rs:10:5
+   |
+10 | /     #[unique]
+11 | |     pub maybe: Option<String>,
+   | |_____________________________^

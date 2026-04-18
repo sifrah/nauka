@@ -1,0 +1,18 @@
+[package]
+name = "nauka-core-macros"
+description = "Proc-macros powering the Nauka Resource contract — see ADR 0006"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+[dev-dependencies]
+trybuild = { workspace = true }

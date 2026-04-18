@@ -1,0 +1,5 @@
+error: `version` is injected by `#[resource]` and must not be declared manually
+  --> tests/compile_fail/version_collision.rs:10:5
+   |
+10 |     pub version: u32,
+   |     ^^^^^^^^^^^^^^^^

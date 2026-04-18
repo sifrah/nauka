@@ -1,0 +1,5 @@
+error: unknown attribute key `banana` (allowed: `table`, `scope`, `cascade_delete`, `restrict_delete`, `set_null_on_delete`)
+ --> tests/compile_fail/unknown_attr_key.rs:6:46
+  |
+6 | #[resource(table = "extra", scope = "local", banana = "yes")]
+  |                                              ^^^^^^

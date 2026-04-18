@@ -1,0 +1,5 @@
+error: `cascade_delete` names field `nonexistent` which does not exist on this struct
+ --> tests/compile_fail/cascade_missing_field.rs:9:22
+  |
+9 |     cascade_delete = "nonexistent"
+  |                      ^^^^^^^^^^^^^

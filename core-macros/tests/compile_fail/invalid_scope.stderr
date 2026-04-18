@@ -1,0 +1,5 @@
+error: scope `regional` is invalid — must be `"local"` or `"cluster"`
+ --> tests/compile_fail/invalid_scope.rs:5:37
+  |
+5 | #[resource(table = "weird", scope = "regional")]
+  |                                     ^^^^^^^^^^

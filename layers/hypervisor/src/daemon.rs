@@ -10,12 +10,14 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nauka_core::resource::{Datetime, ResourceOps};
 use nauka_core::{LogErr, LogNaukaErr};
-use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig};
+use nauka_state::{node_id_from_key, Database, RaftNode, TlsConfig, Writer};
 use serde::Deserialize;
 use surrealdb::types::SurrealValue;
 use tokio::signal::unix::{signal, SignalKind};
 
+use crate::definition::Hypervisor;
 use crate::mesh::reconciler;
 use crate::mesh::{
     certs, generate_pin, join_mesh, mesh_listener, whoami, Mesh, MeshError, MeshId, MeshState,
@@ -31,11 +33,6 @@ fn snapshot_threshold() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(nauka_state::raft::SNAPSHOT_THRESHOLD)
-}
-
-#[derive(Deserialize, SurrealValue)]
-struct EndpointRow {
-    endpoint: Option<String>,
 }
 
 #[derive(Clone)]
@@ -136,19 +133,27 @@ pub async fn init_hypervisor(
         // Let the initial vote + blank entry fully apply before we write.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Format `joined_at` in Rust (here on the leader) rather than letting
-        // `time::now()` default run on every node's state machine — the latter
-        // diverges by clock drift and breaks Raft determinism.
-        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        let surql = format!(
-            "CREATE hypervisor SET \
-             public_key = '{own_pk}', node_id = {node_id}, address = '{addr}', \
-             endpoint = NONE, allowed_ips = ['{addr}'], keepalive = 25, \
-             raft_addr = '{raft_addr}', joined_at = d'{joined_at}'",
-            node_id = node_id as i64,
-            addr = mesh.address(),
-        );
-        raft.write(surql)
+        // Timestamps are set here on the leader so every node's state
+        // machine applies the same byte-identical value — a schema-level
+        // `DEFAULT time::now()` would diverge by clock drift and break
+        // Raft determinism (see ADR 0006 rule #7).
+        let now = Datetime::now();
+        let address_str = mesh.address().to_string();
+        let hv = Hypervisor {
+            public_key: own_pk.clone(),
+            node_id,
+            raft_addr: raft_addr.clone(),
+            address: address_str.clone(),
+            endpoint: None,
+            allowed_ips: vec![address_str],
+            keepalive: Some(25),
+            created_at: now,
+            updated_at: now,
+            version: 0,
+        };
+        Writer::new(&db)
+            .with_raft(&raft)
+            .create(&hv)
             .await
             .map_err(|e| MeshError::State(format!("register self: {e}")))?;
 
@@ -246,20 +251,31 @@ async fn write_bootstrap_peers(db: &Database, peers: &[PeerInfo]) {
                 continue;
             }
         };
-        // `joined_at` has no schema default (removed to keep Raft apply
-        // deterministic); every CREATE hypervisor must set it explicitly.
-        // This write is local-only, not Raft-replicated, so the timestamp
-        // doesn't need to match any other node — just be present.
-        let joined_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-        let surql = format!(
-            "CREATE hypervisor SET \
-             public_key = '{canonical_pk}', node_id = {node_id}, address = '{mesh_addr_mask}', \
-             endpoint = '{endpoint}', allowed_ips = ['{mesh_addr_mask}'], keepalive = 25, \
-             raft_addr = '[{ip}]:4001', joined_at = d'{joined_at}'",
-            node_id = node_id_from_key(&canonical_pk) as i64,
-            ip = mesh_addr_mask.address,
-        );
-        let _ = db.query(&surql).await.warn_if_err("bootstrap.peer.write");
+        // Local-only bootstrap write — the joiner isn't in the Raft
+        // cluster yet, so we cache the peer record locally so the WG
+        // reconciler can dial it immediately. Once the joiner becomes
+        // a Raft voter, the leader's replicated CREATE takes
+        // precedence. `Writer::create` is not used here because it
+        // would route to Raft (Hypervisor is `scope = "cluster"`),
+        // which is exactly what we cannot do pre-membership.
+        let now = Datetime::now();
+        let mesh_addr_str = mesh_addr_mask.to_string();
+        let hv = Hypervisor {
+            public_key: canonical_pk.clone(),
+            node_id: node_id_from_key(&canonical_pk),
+            raft_addr: format!("[{}]:4001", mesh_addr_mask.address),
+            address: mesh_addr_str.clone(),
+            endpoint: Some(endpoint.to_string()),
+            allowed_ips: vec![mesh_addr_str],
+            keepalive: Some(25),
+            created_at: now,
+            updated_at: now,
+            version: 0,
+        };
+        let _ = db
+            .query(&hv.create_query())
+            .await
+            .warn_if_err("bootstrap.peer.write");
     }
 }
 
@@ -405,8 +421,16 @@ async fn refresh_own_endpoint(
     };
     let new_endpoint = SocketAddr::new(observed_ip, listen_port).to_string();
 
-    let current_ep = match read_own_endpoint(&db, &own_pk).await {
-        Ok(ep) => ep,
+    let mut hv = match fetch_hypervisor(&db, &own_pk).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            tracing::warn!(
+                event = "endpoint.refresh.own_record_missing",
+                public_key = %own_pk,
+                "endpoint refresh: own hypervisor record not found"
+            );
+            return;
+        }
         Err(e) => {
             tracing::warn!(
                 event = "endpoint.refresh.read_own_failed",
@@ -416,7 +440,7 @@ async fn refresh_own_endpoint(
             return;
         }
     };
-    if current_ep.as_deref() == Some(new_endpoint.as_str()) {
+    if hv.endpoint.as_deref() == Some(new_endpoint.as_str()) {
         tracing::debug!(
             event = "endpoint.refresh.unchanged",
             endpoint = %new_endpoint,
@@ -427,13 +451,16 @@ async fn refresh_own_endpoint(
 
     tracing::info!(
         event = "endpoint.refresh.change",
-        from = %current_ep.as_deref().unwrap_or("NONE"),
+        from = %hv.endpoint.as_deref().unwrap_or("NONE"),
         to = %new_endpoint,
         "endpoint refresh: changed"
     );
-    let surql =
-        format!("UPDATE hypervisor SET endpoint = '{new_endpoint}' WHERE public_key = '{own_pk}'");
-    match raft.write(surql).await {
+
+    hv.endpoint = Some(new_endpoint.clone());
+    hv.updated_at = Datetime::now();
+    hv.version += 1;
+
+    match Writer::new(&db).with_raft(&raft).update(&hv).await {
         Ok(_) => tracing::info!(
             event = "endpoint.refresh.propagated",
             "endpoint refresh: propagated via Raft"
@@ -482,12 +509,14 @@ pub async fn list_hypervisors(db: &Database) -> Result<Vec<HypervisorSummary>, M
         .map_err(|e| MeshError::State(e.to_string()))
 }
 
-async fn read_own_endpoint(db: &Database, own_pk: &str) -> Result<Option<String>, MeshError> {
-    let rows: Vec<EndpointRow> = db
-        .query_take(&format!(
-            "SELECT endpoint FROM hypervisor WHERE public_key = '{own_pk}'"
-        ))
+async fn fetch_hypervisor(
+    db: &Database,
+    public_key: &str,
+) -> Result<Option<Hypervisor>, MeshError> {
+    let query = Hypervisor::get_query(&public_key.to_string());
+    let rows: Vec<Hypervisor> = db
+        .query_take(&query)
         .await
         .map_err(|e| MeshError::State(e.to_string()))?;
-    Ok(rows.into_iter().next().and_then(|r| r.endpoint))
+    Ok(rows.into_iter().next())
 }

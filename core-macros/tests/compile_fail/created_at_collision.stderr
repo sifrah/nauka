@@ -1,0 +1,5 @@
+error: `created_at` is injected by `#[resource]` and must not be declared manually
+  --> tests/compile_fail/created_at_collision.rs:10:5
+   |
+10 |     pub created_at: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^

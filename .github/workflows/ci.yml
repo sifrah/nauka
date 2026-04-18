@@ -65,6 +65,9 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      - name: Resource contract — no raw CRUD (ADR 0006)
+        run: ./scripts/check-raw-crud.sh
+
       - name: cargo clippy --workspace --all-targets
         run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
 

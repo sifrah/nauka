@@ -1,0 +1,5 @@
+error: entry #1 `bare_entry_no_colon` is not in `table:field` form — e.g. `"vm:host, backup:vm"`
+ --> tests/compile_fail/restrict_bad_syntax.rs:9:23
+  |
+9 |     restrict_delete = "bare_entry_no_colon"
+  |                       ^^^^^^^^^^^^^^^^^^^^^

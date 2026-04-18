@@ -1,0 +1,5 @@
+error: `updated_at` is injected by `#[resource]` and must not be declared manually
+  --> tests/compile_fail/updated_at_collision.rs:10:5
+   |
+10 |     pub updated_at: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^

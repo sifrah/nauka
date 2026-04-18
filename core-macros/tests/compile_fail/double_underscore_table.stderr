@@ -1,0 +1,5 @@
+error: table name `my__table` must be snake_case (no leading, trailing, or doubled underscores)
+ --> tests/compile_fail/double_underscore_table.rs:6:20
+  |
+6 | #[resource(table = "my__table", scope = "local")]
+  |                    ^^^^^^^^^^^

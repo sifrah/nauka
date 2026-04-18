@@ -1,0 +1,5 @@
+error: `cascade_delete = "not_a_ref"` targets a field that is not a `Ref<T>` / `Vec<Ref<T>>` / `Option<Ref<T>>` — cascading only makes sense on reference fields
+  --> tests/compile_fail/cascade_wrong_type.rs:10:22
+   |
+10 |     cascade_delete = "not_a_ref"
+   |                      ^^^^^^^^^^^

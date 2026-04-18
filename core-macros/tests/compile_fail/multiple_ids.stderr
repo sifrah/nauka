@@ -1,0 +1,6 @@
+error: `#[id]` may appear on only one field per resource
+  --> tests/compile_fail/multiple_ids.rs:10:5
+   |
+10 | /     #[id]
+11 | |     pub b: String,
+   | |_________________^
