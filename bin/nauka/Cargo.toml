@@ -13,9 +13,11 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 anyhow.workspace = true
+rpassword.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 nauka-core.workspace = true
 nauka-hypervisor.workspace = true
+nauka-iam.workspace = true
 nauka-state.workspace = true

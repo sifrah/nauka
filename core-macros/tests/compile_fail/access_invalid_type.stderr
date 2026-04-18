@@ -1,0 +1,5 @@
+error: `#[access]` type `jwt` is not supported — only `"record"` today; `"jwt"` is reserved for OIDC/SSO (IAM epic post-MVP)
+ --> tests/compile_fail/access_invalid_type.rs:8:12
+  |
+8 |     type = "jwt",
+  |            ^^^^^

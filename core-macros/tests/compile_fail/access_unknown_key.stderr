@@ -1,0 +1,5 @@
+error: unknown `#[access]` key `typo_here` (allowed: `name`, `type`, `signup`, `signin`, `jwt_duration`, `session_duration`)
+  --> tests/compile_fail/access_unknown_key.rs:12:5
+   |
+12 |     typo_here = "oops"
+   |     ^^^^^^^^^

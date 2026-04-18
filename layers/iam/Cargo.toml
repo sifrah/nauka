@@ -1,29 +1,23 @@
 [package]
-name = "nauka-hypervisor"
-description = "Nauka hypervisor layer — WireGuard mesh networking"
+name = "nauka-iam"
+description = "Nauka IAM layer — identity, authentication, authorization (see IAM epic)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-defguard_wireguard_rs.workspace = true
 nauka-core.workspace = true
 nauka-core-macros.workspace = true
-nauka-iam.workspace = true
 nauka-state.workspace = true
 surrealdb.workspace = true
-tokio.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
 base64.workspace = true
-rcgen.workspace = true
-ring.workspace = true
-rustls.workspace = true
-rustls-pemfile.workspace = true
-chrono.workspace = true
+argon2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

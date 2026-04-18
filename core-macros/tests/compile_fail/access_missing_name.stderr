@@ -1,0 +1,12 @@
+error: `#[access]` requires `name = "…"`
+  --> tests/compile_fail/access_missing_name.rs:5:1
+   |
+ 5 | / #[access(
+ 6 | |     type = "record",
+ 7 | |     signin = "SELECT * FROM x",
+ 8 | |     jwt_duration = "1h",
+ 9 | |     session_duration = "24h"
+10 | | )]
+   | |__^
+   |
+   = note: this error originates in the attribute macro `access` (in Nightly builds, run with -Z macro-backtrace for more info)

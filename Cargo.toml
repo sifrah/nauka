@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["bin/nauka", "core", "core-macros", "layers/hypervisor", "layers/state"]
+members = ["bin/nauka", "core", "core-macros", "layers/hypervisor", "layers/iam", "layers/state"]
 
 [workspace.package]
 version = "2.0.0"
@@ -36,7 +36,10 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 trybuild = "1"
+argon2 = "0.5"
+rpassword = "7"
 nauka-core = { path = "core" }
 nauka-core-macros = { path = "core-macros" }
 nauka-hypervisor = { path = "layers/hypervisor" }
+nauka-iam = { path = "layers/iam" }
 nauka-state = { path = "layers/state" }

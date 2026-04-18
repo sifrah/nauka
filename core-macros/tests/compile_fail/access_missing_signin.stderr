@@ -1,0 +1,12 @@
+error: `#[access]` requires `signin = "…"` — the SurrealQL clause that authenticates an existing user
+  --> tests/compile_fail/access_missing_signin.rs:6:1
+   |
+ 6 | / #[access(
+ 7 | |     name = "x",
+ 8 | |     type = "record",
+ 9 | |     jwt_duration = "1h",
+10 | |     session_duration = "24h"
+11 | | )]
+   | |__^
+   |
+   = note: this error originates in the attribute macro `access` (in Nightly builds, run with -Z macro-backtrace for more info)

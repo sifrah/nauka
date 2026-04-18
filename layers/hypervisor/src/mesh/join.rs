@@ -59,6 +59,19 @@ struct RaftWriteRequest {
     query: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamSignupRequest {
+    email: String,
+    password: String,
+    display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamSigninRequest {
+    email: String,
+    password: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -509,6 +522,93 @@ async fn handle_connection(
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
         }
+    } else if v.get("iam_signup").is_some() {
+        // Create a user. Loopback-only: signup is an operator action
+        // today (no REST surface yet). The daemon hashes the password
+        // with Argon2id in Rust, then replicates the literal hash via
+        // Raft so every follower applies the same PHC string. Without
+        // this, `crypto::argon2::generate` running on the leader
+        // would produce a different hash on each replica and the
+        // state machine would diverge.
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_signup requires loopback\"}\n")
+                .await;
+            nauka_core::bail_log!(
+                MeshError::Join("non-loopback iam_signup".into()),
+                event = "iam.signup.non_loopback_rejected",
+                peer = %peer_addr,
+                "iam_signup requires loopback"
+            );
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamSignupRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::signup(db, raft, &req.email, &req.password, &req.display_name).await {
+            Ok(jwt) => {
+                let body = serde_json::json!({ "ok": true, "jwt": jwt.into_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(
+                    event = "iam.signup.ok",
+                    email = %req.email,
+                    "iam signup ok"
+                );
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(
+                    event = "iam.signup.fail",
+                    email = %req.email,
+                    error = %e,
+                    "iam signup failed"
+                );
+            }
+        }
+    } else if v.get("iam_signin").is_some() {
+        // Authenticate an existing user. Loopback-only in IAM-1; a
+        // REST surface with bearer-token auth arrives with the
+        // ResourceDef work (#342 + IAM-3).
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_signin requires loopback\"}\n")
+                .await;
+            nauka_core::bail_log!(
+                MeshError::Join("non-loopback iam_signin".into()),
+                event = "iam.signin.non_loopback_rejected",
+                peer = %peer_addr,
+                "iam_signin requires loopback"
+            );
+        }
+        let req: IamSigninRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::signin(db, &req.email, &req.password).await {
+            Ok(jwt) => {
+                let body = serde_json::json!({ "ok": true, "jwt": jwt.into_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(
+                    event = "iam.signin.ok",
+                    email = %req.email,
+                    "iam signin ok"
+                );
+            }
+            Err(e) => {
+                // Collapse to a fixed "invalid credentials" response
+                // from the client's point of view even though we log
+                // the real reason — that distinction must never be
+                // exposed externally (enumeration oracle).
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(
+                    event = "iam.signin.fail",
+                    email = %req.email,
+                    error = %e,
+                    "iam signin failed"
+                );
+            }
+        }
     }
 
     Ok(())
@@ -717,6 +817,66 @@ pub async fn whoami(peer_ip: &str, join_port: u16) -> Result<std::net::IpAddr, M
     ip_str
         .parse()
         .map_err(|_| MeshError::Join(format!("whoami: invalid ip {ip_str}")))
+}
+
+/// Ask the local daemon to create a new user. The daemon hashes the
+/// password in Rust and replicates the record via Raft. Loopback
+/// only; returns the minted JWT on success.
+pub fn request_iam_signup(
+    join_port: u16,
+    email: &str,
+    password: &str,
+    display_name: &str,
+) -> Result<String, MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+    let req = serde_json::json!({
+        "iam_signup": true,
+        "email": email,
+        "password": password,
+        "display_name": display_name,
+    });
+    writeln!(stream, "{req}").map_err(|e| MeshError::Join(e.to_string()))?;
+    read_jwt_response(stream)
+}
+
+/// Ask the local daemon to authenticate an existing user. Returns
+/// the minted JWT on success, an error otherwise.
+pub fn request_iam_signin(
+    join_port: u16,
+    email: &str,
+    password: &str,
+) -> Result<String, MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+    let req = serde_json::json!({
+        "iam_signin": true,
+        "email": email,
+        "password": password,
+    });
+    writeln!(stream, "{req}").map_err(|e| MeshError::Join(e.to_string()))?;
+    read_jwt_response(stream)
+}
+
+fn read_jwt_response(stream: TcpStream) -> Result<String, MeshError> {
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| MeshError::Join("no response".into()))?
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&line).map_err(|e| MeshError::Join(e.to_string()))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(MeshError::Join(err.to_string()));
+    }
+    let jwt = v
+        .get("jwt")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| MeshError::Join("response missing `jwt` field".into()))?;
+    Ok(jwt.to_string())
 }
 
 /// Send a remove-peer command to the local daemon

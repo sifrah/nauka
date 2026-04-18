@@ -53,10 +53,18 @@ async fn run() -> Result<()> {
         .about("Nauka — turn dedicated servers into a programmable cloud")
         .version(option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
         .arg_required_else_help(true)
-        .subcommand(hypervisor_cmd());
+        .subcommand(hypervisor_cmd())
+        .subcommand(login_cmd())
+        .subcommand(logout_cmd())
+        .subcommand(whoami_cmd())
+        .subcommand(user_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
+        Some(("login", sub)) => cmd_login(sub).await,
+        Some(("logout", _)) => cmd_logout().await,
+        Some(("whoami", _)) => cmd_whoami().await,
+        Some(("user", sub)) => handle_user(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -65,10 +73,12 @@ async fn open_db() -> Result<Arc<Database>> {
     let db = Arc::new(Database::open(None).await?);
     // The only hand-written schema left is `nauka_state::SCHEMA`
     // (Raft's internal `_raft_*` tables). Every user-facing resource
-    // flows through `#[resource]` + `ALL_RESOURCES`.
+    // flows through `#[resource]` + `ALL_RESOURCES`; every `DEFINE
+    // ACCESS` through `#[access]` + `ALL_ACCESS_DEFS`.
     let cluster = nauka_core::cluster_schemas();
     let local = nauka_core::local_schemas();
-    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local]).await?;
+    let access = nauka_core::access_definitions();
+    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local, &access]).await?;
     Ok(db)
 }
 
@@ -402,4 +412,113 @@ async fn cmd_debug(sub: &clap::ArgMatches) -> Result<()> {
         }
         _ => anyhow::bail!("unknown debug subcommand"),
     }
+}
+
+// -------- IAM (login / logout / whoami / user create) --------
+
+fn login_cmd() -> Command {
+    Command::new("login")
+        .about("Sign in to the local Nauka cluster and store the JWT")
+        .arg(
+            Arg::new("email")
+                .long("email")
+                .required(true)
+                .help("Email of an existing user"),
+        )
+}
+
+fn logout_cmd() -> Command {
+    Command::new("logout").about("Delete the locally-stored session token")
+}
+
+fn whoami_cmd() -> Command {
+    Command::new("whoami").about("Print the stored token's subject + expiry")
+}
+
+fn user_cmd() -> Command {
+    Command::new("user")
+        .about("Manage users on this cluster")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create a new user (prompts for password)")
+                .arg(Arg::new("email").long("email").required(true))
+                .arg(
+                    Arg::new("display-name")
+                        .long("display-name")
+                        .required(true)
+                        .help("Human-readable name shown in UIs and audit logs"),
+                ),
+        )
+}
+
+async fn handle_user(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => cmd_user_create(sub).await,
+        _ => anyhow::bail!("unknown user subcommand"),
+    }
+}
+
+/// Read a password from the TTY with echo disabled. Prompt goes to
+/// stderr so piping `nauka login … > token.txt` never mixes the
+/// prompt into the output stream — important for tests and scripts.
+fn read_password(prompt: &str) -> Result<String> {
+    rpassword::prompt_password(prompt).context("read password")
+}
+
+async fn cmd_login(sub: &clap::ArgMatches) -> Result<()> {
+    let email = sub.get_one::<String>("email").unwrap().clone();
+    let password = read_password(&format!("Password for {email}: "))?;
+    let jwt = mesh::request_iam_signin(mesh::DEFAULT_JOIN_PORT, &email, &password)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    nauka_iam::save_token(&jwt).map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::say(format_args!("logged in as {email}"));
+    let path = nauka_iam::token_path().map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::pair("token", path.display());
+    Ok(())
+}
+
+async fn cmd_logout() -> Result<()> {
+    nauka_iam::delete_token().map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::say("logged out");
+    Ok(())
+}
+
+async fn cmd_whoami() -> Result<()> {
+    let Some(jwt) = nauka_iam::load_token().map_err(|e| anyhow::anyhow!("{e}"))? else {
+        cli_out::say("not logged in");
+        return Ok(());
+    };
+    let claims = nauka_iam::decode_claims(&jwt).map_err(|e| anyhow::anyhow!("{e}"))?;
+    match claims.email() {
+        Some(email) => cli_out::pair("email", email),
+        None => cli_out::pair("subject", claims.id.as_deref().unwrap_or("?")),
+    }
+    if let Some(exp) = claims.exp {
+        cli_out::pair("exp", exp);
+    }
+    if let Some(ac) = claims.access.as_deref() {
+        cli_out::pair("access", ac);
+    }
+    Ok(())
+}
+
+async fn cmd_user_create(sub: &clap::ArgMatches) -> Result<()> {
+    let email = sub.get_one::<String>("email").unwrap().clone();
+    let display_name = sub.get_one::<String>("display-name").unwrap().clone();
+    let password = read_password(&format!("New password for {email}: "))?;
+    let confirm = read_password("Confirm password: ")?;
+    if password != confirm {
+        anyhow::bail!("passwords do not match");
+    }
+    let jwt = mesh::request_iam_signup(mesh::DEFAULT_JOIN_PORT, &email, &password, &display_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Persist the JWT right away — creating a user implies they
+    // should be able to act as that user immediately, and the round
+    // trip from signup to login would otherwise force a second
+    // password prompt.
+    nauka_iam::save_token(&jwt).map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::say(format_args!("user created: {email}"));
+    cli_out::say(format_args!("  (also logged in as {email})"));
+    Ok(())
 }

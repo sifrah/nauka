@@ -6,7 +6,7 @@ pub mod raft;
 pub mod schema;
 pub mod writer;
 
-pub use db::Database;
+pub use db::{Database, DEFAULT_DATABASE, DEFAULT_NAMESPACE};
 pub use error::StateError;
 pub use raft::tls::TlsConfig;
 pub use raft::{node_id_from_key, RaftNode};

@@ -4,8 +4,11 @@ use surrealdb::Surreal;
 use crate::StateError;
 
 const DEFAULT_PATH: &str = "/var/lib/nauka/db";
-const NS: &str = "nauka";
-const DB: &str = "nauka";
+/// Namespace used by every Nauka instance. Exposed so higher layers
+/// (IAM signin/signup, tests) can reference the same value the
+/// embedded engine was opened with.
+pub const DEFAULT_NAMESPACE: &str = "nauka";
+pub const DEFAULT_DATABASE: &str = "nauka";
 
 #[derive(Debug)]
 pub struct Database {
@@ -19,7 +22,9 @@ impl Database {
             std::fs::create_dir_all(parent).ok();
         }
         let db = Surreal::new::<SurrealKv>(path).await?;
-        db.use_ns(NS).use_db(DB).await?;
+        db.use_ns(DEFAULT_NAMESPACE)
+            .use_db(DEFAULT_DATABASE)
+            .await?;
         Ok(Self { db })
     }
 

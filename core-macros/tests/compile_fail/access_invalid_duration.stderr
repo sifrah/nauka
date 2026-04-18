@@ -1,0 +1,5 @@
+error: `jwt_duration` must be a SurrealDB duration like `"1h"` or `"24h"` — unit suffix must be one of `s`, `m`, `h`, `d`, `w`, `y`
+  --> tests/compile_fail/access_invalid_duration.rs:10:20
+   |
+10 |     jwt_duration = "60",
+   |                    ^^^^

@@ -235,6 +235,23 @@ pub struct ResourceDescriptor {
 #[distributed_slice]
 pub static ALL_RESOURCES: [&'static ResourceDescriptor] = [..];
 
+/// Compile-time descriptor for a SurrealDB `DEFINE ACCESS TYPE RECORD`
+/// statement. One per `#[access(…)]` annotation — see IAM epic #344.
+#[derive(Debug)]
+pub struct AccessDescriptor {
+    /// Access name (`DEFINE ACCESS <name> ON DATABASE …`). Must be
+    /// unique across the database.
+    pub name: &'static str,
+    /// Full `DEFINE ACCESS … TYPE RECORD …` SurrealQL.
+    pub ddl: &'static str,
+}
+
+/// Global registry of every `DEFINE ACCESS` declared via `#[access]`.
+/// Applied by `bin/nauka` at DB open time, after `local_schemas` +
+/// `cluster_schemas`.
+#[distributed_slice]
+pub static ALL_ACCESS_DEFS: [&'static AccessDescriptor] = [..];
+
 /// Contract every resource implements.
 ///
 /// Normally derived through the `#[resource(…)]` attribute macro;
@@ -344,6 +361,20 @@ fn schemas_for(scope: Scope) -> String {
     out
 }
 
+/// Concatenated DDL for every `#[access]`-declared `DEFINE ACCESS`
+/// statement. Passed to `nauka_state::load_schemas` at DB open time so
+/// every node has the same access surface.
+pub fn access_definitions() -> String {
+    let mut out = String::new();
+    for desc in ALL_ACCESS_DEFS.iter() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(desc.ddl);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +386,7 @@ mod tests {
         // return a valid empty String (no panic, no leading separator).
         assert_eq!(local_schemas(), "");
         assert_eq!(cluster_schemas(), "");
+        assert_eq!(access_definitions(), "");
     }
 
     #[test]

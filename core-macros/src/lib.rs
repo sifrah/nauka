@@ -22,10 +22,11 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::{
-    parse_macro_input, parse_quote, Field, Fields, GenericArgument, Ident, ItemStruct, LitStr,
-    PathArguments, PathSegment, Token, Type,
+    parse_macro_input, parse_quote, Field, Fields, GenericArgument, Ident, Item, ItemStruct,
+    LitStr, PathArguments, PathSegment, Token, Type,
 };
 
 #[proc_macro_attribute]
@@ -34,6 +35,40 @@ pub fn resource(args: TokenStream, input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as ItemStruct);
 
     match expand(args, item) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Declare a SurrealDB `DEFINE ACCESS TYPE RECORD` statement alongside
+/// a resource. Wiring identical to `#[resource]`: the macro emits a
+/// `&'static AccessDescriptor` and registers it in
+/// `ALL_ACCESS_DEFS` via `linkme::distributed_slice`, so the binary
+/// picks it up at link time.
+///
+/// Usage — applied to the struct whose table the access authenticates:
+///
+/// ```ignore
+/// #[resource(table = "user", scope = "cluster")]
+/// #[access(
+///     name = "user",
+///     type = "record",
+///     signup = "...",
+///     signin = "...",
+///     jwt_duration = "1h",
+///     session_duration = "24h",
+/// )]
+/// pub struct User { ... }
+/// ```
+///
+/// The `type` argument is currently required and must be `"record"`
+/// — reserved for when `DEFINE ACCESS TYPE JWT` (OIDC / SSO) lands.
+#[proc_macro_attribute]
+pub fn access(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as AccessArgs);
+    let item = parse_macro_input!(input as Item);
+
+    match expand_access(args, item) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -872,4 +907,215 @@ fn strip_macro_attrs(item: &mut ItemStruct) {
             !a.path().is_ident("id") && !a.path().is_ident("unique") && !a.path().is_ident("assert")
         });
     }
+}
+
+// =========================================================================
+// #[access] — SurrealDB DEFINE ACCESS TYPE RECORD
+// =========================================================================
+
+struct AccessArgs {
+    name: LitStr,
+    ty: LitStr,
+    signup: Option<LitStr>,
+    signin: LitStr,
+    jwt_duration: LitStr,
+    session_duration: LitStr,
+}
+
+impl Parse for AccessArgs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut name: Option<LitStr> = None;
+        let mut ty: Option<LitStr> = None;
+        let mut signup: Option<LitStr> = None;
+        let mut signin: Option<LitStr> = None;
+        let mut jwt_duration: Option<LitStr> = None;
+        let mut session_duration: Option<LitStr> = None;
+
+        while !input.is_empty() {
+            // `parse_any` accepts the reserved keyword `type` as an
+            // identifier — the epic specifies `type = "record"` so we
+            // can't rename the key, and `Ident::parse` rejects all
+            // reserved words by default.
+            let key: Ident = input.call(Ident::parse_any)?;
+            input.parse::<Token![=]>()?;
+            let value: LitStr = input.parse()?;
+            let key_s = key.to_string();
+            let slot = match key_s.as_str() {
+                "name" => &mut name,
+                "type" => &mut ty,
+                "signup" => &mut signup,
+                "signin" => &mut signin,
+                "jwt_duration" => &mut jwt_duration,
+                "session_duration" => &mut session_duration,
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "unknown `#[access]` key `{other}` (allowed: `name`, `type`, \
+                             `signup`, `signin`, `jwt_duration`, `session_duration`)"
+                        ),
+                    ));
+                }
+            };
+            if slot.is_some() {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("`{key_s}` specified more than once"),
+                ));
+            }
+            *slot = Some(value);
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        let name = name.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[access]` requires `name = \"…\"`",
+            )
+        })?;
+        let ty = ty.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[access]` requires `type = \"record\"` — only `record` is supported today",
+            )
+        })?;
+        if ty.value() != "record" {
+            return Err(syn::Error::new(
+                ty.span(),
+                format!(
+                    "`#[access]` type `{}` is not supported — only `\"record\"` today; \
+                     `\"jwt\"` is reserved for OIDC/SSO (IAM epic post-MVP)",
+                    ty.value()
+                ),
+            ));
+        }
+        let signin = signin.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[access]` requires `signin = \"…\"` — the SurrealQL clause that \
+                 authenticates an existing user",
+            )
+        })?;
+        let jwt_duration = jwt_duration.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[access]` requires `jwt_duration = \"…\"` — e.g. `\"1h\"`",
+            )
+        })?;
+        let session_duration = session_duration.ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`#[access]` requires `session_duration = \"…\"` — e.g. `\"24h\"`",
+            )
+        })?;
+
+        validate_access_name(&name)?;
+        validate_duration(&jwt_duration, "jwt_duration")?;
+        validate_duration(&session_duration, "session_duration")?;
+
+        Ok(AccessArgs {
+            name,
+            ty,
+            signup,
+            signin,
+            jwt_duration,
+            session_duration,
+        })
+    }
+}
+
+fn validate_access_name(lit: &LitStr) -> syn::Result<()> {
+    let v = lit.value();
+    if v.is_empty() {
+        return Err(syn::Error::new(lit.span(), "access name cannot be empty"));
+    }
+    let bytes = v.as_bytes();
+    if !bytes[0].is_ascii_alphabetic() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("access name `{v}` must start with an ASCII letter"),
+        ));
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_alphanumeric() || b == b'_';
+        if !ok {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!(
+                    "access name `{v}` must contain only ASCII letters, digits, and `_` \
+                     — it is spliced directly into SurrealQL"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `1h`, `24h`, `15m`, `30s`, `7d`, `1w`, `4y`. Matches SurrealDB's
+/// duration-literal syntax for `DURATION FOR TOKEN … / FOR SESSION …`.
+fn validate_duration(lit: &LitStr, field: &str) -> syn::Result<()> {
+    let v = lit.value();
+    if v.is_empty() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`{field}` cannot be empty — e.g. `\"1h\"`"),
+        ));
+    }
+    let bytes = v.as_bytes();
+    let last = *bytes.last().unwrap();
+    if !matches!(last, b's' | b'm' | b'h' | b'd' | b'w' | b'y') {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "`{field}` must be a SurrealDB duration like `\"1h\"` or `\"24h\"` — \
+                 unit suffix must be one of `s`, `m`, `h`, `d`, `w`, `y`"
+            ),
+        ));
+    }
+    let digits = &bytes[..bytes.len() - 1];
+    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`{field}` value `{v}` is not a positive integer followed by a unit"),
+        ));
+    }
+    Ok(())
+}
+
+fn expand_access(args: AccessArgs, item: Item) -> syn::Result<TokenStream2> {
+    // The item is re-emitted unchanged — the attribute only adds a side
+    // effect (registering into ALL_ACCESS_DEFS). Unlike `#[resource]`,
+    // `#[access]` carries no struct-shape invariants of its own.
+    let name = args.name.value();
+    let signup_clause = match args.signup {
+        Some(ref s) => format!(" SIGNUP ( {} )", s.value()),
+        None => String::new(),
+    };
+    let signin_clause = format!(" SIGNIN ( {} )", args.signin.value());
+    let ddl = format!(
+        "DEFINE ACCESS IF NOT EXISTS {name} ON DATABASE TYPE RECORD{signup_clause}{signin_clause} \
+         DURATION FOR TOKEN {jwt}, FOR SESSION {sess};",
+        jwt = args.jwt_duration.value(),
+        sess = args.session_duration.value(),
+    );
+
+    let static_name = format_ident!("__NAUKA_ACCESS_{}", name.to_uppercase());
+    let _ = args.ty; // reserved for future types (jwt, …)
+
+    Ok(quote! {
+        #item
+
+        #[::nauka_core::resource::__macro_support::linkme::distributed_slice(
+            ::nauka_core::resource::ALL_ACCESS_DEFS
+        )]
+        #[linkme(crate = ::nauka_core::resource::__macro_support::linkme)]
+        #[allow(non_upper_case_globals)]
+        static #static_name: &::nauka_core::resource::AccessDescriptor =
+            &::nauka_core::resource::AccessDescriptor {
+                name: #name,
+                ddl: #ddl,
+            };
+    })
 }
