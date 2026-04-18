@@ -1,0 +1,5 @@
+error: custom action `StopVM` must start with an ASCII lowercase letter
+ --> tests/compile_fail/custom_actions_bad_name.rs:7:62
+  |
+7 | #[resource(table = "vm", scope = "cluster", custom_actions = "start, StopVM")]
+  |                                                              ^^^^^^^^^^^^^^^

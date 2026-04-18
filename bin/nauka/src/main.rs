@@ -60,7 +60,8 @@ async fn run() -> Result<()> {
         .subcommand(user_cmd())
         .subcommand(org_cmd())
         .subcommand(project_cmd())
-        .subcommand(env_cmd());
+        .subcommand(env_cmd())
+        .subcommand(role_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -71,6 +72,7 @@ async fn run() -> Result<()> {
         Some(("org", sub)) => handle_org(sub).await,
         Some(("project", sub)) => handle_project(sub).await,
         Some(("env", sub)) => handle_env(sub).await,
+        Some(("role", sub)) => handle_role(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -754,6 +756,126 @@ async fn handle_env(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!("unknown env subcommand"),
+    }
+}
+
+// -------- IAM-3: role list / bind / unbind / bindings --------
+
+fn role_cmd() -> Command {
+    Command::new("role")
+        .about("Manage roles and role bindings (IAM-3)")
+        .arg_required_else_help(true)
+        .subcommand(Command::new("list").about("List roles visible to the logged-in user"))
+        .subcommand(
+            Command::new("bind")
+                .about("Attach a role to a principal at an Org scope")
+                .arg(
+                    Arg::new("principal")
+                        .long("principal")
+                        .required(true)
+                        .help("User email"),
+                )
+                .arg(
+                    Arg::new("role")
+                        .long("role")
+                        .required(true)
+                        .help("Role slug (e.g. `viewer`, `editor`)"),
+                )
+                .arg(Arg::new("org").long("org").required(true).help("Org slug")),
+        )
+        .subcommand(
+            Command::new("unbind")
+                .about("Remove a role binding")
+                .arg(Arg::new("principal").long("principal").required(true))
+                .arg(Arg::new("role").long("role").required(true))
+                .arg(Arg::new("org").long("org").required(true)),
+        )
+        .subcommand(Command::new("bindings").about("List role bindings visible to the user"))
+}
+
+async fn handle_role(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_role_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("roles")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("roles ({}):", rows.len()));
+            for r in rows {
+                let slug = r.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+                let kind = r.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
+                let pcount = r
+                    .get("permissions")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                cli_out::say(format_args!(
+                    "  {slug:<24}  {kind:<10}  {pcount} permissions"
+                ));
+            }
+            Ok(())
+        }
+        Some(("bind", sub)) => {
+            let jwt = require_token()?;
+            let principal = sub.get_one::<String>("principal").unwrap().clone();
+            let role = sub.get_one::<String>("role").unwrap().clone();
+            let org = sub.get_one::<String>("org").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_role_bind": true,
+                "jwt": jwt,
+                "principal": principal,
+                "role": role,
+                "org": org,
+            });
+            mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cli_out::say(format_args!(
+                "bound {principal} to role {role} in org {org}"
+            ));
+            Ok(())
+        }
+        Some(("unbind", sub)) => {
+            let jwt = require_token()?;
+            let principal = sub.get_one::<String>("principal").unwrap().clone();
+            let role = sub.get_one::<String>("role").unwrap().clone();
+            let org = sub.get_one::<String>("org").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_role_unbind": true,
+                "jwt": jwt,
+                "principal": principal,
+                "role": role,
+                "org": org,
+            });
+            mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cli_out::say(format_args!(
+                "unbound {principal} from role {role} in org {org}"
+            ));
+            Ok(())
+        }
+        Some(("bindings", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_bindings_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("bindings")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("bindings ({}):", rows.len()));
+            for b in rows {
+                let principal = b.get("principal").and_then(|x| x.as_str()).unwrap_or("?");
+                let role = b.get("role").and_then(|x| x.as_str()).unwrap_or("?");
+                let org = b.get("org").and_then(|x| x.as_str()).unwrap_or("?");
+                cli_out::say(format_args!("  {principal:<28}  {role:<16}  {org}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown role subcommand"),
     }
 }
 

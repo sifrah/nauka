@@ -110,6 +110,32 @@ struct IamEnvListRequest {
     jwt: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamRoleListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamRoleBindRequest {
+    jwt: String,
+    principal: String,
+    role: String,
+    org: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamRoleUnbindRequest {
+    jwt: String,
+    principal: String,
+    role: String,
+    org: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamBindingsListRequest {
+    jwt: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -800,6 +826,133 @@ async fn handle_connection(
                     })
                     .collect();
                 let body = serde_json::json!({ "ok": true, "envs": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_role_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_role_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_role_list".into()));
+        }
+        let req: IamRoleListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_roles(db, &req.jwt).await {
+            Ok(roles) => {
+                let rows: Vec<serde_json::Value> = roles
+                    .into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "slug": r.slug,
+                            "kind": r.kind,
+                            "org": r.org.as_ref().map(|o| o.id().to_string()),
+                            "permissions": r.permissions.iter().map(|p| p.id().to_string()).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "roles": rows }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_role_bind").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_role_bind requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_role_bind".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamRoleBindRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::bind_role(db, raft, &req.jwt, &req.principal, &req.role, &req.org).await {
+            Ok(b) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "binding": {
+                        "uid": b.uid,
+                        "principal": b.principal.id(),
+                        "role": b.role.id(),
+                        "org": b.org.id(),
+                    }
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(
+                    event = "iam.role.bind.ok",
+                    principal = %req.principal,
+                    role = %req.role,
+                    org = %req.org
+                );
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(
+                    event = "iam.role.bind.fail",
+                    principal = %req.principal,
+                    role = %req.role,
+                    org = %req.org,
+                    error = %e
+                );
+            }
+        }
+    } else if v.get("iam_role_unbind").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_role_unbind requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_role_unbind".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamRoleUnbindRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::unbind_role(db, raft, &req.jwt, &req.principal, &req.role, &req.org).await
+        {
+            Ok(()) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                tracing::info!(event = "iam.role.unbind.ok", principal = %req.principal, role = %req.role, org = %req.org);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_bindings_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_bindings_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_bindings_list".into()));
+        }
+        let req: IamBindingsListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_bindings(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "uid": b.uid,
+                            "principal": b.principal.id(),
+                            "role": b.role.id(),
+                            "org": b.org.id(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "bindings": json }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
             Err(e) => {

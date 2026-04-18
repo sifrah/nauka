@@ -104,6 +104,12 @@ struct ResourceArgs {
     /// `$auth` directly via an `owner` field). Mutually exclusive
     /// with `scope_by`. See IAM-2 (#346).
     permissions: Option<LitStr>,
+    /// `custom_actions = "start, stop"` — non-CRUD verbs this
+    /// resource exposes. IAM-3 (#347) auto-seeds one `Permission`
+    /// record per action so RBAC roles can reference them. The
+    /// macro validates that each entry is a snake_case identifier
+    /// safe to splice into a permission name.
+    custom_actions: Option<LitStr>,
 }
 
 impl Parse for ResourceArgs {
@@ -115,6 +121,7 @@ impl Parse for ResourceArgs {
         let mut set_null_on_delete: Option<LitStr> = None;
         let mut scope_by: Option<LitStr> = None;
         let mut permissions: Option<LitStr> = None;
+        let mut custom_actions: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -128,13 +135,14 @@ impl Parse for ResourceArgs {
                 "set_null_on_delete" => &mut set_null_on_delete,
                 "scope_by" => &mut scope_by,
                 "permissions" => &mut permissions,
+                "custom_actions" => &mut custom_actions,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown attribute key `{other}` (allowed: `table`, `scope`, \
                              `cascade_delete`, `restrict_delete`, `set_null_on_delete`, \
-                             `scope_by`, `permissions`)"
+                             `scope_by`, `permissions`, `custom_actions`)"
                         ),
                     ));
                 }
@@ -184,6 +192,7 @@ impl Parse for ResourceArgs {
             set_null_on_delete,
             scope_by,
             permissions,
+            custom_actions,
         })
     }
 }
@@ -274,20 +283,45 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
     };
 
     if let Some(lit) = &args.scope_by {
-        validate_scope_by_target(&item, lit)?;
+        if lit.value() != "self" {
+            validate_scope_by_target(&item, lit)?;
+        }
     }
+
+    let custom_action_names = match &args.custom_actions {
+        Some(lit) => {
+            let names = parse_field_list(lit)?;
+            for n in &names {
+                validate_custom_action(n, lit)?;
+            }
+            names
+        }
+        None => Vec::new(),
+    };
 
     let permissions_clause = if let Some(field_lit) = &args.scope_by {
         let field = field_lit.value();
-        // One `FOR` per verb so every verb carries the correct
-        // `$action` — the function uses it for RoleBinding lookups in
-        // IAM-3 even though IAM-2's owner-only impl ignores it.
+        // `scope_by = "self"` means the record is its own
+        // authorization scope — no dereference, just pass `$this`.
+        // `scope_by = "<field>"` passes `$this.<field>` so the
+        // function can walk the scope chain (project → org, env →
+        // project → org). One `FOR` per verb so every verb carries
+        // the correct `$action` into `fn::iam::can`.
+        let target = if field == "self" {
+            // `$this` is the full record object; the function's
+            // `$scope: record` parameter wants a record link. Pass
+            // the id so SurrealDB coerces it the same way it does
+            // for Ref<T> fields in the non-self case.
+            "$this.id".to_string()
+        } else {
+            format!("$this.{field}")
+        };
         format!(
             "\n    PERMISSIONS\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20FOR select WHERE fn::iam::can('select', $this.{field})\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20FOR create WHERE fn::iam::can('create', $this.{field})\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20FOR update WHERE fn::iam::can('update', $this.{field})\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20FOR delete WHERE fn::iam::can('delete', $this.{field})"
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR select WHERE fn::iam::can('select', {target})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR create WHERE fn::iam::can('create', {target})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR update WHERE fn::iam::can('update', {target})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR delete WHERE fn::iam::can('delete', {target})"
         )
     } else if let Some(expr_lit) = &args.permissions {
         let expr = expr_lit.value();
@@ -378,6 +412,7 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
                 table: #table,
                 scope: #scope_path,
                 ddl: #full_ddl,
+                custom_actions: &[ #( #custom_action_names ),* ],
             };
     })
 }
@@ -765,6 +800,49 @@ fn validate_cascade_targets(
         }
     }
 
+    Ok(())
+}
+
+/// Each `custom_actions` entry turns into a `<table>.<action>`
+/// permission name at boot, and is also spliced into SurrealQL /
+/// the CLI surface. The safe set is the same as a table name:
+/// lowercase ASCII + digits + underscore, no leading/trailing/doubled
+/// underscore, must start with a letter.
+fn validate_custom_action(name: &str, lit: &LitStr) -> syn::Result<()> {
+    if name.is_empty() {
+        return Err(syn::Error::new(
+            lit.span(),
+            "`custom_actions` contains an empty entry",
+        ));
+    }
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("custom action `{name}` must start with an ASCII lowercase letter"),
+        ));
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_';
+        if !ok {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!(
+                    "custom action `{name}` must be snake_case (lowercase ASCII letters, \
+                     digits, and `_` only)"
+                ),
+            ));
+        }
+    }
+    if name.starts_with('_') || name.ends_with('_') || name.contains("__") {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "custom action `{name}` must be snake_case (no leading, trailing, or \
+                 doubled underscores)"
+            ),
+        ));
+    }
     Ok(())
 }
 

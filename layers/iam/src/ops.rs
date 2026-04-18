@@ -27,7 +27,7 @@ use nauka_state::{Database, RaftNode, Writer};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use crate::definition::{Env, Org, Project, User};
+use crate::definition::{Env, Org, Project, Role, RoleBinding, User};
 use crate::error::IamError;
 
 /// Process-wide lock around any operation that mutates the shared
@@ -266,6 +266,102 @@ pub async fn create_env(
 pub async fn list_envs(db: &Database, jwt: &str) -> Result<Vec<Env>, IamError> {
     read_as(db, jwt, || async {
         db.query_take(&Env::list_query())
+            .await
+            .map_err(IamError::State)
+    })
+    .await
+}
+
+// -------- Role / RoleBinding (IAM-3) --------
+
+/// List every role visible to the caller. Primitive / predefined
+/// roles are globally readable; custom roles are filtered by the
+/// table's PERMISSIONS clause (owner of the role's org only).
+#[instrument(name = "iam.role.list", skip_all)]
+pub async fn list_roles(db: &Database, jwt: &str) -> Result<Vec<Role>, IamError> {
+    read_as(db, jwt, || async {
+        db.query_take(&Role::list_query())
+            .await
+            .map_err(IamError::State)
+    })
+    .await
+}
+
+/// Attach an existing role to a principal at an Org scope.
+/// Authorization: only the Org's owner (as enforced by the
+/// `role_binding` table's `scope_by = "org"` PERMISSIONS) can
+/// establish new bindings.
+#[instrument(
+    name = "iam.role.bind",
+    skip_all,
+    fields(principal = %principal_email, role = %role_slug, org = %org_slug)
+)]
+pub async fn bind_role(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    principal_email: &str,
+    role_slug: &str,
+    org_slug: &str,
+) -> Result<RoleBinding, IamError> {
+    let _auth = authenticate(db, jwt).await?;
+    // Synthetic uid keeps `(org, principal, role)` unique and makes
+    // the record id greppable in SurrealDB record form
+    // (`role_binding:⟨acme-bob@example.com-viewer⟩`).
+    let uid = format!("{org_slug}-{principal_email}-{role_slug}");
+    let (c, u) = now_pair();
+    let binding = RoleBinding {
+        uid: uid.clone(),
+        principal: Ref::<User>::new(principal_email.to_string()),
+        role: Ref::<Role>::new(role_slug.to_string()),
+        org: Ref::<Org>::new(org_slug.to_string()),
+        created_at: c,
+        updated_at: u,
+        version: 0,
+    };
+    match Writer::new(db).with_raft(raft).create(&binding).await {
+        Ok(()) => Ok(binding),
+        Err(e) => {
+            let s = e.to_string();
+            if s.contains("already exists") || s.contains("Database record") {
+                Err(IamError::AlreadyExists(format!("role_binding:{uid}")))
+            } else {
+                Err(IamError::State(e))
+            }
+        }
+    }
+}
+
+/// Remove a role binding previously created with [`bind_role`].
+/// Authorization follows the same `scope_by = "org"` rule as
+/// creation.
+#[instrument(
+    name = "iam.role.unbind",
+    skip_all,
+    fields(principal = %principal_email, role = %role_slug, org = %org_slug)
+)]
+pub async fn unbind_role(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    principal_email: &str,
+    role_slug: &str,
+    org_slug: &str,
+) -> Result<(), IamError> {
+    let _auth = authenticate(db, jwt).await?;
+    let uid = format!("{org_slug}-{principal_email}-{role_slug}");
+    Writer::new(db)
+        .with_raft(raft)
+        .delete::<RoleBinding>(&uid)
+        .await
+        .map_err(IamError::State)?;
+    Ok(())
+}
+
+#[instrument(name = "iam.role.list_bindings", skip_all)]
+pub async fn list_bindings(db: &Database, jwt: &str) -> Result<Vec<RoleBinding>, IamError> {
+    read_as(db, jwt, || async {
+        db.query_take(&RoleBinding::list_query())
             .await
             .map_err(IamError::State)
     })

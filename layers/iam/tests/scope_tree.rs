@@ -93,14 +93,15 @@ async fn function_definitions_includes_iam_can() {
 #[tokio::test]
 async fn permissions_clause_in_table_ddl() {
     let cluster = nauka_core::cluster_schemas();
-    // Org uses `permissions = "..."` — one FOR clause for all verbs.
-    assert!(
-        cluster.contains(
-            "FOR select, create, update, delete WHERE \
-             $auth = NONE OR $this.owner = $auth.id"
-        ),
-        "org permissions missing: {cluster}"
-    );
+    // Org uses `scope_by = "self"` — one FOR clause per verb,
+    // each passing `$this.id` (the org record id) to `fn::iam::can`.
+    for verb in ["select", "create", "update", "delete"] {
+        let expected = format!("FOR {verb} WHERE fn::iam::can('{verb}', $this.id)");
+        assert!(
+            cluster.contains(&expected),
+            "org missing `{expected}`: {cluster}"
+        );
+    }
     // Project uses `scope_by = "org"` — four per-verb FOR clauses.
     for verb in ["select", "create", "update", "delete"] {
         let expected = format!("FOR {verb} WHERE fn::iam::can('{verb}', $this.org)");

@@ -1,20 +1,22 @@
 //! `fn::iam::can` — the authorization decision function every
 //! `#[resource(..., scope_by = "...")]` PERMISSIONS clause calls.
 //!
-//! IAM-2 (#346) ships an owner-only implementation: given a scope
-//! record (`Org`, `Project`, or `Env`), the function walks up the
-//! hierarchy to the root `Org` and checks whether the org's `owner`
-//! is the authenticated user. Any other principal — including the
-//! same person signed in via a different record-id — is denied.
+//! IAM-3 (#347) extends IAM-2's owner-only check with RoleBinding
+//! lookups:
 //!
-//! The `$action` parameter (`"select"` / `"create"` / `"update"` /
-//! `"delete"`) is accepted and ignored here; IAM-3 will branch on it
-//! once `RoleBinding` records exist.
+//! 1. If `$auth = NONE`, return true — this is the Raft-state-machine
+//!    / background-task path. CLI-originated writes are authorized
+//!    in Rust before they reach the log.
+//! 2. Walk the scope chain to the root `Org` (same as IAM-2).
+//! 3. If `$auth.id = org.owner`, return true. The owner shortcut
+//!    avoids needing a binding for the person who created the org.
+//! 4. Otherwise, look for a `RoleBinding` where
+//!    `principal = $auth.id`, `org = <resolved org>`, and the role's
+//!    `permissions` list contains a record named
+//!    `<table-of-\$scope>.<\$action>`.
 //!
-//! SurrealDB auto-dereferences record links in dot-notation
-//! (`$scope.org.owner` walks from a `Project` to its `Org.owner`),
-//! so the walk fits in one SurrealQL expression without explicit
-//! `SELECT` statements.
+//! IAM-3 only binds at Org scope. Project/Env bindings are
+//! tech-debt tracked in the epic follow-up.
 
 use linkme::distributed_slice;
 use nauka_core::resource::{FunctionDescriptor, ALL_DB_FUNCTIONS};
@@ -35,16 +37,34 @@ pub const IAM_CAN_DDL: &str = r#"DEFINE FUNCTION IF NOT EXISTS fn::iam::can($act
         RETURN true;
     };
     LET $tb = meta::tb($scope);
-    LET $owner = IF $tb = 'org' {
-        $scope.owner
+    LET $org = IF $tb = 'org' {
+        $scope
     } ELSE IF $tb = 'project' {
-        $scope.org.owner
+        $scope.org
     } ELSE IF $tb = 'env' {
-        $scope.project.org.owner
+        $scope.project.org
     } ELSE {
         NONE
     };
-    RETURN $owner = $auth.id;
+    IF $org = NONE {
+        RETURN false;
+    };
+    -- Owner shortcut: the org's creator has full access without
+    -- needing an explicit RoleBinding. Carried over from IAM-2.
+    IF $org.owner = $auth.id {
+        RETURN true;
+    };
+    -- Role-binding path: any binding tying $auth to a role that
+    -- includes `<table>.<action>` grants the permission. The
+    -- permission record's id follows that exact name
+    -- (`permission:⟨org.select⟩`), so we can compare by record id
+    -- rather than querying the permission table first.
+    LET $needed = type::record('permission', $tb + '.' + $action);
+    LET $matched = (SELECT VALUE id FROM role_binding
+        WHERE principal = $auth.id
+          AND org = $org.id
+          AND role.permissions CONTAINS $needed);
+    RETURN array::len($matched) > 0;
 } PERMISSIONS FULL;
 "#;
 
@@ -63,16 +83,16 @@ mod tests {
         assert!(IAM_CAN_DDL.contains(
             "DEFINE FUNCTION IF NOT EXISTS fn::iam::can($action: string, $scope: record)"
         ));
-        // Sanity — each level of the Org/Project/Env walk appears.
         for tb in ["org", "project", "env"] {
             assert!(
                 IAM_CAN_DDL.contains(&format!("$tb = '{tb}'")),
                 "missing branch for table `{tb}`: {IAM_CAN_DDL}"
             );
         }
-        // RoleBinding lookup hasn't landed — the action param is
-        // accepted but the body must not reference it yet.
-        assert!(!IAM_CAN_DDL.contains("role_binding"));
+        // IAM-3 — RoleBinding lookup, owner shortcut preserved.
+        assert!(IAM_CAN_DDL.contains("role_binding"));
+        assert!(IAM_CAN_DDL.contains("$org.owner = $auth.id"));
+        assert!(IAM_CAN_DDL.contains("role.permissions CONTAINS $needed"));
     }
 
     #[test]

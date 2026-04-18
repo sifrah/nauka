@@ -157,6 +157,14 @@ pub async fn init_hypervisor(
             .await
             .map_err(|e| MeshError::State(format!("register self: {e}")))?;
 
+        // Seed the IAM permission catalog + primitive roles now
+        // that Raft is live on the bootstrap node. Every future
+        // joiner replays the writes from the Raft log, so only the
+        // founder has to run this. Idempotent on retry.
+        nauka_iam::bootstrap(&db, &raft)
+            .await
+            .map_err(|e| MeshError::State(format!("iam bootstrap: {e}")))?;
+
         // Tear the in-process Raft down cleanly so the systemd-launched daemon
         // can acquire the SurrealKV LOCK file — otherwise it crash-loops on
         // "Database is already locked by another process".

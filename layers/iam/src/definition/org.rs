@@ -23,15 +23,12 @@ use super::user::User;
 #[resource(
     table = "org",
     scope = "cluster",
-    // Two allowed paths:
-    //   - `$auth = NONE` — the Raft state machine applying a write
-    //     after the daemon's handler already authorized the caller
-    //     in Rust. Background tasks also run this way.
-    //   - `$auth.id = $this.owner` — a user-session query; the
-    //     owner can do anything to their own org.
-    // Other sessions (including impersonation attempts via record
-    // access) are rejected.
-    permissions = "$auth = NONE OR $this.owner = $auth.id"
+    // `scope_by = "self"` routes every verb through `fn::iam::can`
+    // against the org record itself. Authorization lives in one
+    // place (the function), which — as of IAM-3 — consults role
+    // bindings. The owner shortcut + root bypass are baked into
+    // `fn::iam::can` so IAM-1/IAM-2 flows still work.
+    scope_by = "self"
 )]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct Org {

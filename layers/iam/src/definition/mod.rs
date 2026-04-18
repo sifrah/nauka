@@ -11,10 +11,16 @@
 
 mod env;
 mod org;
+mod permission;
 mod project;
+mod role;
+mod role_binding;
 mod user;
 
 pub use env::Env;
 pub use org::Org;
+pub use permission::Permission;
 pub use project::Project;
+pub use role::Role;
+pub use role_binding::RoleBinding;
 pub use user::User;

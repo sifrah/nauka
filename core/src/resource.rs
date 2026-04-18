@@ -224,6 +224,11 @@ pub struct ResourceDescriptor {
     /// Full `DEFINE TABLE` / `DEFINE FIELD` / `DEFINE INDEX`
     /// SurrealQL emitted by the macro.
     pub ddl: &'static str,
+    /// Non-CRUD verbs this resource declares via
+    /// `#[resource(..., custom_actions = "start, stop")]`. Each entry
+    /// becomes a `<table>.<action>` `Permission` record at boot. Empty
+    /// for resources with only standard CRUD.
+    pub custom_actions: &'static [&'static str],
 }
 
 /// Global registry of every resource defined in the workspace.

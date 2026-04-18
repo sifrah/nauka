@@ -373,6 +373,38 @@ fn scope_by_emits_one_clause_per_verb() {
     }
 }
 
+#[resource(
+    table = "test_vm_with_actions",
+    scope = "cluster",
+    custom_actions = "start, stop, reboot"
+)]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestVmWithActions {
+    #[id]
+    pub name: String,
+    pub cpu: u32,
+}
+
+#[test]
+fn custom_actions_register_in_descriptor() {
+    use nauka_core::resource::ALL_RESOURCES;
+    let desc = ALL_RESOURCES
+        .iter()
+        .find(|d| d.table == "test_vm_with_actions")
+        .expect("test_vm_with_actions descriptor registered");
+    assert_eq!(desc.custom_actions, &["start", "stop", "reboot"]);
+}
+
+#[test]
+fn resource_without_custom_actions_has_empty_slice() {
+    use nauka_core::resource::ALL_RESOURCES;
+    let desc = ALL_RESOURCES
+        .iter()
+        .find(|d| d.table == "test_widget")
+        .expect("test_widget descriptor registered");
+    assert!(desc.custom_actions.is_empty());
+}
+
 #[test]
 fn resource_without_scope_by_or_permissions_omits_clause() {
     // TestParent / TestWidget above don't set either key — they must

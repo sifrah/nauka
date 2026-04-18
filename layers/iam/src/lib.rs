@@ -26,14 +26,16 @@ pub mod can;
 pub mod definition;
 pub mod error;
 pub mod ops;
+pub mod seed;
 pub mod token;
 
 pub use auth::{decode_claims, hash_password, signin, signup, verify_password, Claims, Jwt};
 pub use can::IAM_CAN_DDL;
-pub use definition::{Env, Org, Project, User};
+pub use definition::{Env, Org, Permission, Project, Role, RoleBinding, User};
 pub use error::IamError;
 pub use ops::{
-    authenticate, create_env, create_org, create_project, list_envs, list_orgs, list_projects,
-    AuthContext,
+    authenticate, bind_role, create_env, create_org, create_project, list_bindings, list_envs,
+    list_orgs, list_projects, list_roles, unbind_role, AuthContext,
 };
+pub use seed::bootstrap;
 pub use token::{delete_token, load_token, save_token, token_path};
