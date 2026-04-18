@@ -14,6 +14,9 @@ pub enum StateError {
 
     #[error("network: {0}")]
     Network(String),
+
+    #[error("transaction: {0}")]
+    Transaction(String),
 }
 
 impl NaukaError for StateError {
@@ -23,6 +26,7 @@ impl NaukaError for StateError {
             StateError::Schema(_) => "state.schema",
             StateError::Raft(_) => "state.raft",
             StateError::Network(_) => "state.network",
+            StateError::Transaction(_) => "state.transaction",
         }
     }
 }

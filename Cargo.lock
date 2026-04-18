@@ -2603,6 +2603,7 @@ version = "2.0.0"
 dependencies = [
  "futures",
  "nauka-core",
+ "nauka-core-macros",
  "openraft",
  "rustls",
  "rustls-pemfile",

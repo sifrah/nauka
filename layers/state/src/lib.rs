@@ -11,6 +11,6 @@ pub use error::StateError;
 pub use raft::tls::TlsConfig;
 pub use raft::{node_id_from_key, RaftNode};
 pub use schema::load_schemas;
-pub use writer::Writer;
+pub use writer::{TxBuilder, Writer};
 
 pub const SCHEMA: &str = include_str!("../definition.surql");
