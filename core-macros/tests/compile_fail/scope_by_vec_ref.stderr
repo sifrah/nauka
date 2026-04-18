@@ -1,0 +1,5 @@
+error: `scope_by = "parents"` targets a field that is not `Ref<T>` or `Option<Ref<T>>` — authorization flows along record links, and emitting `$this.parents` against anything else would generate invalid SurrealQL
+  --> tests/compile_fail/scope_by_vec_ref.rs:12:59
+   |
+12 | #[resource(table = "child", scope = "cluster", scope_by = "parents")]
+   |                                                           ^^^^^^^^^

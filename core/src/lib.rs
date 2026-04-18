@@ -8,6 +8,6 @@ pub use logging::{
     LogNaukaErr, NaukaError, NaukaFormat,
 };
 pub use resource::{
-    access_definitions, cluster_schemas, local_schemas, AccessDescriptor, Ref, Resource,
-    ResourceDescriptor, ResourceOps, Scope,
+    access_definitions, cluster_schemas, function_definitions, local_schemas, AccessDescriptor,
+    FunctionDescriptor, Ref, Resource, ResourceDescriptor, ResourceOps, Scope,
 };

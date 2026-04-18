@@ -321,6 +321,74 @@ fn ref_is_type_safe_across_resources() {
     assert_eq!(format!("{r}"), "test_parent:foo");
 }
 
+// --- scope_by / permissions (IAM-2) ---
+
+#[resource(
+    table = "test_scoped_parent",
+    scope = "cluster",
+    permissions = "$auth != NONE AND $this.owner = $auth.id"
+)]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestScopedParent {
+    #[id]
+    pub slug: String,
+    pub owner: String,
+}
+
+#[resource(table = "test_scoped_child", scope = "cluster", scope_by = "parent")]
+#[derive(Serialize, Deserialize, SurrealValue)]
+pub struct TestScopedChild {
+    #[id]
+    pub id: String,
+    pub parent: Ref<TestScopedParent>,
+    pub label: String,
+}
+
+#[test]
+fn permissions_attr_emits_single_where_clause() {
+    let ddl = TestScopedParent::DDL;
+    assert!(
+        ddl.contains("DEFINE TABLE IF NOT EXISTS test_scoped_parent SCHEMAFULL"),
+        "table def missing: {ddl}"
+    );
+    assert!(
+        ddl.contains(
+            "PERMISSIONS FOR select, create, update, delete WHERE \
+             $auth != NONE AND $this.owner = $auth.id"
+        ),
+        "permissions clause wrong: {ddl}"
+    );
+}
+
+#[test]
+fn scope_by_emits_one_clause_per_verb() {
+    let ddl = TestScopedChild::DDL;
+    assert!(
+        ddl.contains("DEFINE TABLE IF NOT EXISTS test_scoped_child SCHEMAFULL"),
+        "table def missing: {ddl}"
+    );
+    for verb in ["select", "create", "update", "delete"] {
+        let expected = format!("FOR {verb} WHERE fn::iam::can('{verb}', $this.parent)");
+        assert!(ddl.contains(&expected), "missing `{expected}`: {ddl}");
+    }
+}
+
+#[test]
+fn resource_without_scope_by_or_permissions_omits_clause() {
+    // TestParent / TestWidget above don't set either key — they must
+    // not emit a PERMISSIONS clause (SurrealDB applies its default).
+    assert!(
+        !TestParent::DDL.contains("PERMISSIONS"),
+        "TestParent should not carry PERMISSIONS: {}",
+        TestParent::DDL
+    );
+    assert!(
+        !TestWidget::DDL.contains("PERMISSIONS"),
+        "TestWidget should not carry PERMISSIONS: {}",
+        TestWidget::DDL
+    );
+}
+
 #[test]
 fn record_id_escaping_blocks_injection() {
     // A hostile id that tries to close the ⟨…⟩ and append a second

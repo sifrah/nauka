@@ -1,0 +1,5 @@
+error: `scope_by` names field `ghost` which does not exist on this struct
+ --> tests/compile_fail/scope_by_missing_field.rs:5:55
+  |
+5 | #[resource(table = "t", scope = "cluster", scope_by = "ghost")]
+  |                                                       ^^^^^^^

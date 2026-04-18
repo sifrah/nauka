@@ -57,7 +57,10 @@ async fn run() -> Result<()> {
         .subcommand(login_cmd())
         .subcommand(logout_cmd())
         .subcommand(whoami_cmd())
-        .subcommand(user_cmd());
+        .subcommand(user_cmd())
+        .subcommand(org_cmd())
+        .subcommand(project_cmd())
+        .subcommand(env_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -65,6 +68,9 @@ async fn run() -> Result<()> {
         Some(("logout", _)) => cmd_logout().await,
         Some(("whoami", _)) => cmd_whoami().await,
         Some(("user", sub)) => handle_user(sub).await,
+        Some(("org", sub)) => handle_org(sub).await,
+        Some(("project", sub)) => handle_project(sub).await,
+        Some(("env", sub)) => handle_env(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -74,11 +80,22 @@ async fn open_db() -> Result<Arc<Database>> {
     // The only hand-written schema left is `nauka_state::SCHEMA`
     // (Raft's internal `_raft_*` tables). Every user-facing resource
     // flows through `#[resource]` + `ALL_RESOURCES`; every `DEFINE
-    // ACCESS` through `#[access]` + `ALL_ACCESS_DEFS`.
+    // ACCESS` through `#[access]` + `ALL_ACCESS_DEFS`; every
+    // `DEFINE FUNCTION` through `ALL_DB_FUNCTIONS`.
+    //
+    // Functions load BEFORE tables: any `PERMISSIONS` clause that
+    // calls `fn::iam::can` (or future helpers) must resolve the
+    // function at parse time. Access definitions come last because
+    // they can refer to both tables and functions.
+    let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
     let local = nauka_core::local_schemas();
     let access = nauka_core::access_definitions();
-    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local, &access]).await?;
+    nauka_state::load_schemas(
+        &db,
+        &[nauka_state::SCHEMA, &functions, &cluster, &local, &access],
+    )
+    .await?;
     Ok(db)
 }
 
@@ -527,6 +544,217 @@ async fn cmd_whoami() -> Result<()> {
         cli_out::pair("access", ac);
     }
     Ok(())
+}
+
+// -------- IAM-2: org / project / env --------
+
+fn org_cmd() -> Command {
+    Command::new("org")
+        .about("Manage orgs (IAM-2)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create a new org owned by the logged-in user")
+                .arg(Arg::new("slug").long("slug").required(true))
+                .arg(Arg::new("display-name").long("display-name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List orgs visible to the logged-in user"))
+}
+
+fn project_cmd() -> Command {
+    Command::new("project")
+        .about("Manage projects (IAM-2)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create a project under an org")
+                .arg(Arg::new("org").long("org").required(true).help("Org slug"))
+                .arg(Arg::new("slug").long("slug").required(true))
+                .arg(Arg::new("display-name").long("display-name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List projects visible to the logged-in user"))
+}
+
+fn env_cmd() -> Command {
+    Command::new("env")
+        .about("Manage environments (IAM-2)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create an environment under a project")
+                .arg(
+                    Arg::new("project")
+                        .long("project")
+                        .required(true)
+                        .help("Project uid (`<org>-<slug>`)"),
+                )
+                .arg(Arg::new("slug").long("slug").required(true))
+                .arg(Arg::new("display-name").long("display-name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List envs visible to the logged-in user"))
+}
+
+/// Load the stored JWT or bail — every IAM-2 command requires one.
+fn require_token() -> Result<String> {
+    nauka_iam::load_token()
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .ok_or_else(|| anyhow::anyhow!("not logged in — run `nauka login --email <you>` first"))
+}
+
+async fn handle_org(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => {
+            let jwt = require_token()?;
+            let slug = sub.get_one::<String>("slug").unwrap().clone();
+            let display = sub.get_one::<String>("display-name").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_org_create": true,
+                "jwt": jwt,
+                "slug": slug,
+                "display_name": display,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let org = resp
+                .get("org")
+                .ok_or_else(|| anyhow::anyhow!("no org in response"))?;
+            cli_out::say(format_args!(
+                "org created: {}",
+                org.get("slug").and_then(|x| x.as_str()).unwrap_or("?")
+            ));
+            cli_out::pair(
+                "owner",
+                org.get("owner").and_then(|x| x.as_str()).unwrap_or("?"),
+            );
+            Ok(())
+        }
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_org_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("orgs")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("orgs ({}):", rows.len()));
+            for o in rows {
+                let slug = o.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+                let dn = o
+                    .get("display_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {slug:<16}  {dn}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown org subcommand"),
+    }
+}
+
+async fn handle_project(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => {
+            let jwt = require_token()?;
+            let org = sub.get_one::<String>("org").unwrap().clone();
+            let slug = sub.get_one::<String>("slug").unwrap().clone();
+            let display = sub.get_one::<String>("display-name").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_project_create": true,
+                "jwt": jwt,
+                "org": org,
+                "slug": slug,
+                "display_name": display,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let p = resp
+                .get("project")
+                .ok_or_else(|| anyhow::anyhow!("no project in response"))?;
+            cli_out::say(format_args!(
+                "project created: {}",
+                p.get("uid").and_then(|x| x.as_str()).unwrap_or("?")
+            ));
+            Ok(())
+        }
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_project_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("projects")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("projects ({}):", rows.len()));
+            for p in rows {
+                let uid = p.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
+                let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+                let org = p.get("org").and_then(|x| x.as_str()).unwrap_or("?");
+                let dn = p
+                    .get("display_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {uid:<24}  {slug:<10}  {org:<16}  {dn}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown project subcommand"),
+    }
+}
+
+async fn handle_env(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => {
+            let jwt = require_token()?;
+            let project = sub.get_one::<String>("project").unwrap().clone();
+            let slug = sub.get_one::<String>("slug").unwrap().clone();
+            let display = sub.get_one::<String>("display-name").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_env_create": true,
+                "jwt": jwt,
+                "project": project,
+                "slug": slug,
+                "display_name": display,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let e = resp
+                .get("env")
+                .ok_or_else(|| anyhow::anyhow!("no env in response"))?;
+            cli_out::say(format_args!(
+                "env created: {}",
+                e.get("uid").and_then(|x| x.as_str()).unwrap_or("?")
+            ));
+            Ok(())
+        }
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_env_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("envs")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("envs ({}):", rows.len()));
+            for e in rows {
+                let uid = e.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
+                let slug = e.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+                let proj = e.get("project").and_then(|x| x.as_str()).unwrap_or("?");
+                let dn = e
+                    .get("display_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {uid:<24}  {slug:<12}  {proj:<24}  {dn}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown env subcommand"),
+    }
 }
 
 async fn cmd_user_create(sub: &clap::ArgMatches) -> Result<()> {

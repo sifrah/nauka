@@ -1,0 +1,5 @@
+error: `scope_by` and `permissions` are mutually exclusive — use `scope_by` for delegated authorization via `fn::iam::can`, or `permissions` for an explicit clause
+  --> tests/compile_fail/scope_by_and_permissions.rs:13:19
+   |
+13 |     permissions = "$auth != NONE"
+   |                   ^^^^^^^^^^^^^^^

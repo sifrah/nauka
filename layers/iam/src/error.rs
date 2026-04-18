@@ -15,6 +15,12 @@ pub enum IamError {
     #[error("user already exists: {0}")]
     UserExists(String),
 
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("invalid slug: {0}")]
+    InvalidSlug(String),
+
     #[error("jwt: {0}")]
     Jwt(String),
 
@@ -35,6 +41,8 @@ impl NaukaError for IamError {
             IamError::Password(_) => "iam.password",
             IamError::InvalidCredentials => "iam.invalid_credentials",
             IamError::UserExists(_) => "iam.user_exists",
+            IamError::AlreadyExists(_) => "iam.already_exists",
+            IamError::InvalidSlug(_) => "iam.invalid_slug",
             IamError::Jwt(_) => "iam.jwt",
             IamError::Token(_) => "iam.token",
             IamError::State(_) => "iam.state",

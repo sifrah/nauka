@@ -252,6 +252,25 @@ pub struct AccessDescriptor {
 #[distributed_slice]
 pub static ALL_ACCESS_DEFS: [&'static AccessDescriptor] = [..];
 
+/// Compile-time descriptor for a `DEFINE FUNCTION fn::ns::name(...) {...}`
+/// SurrealQL statement — e.g. `fn::iam::can` for IAM-2 (#346).
+///
+/// Functions must be defined before any `DEFINE TABLE ... PERMISSIONS`
+/// clause that calls them, which is why they have their own slice +
+/// `function_definitions()` helper: `bin/nauka` loads them first.
+#[derive(Debug)]
+pub struct FunctionDescriptor {
+    /// Fully-qualified function name, e.g. `"fn::iam::can"`. Used
+    /// only for diagnostics and slice dedup — SurrealDB parses it
+    /// out of the DDL string.
+    pub name: &'static str,
+    /// Full `DEFINE FUNCTION … { … } PERMISSIONS …;` SurrealQL.
+    pub ddl: &'static str,
+}
+
+#[distributed_slice]
+pub static ALL_DB_FUNCTIONS: [&'static FunctionDescriptor] = [..];
+
 /// Contract every resource implements.
 ///
 /// Normally derived through the `#[resource(…)]` attribute macro;
@@ -375,6 +394,21 @@ pub fn access_definitions() -> String {
     out
 }
 
+/// Concatenated DDL for every `DEFINE FUNCTION` registered in
+/// [`ALL_DB_FUNCTIONS`]. Load *before* the table DDL so any
+/// `PERMISSIONS` clause that calls a function can resolve it at
+/// parse time.
+pub fn function_definitions() -> String {
+    let mut out = String::new();
+    for desc in ALL_DB_FUNCTIONS.iter() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(desc.ddl);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +421,7 @@ mod tests {
         assert_eq!(local_schemas(), "");
         assert_eq!(cluster_schemas(), "");
         assert_eq!(access_definitions(), "");
+        assert_eq!(function_definitions(), "");
     }
 
     #[test]

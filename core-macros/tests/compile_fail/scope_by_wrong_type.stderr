@@ -1,0 +1,5 @@
+error: `scope_by = "owner"` targets a field that is not `Ref<T>` or `Option<Ref<T>>` — authorization flows along record links, and emitting `$this.owner` against anything else would generate invalid SurrealQL
+ --> tests/compile_fail/scope_by_wrong_type.rs:7:55
+  |
+7 | #[resource(table = "t", scope = "cluster", scope_by = "owner")]
+  |                                                       ^^^^^^^

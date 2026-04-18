@@ -207,6 +207,16 @@ async fn sign_in_via_db(db: &Database, email: &str, password: &str) -> Result<Jw
         password: String,
     }
 
+    // Hold the shared IPC lock across the whole signin + invalidate
+    // so the daemon's session never leaks between concurrent IPC
+    // handlers or between the handler and a background task (see
+    // `ops::IPC_LOCK`'s docstring for the full reasoning — tl;dr: a
+    // leaked session breaks the reconciler).
+    let _guard = crate::ops::IPC_LOCK.lock().await;
+    // Drop any stale session that a previous panicked request may
+    // have left behind before the new signin mutates it.
+    let _ = db.inner().invalidate().await;
+
     let token = db
         .inner()
         .signin(Record {
@@ -231,6 +241,11 @@ async fn sign_in_via_db(db: &Database, email: &str, password: &str) -> Result<Jw
                 IamError::Db(e)
             }
         })?;
+
+    // The JWT is what the caller keeps; the server-side session is
+    // throwaway. Invalidate before returning so the daemon goes back
+    // to root-level for any background task that runs next.
+    let _ = db.inner().invalidate().await;
 
     // `AccessToken::into_insecure_token` is named that way to
     // discourage logging — we only hand it over loopback to the CLI,

@@ -22,11 +22,18 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod auth;
+pub mod can;
 pub mod definition;
 pub mod error;
+pub mod ops;
 pub mod token;
 
 pub use auth::{decode_claims, hash_password, signin, signup, verify_password, Claims, Jwt};
-pub use definition::User;
+pub use can::IAM_CAN_DDL;
+pub use definition::{Env, Org, Project, User};
 pub use error::IamError;
+pub use ops::{
+    authenticate, create_env, create_org, create_project, list_envs, list_orgs, list_projects,
+    AuthContext,
+};
 pub use token::{delete_token, load_token, save_token, token_path};

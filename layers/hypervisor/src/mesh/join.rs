@@ -72,6 +72,44 @@ struct IamSigninRequest {
     password: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamOrgCreateRequest {
+    jwt: String,
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamOrgListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamProjectCreateRequest {
+    jwt: String,
+    org: String,
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamProjectListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamEnvCreateRequest {
+    jwt: String,
+    project: String,
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamEnvListRequest {
+    jwt: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -567,6 +605,208 @@ async fn handle_connection(
                 );
             }
         }
+    } else if v.get("iam_org_create").is_some() {
+        // IAM-2: create an Org on behalf of the JWT-authenticated
+        // caller. Loopback only — the CLI is the sole consumer; a
+        // REST surface with proper bearer auth arrives with
+        // ResourceDef (#342).
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_org_create requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_org_create".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamOrgCreateRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::create_org(db, raft, &req.jwt, &req.slug, &req.display_name).await {
+            Ok(org) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "org": {
+                        "slug": org.slug,
+                        "display_name": org.display_name,
+                        "owner": org.owner.id(),
+                    }
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(event = "iam.org.create.ok", slug = %req.slug);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.org.create.fail", slug = %req.slug, error = %e);
+            }
+        }
+    } else if v.get("iam_org_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_org_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_org_list".into()));
+        }
+        let req: IamOrgListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_orgs(db, &req.jwt).await {
+            Ok(orgs) => {
+                let rows: Vec<serde_json::Value> = orgs
+                    .into_iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "slug": o.slug,
+                            "display_name": o.display_name,
+                            "owner": o.owner.id(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "orgs": rows }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_project_create").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_project_create requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_project_create".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamProjectCreateRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::create_project(db, raft, &req.jwt, &req.org, &req.slug, &req.display_name)
+            .await
+        {
+            Ok(p) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "project": {
+                        "uid": p.uid,
+                        "slug": p.slug,
+                        "org": p.org.id(),
+                        "display_name": p.display_name,
+                    }
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(event = "iam.project.create.ok", slug = %req.slug);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.project.create.fail", slug = %req.slug, error = %e);
+            }
+        }
+    } else if v.get("iam_project_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_project_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_project_list".into()));
+        }
+        let req: IamProjectListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_projects(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "uid": p.uid,
+                            "slug": p.slug,
+                            "org": p.org.id(),
+                            "display_name": p.display_name,
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "projects": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_env_create").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_env_create requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_env_create".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamEnvCreateRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::create_env(
+            db,
+            raft,
+            &req.jwt,
+            &req.project,
+            &req.slug,
+            &req.display_name,
+        )
+        .await
+        {
+            Ok(e) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "env": {
+                        "uid": e.uid,
+                        "slug": e.slug,
+                        "project": e.project.id(),
+                        "display_name": e.display_name,
+                    }
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(event = "iam.env.create.ok", slug = %req.slug);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.env.create.fail", slug = %req.slug, error = %e);
+            }
+        }
+    } else if v.get("iam_env_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_env_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_env_list".into()));
+        }
+        let req: IamEnvListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_envs(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "uid": e.uid,
+                            "slug": e.slug,
+                            "project": e.project.id(),
+                            "display_name": e.display_name,
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "envs": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
     } else if v.get("iam_signin").is_some() {
         // Authenticate an existing user. Loopback-only in IAM-1; a
         // REST surface with bearer-token auth arrives with the
@@ -858,6 +1098,32 @@ pub fn request_iam_signin(
     });
     writeln!(stream, "{req}").map_err(|e| MeshError::Join(e.to_string()))?;
     read_jwt_response(stream)
+}
+
+/// Send a JSON request to the local daemon and return the raw
+/// response value. Used by the IAM org/project/env RPCs — each one
+/// returns structured data (not a JWT), so they don't go through
+/// `read_jwt_response`.
+pub fn request_json(
+    join_port: u16,
+    req: serde_json::Value,
+) -> Result<serde_json::Value, MeshError> {
+    let addr = format!("127.0.0.1:{join_port}");
+    let mut stream =
+        TcpStream::connect(&addr).map_err(|e| MeshError::Join(format!("connect daemon: {e}")))?;
+    writeln!(stream, "{req}").map_err(|e| MeshError::Join(e.to_string()))?;
+    let reader = BufReader::new(stream);
+    let mut lines = reader.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| MeshError::Join("no response".into()))?
+        .map_err(|e| MeshError::Join(e.to_string()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&line).map_err(|e| MeshError::Join(e.to_string()))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(MeshError::Join(err.to_string()));
+    }
+    Ok(v)
 }
 
 fn read_jwt_response(stream: TcpStream) -> Result<String, MeshError> {

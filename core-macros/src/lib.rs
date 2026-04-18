@@ -92,6 +92,18 @@ struct ResourceArgs {
     /// field MUST be `Option<Ref<_>>` at the DDL layer, but the
     /// macro cannot verify cross-crate.
     set_null_on_delete: Option<LitStr>,
+    /// `scope_by = "org"` — shortcut for authorization scope tree.
+    /// The named field must be a `Ref<…>`; the macro emits
+    /// `PERMISSIONS FOR select/create/update/delete WHERE
+    /// fn::iam::can('<action>', $this.<field>)`. Mutually exclusive
+    /// with `permissions`. See IAM-2 (#346).
+    scope_by: Option<LitStr>,
+    /// `permissions = "<expr>"` — single SurrealQL WHERE clause
+    /// applied to all four CRUD verbs. Use for resources whose
+    /// permission rule is flat (typically: the record references
+    /// `$auth` directly via an `owner` field). Mutually exclusive
+    /// with `scope_by`. See IAM-2 (#346).
+    permissions: Option<LitStr>,
 }
 
 impl Parse for ResourceArgs {
@@ -101,6 +113,8 @@ impl Parse for ResourceArgs {
         let mut cascade_delete: Option<LitStr> = None;
         let mut restrict_delete: Option<LitStr> = None;
         let mut set_null_on_delete: Option<LitStr> = None;
+        let mut scope_by: Option<LitStr> = None;
+        let mut permissions: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -112,12 +126,15 @@ impl Parse for ResourceArgs {
                 "cascade_delete" => &mut cascade_delete,
                 "restrict_delete" => &mut restrict_delete,
                 "set_null_on_delete" => &mut set_null_on_delete,
+                "scope_by" => &mut scope_by,
+                "permissions" => &mut permissions,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown attribute key `{other}` (allowed: `table`, `scope`, \
-                             `cascade_delete`, `restrict_delete`, `set_null_on_delete`)"
+                             `cascade_delete`, `restrict_delete`, `set_null_on_delete`, \
+                             `scope_by`, `permissions`)"
                         ),
                     ));
                 }
@@ -147,12 +164,26 @@ impl Parse for ResourceArgs {
             )
         })?;
 
+        // `scope_by` and `permissions` both produce a PERMISSIONS
+        // clause; accepting both would force a merge policy that
+        // doesn't match any real use case. Reject up front.
+        if let (Some(_), Some(p)) = (&scope_by, &permissions) {
+            return Err(syn::Error::new(
+                p.span(),
+                "`scope_by` and `permissions` are mutually exclusive — \
+                 use `scope_by` for delegated authorization via \
+                 `fn::iam::can`, or `permissions` for an explicit clause",
+            ));
+        }
+
         Ok(ResourceArgs {
             table,
             scope,
             cascade_delete,
             restrict_delete,
             set_null_on_delete,
+            scope_by,
+            permissions,
         })
     }
 }
@@ -242,13 +273,37 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
         None => Vec::new(),
     };
 
+    if let Some(lit) = &args.scope_by {
+        validate_scope_by_target(&item, lit)?;
+    }
+
+    let permissions_clause = if let Some(field_lit) = &args.scope_by {
+        let field = field_lit.value();
+        // One `FOR` per verb so every verb carries the correct
+        // `$action` — the function uses it for RoleBinding lookups in
+        // IAM-3 even though IAM-2's owner-only impl ignores it.
+        format!(
+            "\n    PERMISSIONS\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR select WHERE fn::iam::can('select', $this.{field})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR create WHERE fn::iam::can('create', $this.{field})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR update WHERE fn::iam::can('update', $this.{field})\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20FOR delete WHERE fn::iam::can('delete', $this.{field})"
+        )
+    } else if let Some(expr_lit) = &args.permissions {
+        let expr = expr_lit.value();
+        format!("\n    PERMISSIONS FOR select, create, update, delete WHERE {expr}")
+    } else {
+        String::new()
+    };
+
     let user_ddl = generate_user_field_ddl(&table, &item)?;
     let unique_ddl = generate_unique_indexes(&table, &item);
     let base_ddl = generate_base_field_ddl(&table);
     let event_ddl =
         generate_on_delete_event(&table, &cascade_fields, &restrict_pairs, &set_null_pairs);
     let full_ddl = format!(
-        "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL;\n{user_ddl}{base_ddl}{unique_ddl}{event_ddl}"
+        "DEFINE TABLE IF NOT EXISTS {table} SCHEMAFULL{permissions_clause};\n\
+         {user_ddl}{base_ddl}{unique_ddl}{event_ddl}"
     );
 
     // Build the SET-clause expression list *before* adding base fields
@@ -711,6 +766,63 @@ fn validate_cascade_targets(
     }
 
     Ok(())
+}
+
+/// Confirm that the `scope_by = "<field>"` target is a real field of
+/// the struct AND is a `Ref<T>` (or `Option<Ref<T>>`). Authorization
+/// propagates across record links; applying `scope_by` to anything
+/// else would emit invalid SurrealQL at the `$this.<field>` dereference.
+/// `Vec<Ref<T>>` is rejected too — "scope" is a single authorization
+/// boundary, not a set of parents.
+fn validate_scope_by_target(item: &ItemStruct, lit: &LitStr) -> syn::Result<()> {
+    let name = lit.value();
+    let Fields::Named(named) = &item.fields else {
+        return Err(syn::Error::new(
+            lit.span(),
+            "`scope_by` requires a struct with named fields",
+        ));
+    };
+    let field = named
+        .named
+        .iter()
+        .find(|f| f.ident.as_ref().map(|i| i == &name).unwrap_or(false))
+        .ok_or_else(|| {
+            syn::Error::new(
+                lit.span(),
+                format!("`scope_by` names field `{name}` which does not exist on this struct"),
+            )
+        })?;
+
+    if !is_ref_or_optional_ref(&field.ty) {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "`scope_by = \"{name}\"` targets a field that is not `Ref<T>` or \
+                 `Option<Ref<T>>` — authorization flows along record links, and \
+                 emitting `$this.{name}` against anything else would generate \
+                 invalid SurrealQL"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `Ref<T>` / `Option<Ref<T>>`. Deliberately rejects `Vec<Ref<T>>` —
+/// scope_by identifies a single parent.
+fn is_ref_or_optional_ref(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return false;
+    };
+    match seg.ident.to_string().as_str() {
+        "Ref" => true,
+        "Option" => first_type_arg(seg)
+            .map(is_ref_or_optional_ref)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// `Ref<T>` / `Option<Ref<T>>` / `Vec<Ref<T>>`.

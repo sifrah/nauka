@@ -10,6 +10,7 @@ repository.workspace = true
 nauka-core.workspace = true
 nauka-core-macros.workspace = true
 nauka-state.workspace = true
+linkme.workspace = true
 surrealdb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
