@@ -28,7 +28,8 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 use crate::definition::{
-    ApiToken, Env, Org, PasswordResetToken, Project, Role, RoleBinding, ServiceAccount, User,
+    ActiveSession, ApiToken, Env, Org, PasswordResetToken, Project, Role, RoleBinding,
+    ServiceAccount, User,
 };
 use crate::error::IamError;
 
@@ -440,6 +441,24 @@ pub async fn unbind_role(
     )
     .await;
     Ok(())
+}
+
+// -------- IAM-8: active session inventory --------
+
+#[instrument(name = "iam.session.list", skip_all)]
+pub async fn list_sessions(db: &Database, jwt: &str) -> Result<Vec<ActiveSession>, IamError> {
+    read_as(db, jwt, || async {
+        // Sort newest-first off the ULID-shaped uid — same shape
+        // `audit_event` uses. Including `uid` in the projection
+        // keeps SurrealDB 3's ORDER BY check happy.
+        db.query_take(
+            "SELECT uid, user, ip, user_agent, last_active_at, created_at, updated_at, version \
+             FROM active_session ORDER BY uid DESC",
+        )
+        .await
+        .map_err(IamError::State)
+    })
+    .await
 }
 
 // -------- IAM-7: password reset flow --------

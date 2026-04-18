@@ -22,23 +22,35 @@
 
 use nauka_core::resource::{Datetime, ResourceOps};
 use nauka_iam::{decode_claims, hash_password, signin, User};
-use nauka_state::Database;
+use nauka_state::{Database, RaftNode, TlsConfig};
+use std::sync::Arc;
 use surrealdb::opt::auth::Record;
 use surrealdb::types::SurrealValue;
 
+async fn single_node_raft(db: Arc<Database>) -> RaftNode {
+    let raft = RaftNode::new(1, db, None::<TlsConfig>).await.unwrap();
+    raft.init_cluster("[::1]:0").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    raft
+}
+
 /// Tear up a fresh database with the full Nauka schema applied —
 /// this is what `bin/nauka` does at startup, condensed.
-async fn fresh_db() -> (Database, tempfile::TempDir) {
+async fn fresh_db() -> (Arc<Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("iam-test.db");
-    let db = Database::open(Some(path.to_str().unwrap())).await.unwrap();
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
 
+    let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
     let local = nauka_core::local_schemas();
     let access = nauka_core::access_definitions();
-    nauka_state::load_schemas(&db, &[nauka_state::SCHEMA, &cluster, &local, &access])
-        .await
-        .unwrap();
+    nauka_state::load_schemas(
+        &db,
+        &[nauka_state::SCHEMA, &functions, &cluster, &local, &access],
+    )
+    .await
+    .unwrap();
 
     (db, dir)
 }
@@ -162,7 +174,8 @@ async fn wrong_password_is_invalid_credentials() {
         .await
         .expect("signup");
 
-    let err = signin(&db, "bob@example.com", "wrong-password")
+    let raft = single_node_raft(db.clone()).await;
+    let err = signin(&db, &raft, "bob@example.com", "wrong-password", "127.0.0.1")
         .await
         .expect_err("wrong password must not sign in");
     assert!(
@@ -209,9 +222,16 @@ async fn rust_hashed_record_verifies_with_surreal_compare() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].email, "carol@example.com");
 
-    let jwt = signin(&db, "carol@example.com", "correct-horse")
-        .await
-        .expect("signin with rust-hashed password");
+    let raft = single_node_raft(db.clone()).await;
+    let jwt = signin(
+        &db,
+        &raft,
+        "carol@example.com",
+        "correct-horse",
+        "127.0.0.1",
+    )
+    .await
+    .expect("signin with rust-hashed password");
     let claims = decode_claims(jwt.as_str()).unwrap();
     assert_eq!(claims.email().as_deref(), Some("carol@example.com"));
 }

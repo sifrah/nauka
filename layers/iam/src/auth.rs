@@ -203,13 +203,14 @@ fn validate_email(email: &str) -> Result<(), IamError> {
 /// bypass Raft entirely and the cluster state would diverge. Hashing
 /// here, then replicating the literal hash via the Writer, keeps the
 /// state machine deterministic (see ADR 0006 rule #7).
-#[instrument(name = "iam.signup", skip_all, fields(email = %email))]
+#[instrument(name = "iam.signup", skip_all, fields(email = %email, peer_ip = %peer_ip))]
 pub async fn signup(
     db: &Database,
     raft: &RaftNode,
     email: &str,
     password: &str,
     display_name: &str,
+    peer_ip: &str,
 ) -> Result<Jwt, IamError> {
     validate_email(email)?;
     validate_password_complexity(password)?;
@@ -241,17 +242,78 @@ pub async fn signup(
         }
     }
 
-    sign_in_via_db(db, email, password).await
+    let jwt = sign_in_via_db(db, email, password).await?;
+    record_active_session(db, raft, email, peer_ip).await;
+    Ok(jwt)
 }
 
 /// Authenticate an existing user by running the DEFINE ACCESS SIGNIN
 /// query via the embedded SurrealDB engine. SurrealDB evaluates
 /// `crypto::argon2::compare(password_hash, $password)` and, on
 /// success, mints a JWT signed with the database's signing key.
-#[instrument(name = "iam.signin", skip_all, fields(email = %email))]
-pub async fn signin(db: &Database, email: &str, password: &str) -> Result<Jwt, IamError> {
+#[instrument(name = "iam.signin", skip_all, fields(email = %email, peer_ip = %peer_ip))]
+pub async fn signin(
+    db: &Database,
+    raft: &RaftNode,
+    email: &str,
+    password: &str,
+    peer_ip: &str,
+) -> Result<Jwt, IamError> {
     validate_email(email)?;
-    sign_in_via_db(db, email, password).await
+    let jwt = sign_in_via_db(db, email, password).await?;
+    record_active_session(db, raft, email, peer_ip).await;
+    Ok(jwt)
+}
+
+/// Write an `ActiveSession` row on every successful signin. Runs
+/// outside the `IPC_LOCK` critical section held in `sign_in_via_db`
+/// — the JWT has already been minted and the session state is back
+/// to NONE, so the Raft-routed write sees the root path and the
+/// PERMISSIONS rule's `$auth = NONE` arm.
+///
+/// Best-effort: a write failure emits a warning but does not fail
+/// the signin, same policy as audit. Losing an observability row
+/// should never lock a user out.
+async fn record_active_session(db: &Database, raft: &RaftNode, email: &str, peer_ip: &str) {
+    let now = Datetime::now();
+    let uid = new_session_uid();
+    let session = crate::ActiveSession {
+        uid: uid.clone(),
+        user: nauka_core::resource::Ref::<User>::new(email.to_string()),
+        ip: peer_ip.to_string(),
+        user_agent: "cli".to_string(),
+        last_active_at: now,
+        created_at: now,
+        updated_at: now,
+        version: 0,
+    };
+    if let Err(e) = Writer::new(db).with_raft(raft).create(&session).await {
+        tracing::warn!(
+            event = "iam.session.write_failed",
+            email = %email,
+            peer_ip = %peer_ip,
+            uid = %uid,
+            error = %e,
+            "active_session write failed — signin already succeeded"
+        );
+    }
+}
+
+/// 24-char `<12 hex ms><12 hex random>` id, same shape audit
+/// events use. Sortable by prefix; doesn't need a full ULID.
+fn new_session_uid() -> String {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mut rand = [0u8; 6];
+    OsRng.fill_bytes(&mut rand);
+    let mut out = format!("{ms:012x}");
+    for b in rand {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 async fn sign_in_via_db(db: &Database, email: &str, password: &str) -> Result<Jwt, IamError> {

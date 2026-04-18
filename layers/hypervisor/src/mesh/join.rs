@@ -186,6 +186,11 @@ struct IamPasswordResetReq {
     new_password: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamSessionListRequest {
+    jwt: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -660,7 +665,17 @@ async fn handle_connection(
             .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let req: IamSignupRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::signup(db, raft, &req.email, &req.password, &req.display_name).await {
+        let peer_ip_str = peer_addr.ip().to_string();
+        match nauka_iam::signup(
+            db,
+            raft,
+            &req.email,
+            &req.password,
+            &req.display_name,
+            &peer_ip_str,
+        )
+        .await
+        {
             Ok(jwt) => {
                 let body = serde_json::json!({ "ok": true, "jwt": jwt.into_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
@@ -1278,6 +1293,37 @@ async fn handle_connection(
                 tracing::warn!(event = "iam.password.reset.fail", error = %e);
             }
         }
+    } else if v.get("iam_session_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_session_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_session_list".into()));
+        }
+        let req: IamSessionListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_sessions(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "uid": s.uid,
+                            "user": s.user.id(),
+                            "ip": s.ip,
+                            "user_agent": s.user_agent,
+                            "last_active_at": s.last_active_at.to_string(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "sessions": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
     } else if v.get("iam_signin").is_some() {
         // Authenticate an existing user. Loopback-only in IAM-1; a
         // REST surface with bearer-token auth arrives with the
@@ -1295,7 +1341,11 @@ async fn handle_connection(
         }
         let req: IamSigninRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::signin(db, &req.email, &req.password).await {
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let peer_ip_str = peer_addr.ip().to_string();
+        match nauka_iam::signin(db, raft, &req.email, &req.password, &peer_ip_str).await {
             Ok(jwt) => {
                 let body = serde_json::json!({ "ok": true, "jwt": jwt.into_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;

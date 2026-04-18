@@ -65,7 +65,8 @@ async fn run() -> Result<()> {
         .subcommand(service_account_cmd())
         .subcommand(token_cmd())
         .subcommand(audit_cmd())
-        .subcommand(password_cmd());
+        .subcommand(password_cmd())
+        .subcommand(session_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -81,6 +82,7 @@ async fn run() -> Result<()> {
         Some(("token", sub)) => handle_token(sub).await,
         Some(("audit", sub)) => handle_audit(sub).await,
         Some(("password", sub)) => handle_password(sub).await,
+        Some(("session", sub)) => handle_session(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -1164,6 +1166,47 @@ async fn handle_password(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!("unknown password subcommand"),
+    }
+}
+
+// -------- IAM-8: session inventory --------
+
+fn session_cmd() -> Command {
+    Command::new("session")
+        .about("Inspect active sessions (IAM-8)")
+        .arg_required_else_help(true)
+        .subcommand(Command::new("list").about("List the current user's active sessions"))
+}
+
+async fn handle_session(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({
+                "iam_session_list": true,
+                "jwt": jwt,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("sessions")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("active sessions ({}):", rows.len()));
+            for s in rows {
+                let uid = s.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
+                let ip = s.get("ip").and_then(|x| x.as_str()).unwrap_or("?");
+                let ua = s.get("user_agent").and_then(|x| x.as_str()).unwrap_or("?");
+                let at = s
+                    .get("last_active_at")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {uid}  {ip:<16}  {ua:<8}  {at}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown session subcommand"),
     }
 }
 
