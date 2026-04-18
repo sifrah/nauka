@@ -131,6 +131,35 @@ pub fn hash_password(password: &str) -> Result<String, IamError> {
         .map_err(|e| IamError::Password(e.to_string()))
 }
 
+/// IAM-7 password-complexity gate.
+///
+/// Lives in Rust because plaintext is never stored — a SurrealDB
+/// `ASSERT` couldn't see the raw password. The rule is deliberately
+/// narrow: at least 10 characters, must contain a letter and a
+/// non-letter (symbol or digit). Anything stricter (history, max
+/// age) lands in follow-up issues where the storage design is
+/// worth resolving on its own.
+///
+/// Callers: `signup`, `consume_password_reset`. Surface the
+/// returned message to operators so they can fix the password
+/// before retrying — wrapping this in `InvalidCredentials` would
+/// leak the reason up through the auth error type.
+pub fn validate_password_complexity(password: &str) -> Result<(), IamError> {
+    if password.chars().count() < 10 {
+        return Err(IamError::Password(
+            "password must be at least 10 characters long".into(),
+        ));
+    }
+    let has_letter = password.chars().any(|c| c.is_ascii_alphabetic());
+    let has_non_letter = password.chars().any(|c| !c.is_ascii_alphabetic());
+    if !has_letter || !has_non_letter {
+        return Err(IamError::Password(
+            "password must contain at least one letter and one non-letter (digit or symbol)".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify a plaintext password against a PHC-encoded hash. The
 /// verifier reads the parameters from the PHC string, so this works
 /// regardless of which parameter set produced the stored hash —
@@ -183,9 +212,7 @@ pub async fn signup(
     display_name: &str,
 ) -> Result<Jwt, IamError> {
     validate_email(email)?;
-    if password.is_empty() {
-        return Err(IamError::Password("password cannot be empty".into()));
-    }
+    validate_password_complexity(password)?;
 
     let password_hash = hash_password(password)?;
     let now = Datetime::now();
@@ -193,6 +220,7 @@ pub async fn signup(
         email: email.to_string(),
         password_hash,
         display_name: display_name.to_string(),
+        email_verified_at: None,
         created_at: now,
         updated_at: now,
         version: 0,

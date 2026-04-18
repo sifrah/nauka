@@ -31,17 +31,21 @@ pub mod seed;
 pub mod token;
 
 pub use audit::{audit_write, list_audit, try_audit};
-pub use auth::{decode_claims, hash_password, signin, signup, verify_password, Claims, Jwt};
+pub use auth::{
+    decode_claims, hash_password, signin, signup, validate_password_complexity, verify_password,
+    Claims, Jwt,
+};
 pub use can::IAM_CAN_DDL;
 pub use definition::{
-    ApiToken, AuditEvent, Env, Org, Permission, Project, Role, RoleBinding, ServiceAccount, User,
+    ApiToken, AuditEvent, Env, Org, PasswordResetToken, Permission, Project, Role, RoleBinding,
+    ServiceAccount, User,
 };
 pub use error::IamError;
 pub use ops::{
-    authenticate, bind_role, create_api_token, create_env, create_org, create_project,
-    create_service_account, list_api_tokens, list_bindings, list_envs, list_orgs, list_projects,
-    list_roles, list_service_accounts, parse_api_token, revoke_api_token, unbind_role, AuthContext,
-    MintedToken,
+    authenticate, bind_role, consume_password_reset, create_api_token, create_env, create_org,
+    create_project, create_service_account, list_api_tokens, list_bindings, list_envs, list_orgs,
+    list_projects, list_roles, list_service_accounts, parse_api_token, request_password_reset,
+    revoke_api_token, unbind_role, AuthContext, MintedToken,
 };
 pub use seed::bootstrap;
 pub use token::{delete_token, load_token, save_token, token_path};

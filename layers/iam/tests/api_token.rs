@@ -38,6 +38,7 @@ async fn seed_owner_and_sa(db: &Database) {
         email: "alice@example.com".into(),
         password_hash: hash_password("alice-pw").unwrap(),
         display_name: "Alice".into(),
+        email_verified_at: None,
         created_at: Datetime::default(),
         updated_at: Datetime::default(),
         version: 0,

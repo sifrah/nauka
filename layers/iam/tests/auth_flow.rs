@@ -186,6 +186,7 @@ async fn rust_hashed_record_verifies_with_surreal_compare() {
         email: "carol@example.com".into(),
         password_hash: hash,
         display_name: "Carol".into(),
+        email_verified_at: None,
         created_at: Datetime::default(),
         updated_at: Datetime::default(),
         version: 0,

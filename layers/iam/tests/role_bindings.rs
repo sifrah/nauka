@@ -80,6 +80,7 @@ async fn create_user(db: &Database, email: &str, display_name: &str) {
         email: email.to_string(),
         password_hash: hash,
         display_name: display_name.to_string(),
+        email_verified_at: None,
         created_at: Datetime::default(),
         updated_at: Datetime::default(),
         version: 0,

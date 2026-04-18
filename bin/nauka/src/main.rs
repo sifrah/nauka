@@ -64,7 +64,8 @@ async fn run() -> Result<()> {
         .subcommand(role_cmd())
         .subcommand(service_account_cmd())
         .subcommand(token_cmd())
-        .subcommand(audit_cmd());
+        .subcommand(audit_cmd())
+        .subcommand(password_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -79,6 +80,7 @@ async fn run() -> Result<()> {
         Some(("service-account", sub)) => handle_service_account(sub).await,
         Some(("token", sub)) => handle_token(sub).await,
         Some(("audit", sub)) => handle_audit(sub).await,
+        Some(("password", sub)) => handle_password(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -1105,6 +1107,63 @@ async fn handle_audit(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!("unknown audit subcommand"),
+    }
+}
+
+// -------- IAM-7: password lifecycle --------
+
+fn password_cmd() -> Command {
+    Command::new("password")
+        .about("Password lifecycle operations (IAM-7)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("reset-request")
+                .about("Request a password-reset token (admin reads it from the daemon journal until IAM-7b adds email delivery)")
+                .arg(Arg::new("email").long("email").required(true)),
+        )
+        .subcommand(
+            Command::new("reset")
+                .about("Consume a reset token and set a new password")
+                .arg(Arg::new("token-id").long("token-id").required(true))
+                .arg(Arg::new("email").long("email").required(true).help("Email of the account being reset (used for the login nudge printed on success)")),
+        )
+}
+
+async fn handle_password(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("reset-request", sub)) => {
+            let email = sub.get_one::<String>("email").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_password_reset_request": true,
+                "email": email,
+            });
+            mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            // Always the same message — no enumeration oracle.
+            cli_out::say("if that email is registered, a reset token has been minted");
+            cli_out::say("(admin: look for `iam.password.reset_request.minted` in journalctl)");
+            Ok(())
+        }
+        Some(("reset", sub)) => {
+            let token_id = sub.get_one::<String>("token-id").unwrap().clone();
+            let email = sub.get_one::<String>("email").unwrap().clone();
+            let new_password = read_password("New password: ")?;
+            let confirm = read_password("Confirm password: ")?;
+            if new_password != confirm {
+                anyhow::bail!("passwords do not match");
+            }
+            let req = serde_json::json!({
+                "iam_password_reset": true,
+                "token_id": token_id,
+                "new_password": new_password,
+            });
+            mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cli_out::say("password updated");
+            cli_out::say(format_args!(
+                "  run `nauka login --email {email}` to mint a fresh JWT"
+            ));
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown password subcommand"),
     }
 }
 

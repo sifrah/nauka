@@ -175,6 +175,17 @@ struct IamAuditListRequest {
     limit: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamPasswordResetRequestReq {
+    email: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamPasswordResetReq {
+    token_id: String,
+    new_password: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -1193,6 +1204,78 @@ async fn handle_connection(
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_password_reset_request").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_password_reset_request requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join(
+                "non-loopback iam_password_reset_request".into(),
+            ));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamPasswordResetRequestReq =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::request_password_reset(db, raft, &req.email).await {
+            Ok(Some(token_id)) => {
+                // Deliberately NOT echoing the token in the IPC
+                // response — the CLI gets an opaque `ok`, while the
+                // daemon journal carries the plaintext token so an
+                // admin can fish it out until IAM-7b wires up
+                // email delivery. That keeps the reset-request IPC
+                // indistinguishable between known / unknown emails.
+                tracing::info!(
+                    event = "iam.password.reset_request.minted",
+                    email = %req.email,
+                    token_id = %token_id,
+                    "password reset token minted — plaintext logged for admin retrieval"
+                );
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+            }
+            Ok(None) => {
+                // Silent no-op: the client cannot tell this from
+                // the minted case. Preserves the no-enumeration
+                // property the epic called out.
+                tracing::info!(
+                    event = "iam.password.reset_request.no_user",
+                    email = %req.email
+                );
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(
+                    event = "iam.password.reset_request.fail",
+                    error = %e
+                );
+            }
+        }
+    } else if v.get("iam_password_reset").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_password_reset requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_password_reset".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamPasswordResetReq =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::consume_password_reset(db, raft, &req.token_id, &req.new_password).await {
+            Ok(()) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                tracing::info!(event = "iam.password.reset.ok");
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.password.reset.fail", error = %e);
             }
         }
     } else if v.get("iam_signin").is_some() {

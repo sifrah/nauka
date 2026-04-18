@@ -30,7 +30,7 @@
 //! `#[secret]` attribute — KMS/Vault-backed encryption at rest —
 //! is a later phase.
 
-use nauka_core::resource::SurrealValue;
+use nauka_core::resource::{Datetime, SurrealValue};
 use nauka_core_macros::{access, resource};
 use serde::{Deserialize, Serialize};
 
@@ -74,5 +74,11 @@ pub struct User {
     #[hidden]
     pub password_hash: String,
     pub display_name: String,
+    /// Set once the user has proven they own the address —
+    /// currently done out-of-band by an admin (future IAM-7b wires
+    /// up email delivery). IAM-9 governance will gate critical
+    /// actions (`EmergencyAccess`, role escalation) on this being
+    /// populated.
+    pub email_verified_at: Option<Datetime>,
     // `created_at`, `updated_at`, `version` — injected by `#[resource]`.
 }

@@ -22,12 +22,14 @@
 //! rows are back. That's the part that actually exercises
 //! `fn::iam::can`.
 
-use nauka_core::resource::{Datetime, Ref, ResourceOps};
+use nauka_core::resource::{Datetime, Ref, ResourceOps, SurrealValue};
 use nauka_state::{Database, RaftNode, Writer};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use crate::definition::{ApiToken, Env, Org, Project, Role, RoleBinding, ServiceAccount, User};
+use crate::definition::{
+    ApiToken, Env, Org, PasswordResetToken, Project, Role, RoleBinding, ServiceAccount, User,
+};
 use crate::error::IamError;
 
 /// Process-wide lock around any operation that mutates the shared
@@ -438,6 +440,211 @@ pub async fn unbind_role(
     )
     .await;
     Ok(())
+}
+
+// -------- IAM-7: password reset flow --------
+
+/// Wall-clock window a reset token stays redeemable. IAM-7 default;
+/// IAM-9 governance may tighten this.
+const PASSWORD_RESET_TTL_SECS: i64 = 15 * 60;
+
+/// Mint a `PasswordResetToken` for `email` — or silently pretend
+/// to, if no such user exists. The response visible to the caller
+/// must not distinguish the two cases (enumeration oracle), so the
+/// CLI sees `ok` either way; operators read the plaintext token out
+/// of the daemon journal until IAM-7b wires up email delivery.
+///
+/// Returns the plaintext token when a user does exist; returns
+/// `None` when the email is unknown.
+#[instrument(name = "iam.password.reset_request", skip_all, fields(email = %email))]
+pub async fn request_password_reset(
+    db: &Database,
+    raft: &RaftNode,
+    email: &str,
+) -> Result<Option<String>, IamError> {
+    // Existence check runs as root (no auth), so the `user`
+    // table's PERMISSIONS don't hide the row.
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct ExistsRow {
+        email: String,
+    }
+    let rows: Vec<ExistsRow> = db
+        .query_take(&format!(
+            "SELECT email FROM user WHERE email = '{}'",
+            crate::ops::escape_sq(email)
+        ))
+        .await
+        .map_err(IamError::State)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let token_id = random_token_chunk(32);
+    // SurrealDB's `Datetime` wraps `chrono::DateTime<Utc>`, so the
+    // TTL just adds seconds to the current time. Computed on the
+    // Raft leader so every follower applies the byte-identical
+    // value — required by ADR 0006 rule #7.
+    let expires_at: Datetime =
+        (chrono::Utc::now() + chrono::Duration::seconds(PASSWORD_RESET_TTL_SECS)).into();
+    let created = Datetime::now();
+    let token = PasswordResetToken {
+        token_id: token_id.clone(),
+        user: Ref::<User>::new(email.to_string()),
+        expires_at,
+        consumed: false,
+        created_at: created,
+        updated_at: created,
+        version: 0,
+    };
+    Writer::new(db)
+        .with_raft(raft)
+        .create(&token)
+        .await
+        .map_err(IamError::State)?;
+    crate::audit::try_audit(
+        db,
+        raft,
+        &format!("user:{email}"),
+        "create",
+        &format!("password_reset_token:{token_id}"),
+        None,
+        "success",
+    )
+    .await;
+    Ok(Some(token_id))
+}
+
+/// Redeem a reset token: checks non-consumed + unexpired, hashes
+/// the new password, updates `User.password_hash`, marks the
+/// token consumed. Both writes flow through Raft so the two rows
+/// land on every node together.
+#[instrument(name = "iam.password.reset", skip_all)]
+pub async fn consume_password_reset(
+    db: &Database,
+    raft: &RaftNode,
+    token_id: &str,
+    new_password: &str,
+) -> Result<(), IamError> {
+    crate::auth::validate_password_complexity(new_password)?;
+
+    // Look the token up as root.
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct TokenRow {
+        token_id: String,
+        // `Ref<User>` deserialises a `record<user>` payload the
+        // same way our CRUD helpers produce it; using `String`
+        // here would trip SurrealDB's type check.
+        user: Ref<User>,
+        expires_at: Datetime,
+        consumed: bool,
+    }
+    let rows: Vec<TokenRow> = db
+        .query_take(&format!(
+            "SELECT token_id, user, expires_at, consumed FROM password_reset_token \
+             WHERE token_id = '{}'",
+            crate::ops::escape_sq(token_id)
+        ))
+        .await
+        .map_err(IamError::State)?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or(IamError::InvalidCredentials)?;
+    if row.consumed {
+        return Err(IamError::InvalidCredentials);
+    }
+    let now = Datetime::now();
+    if row.expires_at.to_string().as_str() <= now.to_string().as_str() {
+        return Err(IamError::InvalidCredentials);
+    }
+
+    // `row.user` is a `Ref<User>` wrapping the record-id payload
+    // (the user's email). Pull the inner string.
+    let email = row.user.id().to_string();
+
+    // Pull the existing user record so we keep `display_name`,
+    // `email_verified_at`, `created_at`, and the version counter.
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct UserRow {
+        email: String,
+        password_hash: String,
+        display_name: String,
+        email_verified_at: Option<Datetime>,
+        created_at: Datetime,
+        #[allow(dead_code)]
+        updated_at: Datetime,
+        version: u64,
+    }
+    let users: Vec<UserRow> = db
+        .query_take(&format!(
+            "SELECT email, password_hash, display_name, email_verified_at, \
+                    created_at, updated_at, version \
+             FROM user WHERE email = '{}'",
+            crate::ops::escape_sq(&email)
+        ))
+        .await
+        .map_err(IamError::State)?;
+    let existing = users
+        .into_iter()
+        .next()
+        .ok_or(IamError::InvalidCredentials)?;
+
+    let new_hash = crate::auth::hash_password(new_password)?;
+    let updated = User {
+        email: existing.email.clone(),
+        password_hash: new_hash,
+        display_name: existing.display_name,
+        email_verified_at: existing.email_verified_at,
+        created_at: existing.created_at,
+        updated_at: now,
+        version: existing.version + 1,
+    };
+
+    let consumed_token = PasswordResetToken {
+        token_id: row.token_id.clone(),
+        user: Ref::<User>::new(existing.email.clone()),
+        expires_at: row.expires_at,
+        consumed: true,
+        // Reuse the subject user's `created_at` — we never return
+        // to the original token row after the redeem, so any
+        // datetime would do; keeping it deterministic makes Raft
+        // replay byte-identical across followers.
+        created_at: updated.created_at,
+        updated_at: now,
+        version: 1,
+    };
+
+    // Two writes — wrap in a transaction so a failure between them
+    // doesn't leave a redeemed-but-unrotated state around.
+    Writer::new(db)
+        .with_raft(raft)
+        .transaction(|tx| {
+            tx.update::<User>(&updated)?;
+            tx.update::<PasswordResetToken>(&consumed_token)?;
+            Ok(())
+        })
+        .await
+        .map_err(IamError::State)?;
+
+    crate::audit::try_audit(
+        db,
+        raft,
+        &format!("user:{email}"),
+        "update",
+        &format!("user:{email}"),
+        None,
+        "success",
+    )
+    .await;
+    Ok(())
+}
+
+/// Escape a `'` inside a single-quoted SurrealQL string literal.
+/// Used by the ad-hoc `WHERE email = '…'` queries in this module
+/// — the Writer's generated CRUD already escapes correctly for
+/// record-id payloads.
+fn escape_sq(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 #[instrument(name = "iam.role.list_bindings", skip_all)]

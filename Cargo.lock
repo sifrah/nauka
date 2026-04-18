@@ -2607,6 +2607,7 @@ version = "2.0.0"
 dependencies = [
  "argon2",
  "base64",
+ "chrono",
  "linkme",
  "nauka-core",
  "nauka-core-macros",
