@@ -136,6 +136,37 @@ struct IamBindingsListRequest {
     jwt: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamSaCreateRequest {
+    jwt: String,
+    org: String,
+    slug: String,
+    display_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamSaListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamTokenCreateRequest {
+    jwt: String,
+    service_account: String,
+    name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamTokenListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamTokenRevokeRequest {
+    jwt: String,
+    token_id: String,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -954,6 +985,158 @@ async fn handle_connection(
                     .collect();
                 let body = serde_json::json!({ "ok": true, "bindings": json }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_sa_create").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_sa_create requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_sa_create".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamSaCreateRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::create_service_account(
+            db,
+            raft,
+            &req.jwt,
+            &req.org,
+            &req.slug,
+            &req.display_name,
+        )
+        .await
+        {
+            Ok(sa) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "service_account": {
+                        "slug": sa.slug,
+                        "org": sa.org.id(),
+                        "display_name": sa.display_name,
+                    }
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(event = "iam.sa.create.ok", slug = %req.slug);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.sa.create.fail", slug = %req.slug, error = %e);
+            }
+        }
+    } else if v.get("iam_sa_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_sa_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_sa_list".into()));
+        }
+        let req: IamSaListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_service_accounts(db, &req.jwt).await {
+            Ok(sas) => {
+                let rows: Vec<serde_json::Value> = sas
+                    .into_iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "slug": s.slug,
+                            "org": s.org.id(),
+                            "display_name": s.display_name,
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "service_accounts": rows }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_token_create").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_token_create requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_token_create".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamTokenCreateRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::create_api_token(db, raft, &req.jwt, &req.service_account, &req.name).await
+        {
+            Ok(minted) => {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "token_id": minted.record.token_id,
+                    "name": minted.record.name,
+                    "plaintext": minted.plaintext,
+                })
+                .to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::info!(event = "iam.token.create.ok", name = %req.name);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(event = "iam.token.create.fail", name = %req.name, error = %e);
+            }
+        }
+    } else if v.get("iam_token_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_token_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_token_list".into()));
+        }
+        let req: IamTokenListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_api_tokens(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "token_id": t.token_id,
+                            "name": t.name,
+                            "service_account": t.service_account.id(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "tokens": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_token_revoke").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_token_revoke requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_token_revoke".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamTokenRevokeRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::revoke_api_token(db, raft, &req.jwt, &req.token_id).await {
+            Ok(()) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                tracing::info!(event = "iam.token.revoke.ok", token_id = %req.token_id);
             }
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();

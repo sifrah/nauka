@@ -31,11 +31,15 @@ pub mod token;
 
 pub use auth::{decode_claims, hash_password, signin, signup, verify_password, Claims, Jwt};
 pub use can::IAM_CAN_DDL;
-pub use definition::{Env, Org, Permission, Project, Role, RoleBinding, User};
+pub use definition::{
+    ApiToken, Env, Org, Permission, Project, Role, RoleBinding, ServiceAccount, User,
+};
 pub use error::IamError;
 pub use ops::{
-    authenticate, bind_role, create_env, create_org, create_project, list_bindings, list_envs,
-    list_orgs, list_projects, list_roles, unbind_role, AuthContext,
+    authenticate, bind_role, create_api_token, create_env, create_org, create_project,
+    create_service_account, list_api_tokens, list_bindings, list_envs, list_orgs, list_projects,
+    list_roles, list_service_accounts, parse_api_token, revoke_api_token, unbind_role, AuthContext,
+    MintedToken,
 };
 pub use seed::bootstrap;
 pub use token::{delete_token, load_token, save_token, token_path};

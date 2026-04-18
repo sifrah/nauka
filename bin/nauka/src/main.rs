@@ -61,7 +61,9 @@ async fn run() -> Result<()> {
         .subcommand(org_cmd())
         .subcommand(project_cmd())
         .subcommand(env_cmd())
-        .subcommand(role_cmd());
+        .subcommand(role_cmd())
+        .subcommand(service_account_cmd())
+        .subcommand(token_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -73,6 +75,8 @@ async fn run() -> Result<()> {
         Some(("project", sub)) => handle_project(sub).await,
         Some(("env", sub)) => handle_env(sub).await,
         Some(("role", sub)) => handle_role(sub).await,
+        Some(("service-account", sub)) => handle_service_account(sub).await,
+        Some(("token", sub)) => handle_token(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -876,6 +880,172 @@ async fn handle_role(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!("unknown role subcommand"),
+    }
+}
+
+// -------- IAM-4: service accounts + API tokens --------
+
+fn service_account_cmd() -> Command {
+    Command::new("service-account")
+        .about("Manage service accounts (IAM-4)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Create a service account under an org")
+                .arg(Arg::new("org").long("org").required(true).help("Org slug"))
+                .arg(
+                    Arg::new("slug")
+                        .long("slug")
+                        .required(true)
+                        .help("Per-org slug (record id becomes `<org>-<slug>`)"),
+                )
+                .arg(Arg::new("display-name").long("display-name").required(true)),
+        )
+        .subcommand(Command::new("list").about("List service accounts visible to the caller"))
+}
+
+fn token_cmd() -> Command {
+    Command::new("token")
+        .about("Manage API tokens for service accounts (IAM-4)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("create")
+                .about("Mint a new API token (plaintext shown ONCE — save it)")
+                .arg(
+                    Arg::new("service-account")
+                        .long("service-account")
+                        .required(true)
+                        .help("SA scoped slug, e.g. `acme-ci`"),
+                )
+                .arg(
+                    Arg::new("name")
+                        .long("name")
+                        .required(true)
+                        .help("Human-readable token label"),
+                ),
+        )
+        .subcommand(Command::new("list").about("List tokens visible to the caller (no secrets)"))
+        .subcommand(
+            Command::new("revoke")
+                .about("Delete a token — future signins with it will be rejected")
+                .arg(Arg::new("token-id").long("token-id").required(true)),
+        )
+}
+
+async fn handle_service_account(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => {
+            let jwt = require_token()?;
+            let org = sub.get_one::<String>("org").unwrap().clone();
+            let slug = sub.get_one::<String>("slug").unwrap().clone();
+            let display = sub.get_one::<String>("display-name").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_sa_create": true,
+                "jwt": jwt,
+                "org": org,
+                "slug": slug,
+                "display_name": display,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let sa = resp
+                .get("service_account")
+                .ok_or_else(|| anyhow::anyhow!("no service_account in response"))?;
+            cli_out::say(format_args!(
+                "service account created: {}",
+                sa.get("slug").and_then(|x| x.as_str()).unwrap_or("?")
+            ));
+            Ok(())
+        }
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_sa_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("service_accounts")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("service accounts ({}):", rows.len()));
+            for s in rows {
+                let slug = s.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
+                let org = s.get("org").and_then(|x| x.as_str()).unwrap_or("?");
+                let dn = s
+                    .get("display_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {slug:<24}  {org:<16}  {dn}"));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown service-account subcommand"),
+    }
+}
+
+async fn handle_token(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("create", sub)) => {
+            let jwt = require_token()?;
+            let sa = sub.get_one::<String>("service-account").unwrap().clone();
+            let name = sub.get_one::<String>("name").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_token_create": true,
+                "jwt": jwt,
+                "service_account": sa,
+                "name": name,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let plaintext = resp
+                .get("plaintext")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("daemon did not return a plaintext token"))?;
+            // Loud divider + blank lines around the token so the
+            // operator notices; this is the only time the secret
+            // is visible.
+            cli_out::say(format_args!("token `{name}` minted for {sa}"));
+            cli_out::blank();
+            cli_out::say("╔═ SAVE THIS NOW — will not be shown again ═╗");
+            cli_out::say(plaintext);
+            cli_out::say("╚════════════════════════════════════════════╝");
+            Ok(())
+        }
+        Some(("list", _)) => {
+            let jwt = require_token()?;
+            let req = serde_json::json!({ "iam_token_list": true, "jwt": jwt });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("tokens")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("api tokens ({}):", rows.len()));
+            for t in rows {
+                let tid = t.get("token_id").and_then(|x| x.as_str()).unwrap_or("?");
+                let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                let sa = t
+                    .get("service_account")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("?");
+                cli_out::say(format_args!("  {tid:<24}  {name:<20}  {sa}"));
+            }
+            Ok(())
+        }
+        Some(("revoke", sub)) => {
+            let jwt = require_token()?;
+            let token_id = sub.get_one::<String>("token-id").unwrap().clone();
+            let req = serde_json::json!({
+                "iam_token_revoke": true,
+                "jwt": jwt,
+                "token_id": token_id,
+            });
+            mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cli_out::say(format_args!("token {token_id} revoked"));
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown token subcommand"),
     }
 }
 

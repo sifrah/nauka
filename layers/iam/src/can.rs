@@ -43,6 +43,8 @@ pub const IAM_CAN_DDL: &str = r#"DEFINE FUNCTION IF NOT EXISTS fn::iam::can($act
         $scope.org
     } ELSE IF $tb = 'env' {
         $scope.project.org
+    } ELSE IF $tb = 'service_account' {
+        $scope.org
     } ELSE {
         NONE
     };

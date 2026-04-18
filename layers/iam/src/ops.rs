@@ -27,7 +27,7 @@ use nauka_state::{Database, RaftNode, Writer};
 use tokio::sync::Mutex;
 use tracing::instrument;
 
-use crate::definition::{Env, Org, Project, Role, RoleBinding, User};
+use crate::definition::{ApiToken, Env, Org, Project, Role, RoleBinding, ServiceAccount, User};
 use crate::error::IamError;
 
 /// Process-wide lock around any operation that mutates the shared
@@ -366,6 +366,225 @@ pub async fn list_bindings(db: &Database, jwt: &str) -> Result<Vec<RoleBinding>,
             .map_err(IamError::State)
     })
     .await
+}
+
+// -------- Service accounts + API tokens (IAM-4) --------
+
+#[instrument(name = "iam.sa.create", skip_all, fields(slug = %slug, org = %org_slug))]
+pub async fn create_service_account(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    org_slug: &str,
+    slug: &str,
+    display_name: &str,
+) -> Result<ServiceAccount, IamError> {
+    let _auth = authenticate(db, jwt).await?;
+    validate_slug(slug)?;
+    // `<org>-<slug>` keeps SA record ids globally unique while the
+    // operator-facing slug stays per-org. Same pattern Project and
+    // Env use.
+    let scoped = format!("{org_slug}-{slug}");
+    let (c, u) = now_pair();
+    let sa = ServiceAccount {
+        slug: scoped.clone(),
+        display_name: display_name.to_string(),
+        org: Ref::<Org>::new(org_slug.to_string()),
+        created_at: c,
+        updated_at: u,
+        version: 0,
+    };
+    match Writer::new(db).with_raft(raft).create(&sa).await {
+        Ok(()) => Ok(sa),
+        Err(e) => {
+            let s = e.to_string();
+            if s.contains("already exists") || s.contains("Database record") {
+                Err(IamError::AlreadyExists(format!("service_account:{scoped}")))
+            } else {
+                Err(IamError::State(e))
+            }
+        }
+    }
+}
+
+#[instrument(name = "iam.sa.list", skip_all)]
+pub async fn list_service_accounts(
+    db: &Database,
+    jwt: &str,
+) -> Result<Vec<ServiceAccount>, IamError> {
+    read_as(db, jwt, || async {
+        db.query_take(&ServiceAccount::list_query())
+            .await
+            .map_err(IamError::State)
+    })
+    .await
+}
+
+/// Result of minting a new API token. The `plaintext` field is the
+/// only place the secret ever appears — the daemon does not store
+/// it and the CLI is expected to display it once and discard.
+pub struct MintedToken {
+    pub plaintext: String,
+    pub record: ApiToken,
+}
+
+/// Create a new API token for a service account. The plaintext
+/// token follows the Stripe-inspired `nk_live_<id>_<secret>` shape:
+/// `id` is a 16-char URL-safe random string stored as the record's
+/// primary key, `secret` is 48 URL-safe chars hashed via Argon2id
+/// and stored as `hash`. The full plaintext is returned *once* via
+/// [`MintedToken::plaintext`]; anyone wanting a second copy must
+/// revoke and re-mint.
+#[instrument(
+    name = "iam.token.create",
+    skip_all,
+    fields(service_account = %sa_scoped_slug, name = %name)
+)]
+pub async fn create_api_token(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    sa_scoped_slug: &str,
+    name: &str,
+) -> Result<MintedToken, IamError> {
+    let _auth = authenticate(db, jwt).await?;
+    if name.trim().is_empty() {
+        return Err(IamError::InvalidSlug("token name cannot be empty".into()));
+    }
+
+    let token_id = random_token_chunk(16);
+    let secret = random_token_chunk(48);
+    // Separator is `.` because the URL-safe base64 alphabet
+    // includes `_` — using `_` would make `parse_api_token`
+    // ambiguous when either the id or secret happened to contain
+    // one. `.` is outside the alphabet, so split is unique.
+    let plaintext = format!("nk_live_{token_id}.{secret}");
+    let hash = crate::auth::hash_password(&secret)?;
+    let (c, u) = now_pair();
+    let record = ApiToken {
+        token_id: token_id.clone(),
+        name: name.to_string(),
+        service_account: Ref::<ServiceAccount>::new(sa_scoped_slug.to_string()),
+        hash,
+        created_at: c,
+        updated_at: u,
+        version: 0,
+    };
+    match Writer::new(db).with_raft(raft).create(&record).await {
+        Ok(()) => Ok(MintedToken { plaintext, record }),
+        Err(e) => {
+            let s = e.to_string();
+            if s.contains("already exists") || s.contains("Database record") {
+                // 16 URL-safe chars = 96 bits of entropy; a collision
+                // is astronomically unlikely. If we hit one anyway,
+                // surface it rather than silently retrying — easier
+                // to spot corruption of the RNG.
+                Err(IamError::AlreadyExists(format!("api_token:{token_id}")))
+            } else {
+                Err(IamError::State(e))
+            }
+        }
+    }
+}
+
+#[instrument(name = "iam.token.list", skip_all)]
+pub async fn list_api_tokens(db: &Database, jwt: &str) -> Result<Vec<ApiToken>, IamError> {
+    read_as(db, jwt, || async {
+        db.query_take(&ApiToken::list_query())
+            .await
+            .map_err(IamError::State)
+    })
+    .await
+}
+
+#[instrument(name = "iam.token.revoke", skip_all, fields(token_id = %token_id))]
+pub async fn revoke_api_token(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    token_id: &str,
+) -> Result<(), IamError> {
+    let _auth = authenticate(db, jwt).await?;
+    Writer::new(db)
+        .with_raft(raft)
+        .delete::<ApiToken>(&token_id.to_string())
+        .await
+        .map_err(IamError::State)?;
+    Ok(())
+}
+
+/// Return `n` URL-safe-base64 characters drawn from the OS RNG.
+/// Collected to a `String` directly rather than going through a
+/// crate-provided helper — the alphabet is narrow enough to inline,
+/// and staying dependency-free here keeps the token format owned by
+/// nauka-iam.
+fn random_token_chunk(n: usize) -> String {
+    use argon2::password_hash::rand_core::{OsRng, RngCore};
+    // URL-safe base64 alphabet minus padding — 64 entries, so one
+    // byte per char fits cleanly via `% 64`.
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut bytes = vec![0u8; n];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+        .iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+/// Parse an `nk_live_<token_id>.<secret>` string. Fails with
+/// `InvalidCredentials` if the prefix / shape is wrong — callers
+/// should surface that to the caller verbatim (same error as a
+/// wrong secret) so an attacker can't distinguish "malformed" from
+/// "unknown".
+pub fn parse_api_token(plaintext: &str) -> Result<(String, String), IamError> {
+    let rest = plaintext
+        .strip_prefix("nk_live_")
+        .ok_or(IamError::InvalidCredentials)?;
+    let (token_id, secret) = rest.split_once('.').ok_or(IamError::InvalidCredentials)?;
+    if token_id.is_empty() || secret.is_empty() {
+        return Err(IamError::InvalidCredentials);
+    }
+    Ok((token_id.to_string(), secret.to_string()))
+}
+
+#[cfg(test)]
+mod api_token_tests {
+    use super::*;
+
+    #[test]
+    fn random_chunks_are_url_safe() {
+        let s = random_token_chunk(32);
+        assert_eq!(s.len(), 32);
+        for c in s.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() || c == '-' || c == '_',
+                "unexpected char `{c}` in token chunk"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_well_formed() {
+        let (id, secret) = parse_api_token("nk_live_abc.def").unwrap();
+        assert_eq!(id, "abc");
+        assert_eq!(secret, "def");
+    }
+
+    #[test]
+    fn parse_preserves_underscores_in_id_and_secret() {
+        // The URL-safe base64 alphabet includes `_`; the `.`
+        // separator guarantees split_once() never miscounts.
+        let (id, secret) = parse_api_token("nk_live_a_b_c.d_e_f").unwrap();
+        assert_eq!(id, "a_b_c");
+        assert_eq!(secret, "d_e_f");
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        for bad in ["", "abc", "nk_live_", "nk_live_only", "nk_test_a.b"] {
+            assert!(parse_api_token(bad).is_err(), "should reject `{bad}`");
+        }
+    }
 }
 
 /// Constrain slugs to ASCII lowercase + digits + `-`. Spliced into
