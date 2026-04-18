@@ -61,5 +61,9 @@ pub struct ApiToken {
     pub service_account: Ref<ServiceAccount>,
     /// Argon2id PHC hash of the secret portion. Never reversible;
     /// the plaintext is only displayed once at creation time.
+    /// `#[hidden]` keeps this out of user-session SELECTs — the
+    /// `service_account` DEFINE ACCESS SIGNIN still reads it
+    /// because that query runs with `$auth = NONE`.
+    #[hidden]
     pub hash: String,
 }

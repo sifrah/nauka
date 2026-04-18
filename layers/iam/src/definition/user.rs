@@ -20,19 +20,30 @@
 //! so `db.signup()` works in single-node integration tests and dev
 //! REPLs.
 //!
-//! ## Why password_hash is a plain field (not `#[secret]`)
+//! ## `password_hash` is hidden from user SELECTs (IAM-6)
 //!
-//! IAM-6 introduces `#[secret]` (encryption at rest) and field-level
-//! PERMISSIONS that hide `password_hash` from SELECT. For IAM-1 we
-//! keep the field visible — the integration test needs to assert the
-//! PHC string was stored correctly. We'll tighten visibility when the
-//! permission layer lands.
+//! `#[hidden]` emits a field-level
+//! `PERMISSIONS FOR select WHERE $auth = NONE`, so a record-level
+//! session querying `user` sees `NONE` in the `password_hash`
+//! column. DEFINE ACCESS SIGNIN still reads it because SurrealDB
+//! runs that query with `$auth = NONE` (elevated) internally. The
+//! `#[secret]` attribute — KMS/Vault-backed encryption at rest —
+//! is a later phase.
 
 use nauka_core::resource::SurrealValue;
 use nauka_core_macros::{access, resource};
 use serde::{Deserialize, Serialize};
 
-#[resource(table = "user", scope = "cluster")]
+#[resource(
+    table = "user",
+    scope = "cluster",
+    // IAM-6: users can read their own record (display name,
+    // verified flags once they land in IAM-7). `password_hash`
+    // stays hidden via the field-level `#[hidden]` clause even
+    // when the outer record is visible. Root / state-machine
+    // queries keep full access through the `$auth = NONE` arm.
+    permissions = "$auth = NONE OR $this.id = $auth.id"
+)]
 #[access(
     name = "user",
     type = "record",
@@ -57,8 +68,10 @@ use serde::{Deserialize, Serialize};
 pub struct User {
     #[id]
     pub email: String,
-    /// PHC-encoded Argon2id hash (`$argon2id$v=19$…`). Compatible with
-    /// SurrealDB's `crypto::argon2::compare`.
+    /// PHC-encoded Argon2id hash (`$argon2id$v=19$…`). Compatible
+    /// with SurrealDB's `crypto::argon2::compare`. Hidden from
+    /// user-session SELECTs via `#[hidden]` (IAM-6 / #350).
+    #[hidden]
     pub password_hash: String,
     pub display_name: String,
     // `created_at`, `updated_at`, `version` — injected by `#[resource]`.

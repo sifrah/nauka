@@ -56,6 +56,13 @@ pub const IAM_CAN_DDL: &str = r#"DEFINE FUNCTION IF NOT EXISTS fn::iam::can($act
     IF $org.owner = $auth.id {
         RETURN true;
     };
+    -- Service-account shortcut (IAM-6): any SA authenticated via
+    -- its API token can see resources scoped to the SA's own org.
+    -- IAM-3b will promote this to a polymorphic RoleBinding so SAs
+    -- can have narrower roles than "all permissions on own org".
+    IF meta::tb($auth) = 'service_account' AND $auth.org = $org.id {
+        RETURN true;
+    };
     -- Role-binding path: any binding tying $auth to a role that
     -- includes `<table>.<action>` grants the permission. The
     -- permission record's id follows that exact name

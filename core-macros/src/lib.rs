@@ -717,8 +717,20 @@ fn generate_user_field_ddl(table: &str, item: &ItemStruct) -> syn::Result<String
         let surql_type =
             rust_to_surql_type(&field.ty).map_err(|e| syn::Error::new_spanned(&field.ty, e))?;
         let assert_clause = extract_assert(field)?;
+        // `#[hidden]` emits a per-field PERMISSIONS clause that
+        // only `$auth = NONE` (the Raft state machine / daemon
+        // path) can satisfy — any user-level session SELECT sees
+        // `NONE` for the column. Used by IAM-6 (#350) to keep
+        // `User.password_hash` + `ApiToken.hash` out of query
+        // results even for the record's owner.
+        let hidden = field.attrs.iter().any(|a| a.path().is_ident("hidden"));
+        let hidden_clause = if hidden {
+            " PERMISSIONS FOR select WHERE $auth = NONE"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "DEFINE FIELD IF NOT EXISTS {name} ON {table} TYPE {surql_type}{assert_clause};\n"
+            "DEFINE FIELD IF NOT EXISTS {name} ON {table} TYPE {surql_type}{assert_clause}{hidden_clause};\n"
         ));
     }
     Ok(out)
@@ -1094,7 +1106,10 @@ fn strip_macro_attrs(item: &mut ItemStruct) {
     };
     for field in &mut named.named {
         field.attrs.retain(|a| {
-            !a.path().is_ident("id") && !a.path().is_ident("unique") && !a.path().is_ident("assert")
+            !a.path().is_ident("id")
+                && !a.path().is_ident("unique")
+                && !a.path().is_ident("assert")
+                && !a.path().is_ident("hidden")
         });
     }
 }

@@ -7,7 +7,7 @@
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use nauka_core::resource::Datetime;
@@ -87,28 +87,57 @@ impl Claims {
     }
 }
 
-/// Argon2id-hash a password into a PHC string. Uses the default
-/// parameters of the `argon2` crate for IAM-1; IAM-6 will swap in
-/// vetted production parameters (64MB memory, 3 iterations).
+/// Argon2id parameters — IAM-6 vetted values.
 ///
-/// The output is compatible with SurrealDB's
-/// `crypto::argon2::compare`, which the DEFINE ACCESS SIGNIN clause
-/// uses to verify the password server-side.
+/// - `m_cost` = 65 536 KiB (64 MiB).
+/// - `t_cost` = 3 iterations.
+/// - `p_cost` = 1 lane.
+///
+/// These match the OWASP 2026 cheat-sheet recommendation for
+/// password hashing on server hardware. The constants live here
+/// rather than in `Argon2::default()` because the crate's default
+/// is weaker (intended for low-resource contexts) and because
+/// subsequent phases may want to bump memory / iterations as CPUs
+/// get faster — changing a single constant is cheaper than walking
+/// every call site.
+///
+/// Verification reads the parameters out of the stored PHC string,
+/// so existing hashes keep working after a parameter bump: only
+/// freshly-minted passwords pay the new cost.
+const ARGON2_M_COST_KIB: u32 = 64 * 1024;
+const ARGON2_T_COST: u32 = 3;
+const ARGON2_P_COST: u32 = 1;
+
+fn argon2_hasher() -> Argon2<'static> {
+    // `Params::new(...)` only fails for out-of-range values; the
+    // constants above are static and hand-checked, so we panic on
+    // the unreachable error path to keep `argon2_hasher` infallible
+    // for callers.
+    let params =
+        Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None).expect("valid params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// Argon2id-hash a password into a PHC string using the IAM-6
+/// vetted parameters (64 MiB memory, 3 iterations, 1 lane). Output
+/// stays compatible with SurrealDB's `crypto::argon2::compare`,
+/// which reads the parameters out of the PHC string itself — so
+/// hashes minted at the old (weaker) defaults continue to verify.
 pub fn hash_password(password: &str) -> Result<String, IamError> {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    argon2_hasher()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| IamError::Password(e.to_string()))
 }
 
-/// Verify a plaintext password against a PHC-encoded hash. Used by
-/// IAM-1 only in tests; the production signin path goes through
-/// SurrealDB's `crypto::argon2::compare` via the DEFINE ACCESS SIGNIN
-/// query.
+/// Verify a plaintext password against a PHC-encoded hash. The
+/// verifier reads the parameters from the PHC string, so this works
+/// regardless of which parameter set produced the stored hash —
+/// legacy hashes keep working across parameter bumps.
 pub fn verify_password(hash: &str, password: &str) -> Result<bool, IamError> {
     let parsed = PasswordHash::new(hash).map_err(|e| IamError::Password(e.to_string()))?;
-    Ok(Argon2::default()
+    Ok(argon2_hasher()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
 }
