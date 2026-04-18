@@ -459,11 +459,37 @@ async fn handle_user(matches: &clap::ArgMatches) -> Result<()> {
     }
 }
 
-/// Read a password from the TTY with echo disabled. Prompt goes to
-/// stderr so piping `nauka login … > token.txt` never mixes the
-/// prompt into the output stream — important for tests and scripts.
+/// Read a password.
+///
+/// - **Interactive** (stdin is a TTY): prompt on `/dev/tty` with echo
+///   disabled via `rpassword::prompt_password`.
+/// - **Piped** (stdin is not a TTY): read one line from stdin with no
+///   prompt — this is the `echo pass | nauka login` scripting path.
+///   `rpassword` would otherwise fail with `ENXIO` ("No such device
+///   or address") because it requires `/dev/tty`; falling back to
+///   stdin is what kubectl/gh/docker all do.
+///
+/// We deliberately accept passwords on stdin when it is piped rather
+/// than requiring an explicit `--password-stdin` flag — the intent is
+/// unambiguous (you cannot type to a pipe) and the alternative is a
+/// worse script ergonomics for the same security properties.
 fn read_password(prompt: &str) -> Result<String> {
-    rpassword::prompt_password(prompt).context("read password")
+    use std::io::{BufRead, IsTerminal};
+    if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(prompt).context("read password")
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("read password from stdin")?;
+        // Trim the line terminator(s); Windows clients that pipe via
+        // `echo` would otherwise sneak a `\r` into the hash input.
+        Ok(line
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string())
+    }
 }
 
 async fn cmd_login(sub: &clap::ArgMatches) -> Result<()> {
