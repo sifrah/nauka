@@ -63,7 +63,8 @@ async fn run() -> Result<()> {
         .subcommand(env_cmd())
         .subcommand(role_cmd())
         .subcommand(service_account_cmd())
-        .subcommand(token_cmd());
+        .subcommand(token_cmd())
+        .subcommand(audit_cmd());
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
@@ -77,6 +78,7 @@ async fn run() -> Result<()> {
         Some(("role", sub)) => handle_role(sub).await,
         Some(("service-account", sub)) => handle_service_account(sub).await,
         Some(("token", sub)) => handle_token(sub).await,
+        Some(("audit", sub)) => handle_audit(sub).await,
         _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
     }
 }
@@ -1046,6 +1048,63 @@ async fn handle_token(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!("unknown token subcommand"),
+    }
+}
+
+// -------- IAM-5: audit log --------
+
+fn audit_cmd() -> Command {
+    Command::new("audit")
+        .about("Inspect the hash-chained audit log (IAM-5)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("list")
+                .about("List recent audit events, newest first")
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .default_value("50")
+                        .help("Maximum number of events to return"),
+                ),
+        )
+}
+
+async fn handle_audit(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("list", sub)) => {
+            let jwt = require_token()?;
+            let limit: usize = sub
+                .get_one::<String>("limit")
+                .map(|s| s.parse())
+                .transpose()?
+                .unwrap_or(50);
+            let req = serde_json::json!({
+                "iam_audit_list": true,
+                "jwt": jwt,
+                "limit": limit,
+            });
+            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let empty = Vec::new();
+            let rows = resp
+                .get("events")
+                .and_then(|x| x.as_array())
+                .unwrap_or(&empty);
+            cli_out::section(&format!("audit events ({}):", rows.len()));
+            for e in rows {
+                let action = e.get("action").and_then(|x| x.as_str()).unwrap_or("?");
+                let actor = e.get("actor").and_then(|x| x.as_str()).unwrap_or("?");
+                let target = e.get("target").and_then(|x| x.as_str()).unwrap_or("?");
+                let at = e.get("at").and_then(|x| x.as_str()).unwrap_or("?");
+                let hash = e.get("hash").and_then(|x| x.as_str()).unwrap_or("?");
+                let short_hash = if hash.len() >= 8 { &hash[..8] } else { hash };
+                cli_out::say(format_args!(
+                    "  {at}  {action:<6}  {actor:<32}  {target:<40}  {short_hash}"
+                ));
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("unknown audit subcommand"),
     }
 }
 

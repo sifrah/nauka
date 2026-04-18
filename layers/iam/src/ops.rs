@@ -63,6 +63,15 @@ pub struct AuthContext {
     pub email: String,
 }
 
+impl AuthContext {
+    /// Full `user:⟨email⟩` record id the audit log uses as `actor`.
+    /// Service-account identities arrive in IAM-4b with their own
+    /// constructor; IAM-5 assumes JWT-holders are users.
+    pub fn principal_record_id(&self) -> String {
+        format!("user:{}", self.email)
+    }
+}
+
 /// Validate a JWT and recover the caller's email.
 ///
 /// Splits the job: the **signature** is verified by
@@ -139,6 +148,7 @@ pub async fn create_org(
 ) -> Result<Org, IamError> {
     let auth = authenticate(db, jwt).await?;
     validate_slug(slug)?;
+    let actor = auth.principal_record_id();
     let (c, u) = now_pair();
     let org = Org {
         slug: slug.to_string(),
@@ -149,7 +159,19 @@ pub async fn create_org(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&org).await {
-        Ok(()) => Ok(org),
+        Ok(()) => {
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("org:{}", org.slug),
+                Some(&org.slug),
+                "success",
+            )
+            .await;
+            Ok(org)
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -185,7 +207,8 @@ pub async fn create_project(
     slug: &str,
     display_name: &str,
 ) -> Result<Project, IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     validate_slug(slug)?;
     // Scoped uid so we can live with a flat `#[id]` column while
     // the (org, slug) pair is what humans care about. `project:`
@@ -203,7 +226,19 @@ pub async fn create_project(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&project).await {
-        Ok(()) => Ok(project),
+        Ok(()) => {
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("project:{uid}"),
+                Some(org_slug),
+                "success",
+            )
+            .await;
+            Ok(project)
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -236,7 +271,8 @@ pub async fn create_env(
     slug: &str,
     display_name: &str,
 ) -> Result<Env, IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     validate_slug(slug)?;
     let uid = format!("{project_uid}-{slug}");
     let (c, u) = now_pair();
@@ -250,7 +286,29 @@ pub async fn create_env(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&env).await {
-        Ok(()) => Ok(env),
+        Ok(()) => {
+            // Env audit records reference the project's org for
+            // cross-scope filtering; the uid prefix already encodes
+            // that (`<org>-<project-slug>-<env-slug>`) but the
+            // audit row carries the org explicitly so log queries
+            // don't have to parse strings.
+            let org_slug = project_uid.split('-').next().unwrap_or("").to_string();
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("env:{uid}"),
+                if org_slug.is_empty() {
+                    None
+                } else {
+                    Some(&org_slug)
+                },
+                "success",
+            )
+            .await;
+            Ok(env)
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -304,7 +362,8 @@ pub async fn bind_role(
     role_slug: &str,
     org_slug: &str,
 ) -> Result<RoleBinding, IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     // Synthetic uid keeps `(org, principal, role)` unique and makes
     // the record id greppable in SurrealDB record form
     // (`role_binding:⟨acme-bob@example.com-viewer⟩`).
@@ -320,7 +379,19 @@ pub async fn bind_role(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&binding).await {
-        Ok(()) => Ok(binding),
+        Ok(()) => {
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("role_binding:{uid}"),
+                Some(org_slug),
+                "success",
+            )
+            .await;
+            Ok(binding)
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -348,13 +419,24 @@ pub async fn unbind_role(
     role_slug: &str,
     org_slug: &str,
 ) -> Result<(), IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     let uid = format!("{org_slug}-{principal_email}-{role_slug}");
     Writer::new(db)
         .with_raft(raft)
         .delete::<RoleBinding>(&uid)
         .await
         .map_err(IamError::State)?;
+    crate::audit::try_audit(
+        db,
+        raft,
+        &actor,
+        "delete",
+        &format!("role_binding:{uid}"),
+        Some(org_slug),
+        "success",
+    )
+    .await;
     Ok(())
 }
 
@@ -379,7 +461,8 @@ pub async fn create_service_account(
     slug: &str,
     display_name: &str,
 ) -> Result<ServiceAccount, IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     validate_slug(slug)?;
     // `<org>-<slug>` keeps SA record ids globally unique while the
     // operator-facing slug stays per-org. Same pattern Project and
@@ -395,7 +478,19 @@ pub async fn create_service_account(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&sa).await {
-        Ok(()) => Ok(sa),
+        Ok(()) => {
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("service_account:{scoped}"),
+                Some(org_slug),
+                "success",
+            )
+            .await;
+            Ok(sa)
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -447,7 +542,8 @@ pub async fn create_api_token(
     sa_scoped_slug: &str,
     name: &str,
 ) -> Result<MintedToken, IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     if name.trim().is_empty() {
         return Err(IamError::InvalidSlug("token name cannot be empty".into()));
     }
@@ -471,7 +567,27 @@ pub async fn create_api_token(
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&record).await {
-        Ok(()) => Ok(MintedToken { plaintext, record }),
+        Ok(()) => {
+            // The org slug lives in the `<org>-<slug>` prefix of the
+            // scoped SA identifier — extract it for per-org audit
+            // filtering without another DB round-trip.
+            let org_slug = sa_scoped_slug.split('-').next().unwrap_or("").to_string();
+            crate::audit::try_audit(
+                db,
+                raft,
+                &actor,
+                "create",
+                &format!("api_token:{token_id}"),
+                if org_slug.is_empty() {
+                    None
+                } else {
+                    Some(&org_slug)
+                },
+                "success",
+            )
+            .await;
+            Ok(MintedToken { plaintext, record })
+        }
         Err(e) => {
             let s = e.to_string();
             if s.contains("already exists") || s.contains("Database record") {
@@ -504,12 +620,23 @@ pub async fn revoke_api_token(
     jwt: &str,
     token_id: &str,
 ) -> Result<(), IamError> {
-    let _auth = authenticate(db, jwt).await?;
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
     Writer::new(db)
         .with_raft(raft)
         .delete::<ApiToken>(&token_id.to_string())
         .await
         .map_err(IamError::State)?;
+    crate::audit::try_audit(
+        db,
+        raft,
+        &actor,
+        "delete",
+        &format!("api_token:{token_id}"),
+        None,
+        "success",
+    )
+    .await;
     Ok(())
 }
 

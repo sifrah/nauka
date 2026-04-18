@@ -38,6 +38,7 @@ proc-macro2 = "1"
 trybuild = "1"
 argon2 = "0.5"
 rpassword = "7"
+sha2 = "0.10"
 nauka-core = { path = "core" }
 nauka-core-macros = { path = "core-macros" }
 nauka-hypervisor = { path = "layers/hypervisor" }

@@ -21,6 +21,7 @@
 //! so the cluster stays usable after each phase merges.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+pub mod audit;
 pub mod auth;
 pub mod can;
 pub mod definition;
@@ -29,10 +30,11 @@ pub mod ops;
 pub mod seed;
 pub mod token;
 
+pub use audit::{audit_write, list_audit, try_audit};
 pub use auth::{decode_claims, hash_password, signin, signup, verify_password, Claims, Jwt};
 pub use can::IAM_CAN_DDL;
 pub use definition::{
-    ApiToken, Env, Org, Permission, Project, Role, RoleBinding, ServiceAccount, User,
+    ApiToken, AuditEvent, Env, Org, Permission, Project, Role, RoleBinding, ServiceAccount, User,
 };
 pub use error::IamError;
 pub use ops::{

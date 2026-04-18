@@ -10,6 +10,7 @@
 //! one decision point.
 
 mod api_token;
+mod audit_event;
 mod env;
 mod org;
 mod permission;
@@ -20,6 +21,7 @@ mod service_account;
 mod user;
 
 pub use api_token::ApiToken;
+pub use audit_event::AuditEvent;
 pub use env::Env;
 pub use org::Org;
 pub use permission::Permission;

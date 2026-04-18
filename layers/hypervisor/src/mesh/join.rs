@@ -167,6 +167,14 @@ struct IamTokenRevokeRequest {
     token_id: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct IamAuditListRequest {
+    #[serde(default)]
+    jwt: String,
+    #[serde(default)]
+    limit: usize,
+}
+
 pub fn generate_pin() -> String {
     let entropy = Key::generate();
     let bytes = entropy.as_array();
@@ -1137,6 +1145,50 @@ async fn handle_connection(
             Ok(()) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
                 tracing::info!(event = "iam.token.revoke.ok", token_id = %req.token_id);
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_audit_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_audit_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_audit_list".into()));
+        }
+        let req: IamAuditListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        // IAM-5 does not yet enforce per-principal audit filtering —
+        // any authenticated caller can read the full log. The JWT is
+        // still required so we can reject unauthenticated callers
+        // cleanly (calls without a token result in auth failure).
+        if nauka_iam::authenticate(db, &req.jwt).await.is_err() {
+            let _ = writer.write_all(b"{\"error\":\"unauthenticated\"}\n").await;
+            return Ok(());
+        }
+        let limit = if req.limit == 0 { 50 } else { req.limit };
+        match nauka_iam::list_audit(db, limit).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "uid": e.uid,
+                            "actor": e.actor,
+                            "action": e.action,
+                            "target": e.target,
+                            "org": e.org.as_ref().map(|r| r.id().to_string()),
+                            "outcome": e.outcome,
+                            "prev_hash": e.prev_hash,
+                            "hash": e.hash,
+                            "at": e.at.to_string(),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "events": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
