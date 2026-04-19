@@ -16,6 +16,13 @@ use tracing::Instrument;
 
 #[tokio::main]
 async fn main() {
+    // Install the ring rustls crypto provider once per process.
+    // Required for any TLS config we build below — both Raft mTLS
+    // and the axum HTTPS server (342-D2). Ignoring the return is
+    // safe: the error case is "already installed", which is the
+    // only expected non-ok outcome in tests that share a runtime.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Peek at args to pick the logging mode: the systemd-run daemon
     // subcommand needs INFO from nauka crates (lifecycle → journald);
     // every other invocation is a short-lived CLI that should stay
@@ -244,7 +251,14 @@ async fn handle_hypervisor(matches: &clap::ArgMatches) -> Result<()> {
 
 fn api_client() -> Result<nauka_api_client::Client> {
     let jwt = require_token()?;
-    nauka_api_client::Client::new(API_BASE_URL, jwt).map_err(|e| anyhow::anyhow!("{e}"))
+    // Loopback HTTPS with a self-signed mesh cert. The daemon's
+    // cert is signed by the mesh CA (`MeshState::ca_cert`) which
+    // isn't in the system trust store, so validate-skip for the
+    // 127.0.0.1 target. Proper CA pinning lands when the CLI
+    // starts talking to other nodes over the mesh address (post-
+    // 342-D2 — tracked with the daemon listener generalization).
+    nauka_api_client::Client::danger_accept_invalid_certs(API_BASE_URL, jwt)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 async fn cmd_hypervisor_list() -> Result<()> {
@@ -496,44 +510,108 @@ async fn cmd_leave(sub: &clap::ArgMatches) -> Result<()> {
 
 async fn cmd_daemon() -> Result<()> {
     let db = open_db().await?;
-    // Spawn the axum REST + GraphQL server on loopback alongside
-    // every other daemon task. TLS + real listener address land
-    // in 342-D; for now `127.0.0.1:4000` is the single convention
-    // the CLI's `nauka-api-client` dials.
-    run_daemon(db, |db, raft| async move {
+    // Pull the mesh's TLS material *before* `run_daemon` takes over —
+    // the on_ready callback doesn't get access to MeshState, and
+    // re-loading the row inside the callback would duplicate work.
+    // Missing certs (pre-init dev path) transparently fall back to
+    // plaintext loopback.
+    let tls_pem = match nauka_hypervisor::mesh::MeshState::load(&db).await {
+        Ok(s) => s.tls_cert.zip(s.tls_key),
+        Err(e) => {
+            tracing::debug!(
+                event = "api.tls.state_load_failed",
+                error = %e,
+                "MeshState load failed — falling back to plaintext loopback"
+            );
+            None
+        }
+    };
+
+    run_daemon(db, move |db, raft| async move {
         let deps = nauka_api::Deps::new(db, Some(raft));
         let app = nauka_api::router(deps);
-        let listener = match tokio::net::TcpListener::bind(API_SERVER_ADDR).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(
-                    event = "api.listener.bind_failed",
-                    addr = API_SERVER_ADDR,
-                    error = %e,
-                    "axum listener bind failed — daemon continues without REST/GraphQL"
+        let addr: std::net::SocketAddr = API_SERVER_ADDR
+            .parse()
+            .expect("API_SERVER_ADDR is a valid SocketAddr literal");
+
+        match tls_pem {
+            Some((cert, key)) => match nauka_api::tls::server_config(&cert, &key) {
+                Ok(server_cfg) => {
+                    tracing::info!(
+                        event = "api.listener.ready",
+                        addr = %addr,
+                        tls = true,
+                        "axum HTTPS listener binding"
+                    );
+                    let rustls_cfg =
+                        axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
+                    vec![tokio::spawn(async move {
+                        if let Err(e) = axum_server::bind_rustls(addr, rustls_cfg)
+                            .serve(app.into_make_service())
+                            .await
+                        {
+                            tracing::error!(
+                                event = "api.serve.exited",
+                                error = %e,
+                                "axum HTTPS server returned an error"
+                            );
+                        }
+                    })]
+                }
+                Err(e) => {
+                    tracing::error!(
+                        event = "api.tls.config_failed",
+                        error = %e,
+                        "could not build rustls ServerConfig from MeshState — \
+                         daemon continues without REST/GraphQL"
+                    );
+                    Vec::new()
+                }
+            },
+            None => {
+                // Plaintext loopback — dev / pre-`init` path. Same
+                // transport the 342-B2 commit introduced; kept as a
+                // fallback so the CLI still works before TLS certs
+                // are provisioned.
+                let listener = match tokio::net::TcpListener::bind(&addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(
+                            event = "api.listener.bind_failed",
+                            addr = %addr,
+                            error = %e,
+                            "axum listener bind failed — daemon continues \
+                             without REST/GraphQL"
+                        );
+                        return Vec::new();
+                    }
+                };
+                tracing::info!(
+                    event = "api.listener.ready",
+                    addr = %addr,
+                    tls = false,
+                    "axum plaintext listener binding"
                 );
-                return Vec::new();
+                vec![tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!(
+                            event = "api.serve.exited",
+                            error = %e,
+                            "axum::serve returned an error"
+                        );
+                    }
+                })]
             }
-        };
-        tracing::info!(event = "api.listener.ready", addr = API_SERVER_ADDR);
-        vec![tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!(
-                    event = "api.serve.exited",
-                    error = %e,
-                    "axum::serve returned an error"
-                );
-            }
-        })]
+        }
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Loopback address the daemon binds and the generated CLI dials.
-/// Hardcoded in 342-B2; 342-D swaps in TLS + configurable port.
+/// 342-D2 wires TLS on top; 342-D3+ adds a configurable port.
 const API_SERVER_ADDR: &str = "127.0.0.1:4000";
-const API_BASE_URL: &str = "http://127.0.0.1:4000";
+const API_BASE_URL: &str = "https://127.0.0.1:4000";
 
 async fn cmd_mesh(sub: &clap::ArgMatches) -> Result<()> {
     match sub.subcommand() {

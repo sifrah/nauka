@@ -526,6 +526,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "fs-err 3.3.0",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1634,6 +1656,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88a41f105fe1d5b6b34b2055e3dc59bb79b46b48b2040b9e6c7b4b5de097aa41"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -2871,6 +2903,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "clap",
  "nauka-api",
  "nauka-api-client",
@@ -2879,6 +2912,7 @@ dependencies = [
  "nauka-iam",
  "nauka-state",
  "rpassword",
+ "rustls",
  "serde_json",
  "tokio",
  "tracing",
@@ -2891,6 +2925,7 @@ dependencies = [
  "async-graphql",
  "async-graphql-axum",
  "axum",
+ "axum-server",
  "http",
  "linkme",
  "nauka-api-client",
@@ -2898,6 +2933,8 @@ dependencies = [
  "nauka-hypervisor",
  "nauka-iam",
  "nauka-state",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "surrealdb",
@@ -5918,7 +5955,7 @@ dependencies = [
  "askama",
  "camino",
  "cargo_metadata",
- "fs-err",
+ "fs-err 2.11.0",
  "glob",
  "goblin",
  "heck",
@@ -5977,7 +6014,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9273ec45330d8fe9a3701b7b983cea7a4e218503359831967cb95d26b873561"
 dependencies = [
  "camino",
- "fs-err",
+ "fs-err 2.11.0",
  "once_cell",
  "proc-macro2",
  "quote",

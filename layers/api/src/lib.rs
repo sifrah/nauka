@@ -25,6 +25,7 @@
 pub mod deps;
 pub mod error;
 pub mod principal;
+pub mod tls;
 
 mod crud;
 mod graphql;
