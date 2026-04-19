@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use nauka_hypervisor::{Hypervisor, MeshRecord};
+use nauka_iam::Org;
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::de::DeserializeOwned;
@@ -96,6 +97,10 @@ impl Client {
 
     pub fn mesh(&self) -> MeshClient<'_> {
         MeshClient { client: self }
+    }
+
+    pub fn org(&self) -> OrgClient<'_> {
+        OrgClient { client: self }
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
@@ -216,6 +221,42 @@ impl MeshClient<'_> {
 
     pub async fn list(&self) -> Result<Vec<MeshRecord>, ClientError> {
         self.client.get("/v1/meshes").await
+    }
+}
+
+/// Org sub-client. First IAM resource on the generated SDK surface
+/// (342-C1). Identical shape to the Hypervisor client — the
+/// generic `mount_crud::<Org>` handler on the server keeps the
+/// wire format aligned by construction.
+pub struct OrgClient<'a> {
+    client: &'a Client,
+}
+
+impl OrgClient<'_> {
+    pub async fn create(&self, body: &Org) -> Result<Org, ClientError> {
+        self.client.post("/v1/orgs", body).await
+    }
+
+    pub async fn get(&self, id: &str) -> Result<Org, ClientError> {
+        self.client
+            .get(&format!("/v1/orgs/{}", encode_path_segment(id)))
+            .await
+    }
+
+    pub async fn list(&self) -> Result<Vec<Org>, ClientError> {
+        self.client.get("/v1/orgs").await
+    }
+
+    pub async fn update(&self, id: &str, body: &Org) -> Result<Org, ClientError> {
+        self.client
+            .patch(&format!("/v1/orgs/{}", encode_path_segment(id)), body)
+            .await
+    }
+
+    pub async fn delete(&self, id: &str) -> Result<(), ClientError> {
+        self.client
+            .delete_empty(&format!("/v1/orgs/{}", encode_path_segment(id)))
+            .await
     }
 }
 

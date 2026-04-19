@@ -559,6 +559,18 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
             fn update_query(&self) -> ::std::string::String {
                 #update_body
             }
+
+            fn set_created_at(&mut self, dt: ::nauka_core::resource::Datetime) {
+                self.created_at = dt;
+            }
+
+            fn set_updated_at(&mut self, dt: ::nauka_core::resource::Datetime) {
+                self.updated_at = dt;
+            }
+
+            fn set_version(&mut self, v: u64) {
+                self.version = v;
+            }
         }
 
         #[::nauka_core::resource::__macro_support::linkme::distributed_slice(

@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 nauka-core.workspace = true
 nauka-hypervisor.workspace = true
+nauka-iam.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

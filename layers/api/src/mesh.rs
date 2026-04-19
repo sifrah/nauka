@@ -11,54 +11,22 @@
 //! (342-B) so the axum JSON layer cannot serialise them even by
 //! accident — this file assumes that masking and does not re-check.
 
-use async_graphql::dynamic::{Field, FieldFuture, InputValue, Object, TypeRef};
+use async_graphql::dynamic::{Field, FieldFuture, FieldValue, InputValue, Object, TypeRef};
 use async_graphql::Value;
-use axum::{
-    extract::{Path, State},
-    routing::get,
-    Json, Router,
-};
+use axum::Router;
 use nauka_core::resource::ResourceOps;
 // `Mesh` in `nauka_hypervisor::mesh::mod` is the runtime struct;
 // the DB resource is re-exported as `MeshRecord`. Alias locally so
 // the handler code matches the symmetric Hypervisor shape above.
 use nauka_hypervisor::MeshRecord as Mesh;
-use tracing::instrument;
 
-use crate::{Deps, NaukaApiError, Principal};
+use crate::crud::{self, Verb};
+use crate::Deps;
 
 // ---------- REST ----------
 
 pub fn routes() -> Router<Deps> {
-    Router::new()
-        .route("/v1/meshes", get(list))
-        .route("/v1/meshes/{id}", get(get_by_id))
-}
-
-#[instrument(name = "api.mesh.get", skip_all, fields(id = %id))]
-async fn get_by_id(
-    State(deps): State<Deps>,
-    _p: Principal,
-    Path(id): Path<String>,
-) -> Result<Json<Mesh>, NaukaApiError> {
-    let rows = fetch_one(&deps, &id).await?;
-    match rows.into_iter().next() {
-        Some(row) => Ok(Json(row)),
-        None => Err(NaukaApiError::NotFound(format!("mesh:{id}"))),
-    }
-}
-
-#[instrument(name = "api.mesh.list", skip_all)]
-async fn list(State(deps): State<Deps>, _p: Principal) -> Result<Json<Vec<Mesh>>, NaukaApiError> {
-    let surql = Mesh::list_query();
-    let rows: Vec<Mesh> = deps.db.query_take(&surql).await?;
-    Ok(Json(rows))
-}
-
-async fn fetch_one(deps: &Deps, id: &str) -> Result<Vec<Mesh>, NaukaApiError> {
-    let surql = Mesh::get_query(&id.to_string());
-    let rows: Vec<Mesh> = deps.db.query_take(&surql).await?;
-    Ok(rows)
+    crud::mount_crud::<Mesh>(Router::new(), "/v1/meshes", &[Verb::Get, Verb::List])
 }
 
 // ---------- GraphQL ----------
@@ -82,42 +50,34 @@ pub fn register_gql(
         FieldFuture::new(async move {
             let deps = ctx.data::<Deps>()?;
             let id: String = ctx.args.try_get("id")?.string()?.to_string();
-            let rows = fetch_one(deps, &id)
+            let row = crud::fetch_one::<Mesh>(deps, &id)
                 .await
                 .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-            match rows.into_iter().next() {
-                Some(m) => Ok(Some(async_graphql::dynamic::FieldValue::owned_any(m))),
-                None => Ok(None),
-            }
+            Ok(row.map(FieldValue::owned_any))
         })
     })
     .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::STRING)));
 
-    let list_field = Field::new(
-        "meshes",
-        TypeRef::named_list_nn("Mesh"),
-        |ctx| {
-            FieldFuture::new(async move {
-                let deps = ctx.data::<Deps>()?;
-                let surql = Mesh::list_query();
-                let rows: Vec<Mesh> = deps
-                    .db
-                    .query_take(&surql)
-                    .await
-                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-                Ok(Some(async_graphql::dynamic::FieldValue::list(
-                    rows.into_iter()
-                        .map(async_graphql::dynamic::FieldValue::owned_any),
-                )))
-            })
-        },
-    );
+    let list_field = Field::new("meshes", TypeRef::named_list_nn("Mesh"), |ctx| {
+        FieldFuture::new(async move {
+            let deps = ctx.data::<Deps>()?;
+            let surql = Mesh::list_query();
+            let rows: Vec<Mesh> = deps
+                .db
+                .query_take(&surql)
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            Ok(Some(FieldValue::list(
+                rows.into_iter().map(FieldValue::owned_any),
+            )))
+        })
+    });
 
     (
         builder.register(mesh_object),
         query.field(query_field).field(list_field),
-        // Mesh exposes no mutations (api_verbs = "get, list"), so we
-        // return the mutation root unchanged.
+        // Mesh exposes no mutations (api_verbs = "get, list"), so
+        // we return the mutation root unchanged.
         mutation,
     )
 }

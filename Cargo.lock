@@ -2916,6 +2916,7 @@ dependencies = [
  "http",
  "nauka-core",
  "nauka-hypervisor",
+ "nauka-iam",
  "reqwest",
  "serde",
  "serde_json",

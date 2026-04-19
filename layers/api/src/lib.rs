@@ -26,9 +26,11 @@ pub mod deps;
 pub mod error;
 pub mod principal;
 
+mod crud;
 mod graphql;
 mod hypervisor;
 mod mesh;
+mod org;
 mod router;
 
 pub use deps::Deps;
