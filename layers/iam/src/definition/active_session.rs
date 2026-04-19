@@ -27,7 +27,8 @@ use super::user::User;
     // Create happens at signin time on the leader, not over the
     // API. Delete = explicit revoke (future: `nauka session
     // revoke <uid>`). Update never makes sense.
-    api_verbs = "get, list, delete"
+    api_verbs = "get, list, delete",
+    api_path = "/v1/sessions"
 )]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct ActiveSession {

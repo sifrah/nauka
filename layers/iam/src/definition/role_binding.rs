@@ -23,6 +23,7 @@ use super::user::User;
 #[resource(
     table = "role_binding",
     scope = "cluster",
+    api_path = "/v1/role-bindings",
     // Explicit clause instead of `scope_by = "org"` — the scope_by
     // path would emit `fn::iam::can('...', $this.org)`, but
     // `fn::iam::can` itself queries `role_binding` to check bindings,

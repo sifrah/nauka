@@ -23,7 +23,6 @@ use crate::{Deps, NaukaApiError};
 pub fn routes() -> Router<Deps> {
     crud::mount_crud::<Hypervisor>(
         Router::new(),
-        "/v1/hypervisors",
         &[Verb::Create, Verb::Get, Verb::List, Verb::Update, Verb::Delete],
     )
 }

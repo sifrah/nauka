@@ -28,7 +28,14 @@ use nauka_core::resource::SurrealValue;
 use nauka_core_macros::resource;
 use serde::{Deserialize, Serialize};
 
-#[resource(table = "mesh", scope = "local", api_verbs = "get, list")]
+#[resource(
+    table = "mesh",
+    scope = "local",
+    api_verbs = "get, list",
+    // Override the naive default `/v1/meshs` — REST plural for
+    // "mesh" is "meshes".
+    api_path = "/v1/meshes"
+)]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct Mesh {
     /// The mesh's 48-bit ULA prefix, serialised to its canonical

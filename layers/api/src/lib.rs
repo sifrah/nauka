@@ -31,6 +31,7 @@ mod graphql;
 mod hypervisor;
 mod iam;
 mod mesh;
+mod openapi;
 mod org;
 mod router;
 

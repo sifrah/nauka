@@ -31,6 +31,7 @@ use super::org::Org;
     // create / update / delete over HTTP would let a caller break
     // the chain's invariants.
     api_verbs = "get, list",
+    api_path = "/v1/audit-events",
     // Any non-NONE session is rejected for CREATE / UPDATE /
     // DELETE — audit rows arrive only through the state machine.
     // SELECT currently follows the same rule; IAM-6 will split

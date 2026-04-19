@@ -15,7 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use super::org::Org;
 
-#[resource(table = "service_account", scope = "cluster", scope_by = "org")]
+#[resource(
+    table = "service_account",
+    scope = "cluster",
+    scope_by = "org",
+    api_path = "/v1/service-accounts"
+)]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct ServiceAccount {
     /// Per-org unique slug. Global uniqueness is guaranteed by

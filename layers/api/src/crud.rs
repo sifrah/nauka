@@ -39,27 +39,41 @@ pub enum Verb {
     Delete,
 }
 
-/// Mount the verbs in `verbs` under `path_prefix` onto `router`.
+/// Mount the verbs in `verbs` onto `router`, using the path the
+/// `#[resource]` macro registered for `R` in
+/// [`nauka_core::api::ALL_API_RESOURCES`]. The descriptor is the
+/// single source of truth — this keeps the OpenAPI spec and the
+/// actual routes in lockstep by construction.
 ///
-/// - `POST {prefix}` → create
-/// - `GET {prefix}` → list
-/// - `GET {prefix}/{{id}}` → get
-/// - `PATCH {prefix}/{{id}}` → update
-/// - `DELETE {prefix}/{{id}}` → delete (returns `204 No Content`)
+/// - `POST {path}` → create
+/// - `GET {path}` → list
+/// - `GET {path}/{{id}}` → get
+/// - `PATCH {path}/{{id}}` → update
+/// - `DELETE {path}/{{id}}` → delete (returns `204 No Content`)
 ///
-/// Resources with `api_verbs = "get, list"` (read-only) pass
-/// `&[Verb::Get, Verb::List]`; resources with no API surface never
-/// call this function.
-pub fn mount_crud<R>(
-    mut router: Router<Deps>,
-    path_prefix: &'static str,
-    verbs: &[Verb],
-) -> Router<Deps>
+/// Panics if the descriptor is missing — that would mean either the
+/// resource's `#[resource]` attributes set `api_verbs = ""` (wrong
+/// intent if we're calling `mount_crud`) or the link-time
+/// distributed_slice is broken, and both are programming errors
+/// worth surfacing loudly.
+pub fn mount_crud<R>(mut router: Router<Deps>, verbs: &[Verb]) -> Router<Deps>
 where
     R: ResourceOps + DeserializeOwned + Serialize + Send + Sync + 'static,
     <R as Resource>::Id: FromStr + Clone,
     <<R as Resource>::Id as FromStr>::Err: std::fmt::Display,
 {
+    let path_prefix: &'static str = nauka_core::api::api_resource(<R as Resource>::TABLE)
+        .unwrap_or_else(|| {
+            panic!(
+                "mount_crud::<{}> called but no ApiResourceDescriptor \
+                 for table `{}` in ALL_API_RESOURCES — either the \
+                 resource opts out via `api_verbs = \"\"` or the \
+                 distributed_slice is broken",
+                std::any::type_name::<R>(),
+                <R as Resource>::TABLE
+            )
+        })
+        .path;
     // `axum::Router` allows the same path on multiple method-routers
     // only when merged through `.route(path, method_router)` — so we
     // build one method-router per path and attach the relevant verbs.
@@ -78,8 +92,9 @@ where
         }
     }
 
+    let item_path = format!("{path_prefix}/{{id}}");
     router = router.route(path_prefix, root);
-    router = router.route(&format!("{path_prefix}/{{id}}"), item);
+    router = router.route(&item_path, item);
     router
 }
 

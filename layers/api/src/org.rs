@@ -28,7 +28,6 @@ use crate::{Deps, NaukaApiError};
 pub fn routes() -> Router<Deps> {
     crud::mount_crud::<Org>(
         Router::new(),
-        "/v1/orgs",
         &[Verb::Create, Verb::Get, Verb::List, Verb::Update, Verb::Delete],
     )
 }

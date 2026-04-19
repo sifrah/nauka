@@ -32,7 +32,8 @@ use super::service_account::ServiceAccount;
     // the bespoke `nauka token create` path so the one-shot
     // reveal stays TTY-only. Revocation (`delete`) is CRUD-shaped
     // and fine to expose.
-    api_verbs = "get, list, delete"
+    api_verbs = "get, list, delete",
+    api_path = "/v1/api-tokens"
 )]
 #[access(
     name = "service_account",

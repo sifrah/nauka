@@ -26,7 +26,7 @@ use crate::Deps;
 // ---------- REST ----------
 
 pub fn routes() -> Router<Deps> {
-    crud::mount_crud::<Mesh>(Router::new(), "/v1/meshes", &[Verb::Get, Verb::List])
+    crud::mount_crud::<Mesh>(Router::new(), &[Verb::Get, Verb::List])
 }
 
 // ---------- GraphQL ----------

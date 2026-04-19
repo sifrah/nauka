@@ -605,7 +605,10 @@ fn build_api_bits(
             validate_api_path(lit)?;
             lit.value()
         }
-        None => format!("/{table}s"),
+        // Default under `/v1` so the descriptor matches the real
+        // REST prefix `layers/api` mounts at — having two defaults
+        // (macro vs handler) led to silent drift before 342-D1.
+        None => format!("/v1/{table}s"),
     };
     let api_cli = match &args.api_cli {
         Some(lit) => {
