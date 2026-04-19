@@ -19,7 +19,7 @@
 use async_graphql::dynamic::{Object, Schema};
 use nauka_core::api::ALL_GQL_TYPES;
 
-use crate::{hypervisor, Deps};
+use crate::{hypervisor, mesh, Deps};
 
 /// Assemble the runtime GraphQL schema. Resources absent from
 /// `ALL_GQL_TYPES` silently don't appear in the schema — that's the
@@ -35,6 +35,12 @@ pub fn build_schema(deps: Deps) -> Schema {
         match desc.table {
             "hypervisor" => {
                 let (b, q, m) = hypervisor::register_gql(builder, query, mutation);
+                builder = b;
+                query = q;
+                mutation = m;
+            }
+            "mesh" => {
+                let (b, q, m) = mesh::register_gql(builder, query, mutation);
                 builder = b;
                 query = q;
                 mutation = m;

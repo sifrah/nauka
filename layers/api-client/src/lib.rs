@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use nauka_hypervisor::Hypervisor;
+use nauka_hypervisor::{Hypervisor, MeshRecord};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::de::DeserializeOwned;
@@ -94,6 +94,10 @@ impl Client {
         HypervisorClient { client: self }
     }
 
+    pub fn mesh(&self) -> MeshClient<'_> {
+        MeshClient { client: self }
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let url = format!("{}{}", self.inner.base_url, path);
         let resp = self
@@ -167,7 +171,7 @@ impl HypervisorClient<'_> {
 
     pub async fn get(&self, id: &str) -> Result<Hypervisor, ClientError> {
         self.client
-            .get(&format!("/v1/hypervisors/{id}"))
+            .get(&format!("/v1/hypervisors/{}", encode_path_segment(id)))
             .await
     }
 
@@ -177,15 +181,63 @@ impl HypervisorClient<'_> {
 
     pub async fn update(&self, id: &str, body: &Hypervisor) -> Result<Hypervisor, ClientError> {
         self.client
-            .patch(&format!("/v1/hypervisors/{id}"), body)
+            .patch(
+                &format!("/v1/hypervisors/{}", encode_path_segment(id)),
+                body,
+            )
             .await
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), ClientError> {
         self.client
-            .delete_empty(&format!("/v1/hypervisors/{id}"))
+            .delete_empty(&format!("/v1/hypervisors/{}", encode_path_segment(id)))
             .await
     }
+}
+
+/// Mesh sub-client. Read-only surface (`api_verbs = "get, list"` on
+/// the resource) — creation flows through `nauka hypervisor init`,
+/// not through the API. Encrypted/secret fields
+/// (`private_key`, `ca_key`, `tls_key`, `peering_pin`) are masked
+/// server-side via `#[serde(skip)]`; the deserialised values the
+/// SDK returns populate those fields with their `Default` values,
+/// which is correct — a remote caller has no business handling the
+/// ciphertexts.
+pub struct MeshClient<'a> {
+    client: &'a Client,
+}
+
+impl MeshClient<'_> {
+    pub async fn get(&self, id: &str) -> Result<MeshRecord, ClientError> {
+        self.client
+            .get(&format!("/v1/meshes/{}", encode_path_segment(id)))
+            .await
+    }
+
+    pub async fn list(&self) -> Result<Vec<MeshRecord>, ClientError> {
+        self.client.get("/v1/meshes").await
+    }
+}
+
+/// Percent-encode a path segment (RFC 3986 unreserved set kept
+/// as-is, everything else `%XX`). Used when the resource id
+/// contains `/`, `:`, or other characters that would otherwise
+/// break the URL routing — Mesh IDs like `fdaa:bbbb:cccc::/48`
+/// are the motivating case.
+pub fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '.' | '_' | '~' => out.push(c),
+            _ => {
+                let mut buf = [0u8; 4];
+                for &byte in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 async fn parse_json<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, ClientError> {

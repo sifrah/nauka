@@ -28,6 +28,7 @@ pub mod principal;
 
 mod graphql;
 mod hypervisor;
+mod mesh;
 mod router;
 
 pub use deps::Deps;
