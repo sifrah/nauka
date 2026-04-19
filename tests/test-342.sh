@@ -48,12 +48,19 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+    else
+        log "tearing down..."
+        for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
     fi
-    log "tearing down..."
-    for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    # `[[ $rc -ne 0 ]] && …` would short-circuit to exit 1 when the
+    # script actually passed (bash evaluates the failed `[[ ]]` as
+    # the composite's exit), turning a green run into a false red.
+    # Use an explicit `if` so the trap exits on $rc, not on the
+    # `[[ ]]` result.
+    if [[ $rc -ne 0 ]]; then
+        fail "FAILED — logs in $RUN_DIR"
+    fi
+    return $rc
 }
 trap cleanup EXIT
 
