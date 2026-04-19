@@ -49,7 +49,7 @@ argon2 = "0.5"
 rpassword = "7"
 sha2 = "0.10"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "query"] }
-async-graphql = { version = "7", default-features = false, features = ["dynamic-schema"] }
+async-graphql = { version = "7", default-features = false, features = ["dynamic-schema", "graphiql"] }
 async-graphql-axum = "7"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
