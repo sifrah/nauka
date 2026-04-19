@@ -1347,7 +1347,7 @@ async fn handle_audit(matches: &clap::ArgMatches) -> Result<()> {
             // generic LIST endpoint returns insertion-order; sort
             // here until the server-side filter surface lands in
             // 342-D (?limit, ?cursor).
-            rows.sort_by(|a, b| b.at.to_string().cmp(&a.at.to_string()));
+            rows.sort_by_key(|e| std::cmp::Reverse(e.at.to_string()));
             rows.truncate(limit);
             cli_out::section(&format!("audit events ({}):", rows.len()));
             for e in &rows {
