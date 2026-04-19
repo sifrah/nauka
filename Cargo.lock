@@ -2870,7 +2870,10 @@ name = "nauka"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "nauka-api",
+ "nauka-api-client",
  "nauka-core",
  "nauka-hypervisor",
  "nauka-iam",

@@ -306,7 +306,23 @@ pub async fn leave_hypervisor(interface_name: &str) -> Result<(), MeshError> {
 }
 
 /// Long-running service entrypoint — executed by systemd.
-pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
+///
+/// The `on_ready` callback fires once Raft is up, with the shared
+/// `db` / `raft` handles the daemon owns. Callers use this to spawn
+/// sibling servers that need access to the same handles without
+/// having to re-plumb them — the API layer (`nauka-api`) is the
+/// motivating case. The callback must return every `JoinHandle` it
+/// spawns; the daemon aborts them alongside its own tasks on
+/// shutdown, so no extra handles leak past SIGTERM.
+///
+/// Passing an empty callback (`|_, _| async { Vec::new() }`) keeps
+/// the historical behavior where `run_daemon` owned every task
+/// itself.
+pub async fn run_daemon<F, Fut>(db: Arc<Database>, on_ready: F) -> Result<(), MeshError>
+where
+    F: FnOnce(Arc<Database>, Arc<RaftNode>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Vec<tokio::task::JoinHandle<()>>> + Send,
+{
     let state = MeshState::load(&db).await?;
     let mut mesh = Mesh::from_state(&state)?;
     mesh.up()?; // idempotent — if the interface already exists, configure it
@@ -366,6 +382,11 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
         state.listen_port,
     ));
 
+    // Let the caller spawn anything else that needs db + raft —
+    // typically the axum API server (342-B2). Any returned handles
+    // are aborted alongside the daemon's own on shutdown.
+    let extra_handles = on_ready(db.clone(), raft.clone()).await;
+
     // systemd sends SIGTERM on `systemctl stop`; Ctrl+C is SIGINT in
     // foreground mode. Handle either.
     let mut sigint =
@@ -380,6 +401,9 @@ pub async fn run_daemon(db: Arc<Database>) -> Result<(), MeshError> {
     listener_handle.abort();
     reconciler_handle.abort();
     refresh_handle.abort();
+    for h in extra_handles {
+        h.abort();
+    }
     mesh.down()?;
     tracing::info!(event = "daemon.stop", "daemon stopped (state preserved)");
     Ok(())

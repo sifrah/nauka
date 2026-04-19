@@ -54,6 +54,7 @@ async fn run() -> Result<()> {
         .version(option_env!("NAUKA_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
         .arg_required_else_help(true)
         .subcommand(hypervisor_cmd())
+        .subcommand(mesh_cmd())
         .subcommand(login_cmd())
         .subcommand(logout_cmd())
         .subcommand(whoami_cmd())
@@ -70,6 +71,7 @@ async fn run() -> Result<()> {
 
     match app.get_matches().subcommand() {
         Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
+        Some(("mesh", sub)) => handle_mesh(sub).await,
         Some(("login", sub)) => cmd_login(sub).await,
         Some(("logout", _)) => cmd_logout().await,
         Some(("whoami", _)) => cmd_whoami().await,
@@ -143,6 +145,19 @@ fn hypervisor_cmd() -> Command {
         )
         .subcommand(Command::new("status").about("Show cluster membership and local state"))
         .subcommand(
+            Command::new("list")
+                .about("List every hypervisor in the mesh (generated CLI — via the API)"),
+        )
+        .subcommand(
+            Command::new("get")
+                .about("Fetch one hypervisor by its public key (generated CLI — via the API)")
+                .arg(
+                    Arg::new("public-key")
+                        .required(true)
+                        .help("Peer's base64 public key"),
+                ),
+        )
+        .subcommand(
             Command::new("leave")
                 .about("Leave the mesh — stop service, wipe state, remove unit file")
                 .arg(
@@ -213,6 +228,8 @@ async fn handle_hypervisor(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("init", sub)) => cmd_init(sub).await,
         Some(("join", sub)) => cmd_join(sub).await,
+        Some(("list", _)) => cmd_hypervisor_list().await,
+        Some(("get", sub)) => cmd_hypervisor_get(sub).await,
         Some(("status", _)) => cmd_status().await,
         Some(("leave", sub)) => cmd_leave(sub).await,
         Some(("daemon", _)) => cmd_daemon().await,
@@ -221,6 +238,95 @@ async fn handle_hypervisor(matches: &clap::ArgMatches) -> Result<()> {
         Some(("debug", sub)) => cmd_debug(sub).await,
         _ => anyhow::bail!("unknown hypervisor subcommand"),
     }
+}
+
+// -------- Generated-style CLI (via SDK) — see #355 (342-B2). --------
+
+fn api_client() -> Result<nauka_api_client::Client> {
+    let jwt = require_token()?;
+    nauka_api_client::Client::new(API_BASE_URL, jwt).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+async fn cmd_hypervisor_list() -> Result<()> {
+    let client = api_client()?;
+    let rows = client
+        .hypervisor()
+        .list()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::section(&format!("hypervisors ({}):", rows.len()));
+    for h in &rows {
+        let endpoint = h.endpoint.as_deref().unwrap_or("-");
+        cli_out::say(format_args!(
+            "  {}  {}  via {}",
+            h.public_key, h.address, endpoint
+        ));
+    }
+    Ok(())
+}
+
+async fn cmd_hypervisor_get(sub: &clap::ArgMatches) -> Result<()> {
+    let pk = sub.get_one::<String>("public-key").unwrap().clone();
+    let client = api_client()?;
+    let h = client
+        .hypervisor()
+        .get(&pk)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    cli_out::pair("public key", &h.public_key);
+    cli_out::pair("node id", h.node_id.to_string());
+    cli_out::pair("raft addr", &h.raft_addr);
+    cli_out::pair("address", &h.address);
+    cli_out::pair("endpoint", h.endpoint.as_deref().unwrap_or("-"));
+    cli_out::pair("allowed ips", h.allowed_ips.join(","));
+    cli_out::pair(
+        "keepalive",
+        h.keepalive
+            .map(|k| k.to_string())
+            .unwrap_or_else(|| "-".into()),
+    );
+    Ok(())
+}
+
+fn mesh_cmd() -> Command {
+    Command::new("mesh")
+        .about("Inspect the local node's mesh identity (generated CLI — via the API)")
+        .arg_required_else_help(true)
+        .subcommand(
+            Command::new("get")
+                .about("Show the local mesh record (secrets are masked by the API)"),
+        )
+}
+
+async fn handle_mesh(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
+        Some(("get", _)) => cmd_mesh_get().await,
+        _ => anyhow::bail!("unknown mesh subcommand"),
+    }
+}
+
+async fn cmd_mesh_get() -> Result<()> {
+    let client = api_client()?;
+    let list = client
+        .mesh()
+        .list()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Some(m) = list.into_iter().next() else {
+        anyhow::bail!("no mesh state on this node — run `nauka hypervisor init` first");
+    };
+    cli_out::pair("mesh id", &m.mesh_id);
+    cli_out::pair("interface", &m.interface_name);
+    cli_out::pair("listen port", m.listen_port.to_string());
+    cli_out::pair(
+        "ca cert",
+        if m.ca_cert.is_some() { "yes" } else { "no" },
+    );
+    cli_out::pair(
+        "tls cert",
+        if m.tls_cert.is_some() { "yes" } else { "no" },
+    );
+    Ok(())
 }
 
 fn parse_setup(sub: &clap::ArgMatches) -> Result<SetupConfig> {
@@ -390,8 +496,44 @@ async fn cmd_leave(sub: &clap::ArgMatches) -> Result<()> {
 
 async fn cmd_daemon() -> Result<()> {
     let db = open_db().await?;
-    run_daemon(db).await.map_err(|e| anyhow::anyhow!("{e}"))
+    // Spawn the axum REST + GraphQL server on loopback alongside
+    // every other daemon task. TLS + real listener address land
+    // in 342-D; for now `127.0.0.1:4000` is the single convention
+    // the CLI's `nauka-api-client` dials.
+    run_daemon(db, |db, raft| async move {
+        let deps = nauka_api::Deps::new(db, Some(raft));
+        let app = nauka_api::router(deps);
+        let listener = match tokio::net::TcpListener::bind(API_SERVER_ADDR).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(
+                    event = "api.listener.bind_failed",
+                    addr = API_SERVER_ADDR,
+                    error = %e,
+                    "axum listener bind failed — daemon continues without REST/GraphQL"
+                );
+                return Vec::new();
+            }
+        };
+        tracing::info!(event = "api.listener.ready", addr = API_SERVER_ADDR);
+        vec![tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(
+                    event = "api.serve.exited",
+                    error = %e,
+                    "axum::serve returned an error"
+                );
+            }
+        })]
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
+
+/// Loopback address the daemon binds and the generated CLI dials.
+/// Hardcoded in 342-B2; 342-D swaps in TLS + configurable port.
+const API_SERVER_ADDR: &str = "127.0.0.1:4000";
+const API_BASE_URL: &str = "http://127.0.0.1:4000";
 
 async fn cmd_mesh(sub: &clap::ArgMatches) -> Result<()> {
     match sub.subcommand() {
