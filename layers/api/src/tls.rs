@@ -34,9 +34,10 @@ pub enum TlsError {
 /// nothing global — the caller is expected to have initialised a
 /// `rustls::crypto` provider once at process startup.
 pub fn server_config(cert_pem: &str, key_pem: &str) -> Result<Arc<ServerConfig>, TlsError> {
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut BufReader::new(cert_pem.as_bytes()))
-        .collect::<Result<_, _>>()
-        .map_err(|e| TlsError::ParseCert(e.to_string()))?;
+    let certs: Vec<CertificateDer> =
+        rustls_pemfile::certs(&mut BufReader::new(cert_pem.as_bytes()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| TlsError::ParseCert(e.to_string()))?;
 
     let key: PrivateKeyDer = rustls_pemfile::private_key(&mut BufReader::new(key_pem.as_bytes()))
         .map_err(|e| TlsError::ParseKey(e.to_string()))?

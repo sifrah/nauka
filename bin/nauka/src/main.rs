@@ -307,8 +307,7 @@ fn mesh_cmd() -> Command {
         .about("Inspect the local node's mesh identity (generated CLI — via the API)")
         .arg_required_else_help(true)
         .subcommand(
-            Command::new("get")
-                .about("Show the local mesh record (secrets are masked by the API)"),
+            Command::new("get").about("Show the local mesh record (secrets are masked by the API)"),
         )
 }
 
@@ -332,14 +331,8 @@ async fn cmd_mesh_get() -> Result<()> {
     cli_out::pair("mesh id", &m.mesh_id);
     cli_out::pair("interface", &m.interface_name);
     cli_out::pair("listen port", m.listen_port.to_string());
-    cli_out::pair(
-        "ca cert",
-        if m.ca_cert.is_some() { "yes" } else { "no" },
-    );
-    cli_out::pair(
-        "tls cert",
-        if m.tls_cert.is_some() { "yes" } else { "no" },
-    );
+    cli_out::pair("ca cert", if m.ca_cert.is_some() { "yes" } else { "no" });
+    cli_out::pair("tls cert", if m.tls_cert.is_some() { "yes" } else { "no" });
     Ok(())
 }
 
@@ -543,8 +536,7 @@ async fn cmd_daemon() -> Result<()> {
                         tls = true,
                         "axum HTTPS listener binding"
                     );
-                    let rustls_cfg =
-                        axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
+                    let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_cfg);
                     vec![tokio::spawn(async move {
                         if let Err(e) = axum_server::bind_rustls(addr, rustls_cfg)
                             .serve(app.into_make_service())

@@ -55,10 +55,7 @@ pub fn routes() -> Router<Deps> {
     r = crud::mount_crud::<AuditEvent>(r, READ_ONLY);
 
     // User — `create` stays on the bespoke signup path.
-    r = crud::mount_crud::<User>(
-        r,
-        &[Verb::Get, Verb::List, Verb::Update, Verb::Delete],
-    );
+    r = crud::mount_crud::<User>(r, &[Verb::Get, Verb::List, Verb::Update, Verb::Delete]);
 
     r
 }

@@ -65,9 +65,7 @@ impl Client {
     /// development via [`Self::danger_accept_invalid_certs`] — real
     /// mesh-CA verification plumbs through in 342-D.
     pub fn new(base_url: impl Into<String>, jwt: impl Into<String>) -> Result<Self, ClientError> {
-        let http = HttpClient::builder()
-            .build()
-            .map_err(ClientError::Http)?;
+        let http = HttpClient::builder().build().map_err(ClientError::Http)?;
         Ok(Self::from_parts(http, base_url.into(), jwt.into()))
     }
 

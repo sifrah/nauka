@@ -12,7 +12,9 @@
 //! piggybacks on the DB permission layer today, with application-
 //! level can() wiring tracked as an IAM follow-up.
 
-use async_graphql::dynamic::{Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef};
+use async_graphql::dynamic::{
+    Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef,
+};
 use async_graphql::Value;
 use axum::Router;
 use nauka_core::resource::{Datetime, Ref};
@@ -28,7 +30,13 @@ use crate::{Deps, NaukaApiError};
 pub fn routes() -> Router<Deps> {
     crud::mount_crud::<Org>(
         Router::new(),
-        &[Verb::Create, Verb::Get, Verb::List, Verb::Update, Verb::Delete],
+        &[
+            Verb::Create,
+            Verb::Get,
+            Verb::List,
+            Verb::Update,
+            Verb::Delete,
+        ],
     )
 }
 
@@ -49,7 +57,10 @@ pub fn register_gql(
 
     let org_input = InputObject::new("OrgInput")
         .field(InputValue::new("slug", TypeRef::named_nn(TypeRef::STRING)))
-        .field(InputValue::new("displayName", TypeRef::named_nn(TypeRef::STRING)))
+        .field(InputValue::new(
+            "displayName",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
         .field(InputValue::new("owner", TypeRef::named_nn(TypeRef::STRING)));
 
     let query_field = Field::new("org", TypeRef::named("Org"), |ctx| {
@@ -148,9 +159,7 @@ fn decode_input(raw: serde_json::Value) -> Result<Org, serde_json::Error> {
 
 async fn create_via_gql(deps: &Deps, mut body: Org) -> Result<Org, NaukaApiError> {
     let raft = deps.raft.as_deref().ok_or_else(|| {
-        NaukaApiError::Internal(
-            "org is cluster-scoped — Deps needs a Raft handle to write".into(),
-        )
+        NaukaApiError::Internal("org is cluster-scoped — Deps needs a Raft handle to write".into())
     })?;
     let now = Datetime::now();
     body.created_at = now;

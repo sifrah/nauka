@@ -112,9 +112,11 @@ where
     body.set_created_at(now);
     body.set_updated_at(now);
     body.set_version(0);
-    write_with_scope::<R>(&deps, |w| Box::pin(async move { w.create(&body).await.map(|_| body) }))
-        .await
-        .map(Json)
+    write_with_scope::<R>(&deps, |w| {
+        Box::pin(async move { w.create(&body).await.map(|_| body) })
+    })
+    .await
+    .map(Json)
 }
 
 async fn get_one<R>(
@@ -164,15 +166,17 @@ where
         )));
     }
     let id = parse_id::<R>(&id_str)?;
-    let current = fetch_one::<R>(&deps, &id).await?.ok_or_else(|| {
-        NaukaApiError::NotFound(format!("{}:{id_str}", <R as Resource>::TABLE))
-    })?;
+    let current = fetch_one::<R>(&deps, &id)
+        .await?
+        .ok_or_else(|| NaukaApiError::NotFound(format!("{}:{id_str}", <R as Resource>::TABLE)))?;
     body.set_created_at(*current.created_at());
     body.set_updated_at(Datetime::now());
     body.set_version(current.version() + 1);
-    write_with_scope::<R>(&deps, |w| Box::pin(async move { w.update(&body).await.map(|_| body) }))
-        .await
-        .map(Json)
+    write_with_scope::<R>(&deps, |w| {
+        Box::pin(async move { w.update(&body).await.map(|_| body) })
+    })
+    .await
+    .map(Json)
 }
 
 async fn delete_one<R>(
@@ -247,8 +251,9 @@ async fn write_with_scope<R>(
     deps: &Deps,
     f: impl for<'a> FnOnce(
         Writer<'a>,
-    )
-        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<R, nauka_state::StateError>> + Send + 'a>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<R, nauka_state::StateError>> + Send + 'a>,
+    >,
 ) -> Result<R, NaukaApiError>
 where
     R: Resource,

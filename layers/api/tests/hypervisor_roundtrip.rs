@@ -26,11 +26,7 @@ use tower::ServiceExt;
 async fn fresh_stack() -> (Deps, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api-test.db");
-    let db = Arc::new(
-        Database::open(Some(path.to_str().unwrap()))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
 
     let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();

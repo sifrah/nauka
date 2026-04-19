@@ -253,6 +253,9 @@ mod tests {
         assert_eq!(snake_to_pascal("hypervisor"), "Hypervisor");
         assert_eq!(snake_to_pascal("api_token"), "ApiToken");
         assert_eq!(snake_to_pascal("role_binding"), "RoleBinding");
-        assert_eq!(snake_to_pascal("password_reset_token"), "PasswordResetToken");
+        assert_eq!(
+            snake_to_pascal("password_reset_token"),
+            "PasswordResetToken"
+        );
     }
 }

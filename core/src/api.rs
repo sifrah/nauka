@@ -148,10 +148,7 @@ pub static ALL_CLI_COMMANDS: [&'static CliCommandDescriptor] = [..];
 /// table name. Returns `None` if the resource is internal
 /// (`api_verbs = ""`) or not registered.
 pub fn api_resource(table: &str) -> Option<&'static ApiResourceDescriptor> {
-    ALL_API_RESOURCES
-        .iter()
-        .copied()
-        .find(|d| d.table == table)
+    ALL_API_RESOURCES.iter().copied().find(|d| d.table == table)
 }
 
 pub fn gql_resource(table: &str) -> Option<&'static GqlResourceDescriptor> {

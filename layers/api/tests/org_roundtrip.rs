@@ -23,11 +23,7 @@ use tower::ServiceExt;
 async fn fresh_stack() -> (Deps, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api-org-test.db");
-    let db = Arc::new(
-        Database::open(Some(path.to_str().unwrap()))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
 
     let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
@@ -273,7 +269,10 @@ async fn sdk_org_roundtrips_via_reqwest() {
 
     client.org().delete("acme").await.expect("sdk delete");
     let after = client.org().get("acme").await;
-    assert!(after.is_err(), "expected NotFound after delete, got {after:?}");
+    assert!(
+        after.is_err(),
+        "expected NotFound after delete, got {after:?}"
+    );
 
     server.abort();
 }

@@ -7,7 +7,9 @@
 //! async-graphql's dynamic API needs concrete field-name → field-value
 //! wiring that the handler side does not.
 
-use async_graphql::dynamic::{Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef};
+use async_graphql::dynamic::{
+    Field, FieldFuture, FieldValue, InputObject, InputValue, Object, TypeRef,
+};
 use async_graphql::Value;
 use axum::Router;
 use nauka_core::resource::Datetime;
@@ -23,7 +25,13 @@ use crate::{Deps, NaukaApiError};
 pub fn routes() -> Router<Deps> {
     crud::mount_crud::<Hypervisor>(
         Router::new(),
-        &[Verb::Create, Verb::Get, Verb::List, Verb::Update, Verb::Delete],
+        &[
+            Verb::Create,
+            Verb::Get,
+            Verb::List,
+            Verb::Update,
+            Verb::Delete,
+        ],
     )
 }
 
@@ -47,13 +55,31 @@ pub fn register_gql(
         .field(scalar_field("version", TypeRef::STRING));
 
     let hypervisor_input = InputObject::new("HypervisorInput")
-        .field(InputValue::new("publicKey", TypeRef::named_nn(TypeRef::STRING)))
-        .field(InputValue::new("nodeId", TypeRef::named_nn(TypeRef::STRING)))
-        .field(InputValue::new("raftAddr", TypeRef::named_nn(TypeRef::STRING)))
-        .field(InputValue::new("address", TypeRef::named_nn(TypeRef::STRING)))
+        .field(InputValue::new(
+            "publicKey",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
+        .field(InputValue::new(
+            "nodeId",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
+        .field(InputValue::new(
+            "raftAddr",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
+        .field(InputValue::new(
+            "address",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
         .field(InputValue::new("endpoint", TypeRef::named(TypeRef::STRING)))
-        .field(InputValue::new("allowedIps", TypeRef::named(TypeRef::STRING)))
-        .field(InputValue::new("keepalive", TypeRef::named(TypeRef::STRING)));
+        .field(InputValue::new(
+            "allowedIps",
+            TypeRef::named(TypeRef::STRING),
+        ))
+        .field(InputValue::new(
+            "keepalive",
+            TypeRef::named(TypeRef::STRING),
+        ));
 
     let query_field = Field::new("hypervisor", TypeRef::named("Hypervisor"), |ctx| {
         FieldFuture::new(async move {
@@ -67,24 +93,23 @@ pub fn register_gql(
     })
     .argument(InputValue::new("id", TypeRef::named_nn(TypeRef::STRING)));
 
-    let create_mut = Field::new(
-        "createHypervisor",
-        TypeRef::named_nn("Hypervisor"),
-        |ctx| {
-            FieldFuture::new(async move {
-                let deps = ctx.data::<Deps>()?;
-                let input = ctx.args.try_get("input")?;
-                let raw: serde_json::Value = input.deserialize()?;
-                let body = decode_input(raw)
-                    .map_err(|e| async_graphql::Error::new(format!("invalid input: {e}")))?;
-                let hv = create_via_gql(deps, body)
-                    .await
-                    .map_err(|e| async_graphql::Error::new(e.to_string()))?;
-                Ok(Some(FieldValue::owned_any(hv)))
-            })
-        },
-    )
-    .argument(InputValue::new("input", TypeRef::named_nn("HypervisorInput")));
+    let create_mut = Field::new("createHypervisor", TypeRef::named_nn("Hypervisor"), |ctx| {
+        FieldFuture::new(async move {
+            let deps = ctx.data::<Deps>()?;
+            let input = ctx.args.try_get("input")?;
+            let raw: serde_json::Value = input.deserialize()?;
+            let body = decode_input(raw)
+                .map_err(|e| async_graphql::Error::new(format!("invalid input: {e}")))?;
+            let hv = create_via_gql(deps, body)
+                .await
+                .map_err(|e| async_graphql::Error::new(e.to_string()))?;
+            Ok(Some(FieldValue::owned_any(hv)))
+        })
+    })
+    .argument(InputValue::new(
+        "input",
+        TypeRef::named_nn("HypervisorInput"),
+    ));
 
     (
         builder
@@ -167,4 +192,3 @@ async fn create_via_gql(deps: &Deps, mut body: Hypervisor) -> Result<Hypervisor,
     Writer::new(&deps.db).with_raft(raft).create(&body).await?;
     Ok(body)
 }
-

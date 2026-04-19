@@ -50,15 +50,13 @@ pub fn router(deps: Deps) -> Router {
         .route("/openapi.json", get(openapi_handler))
         .route("/docs", get(scalar_ui))
         .route("/graphql", get(graphiql))
-        .route("/graphql/schema", get({
-            let sdl = sdl.clone();
-            move || async move {
-                (
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    sdl,
-                )
-            }
-        }));
+        .route(
+            "/graphql/schema",
+            get({
+                let sdl = sdl.clone();
+                move || async move { ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], sdl) }
+            }),
+        );
 
     Router::new()
         .merge(protected)

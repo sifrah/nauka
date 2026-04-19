@@ -20,11 +20,7 @@ use tower::ServiceExt;
 async fn fresh_router() -> (axum::Router, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api-docs-test.db");
-    let db = Arc::new(
-        Database::open(Some(path.to_str().unwrap()))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
     let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
     let local = nauka_core::local_schemas();
@@ -134,10 +130,7 @@ async fn graphql_sdl_includes_known_types() {
     // Hypervisor + Mesh + Org all register GraphQL resolvers —
     // the dynamic schema's SDL must mention them.
     for expected in &["Hypervisor", "Mesh", "Org", "Query", "Mutation"] {
-        assert!(
-            sdl.contains(expected),
-            "SDL missing `{expected}`: {sdl}"
-        );
+        assert!(sdl.contains(expected), "SDL missing `{expected}`: {sdl}");
     }
 }
 

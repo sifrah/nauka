@@ -28,11 +28,7 @@ const SECRET_MARKER_PIN: &str = "PEERING_PIN_XYZ";
 async fn fresh_stack() -> (Deps, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api-mesh-test.db");
-    let db = Arc::new(
-        Database::open(Some(path.to_str().unwrap()))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
 
     let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
@@ -56,9 +52,13 @@ async fn seed_mesh(deps: &Deps) -> MeshRecord {
         interface_name: "nauka0".to_string(),
         listen_port: 51820,
         private_key: SECRET_MARKER_PRIVATE.to_string(),
-        ca_cert: Some("-----BEGIN CERTIFICATE-----\nACME-CA\n-----END CERTIFICATE-----".to_string()),
+        ca_cert: Some(
+            "-----BEGIN CERTIFICATE-----\nACME-CA\n-----END CERTIFICATE-----".to_string(),
+        ),
         ca_key: Some(SECRET_MARKER_CA_KEY.to_string()),
-        tls_cert: Some("-----BEGIN CERTIFICATE-----\nACME-TLS\n-----END CERTIFICATE-----".to_string()),
+        tls_cert: Some(
+            "-----BEGIN CERTIFICATE-----\nACME-TLS\n-----END CERTIFICATE-----".to_string(),
+        ),
         tls_key: Some(SECRET_MARKER_TLS_KEY.to_string()),
         peering_pin: Some(SECRET_MARKER_PIN.to_string()),
         created_at: now,
@@ -206,11 +206,7 @@ async fn sdk_mesh_list_and_get_via_reqwest() {
     let list = client.mesh().list().await.expect("sdk list");
     assert!(list.iter().any(|m| m.mesh_id == seeded.mesh_id));
 
-    let fetched = client
-        .mesh()
-        .get(&seeded.mesh_id)
-        .await
-        .expect("sdk get");
+    let fetched = client.mesh().get(&seeded.mesh_id).await.expect("sdk get");
     assert_eq!(fetched.mesh_id, seeded.mesh_id);
     // `#[serde(skip)]` means the SDK receives the default for each
     // hidden field (empty string / None) — not the original

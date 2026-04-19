@@ -30,11 +30,7 @@ use tower::ServiceExt;
 async fn fresh_stack() -> (Deps, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("api-iam-test.db");
-    let db = Arc::new(
-        Database::open(Some(path.to_str().unwrap()))
-            .await
-            .unwrap(),
-    );
+    let db = Arc::new(Database::open(Some(path.to_str().unwrap())).await.unwrap());
 
     let functions = nauka_core::function_definitions();
     let cluster = nauka_core::cluster_schemas();
@@ -94,7 +90,12 @@ async fn seed_org(deps: &Deps, slug: &str, owner: &str) {
 #[tokio::test]
 async fn rest_project_crud_roundtrip() {
     let (deps, _dir) = fresh_stack().await;
-    seed_user(&deps, "alice@example.com", "$argon2id$v=19$m=65536,t=3,p=1$x$y").await;
+    seed_user(
+        &deps,
+        "alice@example.com",
+        "$argon2id$v=19$m=65536,t=3,p=1$x$y",
+    )
+    .await;
     seed_org(&deps, "acme", "alice@example.com").await;
     let app = router(deps);
 
@@ -181,7 +182,12 @@ const TOKEN_HASH_MARKER: &str = "API_TOKEN_HASH_CIPHERTEXT_XYZ";
 #[tokio::test]
 async fn api_token_create_is_405_and_hash_never_leaks() {
     let (deps, _dir) = fresh_stack().await;
-    seed_user(&deps, "carol@example.com", "$argon2id$v=19$m=65536,t=3,p=1$x$y").await;
+    seed_user(
+        &deps,
+        "carol@example.com",
+        "$argon2id$v=19$m=65536,t=3,p=1$x$y",
+    )
+    .await;
     seed_org(&deps, "acme", "carol@example.com").await;
 
     // Seed a service_account + api_token through the Writer so
