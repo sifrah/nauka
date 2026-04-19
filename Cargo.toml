@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["bin/nauka", "core", "core-macros", "layers/hypervisor", "layers/iam", "layers/state"]
+members = [
+    "bin/nauka",
+    "core",
+    "core-macros",
+    "layers/api",
+    "layers/api-client",
+    "layers/hypervisor",
+    "layers/iam",
+    "layers/state",
+]
 
 [workspace.package]
 version = "2.0.0"
@@ -39,8 +48,17 @@ trybuild = "1"
 argon2 = "0.5"
 rpassword = "7"
 sha2 = "0.10"
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1", "query"] }
+async-graphql = { version = "7", default-features = false, features = ["dynamic-schema"] }
+async-graphql-axum = "7"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+http = "1"
 nauka-core = { path = "core" }
 nauka-core-macros = { path = "core-macros" }
+nauka-api = { path = "layers/api" }
+nauka-api-client = { path = "layers/api-client" }
 nauka-hypervisor = { path = "layers/hypervisor" }
 nauka-iam = { path = "layers/iam" }
 nauka-state = { path = "layers/state" }

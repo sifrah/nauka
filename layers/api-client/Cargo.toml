@@ -1,0 +1,18 @@
+[package]
+name = "nauka-api-client"
+description = "Nauka API client SDK — typed HTTP client sharing resource structs with the server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nauka-core.workspace = true
+nauka-hypervisor.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+http.workspace = true

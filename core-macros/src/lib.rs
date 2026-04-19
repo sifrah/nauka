@@ -110,6 +110,17 @@ struct ResourceArgs {
     /// macro validates that each entry is a snake_case identifier
     /// safe to splice into a permission name.
     custom_actions: Option<LitStr>,
+    /// `api_path = "/vms"` — REST path prefix (default:
+    /// `"/<table>s"`). See #342-A.
+    api_path: Option<LitStr>,
+    /// `api_cli = "vm"` — CLI subcommand name (default: snake_case
+    /// of the struct identifier). See #342-A.
+    api_cli: Option<LitStr>,
+    /// `api_verbs = "create, get, list, update, delete"` — CRUD
+    /// verbs exposed on REST + GraphQL + CLI (default: all five).
+    /// `api_verbs = ""` opts out entirely; `custom_actions` can still
+    /// register non-CRUD actions. See #342-A.
+    api_verbs: Option<LitStr>,
 }
 
 impl Parse for ResourceArgs {
@@ -122,6 +133,9 @@ impl Parse for ResourceArgs {
         let mut scope_by: Option<LitStr> = None;
         let mut permissions: Option<LitStr> = None;
         let mut custom_actions: Option<LitStr> = None;
+        let mut api_path: Option<LitStr> = None;
+        let mut api_cli: Option<LitStr> = None;
+        let mut api_verbs: Option<LitStr> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -136,13 +150,17 @@ impl Parse for ResourceArgs {
                 "scope_by" => &mut scope_by,
                 "permissions" => &mut permissions,
                 "custom_actions" => &mut custom_actions,
+                "api_path" => &mut api_path,
+                "api_cli" => &mut api_cli,
+                "api_verbs" => &mut api_verbs,
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
                             "unknown attribute key `{other}` (allowed: `table`, `scope`, \
                              `cascade_delete`, `restrict_delete`, `set_null_on_delete`, \
-                             `scope_by`, `permissions`, `custom_actions`)"
+                             `scope_by`, `permissions`, `custom_actions`, \
+                             `api_path`, `api_cli`, `api_verbs`)"
                         ),
                     ));
                 }
@@ -193,6 +211,9 @@ impl Parse for ResourceArgs {
             scope_by,
             permissions,
             custom_actions,
+            api_path,
+            api_cli,
+            api_verbs,
         })
     }
 }
@@ -244,6 +265,142 @@ fn parse_field_list(lit: &LitStr) -> syn::Result<Vec<String>> {
 enum ParsedScope {
     Local,
     Cluster,
+}
+
+/// Macro-time copy of `nauka_core::api::Verb` — the proc-macro can't
+/// call into the runtime enum, so we duplicate the parse/emit logic
+/// here. Kept in sync by hand; if a verb is added to `api::Verb`,
+/// add it here too.
+#[derive(Clone, Copy)]
+enum MacroVerb {
+    Create,
+    Get,
+    List,
+    Update,
+    Delete,
+}
+
+impl MacroVerb {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "create" => Some(MacroVerb::Create),
+            "get" => Some(MacroVerb::Get),
+            "list" => Some(MacroVerb::List),
+            "update" => Some(MacroVerb::Update),
+            "delete" => Some(MacroVerb::Delete),
+            _ => None,
+        }
+    }
+
+    fn as_tokens(self) -> TokenStream2 {
+        match self {
+            MacroVerb::Create => quote!(::nauka_core::api::Verb::Create),
+            MacroVerb::Get => quote!(::nauka_core::api::Verb::Get),
+            MacroVerb::List => quote!(::nauka_core::api::Verb::List),
+            MacroVerb::Update => quote!(::nauka_core::api::Verb::Update),
+            MacroVerb::Delete => quote!(::nauka_core::api::Verb::Delete),
+        }
+    }
+}
+
+/// Parse `api_verbs = "create, get, …"`. Empty string = opt-out
+/// (the resource exposes no CRUD verbs via the API — `custom_actions`
+/// may still register non-CRUD actions).
+fn parse_api_verbs(lit: &LitStr) -> syn::Result<Vec<MacroVerb>> {
+    let raw = lit.value();
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for part in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match MacroVerb::parse(part) {
+            Some(v) => out.push(v),
+            None => {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    format!(
+                        "unknown verb `{part}` in `api_verbs` — allowed: \
+                         `create`, `get`, `list`, `update`, `delete` (case-insensitive)"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Validate `api_path = "…"`: must start with `/`, no trailing `/`,
+/// URL-safe chars only (ASCII alnum, `/`, `-`, `_`). Path params
+/// (`:id`) are appended by `layers/api` at mount time; the descriptor
+/// carries only the prefix.
+fn validate_api_path(lit: &LitStr) -> syn::Result<()> {
+    let v = lit.value();
+    if !v.starts_with('/') {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`api_path` must start with `/` — got `{v}`"),
+        ));
+    }
+    if v == "/" {
+        return Err(syn::Error::new(
+            lit.span(),
+            "`api_path` cannot be `/` — use a resource-specific prefix like `/vms`",
+        ));
+    }
+    if v.ends_with('/') {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`api_path` must not end with `/` — got `{v}`"),
+        ));
+    }
+    if v.contains("//") {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`api_path` must not contain `//` — got `{v}`"),
+        ));
+    }
+    for c in v.chars() {
+        let ok = c.is_ascii_alphanumeric() || c == '/' || c == '-' || c == '_';
+        if !ok {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!(
+                    "`api_path` may only contain ASCII alphanumerics, `/`, `-`, `_` \
+                     — got `{c}` in `{v}`"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate `api_cli = "…"`: ASCII lowercase, digits, `-`, `_`, must
+/// start with a letter. Same shape clap accepts for a subcommand name.
+fn validate_api_cli(lit: &LitStr) -> syn::Result<()> {
+    let v = lit.value();
+    if v.is_empty() {
+        return Err(syn::Error::new(lit.span(), "`api_cli` cannot be empty"));
+    }
+    let bytes = v.as_bytes();
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!("`api_cli` `{v}` must start with an ASCII lowercase letter"),
+        ));
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-';
+        if !ok {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!(
+                    "`api_cli` `{v}` must use only ASCII lowercase letters, \
+                     digits, `_`, `-`"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // -------- expansion --------
@@ -365,6 +522,8 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
     let create_body = build_create_body(&table, &id_field_name, &all_set_exprs);
     let update_body = build_update_body(&table, &id_field_name, &all_set_exprs);
 
+    let api_bits = build_api_bits(&table, &struct_name, &args, &custom_action_names)?;
+
     Ok(quote! {
         #item
 
@@ -413,6 +572,118 @@ fn expand(args: ResourceArgs, mut item: ItemStruct) -> syn::Result<TokenStream2>
                 scope: #scope_path,
                 ddl: #full_ddl,
                 custom_actions: &[ #( #custom_action_names ),* ],
+            };
+
+        #api_bits
+    })
+}
+
+/// Emit the REST / GraphQL / CLI descriptor registrations — see
+/// `nauka_core::api` and issue #342-A. Returns an empty stream when
+/// the resource is fully opted out (`api_verbs = ""` and no
+/// `custom_actions`).
+fn build_api_bits(
+    table: &str,
+    struct_name: &Ident,
+    args: &ResourceArgs,
+    custom_actions: &[String],
+) -> syn::Result<TokenStream2> {
+    let api_path = match &args.api_path {
+        Some(lit) => {
+            validate_api_path(lit)?;
+            lit.value()
+        }
+        None => format!("/{table}s"),
+    };
+    let api_cli = match &args.api_cli {
+        Some(lit) => {
+            validate_api_cli(lit)?;
+            lit.value()
+        }
+        None => pascal_to_snake(&struct_name.to_string()),
+    };
+    let api_verbs = match &args.api_verbs {
+        Some(lit) => parse_api_verbs(lit)?,
+        None => vec![
+            MacroVerb::Create,
+            MacroVerb::Get,
+            MacroVerb::List,
+            MacroVerb::Update,
+            MacroVerb::Delete,
+        ],
+    };
+
+    // Fully opted out — no CRUD, no custom actions — skip
+    // registration entirely. The resource is invisible to API / CLI /
+    // GraphQL but still gets its DB DDL.
+    if api_verbs.is_empty() && custom_actions.is_empty() {
+        return Ok(TokenStream2::new());
+    }
+
+    let verb_tokens: Vec<TokenStream2> = api_verbs.iter().copied().map(|v| v.as_tokens()).collect();
+    let custom_action_tokens: Vec<TokenStream2> = custom_actions
+        .iter()
+        .map(|s| {
+            let s: &str = s.as_str();
+            quote!(#s)
+        })
+        .collect();
+
+    let gql_type_name = struct_name.to_string();
+    let struct_upper = struct_name.to_string().to_uppercase();
+    let struct_lower = struct_name.to_string().to_lowercase();
+    let api_static = format_ident!("__NAUKA_API_RES_{}", struct_upper);
+    let gql_static = format_ident!("__NAUKA_GQL_RES_{}", struct_upper);
+    let cli_static = format_ident!("__NAUKA_CLI_CMD_{}", struct_upper);
+    let cli_build_fn = format_ident!("__nauka_cli_build_{}", struct_lower);
+
+    let cli_about = format!("Manage {table} resources");
+
+    Ok(quote! {
+        #[doc(hidden)]
+        pub fn #cli_build_fn() -> ::nauka_core::api::Command {
+            // Skeleton subcommand tree — per-verb arg wiring lands in
+            // #342-B when the CLI migration starts consuming this.
+            ::nauka_core::api::Command::new(#api_cli)
+                .about(#cli_about)
+        }
+
+        #[::nauka_core::resource::__macro_support::linkme::distributed_slice(
+            ::nauka_core::api::ALL_API_RESOURCES
+        )]
+        #[linkme(crate = ::nauka_core::resource::__macro_support::linkme)]
+        #[allow(non_upper_case_globals)]
+        static #api_static: &::nauka_core::api::ApiResourceDescriptor =
+            &::nauka_core::api::ApiResourceDescriptor {
+                table: #table,
+                path: #api_path,
+                verbs: &[ #( #verb_tokens ),* ],
+                custom_actions: &[ #( #custom_action_tokens ),* ],
+            };
+
+        #[::nauka_core::resource::__macro_support::linkme::distributed_slice(
+            ::nauka_core::api::ALL_GQL_TYPES
+        )]
+        #[linkme(crate = ::nauka_core::resource::__macro_support::linkme)]
+        #[allow(non_upper_case_globals)]
+        static #gql_static: &::nauka_core::api::GqlResourceDescriptor =
+            &::nauka_core::api::GqlResourceDescriptor {
+                table: #table,
+                gql_type_name: #gql_type_name,
+                verbs: &[ #( #verb_tokens ),* ],
+                custom_actions: &[ #( #custom_action_tokens ),* ],
+            };
+
+        #[::nauka_core::resource::__macro_support::linkme::distributed_slice(
+            ::nauka_core::api::ALL_CLI_COMMANDS
+        )]
+        #[linkme(crate = ::nauka_core::resource::__macro_support::linkme)]
+        #[allow(non_upper_case_globals)]
+        static #cli_static: &::nauka_core::api::CliCommandDescriptor =
+            &::nauka_core::api::CliCommandDescriptor {
+                table: #table,
+                name: #api_cli,
+                build: #cli_build_fn,
             };
     })
 }

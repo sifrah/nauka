@@ -13,6 +13,7 @@ uuid.workspace = true
 linkme.workspace = true
 serde.workspace = true
 surrealdb.workspace = true
+clap.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
