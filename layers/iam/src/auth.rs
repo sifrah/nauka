@@ -222,6 +222,7 @@ pub async fn signup(
         password_hash,
         display_name: display_name.to_string(),
         email_verified_at: None,
+        active: true,
         created_at: now,
         updated_at: now,
         version: 0,

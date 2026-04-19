@@ -55,11 +55,18 @@ use serde::{Deserialize, Serialize};
               SET email = $email, \
                   password_hash = crypto::argon2::generate($password), \
                   display_name = $display_name, \
+                  email_verified_at = NONE, \
+                  active = true, \
                   created_at = time::now(), \
                   updated_at = time::now(), \
                   version = 0",
+    // IAM-9 (#353): `AND active = true` keeps deactivated users
+    // from ever signing in, even if the password still matches —
+    // same error surface as \"unknown user\" / \"wrong password\" so
+    // the CLI can't tell the three cases apart.
     signin = "SELECT * FROM user \
               WHERE email = $email \
+                AND active = true \
                 AND crypto::argon2::compare(password_hash, $password)",
     jwt_duration = "1h",
     session_duration = "24h",
@@ -80,5 +87,11 @@ pub struct User {
     /// actions (`EmergencyAccess`, role escalation) on this being
     /// populated.
     pub email_verified_at: Option<Datetime>,
+    /// IAM-9 (#353) deactivation flag. `auth::signin` rejects
+    /// credentials when `active = false`; the DB-layer record
+    /// stays around so audit history + re-activation remain
+    /// possible. Follow-up IAM-9e handles 30-day soft-delete / GDPR
+    /// purge on top of this.
+    pub active: bool,
     // `created_at`, `updated_at`, `version` — injected by `#[resource]`.
 }

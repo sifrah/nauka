@@ -54,6 +54,7 @@ async fn seed_user(db: &Database, email: &str, password: &str) {
         password_hash: hash_password(password).unwrap(),
         display_name: "User".into(),
         email_verified_at: None,
+        active: true,
         created_at: Datetime::default(),
         updated_at: Datetime::default(),
         version: 0,

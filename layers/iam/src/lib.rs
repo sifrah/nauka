@@ -44,8 +44,9 @@ pub use error::IamError;
 pub use ops::{
     authenticate, bind_role, consume_password_reset, create_api_token, create_env, create_org,
     create_project, create_service_account, list_api_tokens, list_bindings, list_envs, list_orgs,
-    list_projects, list_roles, list_service_accounts, list_sessions, parse_api_token,
-    request_password_reset, revoke_api_token, unbind_role, AuthContext, MintedToken,
+    list_projects, list_roles, list_service_accounts, list_sessions, list_users, parse_api_token,
+    request_password_reset, revoke_api_token, set_user_active, unbind_role, AuthContext,
+    MintedToken, UserSummary,
 };
 pub use seed::bootstrap;
 pub use token::{delete_token, load_token, save_token, token_path};

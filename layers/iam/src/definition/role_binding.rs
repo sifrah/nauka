@@ -51,4 +51,10 @@ pub struct RoleBinding {
     pub role: Ref<Role>,
     /// Org scope.
     pub org: Ref<Org>,
+    /// Why this binding exists — required by IAM-9 (#353) so audit
+    /// reviews have intent, not just action. Non-empty enforced in
+    /// `ops::bind_role`; the ASSERT below enforces it at the DB
+    /// layer as a defence-in-depth.
+    #[assert("string::len($value) > 0")]
+    pub reason: String,
 }

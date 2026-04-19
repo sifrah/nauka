@@ -364,9 +364,19 @@ pub async fn bind_role(
     principal_email: &str,
     role_slug: &str,
     org_slug: &str,
+    reason: &str,
 ) -> Result<RoleBinding, IamError> {
     let auth = authenticate(db, jwt).await?;
     let actor = auth.principal_record_id();
+    // IAM-9 (#353): every binding needs a written reason so audit
+    // reviews carry intent. Trim to block whitespace-only entries
+    // that an eager caller might submit to \"bypass\" the rule.
+    let reason_trimmed = reason.trim();
+    if reason_trimmed.is_empty() {
+        return Err(IamError::InvalidSlug(
+            "role binding requires a non-empty --reason (IAM-9 governance)".into(),
+        ));
+    }
     // Synthetic uid keeps `(org, principal, role)` unique and makes
     // the record id greppable in SurrealDB record form
     // (`role_binding:⟨acme-bob@example.com-viewer⟩`).
@@ -377,12 +387,17 @@ pub async fn bind_role(
         principal: Ref::<User>::new(principal_email.to_string()),
         role: Ref::<Role>::new(role_slug.to_string()),
         org: Ref::<Org>::new(org_slug.to_string()),
+        reason: reason_trimmed.to_string(),
         created_at: c,
         updated_at: u,
         version: 0,
     };
     match Writer::new(db).with_raft(raft).create(&binding).await {
         Ok(()) => {
+            // Pack the reason into the audit row's `outcome` slot so
+            // reviewers see it without another join. IAM-9 tracks a
+            // dedicated `reason` column on AuditEvent as a follow-up.
+            let outcome = format!("success:{reason_trimmed}");
             crate::audit::try_audit(
                 db,
                 raft,
@@ -390,7 +405,7 @@ pub async fn bind_role(
                 "create",
                 &format!("role_binding:{uid}"),
                 Some(org_slug),
-                "success",
+                &outcome,
             )
             .await;
             Ok(binding)
@@ -441,6 +456,123 @@ pub async fn unbind_role(
     )
     .await;
     Ok(())
+}
+
+// -------- IAM-9: user deactivation + listing --------
+
+/// Flip `User.active` and audit the change. Reason is required so
+/// the log carries intent, same bar as role bindings. Reactivation
+/// uses the same path with `active = true`.
+#[instrument(name = "iam.user.set_active", skip_all, fields(email = %email, active = active))]
+pub async fn set_user_active(
+    db: &Database,
+    raft: &RaftNode,
+    jwt: &str,
+    email: &str,
+    active: bool,
+    reason: &str,
+) -> Result<(), IamError> {
+    let auth = authenticate(db, jwt).await?;
+    let actor = auth.principal_record_id();
+    let reason_trimmed = reason.trim();
+    if reason_trimmed.is_empty() {
+        return Err(IamError::InvalidSlug(
+            "user deactivate/activate requires a non-empty --reason (IAM-9 governance)".into(),
+        ));
+    }
+
+    // Fetch the full row via root (no PERMISSIONS filter on the
+    // admin path). Fail if the user doesn't exist.
+    #[derive(serde::Deserialize, SurrealValue)]
+    struct UserRow {
+        email: String,
+        password_hash: String,
+        display_name: String,
+        email_verified_at: Option<Datetime>,
+        active: bool,
+        created_at: Datetime,
+        #[allow(dead_code)]
+        updated_at: Datetime,
+        version: u64,
+    }
+    let rows: Vec<UserRow> = db
+        .query_take(&format!(
+            "SELECT email, password_hash, display_name, email_verified_at, active, \
+                    created_at, updated_at, version \
+             FROM user WHERE email = '{}'",
+            escape_sq(email)
+        ))
+        .await
+        .map_err(IamError::State)?;
+    let existing = rows
+        .into_iter()
+        .next()
+        .ok_or(IamError::InvalidCredentials)?;
+
+    // No-op on unchanged state — keeps the audit log focused on
+    // genuine transitions.
+    if existing.active == active {
+        return Ok(());
+    }
+
+    let now = Datetime::now();
+    let updated = User {
+        email: existing.email.clone(),
+        password_hash: existing.password_hash,
+        display_name: existing.display_name,
+        email_verified_at: existing.email_verified_at,
+        active,
+        created_at: existing.created_at,
+        updated_at: now,
+        version: existing.version + 1,
+    };
+    Writer::new(db)
+        .with_raft(raft)
+        .update(&updated)
+        .await
+        .map_err(IamError::State)?;
+
+    let action = if active { "activate" } else { "deactivate" };
+    crate::audit::try_audit(
+        db,
+        raft,
+        &actor,
+        action,
+        &format!("user:{email}"),
+        None,
+        &format!("success:{reason_trimmed}"),
+    )
+    .await;
+    Ok(())
+}
+
+/// Slim projection returned by `list_users`. The `User` record
+/// itself contains `password_hash` which is `#[hidden]` — a
+/// record-level SELECT sees `NONE` for that column, which would
+/// refuse to deserialize into `User` (typed `String`, not
+/// `Option<String>`). This struct cherry-picks the visible fields.
+#[derive(serde::Deserialize, surrealdb::types::SurrealValue, Debug, Clone)]
+pub struct UserSummary {
+    pub email: String,
+    pub display_name: String,
+    pub active: bool,
+    #[serde(default)]
+    pub email_verified_at: Option<Datetime>,
+}
+
+/// Read-only roster view. PERMISSIONS on `user` keep the caller
+/// scoped to their own record for now; admin visibility (+ the
+/// cross-user listing the CLI wants for deprovisioning UX) lands
+/// with the follow-up that wires role-binding enforcement to
+/// endpoint gates.
+#[instrument(name = "iam.user.list", skip_all)]
+pub async fn list_users(db: &Database, jwt: &str) -> Result<Vec<UserSummary>, IamError> {
+    read_as(db, jwt, || async {
+        db.query_take("SELECT email, display_name, active, email_verified_at FROM user")
+            .await
+            .map_err(IamError::State)
+    })
+    .await
 }
 
 // -------- IAM-8: active session inventory --------
@@ -589,6 +721,7 @@ pub async fn consume_password_reset(
         password_hash: String,
         display_name: String,
         email_verified_at: Option<Datetime>,
+        active: bool,
         created_at: Datetime,
         #[allow(dead_code)]
         updated_at: Datetime,
@@ -596,7 +729,7 @@ pub async fn consume_password_reset(
     }
     let users: Vec<UserRow> = db
         .query_take(&format!(
-            "SELECT email, password_hash, display_name, email_verified_at, \
+            "SELECT email, password_hash, display_name, email_verified_at, active, \
                     created_at, updated_at, version \
              FROM user WHERE email = '{}'",
             crate::ops::escape_sq(&email)
@@ -614,6 +747,7 @@ pub async fn consume_password_reset(
         password_hash: new_hash,
         display_name: existing.display_name,
         email_verified_at: existing.email_verified_at,
+        active: existing.active,
         created_at: existing.created_at,
         updated_at: now,
         version: existing.version + 1,

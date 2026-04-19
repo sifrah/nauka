@@ -479,13 +479,87 @@ fn user_cmd() -> Command {
                         .help("Human-readable name shown in UIs and audit logs"),
                 ),
         )
+        .subcommand(Command::new("list").about("List users visible to the caller"))
+        .subcommand(
+            Command::new("deactivate")
+                .about("Block future signins for a user (IAM-9)")
+                .arg(Arg::new("email").long("email").required(true))
+                .arg(
+                    Arg::new("reason")
+                        .long("reason")
+                        .required(true)
+                        .help("Why the user is being deactivated — audited"),
+                ),
+        )
+        .subcommand(
+            Command::new("activate")
+                .about("Re-enable signins for a deactivated user (IAM-9)")
+                .arg(Arg::new("email").long("email").required(true))
+                .arg(
+                    Arg::new("reason")
+                        .long("reason")
+                        .required(true)
+                        .help("Why the user is being reactivated — audited"),
+                ),
+        )
 }
 
 async fn handle_user(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("create", sub)) => cmd_user_create(sub).await,
+        Some(("list", _)) => cmd_user_list().await,
+        Some(("deactivate", sub)) => cmd_user_set_active(sub, false).await,
+        Some(("activate", sub)) => cmd_user_set_active(sub, true).await,
         _ => anyhow::bail!("unknown user subcommand"),
     }
+}
+
+async fn cmd_user_list() -> Result<()> {
+    let jwt = require_token()?;
+    let req = serde_json::json!({ "iam_user_list": true, "jwt": jwt });
+    let resp =
+        mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let empty = Vec::new();
+    let rows = resp
+        .get("users")
+        .and_then(|x| x.as_array())
+        .unwrap_or(&empty);
+    cli_out::section(&format!("users ({}):", rows.len()));
+    for u in rows {
+        let email = u.get("email").and_then(|x| x.as_str()).unwrap_or("?");
+        let dn = u
+            .get("display_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("?");
+        let active = u.get("active").and_then(|x| x.as_bool()).unwrap_or(true);
+        let verified = u
+            .get("email_verified_at")
+            .and_then(|x| x.as_str())
+            .unwrap_or("-");
+        let status = if active { "active  " } else { "DISABLED" };
+        cli_out::say(format_args!(
+            "  {email:<30}  {status}  {dn:<24}  verified={verified}"
+        ));
+    }
+    Ok(())
+}
+
+async fn cmd_user_set_active(sub: &clap::ArgMatches, active: bool) -> Result<()> {
+    let jwt = require_token()?;
+    let email = sub.get_one::<String>("email").unwrap().clone();
+    let reason = sub.get_one::<String>("reason").unwrap().clone();
+    let req = serde_json::json!({
+        "iam_user_set_active": true,
+        "jwt": jwt,
+        "email": email,
+        "active": active,
+        "reason": reason,
+    });
+    mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let verb = if active { "activated" } else { "deactivated" };
+    cli_out::say(format_args!("user {verb}: {email}"));
+    cli_out::pair("reason", reason);
+    Ok(())
 }
 
 /// Read a password.
@@ -791,7 +865,13 @@ fn role_cmd() -> Command {
                         .required(true)
                         .help("Role slug (e.g. `viewer`, `editor`)"),
                 )
-                .arg(Arg::new("org").long("org").required(true).help("Org slug")),
+                .arg(Arg::new("org").long("org").required(true).help("Org slug"))
+                .arg(
+                    Arg::new("reason")
+                        .long("reason")
+                        .required(true)
+                        .help("Why this binding is being granted — audited (IAM-9)"),
+                ),
         )
         .subcommand(
             Command::new("unbind")
@@ -835,17 +915,20 @@ async fn handle_role(matches: &clap::ArgMatches) -> Result<()> {
             let principal = sub.get_one::<String>("principal").unwrap().clone();
             let role = sub.get_one::<String>("role").unwrap().clone();
             let org = sub.get_one::<String>("org").unwrap().clone();
+            let reason = sub.get_one::<String>("reason").unwrap().clone();
             let req = serde_json::json!({
                 "iam_role_bind": true,
                 "jwt": jwt,
                 "principal": principal,
                 "role": role,
                 "org": org,
+                "reason": reason,
             });
             mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
             cli_out::say(format_args!(
                 "bound {principal} to role {role} in org {org}"
             ));
+            cli_out::pair("reason", reason);
             Ok(())
         }
         Some(("unbind", sub)) => {
@@ -1100,10 +1183,11 @@ async fn handle_audit(matches: &clap::ArgMatches) -> Result<()> {
                 let actor = e.get("actor").and_then(|x| x.as_str()).unwrap_or("?");
                 let target = e.get("target").and_then(|x| x.as_str()).unwrap_or("?");
                 let at = e.get("at").and_then(|x| x.as_str()).unwrap_or("?");
+                let outcome = e.get("outcome").and_then(|x| x.as_str()).unwrap_or("?");
                 let hash = e.get("hash").and_then(|x| x.as_str()).unwrap_or("?");
                 let short_hash = if hash.len() >= 8 { &hash[..8] } else { hash };
                 cli_out::say(format_args!(
-                    "  {at}  {action:<6}  {actor:<32}  {target:<40}  {short_hash}"
+                    "  {at}  {action:<6}  {actor:<32}  {target:<40}  {outcome}  {short_hash}"
                 ));
             }
             Ok(())

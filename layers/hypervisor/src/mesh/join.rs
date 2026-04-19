@@ -121,6 +121,8 @@ struct IamRoleBindRequest {
     principal: String,
     role: String,
     org: String,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -188,6 +190,19 @@ struct IamPasswordResetReq {
 
 #[derive(Serialize, Deserialize)]
 struct IamSessionListRequest {
+    jwt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamUserSetActiveRequest {
+    jwt: String,
+    email: String,
+    active: bool,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IamUserListRequest {
     jwt: String,
 }
 
@@ -940,7 +955,17 @@ async fn handle_connection(
             .ok_or_else(|| MeshError::Join("no raft".into()))?;
         let req: IamRoleBindRequest =
             serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::bind_role(db, raft, &req.jwt, &req.principal, &req.role, &req.org).await {
+        match nauka_iam::bind_role(
+            db,
+            raft,
+            &req.jwt,
+            &req.principal,
+            &req.role,
+            &req.org,
+            &req.reason,
+        )
+        .await
+        {
             Ok(b) => {
                 let body = serde_json::json!({
                     "ok": true,
@@ -949,6 +974,7 @@ async fn handle_connection(
                         "principal": b.principal.id(),
                         "role": b.role.id(),
                         "org": b.org.id(),
+                        "reason": b.reason,
                     }
                 })
                 .to_string();
@@ -1317,6 +1343,69 @@ async fn handle_connection(
                     })
                     .collect();
                 let body = serde_json::json!({ "ok": true, "sessions": json }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+            }
+        }
+    } else if v.get("iam_user_set_active").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_user_set_active requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_user_set_active".into()));
+        }
+        let raft = raft
+            .as_ref()
+            .ok_or_else(|| MeshError::Join("no raft".into()))?;
+        let req: IamUserSetActiveRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::set_user_active(db, raft, &req.jwt, &req.email, req.active, &req.reason)
+            .await
+        {
+            Ok(()) => {
+                let _ = writer.write_all(b"{\"ok\":true}\n").await;
+                tracing::info!(
+                    event = "iam.user.set_active.ok",
+                    email = %req.email,
+                    active = req.active
+                );
+            }
+            Err(e) => {
+                let body = serde_json::json!({ "error": e.to_string() }).to_string();
+                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
+                tracing::warn!(
+                    event = "iam.user.set_active.fail",
+                    email = %req.email,
+                    error = %e
+                );
+            }
+        }
+    } else if v.get("iam_user_list").is_some() {
+        if !peer_addr.ip().is_loopback() {
+            let _ = writer
+                .write_all(b"{\"error\":\"iam_user_list requires loopback\"}\n")
+                .await;
+            return Err(MeshError::Join("non-loopback iam_user_list".into()));
+        }
+        let req: IamUserListRequest =
+            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
+        match nauka_iam::list_users(db, &req.jwt).await {
+            Ok(rows) => {
+                let json: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .map(|u| {
+                        serde_json::json!({
+                            "email": u.email,
+                            "display_name": u.display_name,
+                            "active": u.active,
+                            "email_verified_at": u.email_verified_at.map(|d| d.to_string()),
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "ok": true, "users": json }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
             Err(e) => {
