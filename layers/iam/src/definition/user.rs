@@ -42,7 +42,13 @@ use serde::{Deserialize, Serialize};
     // stays hidden via the field-level `#[hidden]` clause even
     // when the outer record is visible. Root / state-machine
     // queries keep full access through the `$auth = NONE` arm.
-    permissions = "$auth = NONE OR $this.id = $auth.id"
+    permissions = "$auth = NONE OR $this.id = $auth.id",
+    // `create` via the API would short-circuit password hashing —
+    // signup has to hash with Argon2id *on the leader* so every
+    // replica applies an identical SurQL. Keep the bespoke
+    // `nauka user create` / `nauka login` path for that; the API
+    // surfaces the rest.
+    api_verbs = "get, list, update, delete"
 )]
 #[access(
     name = "user",
@@ -78,7 +84,12 @@ pub struct User {
     /// PHC-encoded Argon2id hash (`$argon2id$v=19$…`). Compatible
     /// with SurrealDB's `crypto::argon2::compare`. Hidden from
     /// user-session SELECTs via `#[hidden]` (IAM-6 / #350).
+    /// `#[serde(skip)]` additionally keeps the hash out of
+    /// REST/GraphQL response bodies — even code paths that don't
+    /// go through the DB permission layer (a hypothetical
+    /// administrative bypass) can't leak the digest to the wire.
     #[hidden]
+    #[serde(skip)]
     pub password_hash: String,
     pub display_name: String,
     /// Set once the user has proven they own the address —

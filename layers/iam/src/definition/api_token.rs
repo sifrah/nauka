@@ -27,7 +27,12 @@ use super::service_account::ServiceAccount;
     scope = "cluster",
     // Tokens follow their service account's org scope. A principal
     // who can see the SA can see / revoke its tokens.
-    scope_by = "service_account"
+    scope_by = "service_account",
+    // No create via API — the plaintext secret flow goes through
+    // the bespoke `nauka token create` path so the one-shot
+    // reveal stays TTY-only. Revocation (`delete`) is CRUD-shaped
+    // and fine to expose.
+    api_verbs = "get, list, delete"
 )]
 #[access(
     name = "service_account",
@@ -64,6 +69,13 @@ pub struct ApiToken {
     /// `#[hidden]` keeps this out of user-session SELECTs — the
     /// `service_account` DEFINE ACCESS SIGNIN still reads it
     /// because that query runs with `$auth = NONE`.
+    /// `#[serde(skip)]` keeps it out of REST/GraphQL responses
+    /// for the same reason we masked Mesh's ciphertexts — the API
+    /// shape should never carry the hash bytes, even if some
+    /// future permissions change lets a caller select it. DB
+    /// round-trips use SurrealValue, not serde, so SIGNIN and
+    /// `nauka token create` keep working.
     #[hidden]
+    #[serde(skip)]
     pub hash: String,
 }

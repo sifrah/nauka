@@ -9,7 +9,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::post;
 use axum::{middleware, Router};
 
-use crate::{graphql, hypervisor, mesh, org, principal::require_auth, Deps};
+use crate::{graphql, hypervisor, iam, mesh, org, principal::require_auth, Deps};
 
 /// Build the full API router. Callers are expected to wrap the
 /// returned router with `axum::serve` (or a test harness like
@@ -22,6 +22,7 @@ pub fn router(deps: Deps) -> Router {
         .merge(hypervisor::routes())
         .merge(mesh::routes())
         .merge(org::routes())
+        .merge(iam::routes())
         .route("/graphql", post(graphql_handler).get(graphiql))
         // One middleware layer, applied to every route — `require_auth`
         // is the single enforcement point, handlers never parse the

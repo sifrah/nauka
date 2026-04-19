@@ -15,7 +15,10 @@
 use std::sync::Arc;
 
 use nauka_hypervisor::{Hypervisor, MeshRecord};
-use nauka_iam::Org;
+use nauka_iam::{
+    ActiveSession, ApiToken, AuditEvent, Env, Org, Permission, Project, Role, RoleBinding,
+    ServiceAccount, User,
+};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::de::DeserializeOwned;
@@ -101,6 +104,46 @@ impl Client {
 
     pub fn org(&self) -> OrgClient<'_> {
         OrgClient { client: self }
+    }
+
+    pub fn project(&self) -> ProjectClient<'_> {
+        ProjectClient { client: self }
+    }
+
+    pub fn env(&self) -> EnvClient<'_> {
+        EnvClient { client: self }
+    }
+
+    pub fn role(&self) -> RoleClient<'_> {
+        RoleClient { client: self }
+    }
+
+    pub fn role_binding(&self) -> RoleBindingClient<'_> {
+        RoleBindingClient { client: self }
+    }
+
+    pub fn permission(&self) -> PermissionClient<'_> {
+        PermissionClient { client: self }
+    }
+
+    pub fn service_account(&self) -> ServiceAccountClient<'_> {
+        ServiceAccountClient { client: self }
+    }
+
+    pub fn api_token(&self) -> ApiTokenClient<'_> {
+        ApiTokenClient { client: self }
+    }
+
+    pub fn active_session(&self) -> ActiveSessionClient<'_> {
+        ActiveSessionClient { client: self }
+    }
+
+    pub fn audit_event(&self) -> AuditEventClient<'_> {
+        AuditEventClient { client: self }
+    }
+
+    pub fn user(&self) -> UserClient<'_> {
+        UserClient { client: self }
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
@@ -259,6 +302,62 @@ impl OrgClient<'_> {
             .await
     }
 }
+
+/// Boilerplate-free CRUD sub-client generator. Every sub-client
+/// exposes all five verbs; the server decides which ones actually
+/// work (verbs the resource opted out of return 405).
+///
+/// Client-side we don't hide the methods — a hidden method would
+/// force the SDK to know the `api_verbs` policy, which is the
+/// server's job. Calling a verb the server doesn't expose just
+/// bubbles up `ClientError::Server { status: 405 }` like any
+/// other mismatched request.
+macro_rules! impl_crud_client {
+    ($client:ident, $res:path, $prefix:expr) => {
+        pub struct $client<'a> {
+            client: &'a Client,
+        }
+
+        impl $client<'_> {
+            pub async fn create(&self, body: &$res) -> Result<$res, ClientError> {
+                self.client.post($prefix, body).await
+            }
+
+            pub async fn get(&self, id: &str) -> Result<$res, ClientError> {
+                self.client
+                    .get(&format!("{}/{}", $prefix, encode_path_segment(id)))
+                    .await
+            }
+
+            pub async fn list(&self) -> Result<Vec<$res>, ClientError> {
+                self.client.get($prefix).await
+            }
+
+            pub async fn update(&self, id: &str, body: &$res) -> Result<$res, ClientError> {
+                self.client
+                    .patch(&format!("{}/{}", $prefix, encode_path_segment(id)), body)
+                    .await
+            }
+
+            pub async fn delete(&self, id: &str) -> Result<(), ClientError> {
+                self.client
+                    .delete_empty(&format!("{}/{}", $prefix, encode_path_segment(id)))
+                    .await
+            }
+        }
+    };
+}
+
+impl_crud_client!(ProjectClient, Project, "/v1/projects");
+impl_crud_client!(EnvClient, Env, "/v1/envs");
+impl_crud_client!(RoleClient, Role, "/v1/roles");
+impl_crud_client!(RoleBindingClient, RoleBinding, "/v1/role-bindings");
+impl_crud_client!(PermissionClient, Permission, "/v1/permissions");
+impl_crud_client!(ServiceAccountClient, ServiceAccount, "/v1/service-accounts");
+impl_crud_client!(ApiTokenClient, ApiToken, "/v1/api-tokens");
+impl_crud_client!(ActiveSessionClient, ActiveSession, "/v1/sessions");
+impl_crud_client!(AuditEventClient, AuditEvent, "/v1/audit-events");
+impl_crud_client!(UserClient, User, "/v1/users");
 
 /// Percent-encode a path segment (RFC 3986 unreserved set kept
 /// as-is, everything else `%XX`). Used when the resource id

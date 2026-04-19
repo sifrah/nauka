@@ -29,6 +29,7 @@ pub mod principal;
 mod crud;
 mod graphql;
 mod hypervisor;
+mod iam;
 mod mesh;
 mod org;
 mod router;

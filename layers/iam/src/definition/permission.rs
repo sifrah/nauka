@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 #[resource(
     table = "permission",
     scope = "cluster",
-    permissions = "$auth = NONE OR $auth != NONE"
+    permissions = "$auth = NONE OR $auth != NONE",
+    // Catalog is seeded by the daemon bootstrap — no user-driven
+    // create/update/delete. Read-only surface on the API.
+    api_verbs = "get, list"
 )]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct Permission {

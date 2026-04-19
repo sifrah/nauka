@@ -26,6 +26,11 @@ use super::org::Org;
 #[resource(
     table = "audit_event",
     scope = "cluster",
+    // Read-only API surface — writes come only from the
+    // daemon's hash-chained `audit::audit_write` helper. Exposing
+    // create / update / delete over HTTP would let a caller break
+    // the chain's invariants.
+    api_verbs = "get, list",
     // Any non-NONE session is rejected for CREATE / UPDATE /
     // DELETE — audit rows arrive only through the state machine.
     // SELECT currently follows the same rule; IAM-6 will split

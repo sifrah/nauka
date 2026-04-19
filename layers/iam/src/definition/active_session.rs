@@ -23,7 +23,11 @@ use super::user::User;
     // `$auth = NONE` arm). No cross-user view in IAM-8 — listing
     // someone else's sessions would require an explicit permission
     // once RoleBinding catches up.
-    permissions = "$auth = NONE OR $this.user = $auth.id"
+    permissions = "$auth = NONE OR $this.user = $auth.id",
+    // Create happens at signin time on the leader, not over the
+    // API. Delete = explicit revoke (future: `nauka session
+    // revoke <uid>`). Update never makes sense.
+    api_verbs = "get, list, delete"
 )]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct ActiveSession {

@@ -25,7 +25,11 @@ use super::user::User;
 #[resource(
     table = "password_reset_token",
     scope = "cluster",
-    permissions = "$auth = NONE"
+    permissions = "$auth = NONE",
+    // Fully internal — daemon path is the only reader/writer.
+    // `api_verbs = ""` keeps the resource off every generated
+    // surface (REST, GraphQL, CLI). It still registers its DDL.
+    api_verbs = ""
 )]
 #[derive(Serialize, Deserialize, SurrealValue, Debug, Clone)]
 pub struct PasswordResetToken {
