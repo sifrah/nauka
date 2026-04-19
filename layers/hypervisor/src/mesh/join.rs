@@ -80,11 +80,6 @@ struct IamOrgCreateRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-struct IamOrgListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct IamProjectCreateRequest {
     jwt: String,
     org: String,
@@ -93,26 +88,11 @@ struct IamProjectCreateRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-struct IamProjectListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct IamEnvCreateRequest {
     jwt: String,
     project: String,
     slug: String,
     display_name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IamEnvListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IamRoleListRequest {
-    jwt: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -134,21 +114,11 @@ struct IamRoleUnbindRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-struct IamBindingsListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct IamSaCreateRequest {
     jwt: String,
     org: String,
     slug: String,
     display_name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IamSaListRequest {
-    jwt: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,22 +129,9 @@ struct IamTokenCreateRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-struct IamTokenListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct IamTokenRevokeRequest {
     jwt: String,
     token_id: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IamAuditListRequest {
-    #[serde(default)]
-    jwt: String,
-    #[serde(default)]
-    limit: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -189,21 +146,11 @@ struct IamPasswordResetReq {
 }
 
 #[derive(Serialize, Deserialize)]
-struct IamSessionListRequest {
-    jwt: String,
-}
-
-#[derive(Serialize, Deserialize)]
 struct IamUserSetActiveRequest {
     jwt: String,
     email: String,
     active: bool,
     reason: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IamUserListRequest {
-    jwt: String,
 }
 
 pub fn generate_pin() -> String {
@@ -747,35 +694,6 @@ async fn handle_connection(
                 tracing::warn!(event = "iam.org.create.fail", slug = %req.slug, error = %e);
             }
         }
-    } else if v.get("iam_org_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_org_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_org_list".into()));
-        }
-        let req: IamOrgListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_orgs(db, &req.jwt).await {
-            Ok(orgs) => {
-                let rows: Vec<serde_json::Value> = orgs
-                    .into_iter()
-                    .map(|o| {
-                        serde_json::json!({
-                            "slug": o.slug,
-                            "display_name": o.display_name,
-                            "owner": o.owner.id(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "orgs": rows }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
     } else if v.get("iam_project_create").is_some() {
         if !peer_addr.ip().is_loopback() {
             let _ = writer
@@ -809,36 +727,6 @@ async fn handle_connection(
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
                 tracing::warn!(event = "iam.project.create.fail", slug = %req.slug, error = %e);
-            }
-        }
-    } else if v.get("iam_project_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_project_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_project_list".into()));
-        }
-        let req: IamProjectListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_projects(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|p| {
-                        serde_json::json!({
-                            "uid": p.uid,
-                            "slug": p.slug,
-                            "org": p.org.id(),
-                            "display_name": p.display_name,
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "projects": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
         }
     } else if v.get("iam_env_create").is_some() {
@@ -881,66 +769,6 @@ async fn handle_connection(
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
                 tracing::warn!(event = "iam.env.create.fail", slug = %req.slug, error = %e);
-            }
-        }
-    } else if v.get("iam_env_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_env_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_env_list".into()));
-        }
-        let req: IamEnvListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_envs(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "uid": e.uid,
-                            "slug": e.slug,
-                            "project": e.project.id(),
-                            "display_name": e.display_name,
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "envs": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
-    } else if v.get("iam_role_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_role_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_role_list".into()));
-        }
-        let req: IamRoleListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_roles(db, &req.jwt).await {
-            Ok(roles) => {
-                let rows: Vec<serde_json::Value> = roles
-                    .into_iter()
-                    .map(|r| {
-                        serde_json::json!({
-                            "slug": r.slug,
-                            "kind": r.kind,
-                            "org": r.org.as_ref().map(|o| o.id().to_string()),
-                            "permissions": r.permissions.iter().map(|p| p.id().to_string()).collect::<Vec<_>>(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "roles": rows }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
         }
     } else if v.get("iam_role_bind").is_some() {
@@ -1021,36 +849,6 @@ async fn handle_connection(
                 let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
         }
-    } else if v.get("iam_bindings_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_bindings_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_bindings_list".into()));
-        }
-        let req: IamBindingsListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_bindings(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|b| {
-                        serde_json::json!({
-                            "uid": b.uid,
-                            "principal": b.principal.id(),
-                            "role": b.role.id(),
-                            "org": b.org.id(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "bindings": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
     } else if v.get("iam_sa_create").is_some() {
         if !peer_addr.ip().is_loopback() {
             let _ = writer
@@ -1092,35 +890,6 @@ async fn handle_connection(
                 tracing::warn!(event = "iam.sa.create.fail", slug = %req.slug, error = %e);
             }
         }
-    } else if v.get("iam_sa_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_sa_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_sa_list".into()));
-        }
-        let req: IamSaListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_service_accounts(db, &req.jwt).await {
-            Ok(sas) => {
-                let rows: Vec<serde_json::Value> = sas
-                    .into_iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "slug": s.slug,
-                            "org": s.org.id(),
-                            "display_name": s.display_name,
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "service_accounts": rows }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
     } else if v.get("iam_token_create").is_some() {
         if !peer_addr.ip().is_loopback() {
             let _ = writer
@@ -1152,35 +921,6 @@ async fn handle_connection(
                 tracing::warn!(event = "iam.token.create.fail", name = %req.name, error = %e);
             }
         }
-    } else if v.get("iam_token_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_token_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_token_list".into()));
-        }
-        let req: IamTokenListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_api_tokens(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|t| {
-                        serde_json::json!({
-                            "token_id": t.token_id,
-                            "name": t.name,
-                            "service_account": t.service_account.id(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "tokens": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
     } else if v.get("iam_token_revoke").is_some() {
         if !peer_addr.ip().is_loopback() {
             let _ = writer
@@ -1197,50 +937,6 @@ async fn handle_connection(
             Ok(()) => {
                 let _ = writer.write_all(b"{\"ok\":true}\n").await;
                 tracing::info!(event = "iam.token.revoke.ok", token_id = %req.token_id);
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
-    } else if v.get("iam_audit_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_audit_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_audit_list".into()));
-        }
-        let req: IamAuditListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        // IAM-5 does not yet enforce per-principal audit filtering —
-        // any authenticated caller can read the full log. The JWT is
-        // still required so we can reject unauthenticated callers
-        // cleanly (calls without a token result in auth failure).
-        if nauka_iam::authenticate(db, &req.jwt).await.is_err() {
-            let _ = writer.write_all(b"{\"error\":\"unauthenticated\"}\n").await;
-            return Ok(());
-        }
-        let limit = if req.limit == 0 { 50 } else { req.limit };
-        match nauka_iam::list_audit(db, limit).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "uid": e.uid,
-                            "actor": e.actor,
-                            "action": e.action,
-                            "target": e.target,
-                            "org": e.org.as_ref().map(|r| r.id().to_string()),
-                            "outcome": e.outcome,
-                            "prev_hash": e.prev_hash,
-                            "hash": e.hash,
-                            "at": e.at.to_string(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "events": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
             Err(e) => {
                 let body = serde_json::json!({ "error": e.to_string() }).to_string();
@@ -1319,37 +1015,6 @@ async fn handle_connection(
                 tracing::warn!(event = "iam.password.reset.fail", error = %e);
             }
         }
-    } else if v.get("iam_session_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_session_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_session_list".into()));
-        }
-        let req: IamSessionListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_sessions(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "uid": s.uid,
-                            "user": s.user.id(),
-                            "ip": s.ip,
-                            "user_agent": s.user_agent,
-                            "last_active_at": s.last_active_at.to_string(),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "sessions": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-        }
     } else if v.get("iam_user_set_active").is_some() {
         if !peer_addr.ip().is_loopback() {
             let _ = writer
@@ -1381,36 +1046,6 @@ async fn handle_connection(
                     email = %req.email,
                     error = %e
                 );
-            }
-        }
-    } else if v.get("iam_user_list").is_some() {
-        if !peer_addr.ip().is_loopback() {
-            let _ = writer
-                .write_all(b"{\"error\":\"iam_user_list requires loopback\"}\n")
-                .await;
-            return Err(MeshError::Join("non-loopback iam_user_list".into()));
-        }
-        let req: IamUserListRequest =
-            serde_json::from_value(v).map_err(|e| MeshError::Join(e.to_string()))?;
-        match nauka_iam::list_users(db, &req.jwt).await {
-            Ok(rows) => {
-                let json: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|u| {
-                        serde_json::json!({
-                            "email": u.email,
-                            "display_name": u.display_name,
-                            "active": u.active,
-                            "email_verified_at": u.email_verified_at.map(|d| d.to_string()),
-                        })
-                    })
-                    .collect();
-                let body = serde_json::json!({ "ok": true, "users": json }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
-            }
-            Err(e) => {
-                let body = serde_json::json!({ "error": e.to_string() }).to_string();
-                let _ = writer.write_all(format!("{body}\n").as_bytes()).await;
             }
         }
     } else if v.get("iam_signin").is_some() {

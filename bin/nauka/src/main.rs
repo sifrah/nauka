@@ -657,30 +657,23 @@ async fn handle_user(matches: &clap::ArgMatches) -> Result<()> {
 }
 
 async fn cmd_user_list() -> Result<()> {
-    let jwt = require_token()?;
-    let req = serde_json::json!({ "iam_user_list": true, "jwt": jwt });
-    let resp =
-        mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let empty = Vec::new();
-    let rows = resp
-        .get("users")
-        .and_then(|x| x.as_array())
-        .unwrap_or(&empty);
+    let client = api_client()?;
+    let rows = client
+        .user()
+        .list()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     cli_out::section(&format!("users ({}):", rows.len()));
-    for u in rows {
-        let email = u.get("email").and_then(|x| x.as_str()).unwrap_or("?");
-        let dn = u
-            .get("display_name")
-            .and_then(|x| x.as_str())
-            .unwrap_or("?");
-        let active = u.get("active").and_then(|x| x.as_bool()).unwrap_or(true);
+    for u in &rows {
+        let status = if u.active { "active  " } else { "DISABLED" };
         let verified = u
-            .get("email_verified_at")
-            .and_then(|x| x.as_str())
-            .unwrap_or("-");
-        let status = if active { "active  " } else { "DISABLED" };
+            .email_verified_at
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".into());
         cli_out::say(format_args!(
-            "  {email:<30}  {status}  {dn:<24}  verified={verified}"
+            "  {:<30}  {status}  {:<24}  verified={verified}",
+            u.email, u.display_name
         ));
     }
     Ok(())
@@ -857,23 +850,15 @@ async fn handle_org(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_org_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .org()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("orgs")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("orgs ({}):", rows.len()));
-            for o in rows {
-                let slug = o.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
-                let dn = o
-                    .get("display_name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {slug:<16}  {dn}"));
+            for o in &rows {
+                cli_out::say(format_args!("  {:<16}  {}", o.slug, o.display_name));
             }
             Ok(())
         }
@@ -907,25 +892,21 @@ async fn handle_project(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_project_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .project()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("projects")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("projects ({}):", rows.len()));
-            for p in rows {
-                let uid = p.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
-                let slug = p.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
-                let org = p.get("org").and_then(|x| x.as_str()).unwrap_or("?");
-                let dn = p
-                    .get("display_name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {uid:<24}  {slug:<10}  {org:<16}  {dn}"));
+            for p in &rows {
+                cli_out::say(format_args!(
+                    "  {:<24}  {:<10}  {:<16}  {}",
+                    p.uid,
+                    p.slug,
+                    p.org.id(),
+                    p.display_name
+                ));
             }
             Ok(())
         }
@@ -959,25 +940,21 @@ async fn handle_env(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_env_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .env()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("envs")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("envs ({}):", rows.len()));
-            for e in rows {
-                let uid = e.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
-                let slug = e.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
-                let proj = e.get("project").and_then(|x| x.as_str()).unwrap_or("?");
-                let dn = e
-                    .get("display_name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {uid:<24}  {slug:<12}  {proj:<24}  {dn}"));
+            for e in &rows {
+                cli_out::say(format_args!(
+                    "  {:<24}  {:<12}  {:<24}  {}",
+                    e.uid,
+                    e.slug,
+                    e.project.id(),
+                    e.display_name
+                ));
             }
             Ok(())
         }
@@ -1028,26 +1005,19 @@ fn role_cmd() -> Command {
 async fn handle_role(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_role_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .role()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("roles")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("roles ({}):", rows.len()));
-            for r in rows {
-                let slug = r.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
-                let kind = r.get("kind").and_then(|x| x.as_str()).unwrap_or("?");
-                let pcount = r
-                    .get("permissions")
-                    .and_then(|x| x.as_array())
-                    .map(|a| a.len())
-                    .unwrap_or(0);
+            for r in &rows {
                 cli_out::say(format_args!(
-                    "  {slug:<24}  {kind:<10}  {pcount} permissions"
+                    "  {:<24}  {:<10}  {} permissions",
+                    r.slug,
+                    r.kind,
+                    r.permissions.len()
                 ));
             }
             Ok(())
@@ -1092,21 +1062,20 @@ async fn handle_role(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("bindings", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_bindings_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .role_binding()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("bindings")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("bindings ({}):", rows.len()));
-            for b in rows {
-                let principal = b.get("principal").and_then(|x| x.as_str()).unwrap_or("?");
-                let role = b.get("role").and_then(|x| x.as_str()).unwrap_or("?");
-                let org = b.get("org").and_then(|x| x.as_str()).unwrap_or("?");
-                cli_out::say(format_args!("  {principal:<28}  {role:<16}  {org}"));
+            for b in &rows {
+                cli_out::say(format_args!(
+                    "  {:<28}  {:<16}  {}",
+                    b.principal.id(),
+                    b.role.id(),
+                    b.org.id()
+                ));
             }
             Ok(())
         }
@@ -1189,24 +1158,20 @@ async fn handle_service_account(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_sa_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .service_account()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("service_accounts")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("service accounts ({}):", rows.len()));
-            for s in rows {
-                let slug = s.get("slug").and_then(|x| x.as_str()).unwrap_or("?");
-                let org = s.get("org").and_then(|x| x.as_str()).unwrap_or("?");
-                let dn = s
-                    .get("display_name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {slug:<24}  {org:<16}  {dn}"));
+            for s in &rows {
+                cli_out::say(format_args!(
+                    "  {:<24}  {:<16}  {}",
+                    s.slug,
+                    s.org.id(),
+                    s.display_name
+                ));
             }
             Ok(())
         }
@@ -1243,24 +1208,20 @@ async fn handle_token(matches: &clap::ArgMatches) -> Result<()> {
             Ok(())
         }
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({ "iam_token_list": true, "jwt": jwt });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .api_token()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("tokens")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("api tokens ({}):", rows.len()));
-            for t in rows {
-                let tid = t.get("token_id").and_then(|x| x.as_str()).unwrap_or("?");
-                let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-                let sa = t
-                    .get("service_account")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {tid:<24}  {name:<20}  {sa}"));
+            for t in &rows {
+                cli_out::say(format_args!(
+                    "  {:<24}  {:<20}  {}",
+                    t.token_id,
+                    t.name,
+                    t.service_account.id()
+                ));
             }
             Ok(())
         }
@@ -1301,35 +1262,33 @@ fn audit_cmd() -> Command {
 async fn handle_audit(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", sub)) => {
-            let jwt = require_token()?;
             let limit: usize = sub
                 .get_one::<String>("limit")
                 .map(|s| s.parse())
                 .transpose()?
                 .unwrap_or(50);
-            let req = serde_json::json!({
-                "iam_audit_list": true,
-                "jwt": jwt,
-                "limit": limit,
-            });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let mut rows = client
+                .audit_event()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("events")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
+            // Newest-first ordering was the old IPC contract. The
+            // generic LIST endpoint returns insertion-order; sort
+            // here until the server-side filter surface lands in
+            // 342-D (?limit, ?cursor).
+            rows.sort_by(|a, b| b.at.to_string().cmp(&a.at.to_string()));
+            rows.truncate(limit);
             cli_out::section(&format!("audit events ({}):", rows.len()));
-            for e in rows {
-                let action = e.get("action").and_then(|x| x.as_str()).unwrap_or("?");
-                let actor = e.get("actor").and_then(|x| x.as_str()).unwrap_or("?");
-                let target = e.get("target").and_then(|x| x.as_str()).unwrap_or("?");
-                let at = e.get("at").and_then(|x| x.as_str()).unwrap_or("?");
-                let outcome = e.get("outcome").and_then(|x| x.as_str()).unwrap_or("?");
-                let hash = e.get("hash").and_then(|x| x.as_str()).unwrap_or("?");
-                let short_hash = if hash.len() >= 8 { &hash[..8] } else { hash };
+            for e in &rows {
+                let short_hash = if e.hash.len() >= 8 {
+                    &e.hash[..8]
+                } else {
+                    e.hash.as_str()
+                };
                 cli_out::say(format_args!(
-                    "  {at}  {action:<6}  {actor:<32}  {target:<40}  {outcome}  {short_hash}"
+                    "  {}  {:<6}  {:<32}  {:<40}  {}  {short_hash}",
+                    e.at, e.action, e.actor, e.target, e.outcome
                 ));
             }
             Ok(())
@@ -1407,28 +1366,18 @@ fn session_cmd() -> Command {
 async fn handle_session(matches: &clap::ArgMatches) -> Result<()> {
     match matches.subcommand() {
         Some(("list", _)) => {
-            let jwt = require_token()?;
-            let req = serde_json::json!({
-                "iam_session_list": true,
-                "jwt": jwt,
-            });
-            let resp = mesh::request_json(mesh::DEFAULT_JOIN_PORT, req)
+            let client = api_client()?;
+            let rows = client
+                .active_session()
+                .list()
+                .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let empty = Vec::new();
-            let rows = resp
-                .get("sessions")
-                .and_then(|x| x.as_array())
-                .unwrap_or(&empty);
             cli_out::section(&format!("active sessions ({}):", rows.len()));
-            for s in rows {
-                let uid = s.get("uid").and_then(|x| x.as_str()).unwrap_or("?");
-                let ip = s.get("ip").and_then(|x| x.as_str()).unwrap_or("?");
-                let ua = s.get("user_agent").and_then(|x| x.as_str()).unwrap_or("?");
-                let at = s
-                    .get("last_active_at")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("?");
-                cli_out::say(format_args!("  {uid}  {ip:<16}  {ua:<8}  {at}"));
+            for s in &rows {
+                cli_out::say(format_args!(
+                    "  {}  {:<16}  {:<8}  {}",
+                    s.uid, s.ip, s.user_agent, s.last_active_at
+                ));
             }
             Ok(())
         }
