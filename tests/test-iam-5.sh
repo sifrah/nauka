@@ -45,12 +45,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -115,16 +116,16 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: mutations on node-1 should emit audit events ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 30 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 30 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice failed"
 
-ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme' 2>&1" | grep -q "org created: $ORG_SLUG" \
     || die "org create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka project create --org '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam project create --org '$ORG_SLUG' \
     --slug web --display-name 'Web' 2>&1" | grep -q "project created:" \
     || die "project create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka service-account create --org '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam service-account create --org '$ORG_SLUG' \
     --slug ci --display-name 'CI' 2>&1" | grep -q "service account created" \
     || die "SA create failed"
 ok "  org + project + SA created on node-1"
@@ -132,7 +133,7 @@ ok "  org + project + SA created on node-1"
 # Phase 3: audit log visible on node-1 (read after write)
 log ""
 log "═══ Phase 3: node-1 audit log shows every mutation ═══"
-audit1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka audit list 2>&1' || true)
+audit1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam audit list 2>&1' || true)
 echo "$audit1" | grep -q "audit events" \
     || { echo "$audit1" | sed 's/^/    [audit1] /'; die "audit list failed on node-1"; }
 # Expect at least three create events (org + project + SA).
@@ -155,9 +156,9 @@ ok "  all three targets present in the log"
 log ""
 log "═══ Phase 4: Raft replicates audit events to node-3 ═══"
 ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
     || die "alice login on node-3 failed"
-audit3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka audit list 2>&1')
+audit3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam audit list 2>&1')
 echo "$audit3" | grep -q "org:$ORG_SLUG" \
     || { echo "$audit3" | sed 's/^/    /'; die "org audit not on node-3"; }
 echo "$audit3" | grep -q "project:${ORG_SLUG}-web" \
@@ -171,14 +172,14 @@ ok "  node-3 sees the same audit events (replicated via Raft)"
 log ""
 log "═══ Phase 5: hash chain continuity ═══"
 # Each mutation so far should have chained onto the previous. The
-# nauka audit list CLI shows short hashes (first 8 chars); to
+# nauka iam audit list CLI shows short hashes (first 8 chars); to
 # validate the full chain we fetch JSON via the raw IPC handler.
 # Simpler here: list events via CLI, extract hashes, and verify
 # each row's `prev_hash` matches the previous row's `hash` column.
 # CLI prints `  <at>  <action>  <actor>  <target>  <hash8>`; the full
 # prev_hash isn't displayed, so the check lives in the cargo tests.
 # On Hetzner we just confirm the count and ordering.
-event_count=$(ssh_node "${IPS[0]}" 'timeout 30 nauka audit list --limit 20 2>&1 \
+event_count=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam audit list --limit 20 2>&1 \
     | grep -cE " create +user:" || true')
 [[ $event_count -ge 3 ]] \
     || die "expected ≥3 events after mutations, got $event_count"
@@ -191,23 +192,23 @@ log "═══ Phase 6: delete events appear alongside creates ═══"
 # Bind bob to viewer + unbind to produce create + delete audit events.
 # Create bob first.
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' 'bob-pw' 'bob-pw' \
-    | timeout 30 nauka user create --email 'bob@example.com' --display-name 'Bob' 2>&1" \
+    | timeout 30 nauka iam user create --email 'bob@example.com' --display-name 'Bob' 2>&1" \
     | grep -q "user created: bob@example.com" || die "bob create failed"
 # Log back in as alice so the token slot is hers (user create
 # auto-logs-in the new principal, same convention the earlier
 # scripts rely on).
 ssh_node "${IPS[0]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
     || die "alice re-login failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka role bind --principal 'bob@example.com' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam role bind --principal 'bob@example.com' \
     --role viewer --org '$ORG_SLUG' 2>&1" \
     | grep -q "bound bob@example.com to role viewer" \
     || die "role bind failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka role unbind --principal 'bob@example.com' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam role unbind --principal 'bob@example.com' \
     --role viewer --org '$ORG_SLUG' 2>&1" \
     | grep -q "unbound bob@example.com" \
     || die "role unbind failed"
-audit_last=$(ssh_node "${IPS[0]}" 'timeout 30 nauka audit list --limit 40 2>&1' || true)
+audit_last=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam audit list --limit 40 2>&1' || true)
 echo "$audit_last" | grep -qE ' delete +user:[^ ]+ +role_binding:' \
     || { echo "$audit_last" | sed 's/^/    [audit_last] /'; \
          die "delete event missing for unbind"; }

@@ -125,9 +125,9 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: seed alice + $ORG_SLUG org ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 60 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 60 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme' 2>&1" | grep -q "org created: $ORG_SLUG" \
     || die "org create failed"
 ok "  alice + $ORG_SLUG seeded on node-1"
@@ -136,18 +136,18 @@ ok "  alice + $ORG_SLUG seeded on node-1"
 log ""
 log "═══ Phase 3: generated CLI via SDK over HTTPS ═══"
 HV_LIST=$(ssh_node "${IPS[1]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
     timeout 30 nauka hypervisor list 2>&1" || true)
 echo "$HV_LIST" | grep -qE "hypervisors \($NODE_COUNT\):" \
     || { echo "$HV_LIST" | sed 's/^/    /'; die "hypervisor list failed on node-2"; }
 ok "  node-2 'nauka hypervisor list' → $NODE_COUNT rows"
 
 ORG_LIST=$(ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
-    timeout 30 nauka org list 2>&1" || true)
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
+    timeout 30 nauka iam org list 2>&1" || true)
 echo "$ORG_LIST" | grep -q "$ORG_SLUG" \
     || { echo "$ORG_LIST" | sed 's/^/    /'; die "org list missing $ORG_SLUG on node-3 — Raft replication?"; }
-ok "  node-3 'nauka org list' → $ORG_SLUG visible (Raft replicated)"
+ok "  node-3 'nauka iam org list' → $ORG_SLUG visible (Raft replicated)"
 
 MESH_GET=$(ssh_node "${IPS[0]}" 'timeout 30 nauka mesh get 2>&1' || true)
 echo "$MESH_GET" | grep -q "mesh id" \

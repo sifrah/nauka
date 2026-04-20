@@ -48,12 +48,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -125,22 +126,22 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: alice creates org / SA / token on node-1 ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 30 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 30 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice create failed"
 ok "  alice created"
 
-ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme' 2>&1" | grep -q "org created: $ORG_SLUG" \
     || die "org create failed"
 ok "  org $ORG_SLUG created"
 
-ssh_node "${IPS[0]}" "timeout 30 nauka service-account create --org '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam service-account create --org '$ORG_SLUG' \
     --slug '$SA_SLUG' --display-name 'CI bot' 2>&1" \
     | grep -q "service account created: $SA_SCOPED" \
     || die "service account create failed"
 ok "  service account $SA_SCOPED created"
 
-token_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka token create \
+token_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam token create \
     --service-account '$SA_SCOPED' --name '$TOKEN_NAME' 2>&1" || true)
 echo "$token_out" | grep -q "token \`$TOKEN_NAME\` minted" \
     || { echo "$token_out" | sed 's/^/    /'; die "token mint failed"; }
@@ -161,14 +162,14 @@ ok "  token minted: ${TOKEN:0:12}…${TOKEN: -4}"
 log ""
 log "═══ Phase 3: token record replicated to node-3 ═══"
 ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
     || die "alice login on node-3 failed"
-sa_list3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka service-account list 2>&1')
+sa_list3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam service-account list 2>&1')
 echo "$sa_list3" | grep -q "$SA_SCOPED" \
     || { echo "$sa_list3" | sed 's/^/    /'; die "SA not on node-3"; }
 ok "  SA $SA_SCOPED visible on node-3"
 
-tok_list3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka token list 2>&1')
+tok_list3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam token list 2>&1')
 echo "$tok_list3" | grep -q "$TOKEN_NAME" \
     || { echo "$tok_list3" | sed 's/^/    /'; die "token not on node-3"; }
 ok "  token $TOKEN_NAME visible on node-3 (hash replicated, secret never left node-1)"
@@ -205,15 +206,15 @@ ok "  (signin round-trip validated in cargo tests; CLI auth lands in IAM-4b)"
 log ""
 log "═══ Phase 5: revoke token_id=$token_id from node-2 ═══"
 ssh_node "${IPS[1]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
     || die "alice login on node-2 failed"
-revoke_out=$(ssh_node "${IPS[1]}" "timeout 30 nauka token revoke --token-id '$token_id' 2>&1" || true)
+revoke_out=$(ssh_node "${IPS[1]}" "timeout 30 nauka iam token revoke --token-id '$token_id' 2>&1" || true)
 echo "$revoke_out" | grep -q "token $token_id revoked" \
     || { echo "$revoke_out" | sed 's/^/    /'; die "revoke failed"; }
 ok "  revoke from node-2 succeeded (Raft-forwarded to leader)"
 
 sleep 3
-tok_list1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka token list 2>&1')
+tok_list1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam token list 2>&1')
 echo "$tok_list1" | grep -q "$TOKEN_NAME" \
     && die "token still visible on node-1 after revoke"
 ok "  token gone from node-1 (revocation replicated)"

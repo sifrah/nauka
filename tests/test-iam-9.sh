@@ -45,12 +45,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -115,12 +116,12 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: seed users + org (alice owns acme) ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$BOB_PW' '$BOB_PW' \
-    | timeout 60 nauka user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" \
+    | timeout 60 nauka iam user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" \
     | grep -q "user created: $BOB_EMAIL" || die "bob create failed"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 60 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 60 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme' 2>&1" | grep -q "org created: $ORG_SLUG" \
     || die "org create failed"
 ok "  bob + alice + $ORG_SLUG org seeded"
@@ -128,7 +129,7 @@ ok "  bob + alice + $ORG_SLUG org seeded"
 # Phase 3: bind without reason fails at CLI parse (required arg)
 log ""
 log "═══ Phase 3: role bind requires --reason (IAM-9 gate) ═══"
-miss_reason=$(ssh_node "${IPS[0]}" "timeout 30 nauka role bind \
+miss_reason=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam role bind \
     --principal '$BOB_EMAIL' --role viewer --org '$ORG_SLUG' 2>&1 || true")
 echo "$miss_reason" | grep -qiE "required|reason" \
     || { echo "$miss_reason" | sed 's/^/    /'; die "missing reason not flagged"; }
@@ -137,7 +138,7 @@ ok "  CLI rejects bind without --reason"
 # Phase 4: bind with reason, confirm replication
 log ""
 log "═══ Phase 4: bind with reason, verify reason replicates ═══"
-bind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka role bind \
+bind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam role bind \
     --principal '$BOB_EMAIL' --role viewer --org '$ORG_SLUG' \
     --reason 'onboarding bob to the ops team' 2>&1" || true)
 echo "$bind_out" | grep -q "bound $BOB_EMAIL" \
@@ -146,8 +147,8 @@ ok "  bind succeeded on node-1"
 
 sleep 3
 audit_list=$(ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
-    timeout 30 nauka audit list --limit 20 2>&1")
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
+    timeout 30 nauka iam audit list --limit 20 2>&1")
 echo "$audit_list" | grep -q "success:onboarding bob to the ops team" \
     || { echo "$audit_list" | sed 's/^/    /'; die "reason not in audit outcome"; }
 ok "  audit outcome carries the reason on node-3 (Raft replication)"
@@ -157,22 +158,22 @@ log ""
 log "═══ Phase 5: deactivate bob, signin blocked cluster-wide ═══"
 # login as alice on node-1 again so the token file is hers (admin).
 ssh_node "${IPS[0]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null" \
     || die "alice re-login"
-ssh_node "${IPS[0]}" "timeout 30 nauka user deactivate --email '$BOB_EMAIL' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam user deactivate --email '$BOB_EMAIL' \
     --reason 'leaving the company' 2>&1" | grep -q "user deactivated: $BOB_EMAIL" \
     || die "deactivate failed"
 ok "  bob deactivated from node-1"
 
 sleep 3
 bad_bob=$(ssh_node "${IPS[1]}" "printf '%s\n' '$BOB_PW' \
-    | timeout 60 nauka login --email '$BOB_EMAIL' 2>&1 || true")
+    | timeout 60 nauka iam login --email '$BOB_EMAIL' 2>&1 || true")
 echo "$bad_bob" | grep -qiE "error|invalid" \
     || { echo "$bad_bob" | sed 's/^/    /'; die "deactivated bob signed in on node-2"; }
 ok "  bob's signin rejected on node-2 (deactivation replicated)"
 
 bad_bob_n3=$(ssh_node "${IPS[2]}" "printf '%s\n' '$BOB_PW' \
-    | timeout 60 nauka login --email '$BOB_EMAIL' 2>&1 || true")
+    | timeout 60 nauka iam login --email '$BOB_EMAIL' 2>&1 || true")
 echo "$bad_bob_n3" | grep -qiE "error|invalid" \
     || { echo "$bad_bob_n3" | sed 's/^/    /'; die "deactivated bob signed in on node-3"; }
 ok "  bob's signin rejected on node-3"
@@ -180,12 +181,12 @@ ok "  bob's signin rejected on node-3"
 # Phase 6: user list shows the caller's own row (owner-scoped PERMISSIONS)
 log ""
 log "═══ Phase 6: user list is owner-scoped ═══"
-users_out=$(ssh_node "${IPS[0]}" 'timeout 30 nauka user list 2>&1' || true)
+users_out=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam user list 2>&1' || true)
 echo "$users_out" | grep -q "$ALICE_EMAIL" \
     || { echo "$users_out" | sed 's/^/    /'; die "alice does not see her own row"; }
 # PERMISSIONS filter blocks alice from seeing bob (same filter IAM-6 set
 # up for User.password_hash scoping). Admin-view across users will
-# land when RoleBinding enforcement gates `nauka user list` — tracked
+# land when RoleBinding enforcement gates `nauka iam user list` — tracked
 # as a follow-up alongside IAM-9b EmergencyAccess.
 echo "$users_out" | grep -q "$BOB_EMAIL" \
     && { echo "$users_out" | sed 's/^/    /'; die "alice can see bob's row — PERMISSIONS leaked"; }
@@ -194,12 +195,12 @@ ok "  alice sees only her own row; bob hidden until admin enforcement lands"
 # Phase 7: reactivate, signin works again
 log ""
 log "═══ Phase 7: reactivate bob → signin restored ═══"
-ssh_node "${IPS[0]}" "timeout 30 nauka user activate --email '$BOB_EMAIL' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam user activate --email '$BOB_EMAIL' \
     --reason 'rehiring' 2>&1" | grep -q "user activated: $BOB_EMAIL" \
     || die "reactivate failed"
 sleep 3
 good_bob=$(ssh_node "${IPS[1]}" "printf '%s\n' '$BOB_PW' \
-    | timeout 60 nauka login --email '$BOB_EMAIL' 2>&1" || true)
+    | timeout 60 nauka iam login --email '$BOB_EMAIL' 2>&1" || true)
 echo "$good_bob" | grep -q "logged in as $BOB_EMAIL" \
     || { echo "$good_bob" | sed 's/^/    /'; die "reactivated signin failed"; }
 ok "  bob signed in on node-2 after reactivation"

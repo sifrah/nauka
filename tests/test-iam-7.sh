@@ -46,12 +46,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -116,14 +117,14 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: create alice on node-1 ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW_OLD' '$ALICE_PW_OLD' \
-    | timeout 60 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 60 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice create failed"
 ok "  alice created with old password"
 
 # Phase 3: request reset token on node-1, read plaintext from journal
 log ""
 log "═══ Phase 3: request reset token on node-1 ═══"
-reset_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka password reset-request --email '$ALICE_EMAIL' 2>&1" || true)
+reset_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam password reset-request --email '$ALICE_EMAIL' 2>&1" || true)
 echo "$reset_out" | grep -q "if that email is registered" \
     || { echo "$reset_out" | sed 's/^/    /'; die "reset-request CLI output unexpected"; }
 ok "  CLI returned the no-enumeration response"
@@ -139,14 +140,14 @@ log ""
 log "═══ Phase 4: redeem token from node-3 ═══"
 # Complexity reject should happen on node-3 without consuming the token.
 weak=$(ssh_node "${IPS[2]}" "printf 'short\nshort\n' \
-    | timeout 30 nauka password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1 || true")
+    | timeout 30 nauka iam password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1 || true")
 echo "$weak" | grep -qiE 'password|complexity' \
     || { echo "$weak" | sed 's/^/    /'; die "weak password not rejected"; }
 ok "  weak password rejected (token not consumed)"
 
 # Now a real reset with a proper password.
 ok_reset=$(ssh_node "${IPS[2]}" "printf '%s\n%s\n' '$ALICE_PW_NEW' '$ALICE_PW_NEW' \
-    | timeout 60 nauka password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1" || true)
+    | timeout 60 nauka iam password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1" || true)
 echo "$ok_reset" | grep -q "password updated" \
     || { echo "$ok_reset" | sed 's/^/    /'; die "reset failed on node-3"; }
 ok "  reset succeeded from node-3 (Raft-forwarded)"
@@ -155,13 +156,13 @@ ok "  reset succeeded from node-3 (Raft-forwarded)"
 log ""
 log "═══ Phase 5: rotation verified cluster-wide ═══"
 bad_login=$(ssh_node "${IPS[1]}" "printf '%s\n' '$ALICE_PW_OLD' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1 || true")
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1 || true")
 echo "$bad_login" | grep -qiE 'error|invalid' \
     || { echo "$bad_login" | sed 's/^/    /'; die "old password still accepted"; }
 ok "  old password rejected on node-2"
 
 good_login=$(ssh_node "${IPS[1]}" "printf '%s\n' '$ALICE_PW_NEW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1" || true)
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1" || true)
 echo "$good_login" | grep -q "logged in as $ALICE_EMAIL" \
     || { echo "$good_login" | sed 's/^/    /'; die "new password not accepted"; }
 ok "  new password works on node-2"
@@ -170,7 +171,7 @@ ok "  new password works on node-2"
 log ""
 log "═══ Phase 6: token replay rejected (consumed flag replicated) ═══"
 replay=$(ssh_node "${IPS[0]}" "printf '%s\n%s\n' 'yet-another-pw-1' 'yet-another-pw-1' \
-    | timeout 60 nauka password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1 || true")
+    | timeout 60 nauka iam password reset --token-id '$token_id' --email '$ALICE_EMAIL' 2>&1 || true")
 echo "$replay" | grep -qiE 'error|invalid' \
     || { echo "$replay" | sed 's/^/    /'; die "consumed token accepted on replay"; }
 ok "  replay rejected — consumed flag replicated cluster-wide"

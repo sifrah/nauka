@@ -40,12 +40,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -110,13 +111,13 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: signup alice on node-1 ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 60 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 60 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "signup failed"
 ok "  signup succeeded"
 
 # Let the session write replicate.
 sleep 2
-session_out1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka session list 2>&1')
+session_out1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam session list 2>&1')
 echo "$session_out1" | grep -q "active sessions (1):" \
     || { echo "$session_out1" | sed 's/^/    /'; die "expected 1 session after signup"; }
 ok "  node-1: 1 active session after signup"
@@ -125,19 +126,19 @@ ok "  node-1: 1 active session after signup"
 log ""
 log "═══ Phase 3: login alice on node-3 → 2 sessions cluster-wide ═══"
 ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1" \
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1" \
     | grep -q "logged in as $ALICE_EMAIL" || die "login on node-3 failed"
 ok "  login on node-3"
 
 sleep 2
 # Both nodes should now see 2 sessions (one for signup on node-1, one
 # for login on node-3). Raft replicates both rows.
-session_out_n1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka session list 2>&1')
+session_out_n1=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam session list 2>&1')
 echo "$session_out_n1" | grep -q "active sessions (2):" \
     || { echo "$session_out_n1" | sed 's/^/    /'; die "node-1 did not see 2 sessions"; }
 ok "  node-1 sees 2 sessions (signup + login replicated)"
 
-session_out_n3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka session list 2>&1')
+session_out_n3=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam session list 2>&1')
 echo "$session_out_n3" | grep -q "active sessions (2):" \
     || { echo "$session_out_n3" | sed 's/^/    /'; die "node-3 did not see 2 sessions"; }
 ok "  node-3 sees 2 sessions (cluster-wide view)"
@@ -146,10 +147,10 @@ ok "  node-3 sees 2 sessions (cluster-wide view)"
 log ""
 log "═══ Phase 4: cross-user isolation — bob sees zero ═══"
 ssh_node "${IPS[1]}" "printf '%s\n%s\n' 'bob-pw-iam8-test' 'bob-pw-iam8-test' \
-    | timeout 60 nauka user create --email 'bob@example.com' --display-name 'Bob' 2>&1" \
+    | timeout 60 nauka iam user create --email 'bob@example.com' --display-name 'Bob' 2>&1" \
     | grep -q "user created: bob@example.com" || die "bob create failed"
 # bob's signup created his own session. List as bob → 1 session (his own).
-bob_sessions=$(ssh_node "${IPS[1]}" 'timeout 30 nauka session list 2>&1')
+bob_sessions=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam session list 2>&1')
 echo "$bob_sessions" | grep -q "active sessions (1):" \
     || { echo "$bob_sessions" | sed 's/^/    /'; die "bob should see 1 session (his own)"; }
 # and bob must NOT see alice's uid in his list.

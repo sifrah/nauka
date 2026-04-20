@@ -62,6 +62,20 @@ async fn run() -> Result<()> {
         .arg_required_else_help(true)
         .subcommand(hypervisor_cmd())
         .subcommand(mesh_cmd())
+        .subcommand(iam_cmd());
+
+    match app.get_matches().subcommand() {
+        Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
+        Some(("mesh", sub)) => handle_mesh(sub).await,
+        Some(("iam", sub)) => handle_iam(sub).await,
+        _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
+    }
+}
+
+fn iam_cmd() -> Command {
+    Command::new("iam")
+        .about("Identity & access management — users, orgs, roles, tokens, audit")
+        .arg_required_else_help(true)
         .subcommand(login_cmd())
         .subcommand(logout_cmd())
         .subcommand(whoami_cmd())
@@ -74,11 +88,11 @@ async fn run() -> Result<()> {
         .subcommand(token_cmd())
         .subcommand(audit_cmd())
         .subcommand(password_cmd())
-        .subcommand(session_cmd());
+        .subcommand(session_cmd())
+}
 
-    match app.get_matches().subcommand() {
-        Some(("hypervisor", sub)) => handle_hypervisor(sub).await,
-        Some(("mesh", sub)) => handle_mesh(sub).await,
+async fn handle_iam(matches: &clap::ArgMatches) -> Result<()> {
+    match matches.subcommand() {
         Some(("login", sub)) => cmd_login(sub).await,
         Some(("logout", _)) => cmd_logout().await,
         Some(("whoami", _)) => cmd_whoami().await,
@@ -92,7 +106,7 @@ async fn run() -> Result<()> {
         Some(("audit", sub)) => handle_audit(sub).await,
         Some(("password", sub)) => handle_password(sub).await,
         Some(("session", sub)) => handle_session(sub).await,
-        _ => anyhow::bail!("unknown subcommand — run 'nauka --help'"),
+        _ => anyhow::bail!("unknown iam subcommand"),
     }
 }
 
@@ -889,7 +903,7 @@ fn env_cmd() -> Command {
 fn require_token() -> Result<String> {
     nauka_iam::load_token()
         .map_err(|e| anyhow::anyhow!("{e}"))?
-        .ok_or_else(|| anyhow::anyhow!("not logged in — run `nauka login --email <you>` first"))
+        .ok_or_else(|| anyhow::anyhow!("not logged in — run `nauka iam login --email <you>` first"))
 }
 
 async fn handle_org(matches: &clap::ArgMatches) -> Result<()> {
@@ -1416,7 +1430,7 @@ async fn handle_password(matches: &clap::ArgMatches) -> Result<()> {
             mesh::request_json(mesh::DEFAULT_JOIN_PORT, req).map_err(|e| anyhow::anyhow!("{e}"))?;
             cli_out::say("password updated");
             cli_out::say(format_args!(
-                "  run `nauka login --email {email}` to mint a fresh JWT"
+                "  run `nauka iam login --email {email}` to mint a fresh JWT"
             ));
             Ok(())
         }

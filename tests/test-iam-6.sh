@@ -48,12 +48,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -118,14 +119,14 @@ ok "all $NODE_COUNT nodes agree on cluster"
 log ""
 log "═══ Phase 2: login / signup still works post-Argon2id-bump ═══"
 create=$(ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 60 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" || true)
+    | timeout 60 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" || true)
 echo "$create" | grep -q "user created: $ALICE_EMAIL" \
     || { echo "$create" | sed 's/^/    /'; die "user create failed"; }
 ok "  user created (Argon2id hash computed locally)"
 
 # Login from a follower — exercises both hash verify + JWT replay.
 login=$(ssh_node "${IPS[1]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 60 nauka login --email '$ALICE_EMAIL' 2>&1" || true)
+    | timeout 60 nauka iam login --email '$ALICE_EMAIL' 2>&1" || true)
 echo "$login" | grep -q "logged in as $ALICE_EMAIL" \
     || { echo "$login" | sed 's/^/    /'; die "login on follower failed"; }
 ok "  login on node-2 (verifies hash + mints JWT)"

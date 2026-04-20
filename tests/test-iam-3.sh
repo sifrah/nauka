@@ -53,12 +53,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -133,22 +134,22 @@ ok "all $NODE_COUNT nodes agree on the full cluster"
 log ""
 log "═══ Phase 2: create bob + alice + alice's org tree ═══"
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$BOB_PW' '$BOB_PW' \
-    | timeout 30 nauka user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" \
+    | timeout 30 nauka iam user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" \
     | grep -q "user created: $BOB_EMAIL" || die "bob create failed"
 ok "  bob created on node-1"
 
 ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 30 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
+    | timeout 30 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" \
     | grep -q "user created: $ALICE_EMAIL" || die "alice create failed"
 ok "  alice created on node-1 (token belongs to alice)"
 
-ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme Corp' 2>&1" | grep -q "org created: $ORG_SLUG" \
     || die "org create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka project create --org '$ORG_SLUG' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam project create --org '$ORG_SLUG' \
     --slug '$PROJECT_SLUG' --display-name 'Web Platform' 2>&1" \
     | grep -q "project created:" || die "project create failed"
-ssh_node "${IPS[0]}" "timeout 30 nauka env create --project '${ORG_SLUG}-${PROJECT_SLUG}' \
+ssh_node "${IPS[0]}" "timeout 30 nauka iam env create --project '${ORG_SLUG}-${PROJECT_SLUG}' \
     --slug '$ENV_SLUG' --display-name 'Production' 2>&1" \
     | grep -q "env created:" || die "env create failed"
 ok "  alice's org tree created"
@@ -158,7 +159,7 @@ ok "  alice's org tree created"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 3: seeded primitive roles visible cluster-wide ═══"
-role_list=$(ssh_node "${IPS[0]}" 'timeout 30 nauka role list 2>&1')
+role_list=$(ssh_node "${IPS[0]}" 'timeout 30 nauka iam role list 2>&1')
 echo "$role_list" | grep -q "viewer" \
     || { echo "$role_list" | sed 's/^/    /'; die "viewer role not visible"; }
 echo "$role_list" | grep -q "editor" \
@@ -167,8 +168,8 @@ ok "  node-1 sees viewer + editor primitive roles"
 
 # Same on a follower: confirms the Raft replay carried the seed writes.
 role_list3=$(ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
-    timeout 30 nauka role list 2>&1")
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1 >/dev/null; \
+    timeout 30 nauka iam role list 2>&1")
 echo "$role_list3" | grep -q "viewer" \
     || { echo "$role_list3" | sed 's/^/    /'; die "viewer not replicated to node-3"; }
 ok "  node-3 sees the same roles (Raft replayed the seed writes)"
@@ -178,11 +179,11 @@ ok "  node-3 sees the same roles (Raft replayed the seed writes)"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 4: bob without a binding sees nothing ═══"
-ssh_node "${IPS[1]}" 'nauka logout >/dev/null 2>&1' || true
+ssh_node "${IPS[1]}" 'nauka iam logout >/dev/null 2>&1' || true
 ssh_node "${IPS[1]}" "printf '%s\n' '$BOB_PW' \
-    | timeout 30 nauka login --email '$BOB_EMAIL' 2>&1" \
+    | timeout 30 nauka iam login --email '$BOB_EMAIL' 2>&1" \
     | grep -q "logged in as $BOB_EMAIL" || die "bob login on node-2 failed"
-bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka org list 2>&1' || true)
+bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$bob_orgs" | grep -q "orgs (0):" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see 0 orgs without a binding"; }
 ok "  bob on node-2: 0 orgs visible"
@@ -192,7 +193,7 @@ ok "  bob on node-2: 0 orgs visible"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 5: alice binds bob as viewer on node-1 ═══"
-bind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka role bind \
+bind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam role bind \
     --principal '$BOB_EMAIL' --role viewer --org '$ORG_SLUG' 2>&1" || true)
 echo "$bind_out" | grep -q "bound $BOB_EMAIL to role viewer" \
     || { echo "$bind_out" | sed 's/^/    /'; die "bind failed"; }
@@ -207,19 +208,19 @@ log "═══ Phase 6: binding replicates — bob sees the tree on node-3 ═�
 # (he's still logged in there from Phase 4) — this exercises the
 # binding-record Raft replication.
 sleep 3
-bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka org list 2>&1' || true)
+bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$bob_orgs" | grep -q "orgs (1):" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see 1 org after binding"; }
 echo "$bob_orgs" | grep -q "$ORG_SLUG" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see acme"; }
 ok "  bob on node-2 sees acme (binding replicated)"
 
-bob_projects=$(ssh_node "${IPS[1]}" 'timeout 30 nauka project list 2>&1' || true)
+bob_projects=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam project list 2>&1' || true)
 echo "$bob_projects" | grep -q "projects (1):" \
     || { echo "$bob_projects" | sed 's/^/    /'; die "bob should see 1 project via scope chain"; }
 ok "  bob sees the project (scope chain walked correctly)"
 
-bob_envs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka env list 2>&1' || true)
+bob_envs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam env list 2>&1' || true)
 echo "$bob_envs" | grep -q "envs (1):" \
     || { echo "$bob_envs" | sed 's/^/    /'; die "bob should see 1 env via scope chain"; }
 ok "  bob sees the env (two-hop scope chain)"
@@ -229,14 +230,14 @@ ok "  bob sees the env (two-hop scope chain)"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 7: alice unbinds bob ═══"
-unbind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka role unbind \
+unbind_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam role unbind \
     --principal '$BOB_EMAIL' --role viewer --org '$ORG_SLUG' 2>&1" || true)
 echo "$unbind_out" | grep -q "unbound $BOB_EMAIL" \
     || { echo "$unbind_out" | sed 's/^/    /'; die "unbind failed"; }
 ok "  alice unbound bob"
 
 sleep 3
-bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka org list 2>&1' || true)
+bob_orgs=$(ssh_node "${IPS[1]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$bob_orgs" | grep -q "orgs (0):" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see 0 orgs after unbind"; }
 ok "  bob on node-2: 0 orgs (unbind replicated)"

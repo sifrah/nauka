@@ -53,12 +53,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -132,19 +133,19 @@ ok "all $NODE_COUNT nodes agree on the full cluster"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 2: create bob + alice (bob first so node-1's token ends up as alice's) ═══"
-# `nauka user create` auto-logs-in on the calling node, so the last
+# `nauka iam user create` auto-logs-in on the calling node, so the last
 # `user create` dictates whose JWT sits in `~/.config/nauka/token`.
 # Phase 3 expects alice's token on node-1, so create bob first.
 # Creating both on the leader avoids the Raft-forward race a
 # follower write would hit during a transient re-election.
 create_bob=$(ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$BOB_PW' '$BOB_PW' \
-    | timeout 30 nauka user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" || true)
+    | timeout 30 nauka iam user create --email '$BOB_EMAIL' --display-name 'Bob' 2>&1" || true)
 echo "$create_bob" | grep -q "user created: $BOB_EMAIL" \
     || { echo "$create_bob" | sed 's/^/    /'; die "bob user create failed"; }
 ok "  bob created on node-1"
 
 create_alice=$(ssh_node "${IPS[0]}" "printf '%s\n%s\n' '$ALICE_PW' '$ALICE_PW' \
-    | timeout 30 nauka user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" || true)
+    | timeout 30 nauka iam user create --email '$ALICE_EMAIL' --display-name 'Alice' 2>&1" || true)
 echo "$create_alice" | grep -q "user created: $ALICE_EMAIL" \
     || { echo "$create_alice" | sed 's/^/    /'; die "alice user create failed"; }
 ok "  alice created on node-1 — node-1 now holds alice's token"
@@ -155,19 +156,19 @@ ok "  alice created on node-1 — node-1 now holds alice's token"
 log ""
 log "═══ Phase 3: alice creates org / project / env ═══"
 # node-1 already holds alice's token from the auto-login at user create.
-org_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+org_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Acme Corp' 2>&1" || true)
 echo "$org_out" | grep -q "org created: $ORG_SLUG" \
     || { echo "$org_out" | sed 's/^/    /'; die "org create failed on node-1"; }
 ok "  org $ORG_SLUG created (owner=alice)"
 
-proj_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka project create --org '$ORG_SLUG' \
+proj_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam project create --org '$ORG_SLUG' \
     --slug '$PROJECT_SLUG' --display-name 'Web Platform' 2>&1" || true)
 echo "$proj_out" | grep -q "project created:" \
     || { echo "$proj_out" | sed 's/^/    /'; die "project create failed on node-1"; }
 ok "  project $ORG_SLUG-$PROJECT_SLUG created"
 
-env_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka env create --project '${ORG_SLUG}-${PROJECT_SLUG}' \
+env_out=$(ssh_node "${IPS[0]}" "timeout 30 nauka iam env create --project '${ORG_SLUG}-${PROJECT_SLUG}' \
     --slug '$ENV_SLUG' --display-name 'Production' 2>&1" || true)
 echo "$env_out" | grep -q "env created:" \
     || { echo "$env_out" | sed 's/^/    /'; die "env create failed on node-1"; }
@@ -179,24 +180,24 @@ ok "  env ${ORG_SLUG}-${PROJECT_SLUG}-${ENV_SLUG} created"
 log ""
 log "═══ Phase 4: alice on node-3 sees her org tree (Raft replicated) ═══"
 login_out=$(ssh_node "${IPS[2]}" "printf '%s\n' '$ALICE_PW' \
-    | timeout 30 nauka login --email '$ALICE_EMAIL' 2>&1" || true)
+    | timeout 30 nauka iam login --email '$ALICE_EMAIL' 2>&1" || true)
 echo "$login_out" | grep -q "logged in as $ALICE_EMAIL" \
     || { echo "$login_out" | sed 's/^/    /'; die "alice login on node-3 failed"; }
 ok "  alice logged in on node-3"
 
-org_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka org list 2>&1' || true)
+org_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$org_list" | grep -q "orgs (1):" \
     || { echo "$org_list" | sed 's/^/    /'; die "alice should see 1 org on node-3"; }
 echo "$org_list" | grep -q "$ORG_SLUG" \
     || { echo "$org_list" | sed 's/^/    /'; die "acme not in alice's org list on node-3"; }
 ok "  alice on node-3 sees org $ORG_SLUG"
 
-proj_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka project list 2>&1' || true)
+proj_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam project list 2>&1' || true)
 echo "$proj_list" | grep -q "projects (1):" \
     || { echo "$proj_list" | sed 's/^/    /'; die "alice should see 1 project on node-3"; }
 ok "  alice on node-3 sees project via scope_by = \"org\""
 
-env_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka env list 2>&1' || true)
+env_list=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam env list 2>&1' || true)
 echo "$env_list" | grep -q "envs (1):" \
     || { echo "$env_list" | sed 's/^/    /'; die "alice should see 1 env on node-3"; }
 ok "  alice on node-3 sees env via scope_by chain (env → project → org)"
@@ -207,24 +208,24 @@ ok "  alice on node-3 sees env via scope_by chain (env → project → org)"
 log ""
 log "═══ Phase 5: bob sees empty lists (PERMISSIONS filter) ═══"
 # Log out alice on node-3 so the next login stores bob's token.
-ssh_node "${IPS[2]}" 'nauka logout 2>&1 >/dev/null' || true
+ssh_node "${IPS[2]}" 'nauka iam logout 2>&1 >/dev/null' || true
 bob_login=$(ssh_node "${IPS[2]}" "printf '%s\n' '$BOB_PW' \
-    | timeout 30 nauka login --email '$BOB_EMAIL' 2>&1" || true)
+    | timeout 30 nauka iam login --email '$BOB_EMAIL' 2>&1" || true)
 echo "$bob_login" | grep -q "logged in as $BOB_EMAIL" \
     || { echo "$bob_login" | sed 's/^/    /'; die "bob login on node-3 failed"; }
 ok "  bob logged in on node-3"
 
-bob_orgs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka org list 2>&1' || true)
+bob_orgs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$bob_orgs" | grep -q "orgs (0):" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see 0 orgs"; }
 ok "  bob sees 0 orgs"
 
-bob_projects=$(ssh_node "${IPS[2]}" 'timeout 30 nauka project list 2>&1' || true)
+bob_projects=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam project list 2>&1' || true)
 echo "$bob_projects" | grep -q "projects (0):" \
     || { echo "$bob_projects" | sed 's/^/    /'; die "bob should see 0 projects"; }
 ok "  bob sees 0 projects"
 
-bob_envs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka env list 2>&1' || true)
+bob_envs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam env list 2>&1' || true)
 echo "$bob_envs" | grep -q "envs (0):" \
     || { echo "$bob_envs" | sed 's/^/    /'; die "bob should see 0 envs"; }
 ok "  bob sees 0 envs"
@@ -237,7 +238,7 @@ log "═══ Phase 6: bob cannot steal alice's org slug ═══"
 # Raft is the single source of truth: the id `org:acme` is taken,
 # so the CREATE fails with an already-exists error even though bob
 # is authenticated.
-bob_steal=$(ssh_node "${IPS[2]}" "timeout 30 nauka org create --slug '$ORG_SLUG' \
+bob_steal=$(ssh_node "${IPS[2]}" "timeout 30 nauka iam org create --slug '$ORG_SLUG' \
     --display-name 'Bob Corp' 2>&1 || true")
 echo "$bob_steal" | grep -qiE 'already exists|Database record' \
     || { echo "$bob_steal" | sed 's/^/    /'; die "bob's duplicate org create should have failed"; }
@@ -248,14 +249,14 @@ ok "  duplicate org rejected (already-exists)"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 7: bob creates his own org ═══"
-bob_org=$(ssh_node "${IPS[2]}" "timeout 30 nauka org create --slug 'bobs-co' \
+bob_org=$(ssh_node "${IPS[2]}" "timeout 30 nauka iam org create --slug 'bobs-co' \
     --display-name 'Bobs Co' 2>&1" || true)
 echo "$bob_org" | grep -q "org created: bobs-co" \
     || { echo "$bob_org" | sed 's/^/    /'; die "bob's own org create failed"; }
 ok "  bob created bobs-co"
 
 # bob now sees 1 org (his), alice still sees her 1 org (hers).
-bob_orgs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka org list 2>&1' || true)
+bob_orgs=$(ssh_node "${IPS[2]}" 'timeout 30 nauka iam org list 2>&1' || true)
 echo "$bob_orgs" | grep -q "orgs (1):" \
     || { echo "$bob_orgs" | sed 's/^/    /'; die "bob should see exactly 1 org"; }
 echo "$bob_orgs" | grep -q "bobs-co" \

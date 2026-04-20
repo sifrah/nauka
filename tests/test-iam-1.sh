@@ -6,14 +6,14 @@
 #   1. Provision 3 fresh Hetzner VMs, deploy musl binary.
 #   2. init on node-1 (no --peering), join on node-2 + node-3.
 #   3. Wait for voter promotions — cluster is 3 voters.
-#   4. `nauka user create` on node-1 → hashes password in Rust,
+#   4. `nauka iam user create` on node-1 → hashes password in Rust,
 #      Writer::create routes through Raft → replicates to all nodes.
-#   5. `nauka login` succeeds on node-2 (a follower) for the user
+#   5. `nauka iam login` succeeds on node-2 (a follower) for the user
 #      created on the leader — proves the user record replicated.
 #   6. Token file on node-2 exists at mode 0600 and contains a JWT.
-#   7. `nauka whoami` on node-2 prints the correct email.
-#   8. `nauka logout` on node-2 removes the token file.
-#   9. `nauka login` with the wrong password errors out.
+#   7. `nauka iam whoami` on node-2 prints the correct email.
+#   8. `nauka iam logout` on node-2 removes the token file.
+#   9. `nauka iam login` with the wrong password errors out.
 #  10. Teardown — leave all nodes, destroy VMs.
 #
 # Policy reminders (see CLAUDE.md memory):
@@ -58,12 +58,13 @@ cleanup() {
     local rc=$?
     if [[ ${KEEP_SERVERS:-0} == 1 ]]; then
         log "KEEP_SERVERS=1 — leaving servers (rc=$rc)"
-        [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
-        return
+        if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+        return $rc
     fi
     log "tearing down..."
     for n in "${NAMES[@]}"; do hcloud server delete "$n" >/dev/null 2>&1 || true; done
-    [[ $rc -ne 0 ]] && fail "FAILED — logs in $RUN_DIR"
+    if [[ $rc -ne 0 ]]; then fail "FAILED — logs in $RUN_DIR"; fi
+    return $rc
 }
 trap cleanup EXIT
 
@@ -136,15 +137,15 @@ ok "all $NODE_COUNT nodes agree on the full cluster"
 # Phase 2: user create on leader — tests the Rust-hash + Raft path
 # ═══════════════════════════════════════════════════════════════════
 log ""
-log "═══ Phase 2: nauka user create on node-1 ═══"
+log "═══ Phase 2: nauka iam user create on node-1 ═══"
 
-# `nauka user create` prompts for the password twice (main + confirm).
+# `nauka iam user create` prompts for the password twice (main + confirm).
 # Piping two lines via stdin exercises rpassword's non-TTY fallback —
 # what the CLI does for scripted / batch operator use.
 # `|| true` + explicit echo keeps the CLI's own error message visible;
 # without it, `set -e` kills the script before the diagnostic prints.
 create_out=$(ssh_node "${IPS[0]}" "printf '%s\\n%s\\n' '$PASSWORD' '$PASSWORD' \
-    | timeout 15 nauka user create --email '$EMAIL' --display-name '$DISPLAY_NAME' 2>&1" || true)
+    | timeout 15 nauka iam user create --email '$EMAIL' --display-name '$DISPLAY_NAME' 2>&1" || true)
 echo "$create_out" | grep -q "user created: $EMAIL" \
     || { echo "$create_out" | sed 's/^/    [create] /'; die "user create on node-1 failed"; }
 ok "  user $EMAIL created on node-1"
@@ -162,7 +163,7 @@ ok "  node-1: token file at 0600"
 log ""
 log "═══ Phase 3: login on node-2 (a follower) ═══"
 login_out=$(ssh_node "${IPS[1]}" "printf '%s\\n' '$PASSWORD' \
-    | timeout 15 nauka login --email '$EMAIL' 2>&1" || true)
+    | timeout 15 nauka iam login --email '$EMAIL' 2>&1" || true)
 echo "$login_out" | grep -q "logged in as $EMAIL" \
     || { echo "$login_out" | sed 's/^/    [login2] /'; die "login on node-2 failed — user didn't replicate"; }
 ok "  login on node-2 succeeded"
@@ -183,7 +184,7 @@ ok "  node-2: token file at 0600 and carries a JWT"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 4: whoami on node-2 ═══"
-whoami_out=$(ssh_node "${IPS[1]}" 'timeout 10 nauka whoami 2>&1')
+whoami_out=$(ssh_node "${IPS[1]}" 'timeout 10 nauka iam whoami 2>&1')
 echo "$whoami_out" | grep -q "email:.*$EMAIL" \
     || { echo "$whoami_out" | sed 's/^/    /'; die "whoami didn't show email on node-2"; }
 echo "$whoami_out" | grep -q "access:.*user" \
@@ -196,14 +197,14 @@ ok "  whoami shows email=$EMAIL and access=user"
 log ""
 log "═══ Phase 5: login on node-3 + wrong password rejected ═══"
 login3=$(ssh_node "${IPS[2]}" "printf '%s\\n' '$PASSWORD' \
-    | timeout 15 nauka login --email '$EMAIL' 2>&1" || true)
+    | timeout 15 nauka iam login --email '$EMAIL' 2>&1" || true)
 echo "$login3" | grep -q "logged in as $EMAIL" \
     || { echo "$login3" | sed 's/^/    [login3] /'; die "login on node-3 failed"; }
 ok "  login on node-3 succeeded"
 
 # Wrong password → daemon returns the signin error, CLI exits non-zero.
 bad=$(ssh_node "${IPS[2]}" "printf 'not-the-password\\n' \
-    | timeout 15 nauka login --email '$EMAIL' 2>&1 || true")
+    | timeout 15 nauka iam login --email '$EMAIL' 2>&1 || true")
 echo "$bad" | grep -qiE 'error:|invalid' \
     || { echo "$bad" | sed 's/^/    /'; die "wrong-password login should have errored"; }
 ok "  wrong password rejected"
@@ -213,7 +214,7 @@ ok "  wrong password rejected"
 # ═══════════════════════════════════════════════════════════════════
 log ""
 log "═══ Phase 6: logout on node-2 removes the token ═══"
-ssh_node "${IPS[1]}" 'timeout 10 nauka logout 2>&1' | grep -q 'logged out' \
+ssh_node "${IPS[1]}" 'timeout 10 nauka iam logout 2>&1' | grep -q 'logged out' \
     || die "logout didn't print success"
 ssh_node "${IPS[1]}" "test -f /root/.config/nauka/token" \
     && die "node-2: token file still present after logout"
