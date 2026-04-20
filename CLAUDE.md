@@ -49,3 +49,39 @@ Open-source platform that turns bare-metal servers into a programmable cloud.
 - Manual peering: no automatic discovery, operator approves join requests
 - One layer = one directory in `layers/`, one Rust crate
 - Lower layers never depend on higher layers
+
+## Working Principles
+
+These bias toward caution over speed. For trivial tasks, use judgment.
+
+### 1. Think before coding
+Don't assume, don't hide confusion, surface tradeoffs.
+- State assumptions explicitly; if uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop, name what's confusing, ask.
+
+### 2. Simplicity first
+Minimum code that solves the problem. Nothing speculative.
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If 200 lines could be 50, rewrite it.
+
+### 3. Surgical changes
+Touch only what you must. Clean up only your own mess.
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+- Remove imports/variables/functions that *your* changes made unused; leave pre-existing dead code alone unless asked.
+- Every changed line should trace directly to the user's request.
+
+### 4. Goal-driven execution
+Define success criteria, loop until verified.
+- "Add validation" → write tests for invalid inputs, then make them pass.
+- "Fix the bug" → write a test that reproduces it, then make it pass.
+- "Refactor X" → ensure tests pass before and after.
+- For multi-step work, state a brief plan with a verify step per item.
+- Remember the Hetzner rule: real multi-node VM validation is required before any #issue is called done.
