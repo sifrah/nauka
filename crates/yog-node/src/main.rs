@@ -3,6 +3,8 @@
 //! Les couches QUIC (transport inter-nœuds) et Raft (métadonnées cluster)
 //! viendront se poser sur ces mêmes primitives.
 
+mod api;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,6 +78,12 @@ enum Cmd {
         /// (la liste --peers devient inutile pour le healing).
         #[arg(long)]
         node_id: Option<u64>,
+        /// Adresse de l'API HTTP publique (upload/download).
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        http: SocketAddr,
+        /// Désactive l'API HTTP.
+        #[arg(long)]
+        no_http: bool,
         /// Désactive la découverte DHT (implicite dès que --keys est fourni
         /// sans --peers) : cluster statique / air-gapped.
         #[arg(long)]
@@ -237,6 +245,8 @@ async fn main() -> Result<()> {
             peers,
             scrub_interval,
             node_id,
+            http,
+            no_http,
             no_discover,
             dht_bootstrap,
         } => {
@@ -317,6 +327,21 @@ async fn main() -> Result<()> {
                     let dht_kp = yog_discovery::derive_dht_keypair(&keys_dir)?;
                     let client = yog_discovery::make_client(boots.as_deref())?;
                     tokio::spawn(run_discovery(app.clone(), client, dht_kp, advertise_addr));
+                }
+
+                if !no_http {
+                    let api_state = Arc::new(api::ApiState {
+                        store: store.clone(),
+                        app: app.clone(),
+                        self_id: self_id.clone(),
+                        config: ErasureConfig::default(),
+                        tmp_dir: cli.data_dir.join("tmp"),
+                    });
+                    tokio::spawn(async move {
+                        if let Err(e) = api::serve_http(http, api_state).await {
+                            eprintln!("API HTTP arrêtée: {e:#}");
+                        }
+                    });
                 }
                 let store_bg = store.clone();
                 tokio::spawn(async move {
@@ -571,6 +596,7 @@ async fn main() -> Result<()> {
             let manifest = FileManifest {
                 file_hash,
                 file_size,
+                name: file.file_name().map(|n| n.to_string_lossy().into_owned()),
                 config: cfg,
                 stripes: stripes_meta,
             };

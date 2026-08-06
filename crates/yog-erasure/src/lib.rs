@@ -102,6 +102,9 @@ pub struct FileManifest {
     /// BLAKE3 du fichier original complet.
     pub file_hash: ContentHash,
     pub file_size: u64,
+    /// Nom d'affichage (fourni à l'upload). N'entre pas dans le hash.
+    #[serde(default)]
+    pub name: Option<String>,
     pub config: ErasureConfig,
     pub stripes: Vec<StripeMeta>,
 }
@@ -224,6 +227,7 @@ pub fn encode_file(
         FileManifest {
             file_hash: hash_bytes(data),
             file_size: data.len() as u64,
+            name: None,
             config: *cfg,
             stripes: stripes_meta,
         },

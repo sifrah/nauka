@@ -75,6 +75,27 @@ impl RaftApp {
         self.state_machine.read_state()
     }
 
+    /// Écrit une commande dans le registre : localement si ce nœud est
+    /// leader, sinon en la transmettant au leader via le transport.
+    pub async fn write(&self, cmd: AppCommand) -> Result<AppResponse> {
+        match self.raft.client_write(cmd.clone()).await {
+            Ok(resp) => Ok(resp.data),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {
+                let addr: std::net::SocketAddr = f
+                    .leader_node
+                    .ok_or_else(|| anyhow::anyhow!("pas de leader connu"))?
+                    .addr
+                    .parse()?;
+                let client = yog_transport::PeerClient::connect(addr).await?;
+                match admin_call(&client, &AdminRequest::Write(cmd)).await? {
+                    AdminResponse::Ok(resp) => Ok(resp),
+                    other => anyhow::bail!("écriture via le leader: {other:?}"),
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Membres actuels (id → adresse), d'après les métriques Raft.
     pub fn members(&self) -> BTreeMap<NodeId, String> {
         let metrics = self.raft.metrics().borrow().clone();
