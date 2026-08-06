@@ -48,4 +48,9 @@ async fn derive_publish_resolve_roundtrip() {
     // Un cluster étranger ne trouve rien sous SA clé.
     let nothing = resolve_seeds(&resolver, &kp_other.public_key()).await.unwrap();
     assert!(nothing.is_empty());
+
+    // Auto-détection d'IP via la DHT (BEP42) : sur le testnet local, les
+    // nœuds nous voient depuis la loopback.
+    let detected = yog_discovery::detect_public_ip(Some(&testnet.bootstrap)).await.unwrap();
+    assert_eq!(detected, Some("127.0.0.1".parse().unwrap()));
 }

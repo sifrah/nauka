@@ -268,11 +268,48 @@ async fn main() -> Result<()> {
                 (None, id) => id,
             };
 
+            let boots: Option<Vec<String>> =
+                if dht_bootstrap.is_empty() { None } else { Some(dht_bootstrap.clone()) };
+
+            // Adresse annoncée aux autres nœuds : explicite (--advertise),
+            // sinon auto-détectée via la DHT en mode découverte, sinon
+            // l'adresse d'écoute.
+            let advertise_addr = match advertise {
+                Some(a) => a,
+                None if discover => {
+                    match yog_discovery::detect_public_ip(boots.as_deref()).await {
+                        Ok(Some(ip)) => {
+                            let a = SocketAddr::new(ip, listen.port());
+                            println!(
+                                "IP publique détectée via la DHT: {ip} — adresse annoncée {a} \
+                                 (le port {} et le port {} doivent être joignables en UDP)",
+                                listen.port(),
+                                listen.port() + 1
+                            );
+                            a
+                        }
+                        Ok(None) => {
+                            eprintln!(
+                                "IP publique indétectable via la DHT — repli sur l'adresse \
+                                 d'écoute {listen} (utiliser --advertise si elle n'est pas \
+                                 joignable par les autres nœuds)"
+                            );
+                            listen
+                        }
+                        Err(e) => {
+                            eprintln!("détection d'IP publique en échec ({e:#}) — repli sur {listen}");
+                            listen
+                        }
+                    }
+                }
+                None => listen,
+            };
+
             if let Some(id) = node_id {
                 // Mode consensus : membership et registre viennent de Raft.
                 let app = yog_raft::RaftApp::start(id, &cli.data_dir.join("raft")).await?;
                 raft_handler = Some(app.clone());
-                let self_id = advertise.unwrap_or(listen).to_string();
+                let self_id = advertise_addr.to_string();
 
                 if discover {
                     let keys_dir = cli
@@ -280,10 +317,7 @@ async fn main() -> Result<()> {
                         .clone()
                         .context("--discover nécessite --keys (identité du cluster)")?;
                     let dht_kp = yog_discovery::derive_dht_keypair(&keys_dir)?;
-                    let boots =
-                        if dht_bootstrap.is_empty() { None } else { Some(dht_bootstrap.clone()) };
                     let client = yog_discovery::make_client(boots.as_deref())?;
-                    let advertise_addr = advertise.unwrap_or(listen);
                     tokio::spawn(run_discovery(
                         app.clone(),
                         client,
@@ -335,7 +369,7 @@ async fn main() -> Result<()> {
                 });
             } else if !peers.is_empty() {
                 // Mode statique (sans consensus) : vue du cluster en config.
-                let view = yog_cluster::ClusterView::new(advertise.unwrap_or(listen), &peers);
+                let view = yog_cluster::ClusterView::new(advertise_addr, &peers);
                 tokio::spawn(yog_cluster::run_background(store.clone(), view, interval));
             }
             yog_transport::serve(store, listen, raft_handler).await?;

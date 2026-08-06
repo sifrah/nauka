@@ -95,6 +95,26 @@ pub async fn resolve_seeds(client: &Client, public_key: &PublicKey) -> Result<Ve
     Ok(addrs)
 }
 
+/// Détecte l'IP publique de cette machine via la DHT elle-même : les nœuds
+/// Mainline renvoient l'adresse d'où ils nous voient (BEP42) et le client
+/// en fait un consensus. Aucun service tiers, aucune infra.
+///
+/// `None` si la DHT n'a pas (encore) convergé. L'adresse détectée est celle
+/// vue d'internet — elle n'est joignable que si le port est ouvert/forwardé.
+pub async fn detect_public_ip(bootstrap: Option<&[String]>) -> Result<Option<std::net::IpAddr>> {
+    let bootstrap: Option<Vec<String>> = bootstrap.map(|b| b.to_vec());
+    tokio::task::spawn_blocking(move || -> Result<Option<std::net::IpAddr>> {
+        let mut builder = mainline::Dht::builder();
+        if let Some(nodes) = &bootstrap {
+            builder.bootstrap(nodes);
+        }
+        let dht = builder.build()?;
+        dht.bootstrapped();
+        Ok(dht.info().public_address().map(|a| std::net::IpAddr::V4(*a.ip())))
+    })
+    .await?
+}
+
 /// Boucle de publication : tant que `is_leader` est vrai, republie
 /// périodiquement les adresses fournies par `current_seeds`. Les records
 /// DHT s'évaporent naturellement (caches ~heures) : la republication est
