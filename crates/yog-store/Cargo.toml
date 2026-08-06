@@ -1,0 +1,15 @@
+[package]
+name = "yog-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yog-erasure = { path = "../yog-erasure" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

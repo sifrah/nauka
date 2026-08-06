@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/yog-erasure",
+    "crates/yog-store",
+    "crates/yog-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reed-solomon-erasure = { version = "6", features = ["simd-accel"] }

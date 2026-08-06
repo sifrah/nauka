@@ -1,0 +1,11 @@
+[package]
+name = "yog-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yog-erasure = { path = "../yog-erasure" }
+yog-store = { path = "../yog-store" }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }

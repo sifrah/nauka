@@ -1,0 +1,4 @@
+/target
+yog-data/
+*.tmp
+.DS_Store
