@@ -67,14 +67,28 @@ pub(crate) fn endpoint_config() -> quinn::EndpointConfig {
     ec
 }
 
-/// Socket UDP avec des buffers dignes d'un serveur de fichiers : les
-/// valeurs par défaut du système (souvent < 1 Mo) font déborder les rafales
-/// de shards et écroulent le débit.
-pub(crate) fn make_socket(addr: std::net::SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+/// Socket UDP avec des buffers dimensionnés : les valeurs par défaut du
+/// système (souvent < 1 Mo) font déborder les rafales de shards et
+/// écroulent le débit.
+pub(crate) fn make_socket(
+    addr: std::net::SocketAddr,
+    buf_size: usize,
+) -> std::io::Result<std::net::UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    let _ = socket.set_recv_buffer_size(8 * 1024 * 1024);
-    let _ = socket.set_send_buffer_size(8 * 1024 * 1024);
+    let _ = socket.set_recv_buffer_size(buf_size);
+    let _ = socket.set_send_buffer_size(buf_size);
     socket.bind(&addr.into())?;
     Ok(socket.into())
+}
+
+/// Buffers du plan de données : larges, pour le débit.
+pub(crate) const DATA_SOCKET_BUF: usize = 8 * 1024 * 1024;
+/// Buffers du plan consensus : petits, pour borner le délai de queue —
+/// un heartbeat qui attend derrière 8 Mo de shards est un heartbeat mort.
+pub(crate) const CONSENSUS_SOCKET_BUF: usize = 1024 * 1024;
+
+/// Adresse du plan consensus d'un nœud : même hôte, port data + 1.
+pub fn consensus_addr(data_addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    std::net::SocketAddr::new(data_addr.ip(), data_addr.port() + 1)
 }

@@ -9,7 +9,7 @@ use yog_erasure::{encode_file, ErasureConfig};
 use yog_raft::types::{AdminRequest, AdminResponse, AppCommand};
 use yog_raft::{admin_call, write_via_leader, RaftApp};
 use yog_store::ShardStore;
-use yog_transport::server::{make_endpoint, serve_endpoint};
+use yog_transport::server::{make_endpoint_pair, serve_consensus_endpoint, serve_endpoint};
 use yog_transport::PeerClient;
 
 struct Node {
@@ -21,11 +21,12 @@ struct Node {
 async fn spawn_raft_node(id: u64) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
-    let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
-    let addr = endpoint.local_addr().unwrap();
+    let (data, consensus) = make_endpoint_pair("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = data.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store, endpoint, Some(handler)));
+    tokio::spawn(serve_endpoint(store.clone(), data, Some(handler.clone())));
+    tokio::spawn(serve_consensus_endpoint(consensus, handler));
     Node { addr, app, _dir: dir }
 }
 

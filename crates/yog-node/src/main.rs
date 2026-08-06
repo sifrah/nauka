@@ -46,6 +46,8 @@ enum Cmd {
     /// Liste les fichiers stockés.
     List,
     /// Démarre le nœud en mode serveur QUIC (cluster si --peers est fourni).
+    /// En mode consensus (--node-id), le port+1 est réservé au plan Raft :
+    /// plusieurs nœuds sur un même hôte doivent espacer leurs ports de 2.
     Serve {
         #[arg(long, default_value = "0.0.0.0:7311")]
         listen: SocketAddr,
@@ -248,6 +250,31 @@ async fn main() -> Result<()> {
                     .split_once('@')
                     .with_context(|| format!("format attendu id@host:port, reçu {m}"))?;
                 map.insert(id.parse::<u64>()?, addr.to_string());
+            }
+            // Pre-flight : chaque membre doit répondre sur ses DEUX plans,
+            // et le node-id qui répond au plan consensus doit être le bon —
+            // attrape les nœuds morts et les collisions de ports (nœuds
+            // co-hébergés dont les ports ne sont pas espacés d'au moins 2).
+            for (id, addr_str) in &map {
+                let addr: SocketAddr = addr_str.parse()?;
+                let data = PeerClient::connect(addr)
+                    .await
+                    .with_context(|| format!("nœud {id}: plan data {addr} injoignable"))?;
+                data.ping()
+                    .await
+                    .with_context(|| format!("nœud {id}: plan data {addr} ne répond pas"))?;
+                let cons_addr = yog_transport::consensus_addr(addr);
+                let cons = PeerClient::connect_consensus(cons_addr).await.with_context(|| {
+                    format!("nœud {id}: plan consensus {cons_addr} injoignable")
+                })?;
+                match yog_raft::admin_call(&cons, &yog_raft::types::AdminRequest::Metrics).await {
+                    Ok(yog_raft::types::AdminResponse::Metrics { id: got, .. }) if got == *id => {}
+                    Ok(yog_raft::types::AdminResponse::Metrics { id: got, .. }) => bail!(
+                        "collision de ports: {cons_addr} répond avec le node-id {got} au lieu \
+                         de {id} — espacez les ports d'au moins 2 sur un même hôte"
+                    ),
+                    other => bail!("nœud {id}: réponse consensus inattendue: {other:?}"),
+                }
             }
             let first: SocketAddr = map.values().next().unwrap().parse()?;
             let client = PeerClient::connect(first).await?;

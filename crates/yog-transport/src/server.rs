@@ -19,14 +19,29 @@ pub trait RaftHandler: Send + Sync {
 }
 
 /// Démarre le serveur QUIC et sert les requêtes jusqu'à l'arrêt du process.
+/// Avec consensus actif, ouvre aussi le plan dédié sur port+1.
 pub async fn serve(
     store: Arc<ShardStore>,
     listen: SocketAddr,
     raft: Option<Arc<dyn RaftHandler>>,
 ) -> Result<()> {
-    let endpoint = make_endpoint(listen)?;
-    info!("nœud à l'écoute sur {}", endpoint.local_addr()?);
-    serve_endpoint(store, endpoint, raft).await
+    match raft {
+        Some(handler) => {
+            let (data, consensus) = make_endpoint_pair(listen)?;
+            info!(
+                "nœud à l'écoute sur {} (consensus sur {})",
+                data.local_addr()?,
+                consensus.local_addr()?
+            );
+            tokio::spawn(serve_consensus_endpoint(consensus, handler.clone()));
+            serve_endpoint(store, data, Some(handler)).await
+        }
+        None => {
+            let endpoint = make_endpoint(listen)?;
+            info!("nœud à l'écoute sur {}", endpoint.local_addr()?);
+            serve_endpoint(store, endpoint, None).await
+        }
+    }
 }
 
 /// Boucle d'accept sur un endpoint déjà construit (permet aux tests de
@@ -41,7 +56,7 @@ pub async fn serve_endpoint(
         let raft = raft.clone();
         tokio::spawn(async move {
             match incoming.await {
-                Ok(conn) => handle_connection(store, raft, conn).await,
+                Ok(conn) => handle_connection(Some(store), raft, conn).await,
                 Err(e) => warn!("connexion refusée: {e}"),
             }
         });
@@ -49,9 +64,54 @@ pub async fn serve_endpoint(
     Ok(())
 }
 
-/// Construit l'endpoint serveur (exposé pour les tests, qui ont besoin de
-/// l'adresse effective avant de bloquer sur accept).
+/// Boucle d'accept du plan consensus : NE sert QUE les RPCs Raft. Aucun
+/// accès au store — une collision de ports ne peut pas transformer ce plan
+/// en faux plan de données.
+pub async fn serve_consensus_endpoint(
+    endpoint: quinn::Endpoint,
+    handler: Arc<dyn RaftHandler>,
+) -> Result<()> {
+    while let Some(incoming) = endpoint.accept().await {
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            match incoming.await {
+                Ok(conn) => handle_connection(None, Some(handler), conn).await,
+                Err(e) => warn!("connexion refusée: {e}"),
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Construit l'endpoint serveur du plan de données (exposé pour les tests,
+/// qui ont besoin de l'adresse effective avant de bloquer sur accept).
 pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
+    make_endpoint_buf(listen, crate::DATA_SOCKET_BUF)
+}
+
+/// Construit la paire d'endpoints d'un nœud : plan de données sur `listen`,
+/// plan consensus sur port+1 (socket UDP séparé — le trafic de shards ne
+/// peut plus faire la queue devant les heartbeats Raft). Avec un port 0,
+/// cherche une paire de ports contigus libre.
+pub fn make_endpoint_pair(listen: SocketAddr) -> Result<(quinn::Endpoint, quinn::Endpoint)> {
+    if listen.port() != 0 {
+        let data = make_endpoint_buf(listen, crate::DATA_SOCKET_BUF)?;
+        let consensus =
+            make_endpoint_buf(crate::consensus_addr(listen), crate::CONSENSUS_SOCKET_BUF)?;
+        return Ok((data, consensus));
+    }
+    for _ in 0..32 {
+        let data = make_endpoint_buf(listen, crate::DATA_SOCKET_BUF)?;
+        let bound = data.local_addr()?;
+        match make_endpoint_buf(crate::consensus_addr(bound), crate::CONSENSUS_SOCKET_BUF) {
+            Ok(consensus) => return Ok((data, consensus)),
+            Err(_) => continue, // port+1 occupé : on retire une autre paire
+        }
+    }
+    anyhow::bail!("impossible de trouver deux ports contigus libres")
+}
+
+fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> {
     let cert = rcgen::generate_simple_self_signed(vec!["yogfile".into()])
         .context("génération du certificat auto-signé")?;
     let cert_der = CertificateDer::from(cert.cert);
@@ -66,7 +126,7 @@ pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
     let mut config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
     config.transport_config(crate::transport_config());
-    let socket = crate::make_socket(listen)?;
+    let socket = crate::make_socket(listen, buf)?;
     Ok(quinn::Endpoint::new(
         crate::endpoint_config(),
         Some(config),
@@ -78,7 +138,7 @@ pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
 /// Sert toutes les requêtes d'une connexion entrante, un stream à la fois
 /// par tâche (les streams d'une même connexion tournent en parallèle).
 pub async fn handle_connection(
-    store: Arc<ShardStore>,
+    store: Option<Arc<ShardStore>>,
     raft: Option<Arc<dyn RaftHandler>>,
     conn: quinn::Connection,
 ) {
@@ -105,7 +165,12 @@ pub async fn handle_connection(
                     },
                     None => Response::Error("consensus inactif sur ce nœud".into()),
                 },
-                Ok(req) => handle_request(&store, req),
+                Ok(req) => match &store {
+                    Some(s) => handle_request(s, req),
+                    None => Response::Error(
+                        "plan consensus: seules les RPCs Raft sont acceptées ici".into(),
+                    ),
+                },
                 Err(e) => Response::Error(format!("requête illisible: {e}")),
             };
             if let Err(e) = write_message(&mut send, &response).await {

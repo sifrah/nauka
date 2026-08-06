@@ -20,7 +20,17 @@ pub struct PeerClient {
 
 impl PeerClient {
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let socket = crate::make_socket("0.0.0.0:0".parse().unwrap())?;
+        Self::connect_buf(addr, crate::DATA_SOCKET_BUF).await
+    }
+
+    /// Connexion au plan consensus d'un nœud (petits buffers : latence
+    /// bornée plutôt que débit). `addr` est déjà l'adresse consensus.
+    pub async fn connect_consensus(addr: SocketAddr) -> Result<Self> {
+        Self::connect_buf(addr, crate::CONSENSUS_SOCKET_BUF).await
+    }
+
+    async fn connect_buf(addr: SocketAddr, buf: usize) -> Result<Self> {
+        let socket = crate::make_socket("0.0.0.0:0".parse().unwrap(), buf)?;
         let mut endpoint = quinn::Endpoint::new(
             crate::endpoint_config(),
             None,

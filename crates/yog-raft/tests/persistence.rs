@@ -16,40 +16,43 @@ use yog_erasure::{encode_file, ErasureConfig};
 use yog_raft::types::{AdminRequest, AdminResponse, AppCommand};
 use yog_raft::{admin_call, RaftApp};
 use yog_store::ShardStore;
-use yog_transport::server::{make_endpoint, serve_endpoint};
+use yog_transport::server::{make_endpoint_pair, serve_consensus_endpoint, serve_endpoint};
 use yog_transport::PeerClient;
 
 struct Node {
     addr: SocketAddr,
     app: Arc<RaftApp>,
     endpoint: quinn::Endpoint,
+    consensus_endpoint: quinn::Endpoint,
 }
 
 async fn spawn(id: u64, dir: &PathBuf, addr: SocketAddr) -> Node {
     let store = Arc::new(ShardStore::open(dir.join("store")).unwrap());
-    // Après un arrêt, le socket peut mettre un instant à se libérer.
-    let mut endpoint = None;
+    // Après un arrêt, les sockets peuvent mettre un instant à se libérer.
+    let mut pair = None;
     for _ in 0..50 {
-        match make_endpoint(addr) {
-            Ok(e) => {
-                endpoint = Some(e);
+        match make_endpoint_pair(addr) {
+            Ok(p) => {
+                pair = Some(p);
                 break;
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
     }
-    let endpoint = endpoint.expect("socket jamais libéré");
+    let (endpoint, consensus_endpoint) = pair.expect("sockets jamais libérés");
     let addr = endpoint.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store, endpoint.clone(), Some(handler)));
-    Node { addr, app, endpoint }
+    tokio::spawn(serve_endpoint(store.clone(), endpoint.clone(), Some(handler.clone())));
+    tokio::spawn(serve_consensus_endpoint(consensus_endpoint.clone(), handler));
+    Node { addr, app, endpoint, consensus_endpoint }
 }
 
 async fn full_shutdown(nodes: Vec<Node>) {
     for n in &nodes {
         n.app.raft.shutdown().await.unwrap();
         n.endpoint.close(0u32.into(), b"power-cut");
+        n.consensus_endpoint.close(0u32.into(), b"power-cut");
     }
     drop(nodes);
     tokio::time::sleep(Duration::from_millis(300)).await;

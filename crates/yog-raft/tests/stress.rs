@@ -10,25 +10,27 @@ use yog_erasure::{encode_file, ErasureConfig};
 use yog_raft::types::{AdminRequest, AdminResponse, AppCommand};
 use yog_raft::{admin_call, RaftApp};
 use yog_store::ShardStore;
-use yog_transport::server::{make_endpoint, serve_endpoint};
+use yog_transport::server::{make_endpoint_pair, serve_consensus_endpoint, serve_endpoint};
 use yog_transport::PeerClient;
 
 struct Node {
     addr: SocketAddr,
     app: Arc<RaftApp>,
     endpoint: quinn::Endpoint,
+    consensus_endpoint: quinn::Endpoint,
     _dir: tempfile::TempDir,
 }
 
 async fn spawn_raft_node(id: u64, bind: &str) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
-    let endpoint = make_endpoint(bind.parse().unwrap()).unwrap();
+    let (endpoint, consensus_endpoint) = make_endpoint_pair(bind.parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store, endpoint.clone(), Some(handler)));
-    Node { addr, app, endpoint, _dir: dir }
+    tokio::spawn(serve_endpoint(store.clone(), endpoint.clone(), Some(handler.clone())));
+    tokio::spawn(serve_consensus_endpoint(consensus_endpoint.clone(), handler));
+    Node { addr, app, endpoint, consensus_endpoint, _dir: dir }
 }
 
 fn test_manifest(i: usize) -> yog_erasure::FileManifest {
@@ -165,6 +167,7 @@ async fn leader_crash_failover_and_catchup() {
     let crashed_addr = crashed.addr;
     crashed.app.raft.shutdown().await.unwrap();
     crashed.endpoint.close(0u32.into(), b"crash");
+    crashed.consensus_endpoint.close(0u32.into(), b"crash");
     drop(crashed);
     println!("leader {leader_id} crashé");
 
@@ -201,20 +204,21 @@ async fn leader_crash_failover_and_catchup() {
     // Le socket peut mettre un instant à se libérer après le drop.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
-    let mut endpoint = None;
+    let mut pair = None;
     for _ in 0..50 {
-        match make_endpoint(crashed_addr) {
-            Ok(e) => {
-                endpoint = Some(e);
+        match make_endpoint_pair(crashed_addr) {
+            Ok(p) => {
+                pair = Some(p);
                 break;
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
     }
-    let endpoint = endpoint.expect("socket jamais libéré");
+    let (endpoint, consensus_endpoint) = pair.expect("sockets jamais libérés");
     let revived = RaftApp::start(leader_id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = revived.clone();
-    tokio::spawn(serve_endpoint(store, endpoint, Some(handler)));
+    tokio::spawn(serve_endpoint(store.clone(), endpoint, Some(handler.clone())));
+    tokio::spawn(serve_consensus_endpoint(consensus_endpoint, handler));
 
     // Il doit rattraper tout le registre (snapshot ou replay du log).
     wait_registry_size(&revived, BEFORE + AFTER, 60).await;

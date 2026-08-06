@@ -31,10 +31,12 @@ impl RaftNetworkFactory<TypeConfig> for QuicRaftNetworkFactory {
     type Network = QuicRaftClient;
 
     async fn new_client(&mut self, _target: NodeId, node: &BasicNode) -> Self::Network {
-        QuicRaftClient {
-            addr: node.addr.parse().expect("adresse de nœud invalide dans le membership"),
-            client: None,
-        }
+        // Le membership stocke l'adresse data ; les RPCs Raft passent par le
+        // plan consensus dédié (port+1) — jamais dans la même file que les
+        // shards.
+        let data: std::net::SocketAddr =
+            node.addr.parse().expect("adresse de nœud invalide dans le membership");
+        QuicRaftClient { addr: yog_transport::consensus_addr(data), client: None }
     }
 }
 
@@ -50,7 +52,7 @@ impl QuicRaftClient {
     {
         if self.client.is_none() {
             self.client = Some(
-                PeerClient::connect(self.addr)
+                PeerClient::connect_consensus(self.addr)
                     .await
                     .map_err(|e| Unreachable::new(&IoErr(e.to_string())))?,
             );
