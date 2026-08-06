@@ -23,6 +23,20 @@ pub enum Request {
     PutManifest(FileManifest),
     /// Récupère un manifest par hash de fichier.
     GetManifest(String),
+    /// Message Raft (openraft) : payload bincode opaque pour le transport.
+    Raft(RaftRpc),
+}
+
+/// RPCs du consensus, transportées telles quelles ; seule la couche yog-raft
+/// sait les désérialiser.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RaftRpc {
+    AppendEntries(Vec<u8>),
+    Vote(Vec<u8>),
+    InstallSnapshot(Vec<u8>),
+    /// Commande d'admin/cliente (init, add-learner, change-membership,
+    /// client-write, metrics) — traitée par le nœud local.
+    Admin(Vec<u8>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +49,8 @@ pub enum Response {
     Has(bool),
     PutManifestOk,
     Manifest(Option<FileManifest>),
+    /// Réponse Raft : payload bincode opaque.
+    Raft(Vec<u8>),
     /// Erreur applicative côté serveur.
     Error(String),
 }

@@ -12,7 +12,7 @@ async fn spawn_node() -> (std::net::SocketAddr, Arc<ShardStore>, tempfile::TempD
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint));
+    tokio::spawn(serve_endpoint(store.clone(), endpoint, None));
     (addr, store, dir)
 }
 

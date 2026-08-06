@@ -79,6 +79,14 @@ impl PeerClient {
             other => Err(unexpected(other)),
         }
     }
+
+    /// Envoie une RPC Raft et retourne le payload de réponse opaque.
+    pub async fn raft(&self, rpc: crate::protocol::RaftRpc) -> Result<Vec<u8>> {
+        match self.call(Request::Raft(rpc)).await? {
+            Response::Raft(payload) => Ok(payload),
+            other => Err(unexpected(other)),
+        }
+    }
 }
 
 fn unexpected(resp: Response) -> anyhow::Error {

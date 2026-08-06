@@ -58,6 +58,22 @@ enum Cmd {
         /// Intervalle du scrub d'auto-healing, en secondes.
         #[arg(long, default_value_t = 30)]
         scrub_interval: u64,
+        /// Identifiant Raft de ce nœud. Active le mode consensus : le
+        /// membership et le registre des fichiers sont répliqués par Raft
+        /// (la liste --peers devient inutile pour le healing).
+        #[arg(long)]
+        node_id: Option<u64>,
+    },
+    /// Initialise le cluster Raft (une seule fois, via n'importe quel nœud).
+    ClusterInit {
+        /// Membres au format id@host:port, ex: 1@10.0.0.1:7311 2@10.0.0.2:7311
+        #[arg(required = true)]
+        members: Vec<String>,
+    },
+    /// Affiche l'état du cluster Raft vu par un nœud.
+    ClusterMetrics {
+        #[arg(long, default_value = "127.0.0.1:7311")]
+        peer: SocketAddr,
     },
     /// Encode un fichier et dispatche ses shards sur des peers (round-robin).
     PutRemote {
@@ -150,17 +166,81 @@ async fn main() -> Result<()> {
                 println!("{hash}  {} octets", m.file_size);
             }
         }
-        Cmd::Serve { listen, advertise, peers, scrub_interval } => {
+        Cmd::Serve { listen, advertise, peers, scrub_interval, node_id } => {
             let store = Arc::new(store);
-            if !peers.is_empty() {
+            let interval = std::time::Duration::from_secs(scrub_interval);
+            let mut raft_handler: Option<Arc<dyn yog_transport::server::RaftHandler>> = None;
+
+            if let Some(id) = node_id {
+                // Mode consensus : membership et registre viennent de Raft.
+                let app = yog_raft::RaftApp::start(id).await?;
+                raft_handler = Some(app.clone());
+                let self_id = advertise.unwrap_or(listen).to_string();
+                let store_bg = store.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(interval);
+                    loop {
+                        ticker.tick().await;
+                        // Le registre répliqué est la source de vérité :
+                        // matérialise localement les manifests que ce nœud
+                        // ne connaît pas encore, puis scrub.
+                        let state = app.app_state();
+                        for manifest in state.manifests.values() {
+                            if store_bg.get_manifest(&manifest.file_hash).is_err() {
+                                let _ = store_bg.put_manifest(manifest);
+                            }
+                        }
+                        let members = app.members();
+                        if members.len() < 2 || !members.values().any(|a| *a == self_id) {
+                            continue;
+                        }
+                        let mut nodes: Vec<String> = members.into_values().collect();
+                        nodes.sort();
+                        match yog_cluster::healer::scrub_once(&store_bg, &self_id, &nodes).await {
+                            Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
+                                eprintln!(
+                                    "scrub: {} vérifiés, {} régénérés, {} irréparables",
+                                    r.shards_checked, r.shards_healed, r.shards_unrecoverable
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("scrub en échec: {e}"),
+                        }
+                    }
+                });
+            } else if !peers.is_empty() {
+                // Mode statique (sans consensus) : vue du cluster en config.
                 let view = yog_cluster::ClusterView::new(advertise.unwrap_or(listen), &peers);
-                tokio::spawn(yog_cluster::run_background(
-                    store.clone(),
-                    view,
-                    std::time::Duration::from_secs(scrub_interval),
-                ));
+                tokio::spawn(yog_cluster::run_background(store.clone(), view, interval));
             }
-            yog_transport::serve(store, listen).await?;
+            yog_transport::serve(store, listen, raft_handler).await?;
+        }
+        Cmd::ClusterInit { members } => {
+            let mut map = std::collections::BTreeMap::new();
+            for m in &members {
+                let (id, addr) = m
+                    .split_once('@')
+                    .with_context(|| format!("format attendu id@host:port, reçu {m}"))?;
+                map.insert(id.parse::<u64>()?, addr.to_string());
+            }
+            let first: SocketAddr = map.values().next().unwrap().parse()?;
+            let client = PeerClient::connect(first).await?;
+            match yog_raft::admin_call(&client, &yog_raft::types::AdminRequest::Init(map)).await? {
+                yog_raft::types::AdminResponse::Ok(_) => println!("cluster initialisé"),
+                other => bail!("échec de l'init: {other:?}"),
+            }
+        }
+        Cmd::ClusterMetrics { peer } => {
+            let client = PeerClient::connect(peer).await?;
+            match yog_raft::admin_call(&client, &yog_raft::types::AdminRequest::Metrics).await? {
+                yog_raft::types::AdminResponse::Metrics { id, leader, members, last_applied } => {
+                    println!("nœud {id} — leader: {leader:?}, log appliqué: {last_applied:?}");
+                    for (id, addr) in members {
+                        println!("  membre {id} @ {addr}");
+                    }
+                }
+                other => bail!("réponse inattendue: {other:?}"),
+            }
         }
         Cmd::PutRemote { file, peers, data_shards, parity_shards } => {
             let data = std::fs::read(&file)
@@ -198,6 +278,20 @@ async fn main() -> Result<()> {
             // nœuds — en attendant Raft, chacun sait reconstruire.
             for client in &clients {
                 client.put_manifest(&manifest).await?;
+            }
+            // Si le cluster tourne en mode Raft, enregistre aussi le fichier
+            // dans le registre répliqué (best effort sinon).
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                yog_raft::write_via_leader(
+                    &peers,
+                    yog_raft::types::AppCommand::RegisterManifest(manifest.clone()),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(_)) => println!("enregistré dans le registre Raft"),
+                _ => println!("registre Raft indisponible (cluster en mode statique ?)"),
             }
             println!("dispatché : {}", manifest.file_hash);
             println!(

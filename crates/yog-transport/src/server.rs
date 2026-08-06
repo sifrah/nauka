@@ -9,24 +9,39 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tracing::{debug, info, warn};
 use yog_store::ShardStore;
 
-use crate::protocol::{read_message, write_message, Request, Response, ALPN};
+use crate::protocol::{read_message, write_message, RaftRpc, Request, Response, ALPN};
+
+/// Point d'extension : la couche consensus (yog-raft) s'enregistre ici pour
+/// recevoir les RPCs Raft qui arrivent par le transport.
+#[async_trait::async_trait]
+pub trait RaftHandler: Send + Sync {
+    async fn handle(&self, rpc: RaftRpc) -> Result<Vec<u8>, String>;
+}
 
 /// Démarre le serveur QUIC et sert les requêtes jusqu'à l'arrêt du process.
-/// Retourne l'adresse réellement écoutée (utile avec un port 0).
-pub async fn serve(store: Arc<ShardStore>, listen: SocketAddr) -> Result<()> {
+pub async fn serve(
+    store: Arc<ShardStore>,
+    listen: SocketAddr,
+    raft: Option<Arc<dyn RaftHandler>>,
+) -> Result<()> {
     let endpoint = make_endpoint(listen)?;
     info!("nœud à l'écoute sur {}", endpoint.local_addr()?);
-    serve_endpoint(store, endpoint).await
+    serve_endpoint(store, endpoint, raft).await
 }
 
 /// Boucle d'accept sur un endpoint déjà construit (permet aux tests de
 /// connaître l'adresse effective avant de bloquer).
-pub async fn serve_endpoint(store: Arc<ShardStore>, endpoint: quinn::Endpoint) -> Result<()> {
+pub async fn serve_endpoint(
+    store: Arc<ShardStore>,
+    endpoint: quinn::Endpoint,
+    raft: Option<Arc<dyn RaftHandler>>,
+) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let store = store.clone();
+        let raft = raft.clone();
         tokio::spawn(async move {
             match incoming.await {
-                Ok(conn) => handle_connection(store, conn).await,
+                Ok(conn) => handle_connection(store, raft, conn).await,
                 Err(e) => warn!("connexion refusée: {e}"),
             }
         });
@@ -54,7 +69,11 @@ pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
 
 /// Sert toutes les requêtes d'une connexion entrante, un stream à la fois
 /// par tâche (les streams d'une même connexion tournent en parallèle).
-pub async fn handle_connection(store: Arc<ShardStore>, conn: quinn::Connection) {
+pub async fn handle_connection(
+    store: Arc<ShardStore>,
+    raft: Option<Arc<dyn RaftHandler>>,
+    conn: quinn::Connection,
+) {
     debug!("connexion de {}", conn.remote_address());
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
@@ -68,8 +87,16 @@ pub async fn handle_connection(store: Arc<ShardStore>, conn: quinn::Connection) 
             }
         };
         let store = store.clone();
+        let raft = raft.clone();
         tokio::spawn(async move {
             let response = match read_message::<Request>(&mut recv).await {
+                Ok(Request::Raft(rpc)) => match &raft {
+                    Some(h) => match h.handle(rpc).await {
+                        Ok(payload) => Response::Raft(payload),
+                        Err(e) => Response::Error(e),
+                    },
+                    None => Response::Error("consensus inactif sur ce nœud".into()),
+                },
                 Ok(req) => handle_request(&store, req),
                 Err(e) => Response::Error(format!("requête illisible: {e}")),
             };
@@ -83,6 +110,7 @@ pub async fn handle_connection(store: Arc<ShardStore>, conn: quinn::Connection) 
 
 fn handle_request(store: &ShardStore, req: Request) -> Response {
     match req {
+        Request::Raft(_) => unreachable!("traité en amont"),
         Request::Ping => Response::Pong,
         Request::PutShard(data) => match store.put_shard(&data) {
             Ok(hash) => Response::PutShardOk(hash),

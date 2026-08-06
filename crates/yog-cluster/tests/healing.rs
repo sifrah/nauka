@@ -21,7 +21,7 @@ async fn spawn_node() -> Node {
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let id = endpoint.local_addr().unwrap().to_string();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint));
+    tokio::spawn(serve_endpoint(store.clone(), endpoint, None));
     Node { id, store, _dir: dir }
 }
 
