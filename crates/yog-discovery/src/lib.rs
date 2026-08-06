@@ -72,6 +72,48 @@ pub async fn publish_seeds(
     Ok(())
 }
 
+/// Publie une candidature de genèse : « aucun cluster n'existe, je propose
+/// de le fonder ». Le record vit sous la même clé que les seeds — dès que
+/// le cluster existe, la publication des seeds l'efface.
+pub async fn publish_genesis_candidacy(
+    client: &Client,
+    keypair: &Keypair,
+    node_id: u64,
+    addr: SocketAddr,
+) -> Result<()> {
+    let value = format!("{node_id}|{addr}");
+    let packet = SignedPacket::builder()
+        .txt(
+            "_genesis".try_into().expect("nom DNS valide"),
+            value.as_str().try_into().expect("valeur TXT valide"),
+            RECORD_TTL_SECS,
+        )
+        .sign(keypair)?;
+    client.publish(&packet, None).await?;
+    Ok(())
+}
+
+/// Candidature de genèse actuellement visible sur la DHT, s'il y en a une.
+pub async fn resolve_genesis_candidacy(
+    client: &Client,
+    public_key: &PublicKey,
+) -> Result<Option<(u64, SocketAddr)>> {
+    let Some(packet) = client.resolve_most_recent(public_key).await else {
+        return Ok(None);
+    };
+    for record in packet.resource_records("_genesis") {
+        if let pkarr::dns::rdata::RData::TXT(txt) = &record.rdata {
+            let text: String = txt.clone().try_into().unwrap_or_default();
+            if let Some((id, addr)) = text.split_once('|') {
+                if let (Ok(id), Ok(addr)) = (id.parse(), addr.parse()) {
+                    return Ok(Some((id, addr)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Résout les seeds du cluster depuis la DHT. Vide si aucun enregistrement
 /// (cluster jamais amorcé, ou record expiré partout).
 pub async fn resolve_seeds(client: &Client, public_key: &PublicKey) -> Result<Vec<SocketAddr>> {

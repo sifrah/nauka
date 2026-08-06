@@ -76,14 +76,10 @@ enum Cmd {
         /// (la liste --peers devient inutile pour le healing).
         #[arg(long)]
         node_id: Option<u64>,
-        /// Découverte via la DHT Mainline : trouve le cluster et le rejoint
-        /// automatiquement (nécessite --keys ; le node-id est dérivé).
+        /// Désactive la découverte DHT (implicite dès que --keys est fourni
+        /// sans --peers) : cluster statique / air-gapped.
         #[arg(long)]
-        discover: bool,
-        /// Avec --discover : si aucun cluster n'existe sur la DHT, ce nœud
-        /// s'amorce comme premier membre. À passer sur UN seul nœud.
-        #[arg(long)]
-        bootstrap: bool,
+        no_discover: bool,
         /// Nœuds d'amorçage DHT alternatifs (tests sur DHT locale).
         #[arg(long, value_delimiter = ',', hide = true)]
         dht_bootstrap: Vec<String>,
@@ -241,10 +237,12 @@ async fn main() -> Result<()> {
             peers,
             scrub_interval,
             node_id,
-            discover,
-            bootstrap,
+            no_discover,
             dht_bootstrap,
         } => {
+            // Découverte implicite : des clés de cluster, pas de liste
+            // statique, pas d'opt-out → le nœud se débrouille tout seul.
+            let discover = cli.keys.is_some() && peers.is_empty() && !no_discover;
             let store = Arc::new(store);
             let interval = std::time::Duration::from_secs(scrub_interval);
             let mut raft_handler: Option<Arc<dyn yog_transport::server::RaftHandler>> = None;
@@ -318,13 +316,7 @@ async fn main() -> Result<()> {
                         .context("--discover nécessite --keys (identité du cluster)")?;
                     let dht_kp = yog_discovery::derive_dht_keypair(&keys_dir)?;
                     let client = yog_discovery::make_client(boots.as_deref())?;
-                    tokio::spawn(run_discovery(
-                        app.clone(),
-                        client,
-                        dht_kp,
-                        advertise_addr,
-                        bootstrap,
-                    ));
+                    tokio::spawn(run_discovery(app.clone(), client, dht_kp, advertise_addr));
                 }
                 let store_bg = store.clone();
                 tokio::spawn(async move {
@@ -648,21 +640,34 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Cycle de vie découverte d'un nœud : résoudre le cluster sur la DHT,
-/// le rejoindre (ou s'amorcer), puis republier les seeds tant qu'on est
-/// leader. Tourne en tâche de fond à côté du serveur.
+/// Cycle de vie découverte d'un nœud, entièrement implicite : résoudre le
+/// cluster sur la DHT et le rejoindre ; si la DHT est vierge, élection de
+/// genèse (le plus petit node-id fonde le cluster — déterministe, sans
+/// nœud désigné) ; puis republier les seeds tant qu'on est leader.
 async fn run_discovery(
     app: Arc<yog_raft::RaftApp>,
     client: yog_discovery::pkarr::Client,
     dht_kp: yog_discovery::pkarr::Keypair,
     advertise: SocketAddr,
-    bootstrap: bool,
 ) {
+    use std::time::{Duration, Instant};
     use yog_raft::types::{AdminRequest, AdminResponse};
 
-    // Phase 1 : entrer dans le cluster (sauf si on en fait déjà partie —
-    // cas du redémarrage, l'état Raft durable connaît le membership).
+    /// Cadence de scrutation de la DHT.
+    const POLL: Duration = Duration::from_secs(5);
+    /// Notre candidature doit rester incontestée aussi longtemps avant de
+    /// fonder (laisse aux démarrages simultanés le temps de se voir).
+    const GENESIS_CONFIRM: Duration = Duration::from_secs(12);
+    /// Un candidat étranger qui ne fonde jamais est déclaré mort après ça.
+    const FOREIGN_STALE: Duration = Duration::from_secs(45);
+
+    let mut our_candidacy_at: Option<Instant> = None;
+    let mut foreign_since: Option<(u64, Instant)> = None;
+
+    // Phase 1 : entrer dans le cluster (sauté au redémarrage — l'état Raft
+    // durable connaît déjà le membership).
     while !app.members().contains_key(&app.id) {
+        // 1) Un cluster existe-t-il ?
         match yog_discovery::resolve_seeds(&client, &dht_kp.public_key()).await {
             Ok(seeds) if !seeds.is_empty() => {
                 eprintln!("cluster découvert sur la DHT: {seeds:?} — adhésion…");
@@ -700,30 +705,73 @@ async fn run_discovery(
                     }
                     Err(e) => eprintln!("adhésion en échec ({e:#}), nouvel essai…"),
                 }
+                tokio::time::sleep(POLL).await;
+                continue;
             }
-            Ok(_) if bootstrap => {
-                // Rien sur la DHT et on est désigné premier nœud.
-                let mut members = std::collections::BTreeMap::new();
-                members.insert(
-                    app.id,
-                    yog_raft::openraft::BasicNode { addr: advertise.to_string() },
-                );
-                match app.raft.initialize(members).await {
-                    Ok(()) => eprintln!("aucun cluster sur la DHT — amorcé comme premier nœud"),
-                    // Déjà initialisé (course bénigne) : on continue.
-                    Err(e) => eprintln!("initialize: {e}"),
-                }
-                break;
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("résolution DHT en échec ({e:#}), nouvel essai…");
+                tokio::time::sleep(POLL).await;
+                continue;
             }
-            Ok(_) => {
-                eprintln!(
-                    "aucun cluster sur la DHT — en attente (premier nœud ? relancer avec \
-                     --bootstrap)"
-                );
-            }
-            Err(e) => eprintln!("résolution DHT en échec ({e:#}), nouvel essai…"),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        // 2) DHT vierge : élection de genèse par candidatures signées.
+        match yog_discovery::resolve_genesis_candidacy(&client, &dht_kp.public_key()).await {
+            Ok(Some((cid, _))) if cid == app.id => {
+                // Notre candidature est la plus récente visible.
+                if our_candidacy_at.is_some_and(|t| t.elapsed() >= GENESIS_CONFIRM) {
+                    let mut members = std::collections::BTreeMap::new();
+                    members.insert(
+                        app.id,
+                        yog_raft::openraft::BasicNode { addr: advertise.to_string() },
+                    );
+                    match app.raft.initialize(members).await {
+                        Ok(()) => {
+                            eprintln!("genèse: candidature incontestée — cluster fondé");
+                            break;
+                        }
+                        Err(e) => eprintln!("initialize: {e}"),
+                    }
+                }
+            }
+            Ok(Some((cid, _))) if cid < app.id => {
+                // Un candidat prioritaire (id plus petit) : on le laisse
+                // fonder — sauf s'il ne fonde jamais (crashé).
+                let since = match foreign_since {
+                    Some((id, t)) if id == cid => t,
+                    _ => {
+                        let now = Instant::now();
+                        foreign_since = Some((cid, now));
+                        eprintln!("genèse: candidat prioritaire {cid} vu — on attend");
+                        now
+                    }
+                };
+                if since.elapsed() >= FOREIGN_STALE {
+                    eprintln!("genèse: candidat {cid} silencieux — on reprend la main");
+                    if publish_candidacy(&client, &dht_kp, &app, advertise).await {
+                        our_candidacy_at = Some(Instant::now());
+                        foreign_since = None;
+                    }
+                }
+            }
+            Ok(Some((cid, _))) => {
+                // Candidat moins prioritaire : notre id est plus petit, on
+                // (re)publie — il nous verra et s'inclinera.
+                eprintln!("genèse: candidat {cid} moins prioritaire — on publie notre candidature");
+                if publish_candidacy(&client, &dht_kp, &app, advertise).await {
+                    our_candidacy_at = Some(Instant::now());
+                }
+            }
+            Ok(None) => {
+                eprintln!("aucun cluster sur la DHT — candidature de genèse");
+                if publish_candidacy(&client, &dht_kp, &app, advertise).await {
+                    our_candidacy_at = Some(Instant::now());
+                }
+            }
+            Err(e) => eprintln!("lecture des candidatures en échec ({e:#})"),
+        }
+        tokio::time::sleep(POLL).await;
     }
 
     // Phase 2 : battement de cœur DHT — le leader republie le membership.
@@ -747,6 +795,22 @@ async fn run_discovery(
         },
     )
     .await;
+}
+
+/// Publie notre candidature de genèse ; false si la DHT n'a pas pris.
+async fn publish_candidacy(
+    client: &yog_discovery::pkarr::Client,
+    dht_kp: &yog_discovery::pkarr::Keypair,
+    app: &Arc<yog_raft::RaftApp>,
+    advertise: SocketAddr,
+) -> bool {
+    match yog_discovery::publish_genesis_candidacy(client, dht_kp, app.id, advertise).await {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("publication de candidature en échec ({e:#})");
+            false
+        }
+    }
 }
 
 /// Se connecte aux peers joignables ; échoue seulement si aucun ne répond.
