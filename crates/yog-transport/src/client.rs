@@ -20,11 +20,22 @@ pub struct PeerClient {
 
 impl PeerClient {
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())?;
+        let socket = crate::make_socket("0.0.0.0:0".parse().unwrap())?;
+        let mut endpoint = quinn::Endpoint::new(
+            crate::endpoint_config(),
+            None,
+            socket,
+            std::sync::Arc::new(quinn::TokioRuntime),
+        )?;
         endpoint.set_default_client_config(client_config()?);
         // Le SNI est requis par rustls mais non vérifié (cluster fermé, v0).
         let conn = endpoint.connect(addr, "yogfile")?.await?;
         Ok(Self { conn, addr })
+    }
+
+    /// Accès à la connexion quinn sous-jacente (benchs, usages avancés).
+    pub fn connection(&self) -> &quinn::Connection {
+        &self.conn
     }
 
     async fn call(&self, req: Request) -> Result<Response> {
@@ -102,9 +113,9 @@ fn client_config() -> Result<quinn::ClientConfig> {
         )))
         .with_no_client_auth();
     crypto.alpn_protocols = vec![ALPN.to_vec()];
-    Ok(quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(
-        crypto,
-    )?)))
+    let mut config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
+    config.transport_config(crate::transport_config());
+    Ok(config)
 }
 
 /// v0 : accepte le certificat auto-signé des peers. Le chiffrement QUIC reste

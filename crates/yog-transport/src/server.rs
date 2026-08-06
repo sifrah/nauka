@@ -63,8 +63,16 @@ pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
         .with_single_cert(vec![cert_der], key.into())?;
     crypto.alpn_protocols = vec![ALPN.to_vec()];
 
-    let config = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
-    Ok(quinn::Endpoint::server(config, listen)?)
+    let mut config =
+        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
+    config.transport_config(crate::transport_config());
+    let socket = crate::make_socket(listen)?;
+    Ok(quinn::Endpoint::new(
+        crate::endpoint_config(),
+        Some(config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )?)
 }
 
 /// Sert toutes les requêtes d'une connexion entrante, un stream à la fois

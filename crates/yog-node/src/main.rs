@@ -243,37 +243,116 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::PutRemote { file, peers, data_shards, parity_shards } => {
-            let data = std::fs::read(&file)
-                .with_context(|| format!("lecture de {}", file.display()))?;
+            use std::io::Read;
             let cfg = ErasureConfig {
                 data_shards,
                 parity_shards,
                 ..ErasureConfig::default()
             };
-            let clients = connect_all(&peers).await?;
-            let (manifest, stripes) = encode_file(&data, &cfg)?;
+            let file_size = std::fs::metadata(&file)
+                .with_context(|| format!("lecture de {}", file.display()))?
+                .len();
 
-            // Placement rendezvous-hash : le même calcul que fait le scrubber
-            // des nœuds, pour que chaque shard parte directement chez son
-            // propriétaire. Adresses triées = même vue que le cluster.
+            // Passe 1 : hash du fichier en streaming (le placement et le
+            // manifest sont keyés sur ce hash).
+            let mut hasher = blake3::Hasher::new();
+            {
+                let mut f = std::fs::File::open(&file)?;
+                let mut buf = vec![0u8; 4 * 1024 * 1024];
+                loop {
+                    let n = f.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+            }
+            let file_hash = hasher.finalize().to_hex().to_string();
+
+            let clients = connect_all(&peers).await?;
             let addrs: Vec<String> = clients.iter().map(|c| c.addr.to_string()).collect();
             let mut view: Vec<&str> = addrs.iter().map(String::as_str).collect();
             view.sort();
-            for (si, stripe) in stripes.iter().enumerate() {
-                for shard in stripe {
-                    let owner = yog_cluster::placement::shard_owner(
-                        &manifest.file_hash,
-                        si,
-                        shard.index,
-                        &view,
-                    );
+
+            // Passe 2 : encode et dispatche stripe par stripe — la mémoire
+            // reste bornée à une stripe quel que soit la taille du fichier.
+            // 16 Mo en vol par upload : assez pour saturer un lien, sans
+            // écrouler le cluster quand plusieurs uploads tournent en rafale.
+            const MAX_IN_FLIGHT: usize = 16;
+            let mut in_flight: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+            let mut f = std::fs::File::open(&file)?;
+            let mut stripe_buf = vec![0u8; cfg.stripe_data_len()];
+            let mut stripes_meta = Vec::new();
+            let start = std::time::Instant::now();
+            loop {
+                let mut filled = 0;
+                while filled < stripe_buf.len() {
+                    let n = f.read(&mut stripe_buf[filled..])?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                if filled == 0 {
+                    break;
+                }
+                let si = stripes_meta.len();
+                let shards = yog_erasure::encode_stripe(&stripe_buf[..filled], &cfg)?;
+                // Envois pipelinés : on n'attend pas la fin d'une stripe pour
+                // encoder la suivante, seule la fenêtre borne la mémoire.
+                for shard in &shards {
+                    let owner =
+                        yog_cluster::placement::shard_owner(&file_hash, si, shard.index, &view);
                     let client = clients
                         .iter()
                         .find(|c| c.addr.to_string() == owner)
-                        .expect("owner vient de la liste des clients");
-                    client.put_shard(shard.data.clone()).await?;
+                        .expect("owner vient de la liste des clients")
+                        .clone();
+                    let data = shard.data.clone();
+                    let addr = client.addr;
+                    while in_flight.len() >= MAX_IN_FLIGHT {
+                        in_flight.join_next().await.unwrap()??;
+                    }
+                    // Une connexion tuée par la congestion ne condamne pas
+                    // l'upload : reconnexion + renvoi (idempotent, le shard
+                    // est content-addressed).
+                    in_flight.spawn(async move {
+                        if client.put_shard(data.clone()).await.is_ok() {
+                            return Ok(());
+                        }
+                        for attempt in 1..=4u32 {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                300 * attempt as u64,
+                            ))
+                            .await;
+                            if let Ok(c) = PeerClient::connect(addr).await {
+                                if c.put_shard(data.clone()).await.is_ok() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        bail!("shard non envoyé à {addr} après 5 tentatives")
+                    });
                 }
+                stripes_meta.push(yog_erasure::StripeMeta {
+                    data_len: filled,
+                    shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
+                });
             }
+            while let Some(j) = in_flight.join_next().await {
+                j??;
+            }
+            let manifest = FileManifest {
+                file_hash,
+                file_size,
+                config: cfg,
+                stripes: stripes_meta,
+            };
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "  débit: {:.0} Mo/s",
+                file_size as f64 / 1_000_000.0 / secs.max(0.001)
+            );
             // Le manifest (métadonnées seulement) est répliqué sur tous les
             // nœuds — en attendant Raft, chacun sait reconstruire.
             for client in &clients {
@@ -304,20 +383,32 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::GetRemote { file_hash, peers, output } => {
+            use std::io::Write;
             let clients = connect_all(&peers).await?;
             let manifest = fetch_manifest(&clients, &file_hash).await?;
 
-            let mut stripes_slots = Vec::new();
+            // Reconstruction en streaming : une stripe en mémoire à la fois,
+            // hash global vérifié au fil de l'eau.
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&output)?);
+            let mut hasher = blake3::Hasher::new();
             for stripe in &manifest.stripes {
                 let mut slots = Vec::new();
                 for hash in &stripe.shard_hashes {
                     slots.push(fetch_shard(&clients, hash).await);
                 }
-                stripes_slots.push(slots);
+                let data = yog_erasure::decode_stripe(slots, stripe, &manifest.config)?;
+                hasher.update(&data);
+                out.write_all(&data)?;
             }
-            let data = decode_file(&manifest, stripes_slots)?;
-            std::fs::write(&output, &data)?;
-            println!("reconstruit : {} octets → {}", data.len(), output.display());
+            out.flush()?;
+            if hasher.finalize().to_hex().to_string() != manifest.file_hash {
+                bail!("intégrité violée : hash du fichier reconstruit différent du manifest");
+            }
+            println!(
+                "reconstruit : {} octets → {} (intégrité vérifiée)",
+                manifest.file_size,
+                output.display()
+            );
         }
     }
     Ok(())

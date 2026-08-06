@@ -59,7 +59,10 @@ impl ShardStore {
             return Ok(hash);
         }
         fs::create_dir_all(path.parent().unwrap())?;
-        write_atomic(&path, data)?;
+        // Pas de fsync par shard : un shard perdu sur crash machine est
+        // exactement ce que l'erasure coding + le scrubber savent réparer.
+        // Le fsync par écriture divise le débit d'ingestion par ~20.
+        write_atomic(&path, data, false)?;
         Ok(hash)
     }
 
@@ -89,7 +92,8 @@ impl ShardStore {
 
     pub fn put_manifest(&self, manifest: &FileManifest) -> Result<(), StoreError> {
         let path = self.manifest_path(&manifest.file_hash);
-        write_atomic(&path, serde_json::to_string_pretty(manifest)?.as_bytes())?;
+        // Les manifests sont rares et précieux : fsync conservé.
+        write_atomic(&path, serde_json::to_string_pretty(manifest)?.as_bytes(), true)?;
         Ok(())
     }
 
@@ -113,12 +117,14 @@ impl ShardStore {
     }
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StoreError> {
+fn write_atomic(path: &Path, data: &[u8], sync: bool) -> Result<(), StoreError> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
     }
     fs::rename(&tmp, path)?;
     Ok(())

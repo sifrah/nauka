@@ -11,6 +11,7 @@ yog-transport = { path = "../yog-transport" }
 yog-cluster = { path = "../yog-cluster" }
 yog-raft = { path = "../yog-raft" }
 anyhow.workspace = true
+blake3.workspace = true
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 tracing-subscriber.workspace = true
