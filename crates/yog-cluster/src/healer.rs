@@ -20,6 +20,75 @@ pub struct HealReport {
     pub shards_unrecoverable: usize,
 }
 
+#[derive(Debug, Default)]
+pub struct GcReport {
+    pub shards_released: usize,
+    pub shards_kept: usize,
+}
+
+/// GC de rebalancement : libère les shards locaux dont ce nœud n'est plus
+/// propriétaire (la vue du cluster a changé — nœud ajouté/retiré).
+///
+/// Prudence maximale : un shard n'est supprimé que si TOUS ses propriétaires
+/// actuels (un shard peut être référencé par plusieurs manifests) confirment
+/// le détenir. Un propriétaire injoignable → on garde. Les shards inconnus
+/// des manifests locaux ne sont jamais touchés.
+pub async fn gc_once(
+    store: &Arc<ShardStore>,
+    self_id: &str,
+    all_nodes: &[String],
+) -> Result<GcReport> {
+    let node_refs: Vec<&str> = all_nodes.iter().map(String::as_str).collect();
+
+    // shard → propriétaires (tous manifests confondus).
+    let mut owners: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    for file_hash in store.list_manifests()? {
+        let manifest = store.get_manifest(&file_hash)?;
+        for (si, stripe) in manifest.stripes.iter().enumerate() {
+            for (i, hash) in stripe.shard_hashes.iter().enumerate() {
+                let owner =
+                    crate::placement::shard_owner(&manifest.file_hash, si, i, &node_refs);
+                owners.entry(hash.clone()).or_default().insert(owner.to_string());
+            }
+        }
+    }
+
+    let mut peers: HashMap<String, Option<PeerClient>> = HashMap::new();
+    let mut report = GcReport::default();
+    for shard in store.list_shards()? {
+        let Some(shard_owners) = owners.get(&shard) else {
+            // Shard orphelin (fichier désenregistré ?) : hors périmètre v1.
+            continue;
+        };
+        if shard_owners.iter().any(|o| o == self_id) {
+            continue; // toujours à nous, rien à faire
+        }
+        let mut all_confirmed = true;
+        for owner in shard_owners {
+            let client = peers.entry(owner.clone()).or_insert_with(|| None);
+            if client.is_none() {
+                if let Ok(addr) = owner.parse::<SocketAddr>() {
+                    *client = PeerClient::connect(addr).await.ok();
+                }
+            }
+            match client {
+                Some(c) if c.has_shard(&shard).await.unwrap_or(false) => {}
+                _ => {
+                    all_confirmed = false;
+                    break;
+                }
+            }
+        }
+        if all_confirmed {
+            store.delete_shard(&shard)?;
+            report.shards_released += 1;
+        } else {
+            report.shards_kept += 1;
+        }
+    }
+    Ok(report)
+}
+
 /// Une passe de scrub complète sur tous les manifests connus localement.
 ///
 /// `self_id` est l'adresse annoncée de ce nœud, `all_nodes` la vue du cluster

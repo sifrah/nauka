@@ -75,6 +75,23 @@ enum Cmd {
         #[arg(long, default_value = "127.0.0.1:7311")]
         peer: SocketAddr,
     },
+    /// Ajoute un nœud au cluster à chaud (learner → votant). Le nouveau
+    /// nœud doit déjà tourner (serve --node-id <id>). Le rebalancement des
+    /// shards suit automatiquement (scrub + GC).
+    ClusterAdd {
+        /// Le nœud à ajouter, format id@host:port.
+        member: String,
+        /// N'importe quels nœuds actuels du cluster.
+        #[arg(long, value_delimiter = ',', required = true)]
+        peers: Vec<SocketAddr>,
+    },
+    /// Retire un nœud du cluster à chaud. Ses shards sont re-répliqués par
+    /// les scrubbers des autres nœuds ; le retiré peut ensuite être éteint.
+    ClusterRemove {
+        node_id: u64,
+        #[arg(long, value_delimiter = ',', required = true)]
+        peers: Vec<SocketAddr>,
+    },
     /// Encode un fichier et dispatche ses shards sur des peers (round-robin).
     PutRemote {
         file: PathBuf,
@@ -206,6 +223,15 @@ async fn main() -> Result<()> {
                             Ok(_) => {}
                             Err(e) => eprintln!("scrub en échec: {e}"),
                         }
+                        // Rebalancement : libère ce qui ne nous appartient
+                        // plus (après confirmation chez le propriétaire).
+                        match yog_cluster::healer::gc_once(&store_bg, &self_id, &nodes).await {
+                            Ok(g) if g.shards_released > 0 => {
+                                eprintln!("gc: {} shards libérés", g.shards_released);
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("gc en échec: {e}"),
+                        }
                     }
                 });
             } else if !peers.is_empty() {
@@ -240,6 +266,56 @@ async fn main() -> Result<()> {
                     }
                 }
                 other => bail!("réponse inattendue: {other:?}"),
+            }
+        }
+        Cmd::ClusterAdd { member, peers } => {
+            use yog_raft::types::{AdminRequest, AdminResponse};
+            let (id, addr) = member
+                .split_once('@')
+                .with_context(|| format!("format attendu id@host:port, reçu {member}"))?;
+            let id: u64 = id.parse()?;
+            // 1. Learner : le nœud rattrape le log/snapshot sans voter.
+            match yog_raft::admin_via_leader(
+                &peers,
+                &AdminRequest::AddLearner { id, addr: addr.to_string() },
+            )
+            .await?
+            {
+                AdminResponse::Ok(_) => println!("nœud {id} ajouté comme learner"),
+                other => bail!("add-learner: {other:?}"),
+            }
+            // 2. Promotion en votant : membership = membres actuels + lui.
+            let current = match yog_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await? {
+                AdminResponse::Metrics { members, .. } => members,
+                other => bail!("metrics: {other:?}"),
+            };
+            let mut ids: Vec<u64> = current.keys().copied().collect();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            match yog_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
+                AdminResponse::Ok(_) => {
+                    println!("nœud {id} promu votant — le rebalancement suivra au fil des scrubs")
+                }
+                other => bail!("change-membership: {other:?}"),
+            }
+        }
+        Cmd::ClusterRemove { node_id, peers } => {
+            use yog_raft::types::{AdminRequest, AdminResponse};
+            let current = match yog_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await? {
+                AdminResponse::Metrics { members, .. } => members,
+                other => bail!("metrics: {other:?}"),
+            };
+            let ids: Vec<u64> = current.keys().copied().filter(|i| *i != node_id).collect();
+            if ids.len() == current.len() {
+                bail!("le nœud {node_id} n'est pas membre du cluster");
+            }
+            match yog_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
+                AdminResponse::Ok(_) => println!(
+                    "nœud {node_id} retiré — laisser tourner le temps que les scrubs \
+                     re-répliquent ses shards, puis l'éteindre"
+                ),
+                other => bail!("change-membership: {other:?}"),
             }
         }
         Cmd::PutRemote { file, peers, data_shards, parity_shards } => {

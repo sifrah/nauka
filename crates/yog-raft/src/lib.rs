@@ -196,29 +196,46 @@ pub async fn admin_call(
     Ok(bincode::deserialize(&resp)?)
 }
 
+/// Exécute une AdminRequest en suivant la redirection vers le leader :
+/// essaie chaque peer, suit les `ForwardTo`, retente pendant les bascules.
+pub async fn admin_via_leader(
+    peers: &[std::net::SocketAddr],
+    req: &AdminRequest,
+) -> Result<AdminResponse> {
+    let mut targets: Vec<std::net::SocketAddr> = peers.to_vec();
+    let mut last_err = String::from("aucun peer joignable");
+    for _ in 0..4 {
+        for addr in targets.clone() {
+            let Ok(client) = yog_transport::PeerClient::connect(addr).await else {
+                continue;
+            };
+            match admin_call(&client, req).await {
+                Ok(AdminResponse::ForwardTo { leader: Some((_, leader_addr)) }) => {
+                    if let Ok(a) = leader_addr.parse() {
+                        targets = vec![a];
+                    }
+                }
+                Ok(AdminResponse::ForwardTo { leader: None }) => {
+                    last_err = "pas de leader élu pour l'instant".into();
+                }
+                Ok(AdminResponse::Err(e)) => last_err = e,
+                Ok(resp) => return Ok(resp),
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("échec via le leader: {last_err}")
+}
+
 /// Écrit une commande dans le registre en suivant la redirection vers le
 /// leader si nécessaire.
 pub async fn write_via_leader(
     peers: &[std::net::SocketAddr],
     cmd: AppCommand,
 ) -> Result<AppResponse> {
-    let mut targets: Vec<std::net::SocketAddr> = peers.to_vec();
-    for _ in 0..3 {
-        for addr in targets.clone() {
-            let Ok(client) = yog_transport::PeerClient::connect(addr).await else {
-                continue;
-            };
-            match admin_call(&client, &AdminRequest::Write(cmd.clone())).await {
-                Ok(AdminResponse::Ok(resp)) => return Ok(resp),
-                Ok(AdminResponse::ForwardTo { leader: Some((_, leader_addr)) }) => {
-                    if let Ok(a) = leader_addr.parse() {
-                        targets = vec![a];
-                    }
-                }
-                _ => {}
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    match admin_via_leader(peers, &AdminRequest::Write(cmd)).await? {
+        AdminResponse::Ok(resp) => Ok(resp),
+        other => anyhow::bail!("réponse inattendue: {other:?}"),
     }
-    anyhow::bail!("aucun leader joignable pour écrire dans le registre")
 }

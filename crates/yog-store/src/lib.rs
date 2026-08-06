@@ -104,6 +104,26 @@ impl ShardStore {
         Ok(serde_json::from_slice(&data)?)
     }
 
+    /// Tous les hashes de shards stockés localement (parcours du fanout).
+    pub fn list_shards(&self) -> Result<Vec<ContentHash>, StoreError> {
+        let mut out = Vec::new();
+        for prefix in fs::read_dir(self.root.join("shards"))? {
+            let prefix = prefix?;
+            if !prefix.file_type()?.is_dir() {
+                continue;
+            }
+            let p = prefix.file_name().to_string_lossy().to_string();
+            for entry in fs::read_dir(prefix.path())? {
+                let name = entry?.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".tmp") {
+                    out.push(format!("{p}{name}"));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     pub fn list_manifests(&self) -> Result<Vec<ContentHash>, StoreError> {
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join("manifests"))? {

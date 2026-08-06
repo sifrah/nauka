@@ -2301,6 +2301,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "yog-cluster",
  "yog-erasure",
  "yog-store",
  "yog-transport",
