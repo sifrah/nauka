@@ -24,6 +24,7 @@ use types::{
 };
 
 pub use types::AppResponse;
+pub use openraft;
 
 /// Instance Raft d'un nœud + accès à l'état matérialisé.
 pub struct RaftApp {

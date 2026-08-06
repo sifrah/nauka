@@ -76,6 +76,17 @@ enum Cmd {
         /// (la liste --peers devient inutile pour le healing).
         #[arg(long)]
         node_id: Option<u64>,
+        /// Découverte via la DHT Mainline : trouve le cluster et le rejoint
+        /// automatiquement (nécessite --keys ; le node-id est dérivé).
+        #[arg(long)]
+        discover: bool,
+        /// Avec --discover : si aucun cluster n'existe sur la DHT, ce nœud
+        /// s'amorce comme premier membre. À passer sur UN seul nœud.
+        #[arg(long)]
+        bootstrap: bool,
+        /// Nœuds d'amorçage DHT alternatifs (tests sur DHT locale).
+        #[arg(long, value_delimiter = ',', hide = true)]
+        dht_bootstrap: Vec<String>,
     },
     /// Initialise le cluster Raft (une seule fois, via n'importe quel nœud).
     ClusterInit {
@@ -224,7 +235,16 @@ async fn main() -> Result<()> {
                 println!("{hash}  {} octets", m.file_size);
             }
         }
-        Cmd::Serve { listen, advertise, peers, scrub_interval, node_id } => {
+        Cmd::Serve {
+            listen,
+            advertise,
+            peers,
+            scrub_interval,
+            node_id,
+            discover,
+            bootstrap,
+            dht_bootstrap,
+        } => {
             let store = Arc::new(store);
             let interval = std::time::Duration::from_secs(scrub_interval);
             let mut raft_handler: Option<Arc<dyn yog_transport::server::RaftHandler>> = None;
@@ -253,6 +273,25 @@ async fn main() -> Result<()> {
                 let app = yog_raft::RaftApp::start(id, &cli.data_dir.join("raft")).await?;
                 raft_handler = Some(app.clone());
                 let self_id = advertise.unwrap_or(listen).to_string();
+
+                if discover {
+                    let keys_dir = cli
+                        .keys
+                        .clone()
+                        .context("--discover nécessite --keys (identité du cluster)")?;
+                    let dht_kp = yog_discovery::derive_dht_keypair(&keys_dir)?;
+                    let boots =
+                        if dht_bootstrap.is_empty() { None } else { Some(dht_bootstrap.clone()) };
+                    let client = yog_discovery::make_client(boots.as_deref())?;
+                    let advertise_addr = advertise.unwrap_or(listen);
+                    tokio::spawn(run_discovery(
+                        app.clone(),
+                        client,
+                        dht_kp,
+                        advertise_addr,
+                        bootstrap,
+                    ));
+                }
                 let store_bg = store.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
@@ -573,6 +612,107 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Cycle de vie découverte d'un nœud : résoudre le cluster sur la DHT,
+/// le rejoindre (ou s'amorcer), puis republier les seeds tant qu'on est
+/// leader. Tourne en tâche de fond à côté du serveur.
+async fn run_discovery(
+    app: Arc<yog_raft::RaftApp>,
+    client: yog_discovery::pkarr::Client,
+    dht_kp: yog_discovery::pkarr::Keypair,
+    advertise: SocketAddr,
+    bootstrap: bool,
+) {
+    use yog_raft::types::{AdminRequest, AdminResponse};
+
+    // Phase 1 : entrer dans le cluster (sauf si on en fait déjà partie —
+    // cas du redémarrage, l'état Raft durable connaît le membership).
+    while !app.members().contains_key(&app.id) {
+        match yog_discovery::resolve_seeds(&client, &dht_kp.public_key()).await {
+            Ok(seeds) if !seeds.is_empty() => {
+                eprintln!("cluster découvert sur la DHT: {seeds:?} — adhésion…");
+                let join = async {
+                    match yog_raft::admin_via_leader(
+                        &seeds,
+                        &AdminRequest::AddLearner { id: app.id, addr: advertise.to_string() },
+                    )
+                    .await?
+                    {
+                        AdminResponse::Ok(_) => {}
+                        other => bail!("add-learner: {other:?}"),
+                    }
+                    let members = match yog_raft::admin_via_leader(&seeds, &AdminRequest::Metrics)
+                        .await?
+                    {
+                        AdminResponse::Metrics { members, .. } => members,
+                        other => bail!("metrics: {other:?}"),
+                    };
+                    let mut ids: Vec<u64> = members.keys().copied().collect();
+                    if !ids.contains(&app.id) {
+                        ids.push(app.id);
+                    }
+                    match yog_raft::admin_via_leader(&seeds, &AdminRequest::ChangeMembership(ids))
+                        .await?
+                    {
+                        AdminResponse::Ok(_) => Ok(()),
+                        other => bail!("promotion: {other:?}"),
+                    }
+                };
+                match join.await {
+                    Ok(()) => {
+                        eprintln!("adhésion réussie — membre votant du cluster");
+                        break;
+                    }
+                    Err(e) => eprintln!("adhésion en échec ({e:#}), nouvel essai…"),
+                }
+            }
+            Ok(_) if bootstrap => {
+                // Rien sur la DHT et on est désigné premier nœud.
+                let mut members = std::collections::BTreeMap::new();
+                members.insert(
+                    app.id,
+                    yog_raft::openraft::BasicNode { addr: advertise.to_string() },
+                );
+                match app.raft.initialize(members).await {
+                    Ok(()) => eprintln!("aucun cluster sur la DHT — amorcé comme premier nœud"),
+                    // Déjà initialisé (course bénigne) : on continue.
+                    Err(e) => eprintln!("initialize: {e}"),
+                }
+                break;
+            }
+            Ok(_) => {
+                eprintln!(
+                    "aucun cluster sur la DHT — en attente (premier nœud ? relancer avec \
+                     --bootstrap)"
+                );
+            }
+            Err(e) => eprintln!("résolution DHT en échec ({e:#}), nouvel essai…"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    // Phase 2 : battement de cœur DHT — le leader republie le membership.
+    let app_pub = app.clone();
+    yog_discovery::run_publisher(
+        client,
+        dht_kp,
+        std::time::Duration::from_secs(120),
+        move || {
+            let metrics = app_pub.raft.metrics().borrow().clone();
+            if metrics.current_leader != Some(app_pub.id) {
+                return None;
+            }
+            Some(
+                app_pub
+                    .members()
+                    .values()
+                    .filter_map(|a| a.parse::<SocketAddr>().ok())
+                    .collect(),
+            )
+        },
+    )
+    .await;
 }
 
 /// Se connecte aux peers joignables ; échoue seulement si aucun ne répond.

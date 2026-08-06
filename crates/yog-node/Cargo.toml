@@ -10,6 +10,7 @@ yog-store = { path = "../yog-store" }
 yog-transport = { path = "../yog-transport" }
 yog-cluster = { path = "../yog-cluster" }
 yog-raft = { path = "../yog-raft" }
+yog-discovery = { path = "../yog-discovery" }
 anyhow.workspace = true
 blake3.workspace = true
 clap = { version = "4", features = ["derive"] }
