@@ -12,10 +12,12 @@
 pub mod client;
 pub mod protocol;
 pub mod server;
+pub mod tls;
 
 pub use client::PeerClient;
 pub use protocol::{Request, Response};
 pub use server::serve;
+pub use tls::{generate_cluster_ca, load_cluster_tls, set_cluster_tls, ClusterTls};
 
 use std::sync::Arc;
 

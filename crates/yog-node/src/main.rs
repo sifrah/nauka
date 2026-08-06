@@ -19,6 +19,10 @@ struct Cli {
     /// Répertoire de données du nœud.
     #[arg(long, default_value = "./yog-data")]
     data_dir: PathBuf,
+    /// Répertoire contenant la clé de cluster (cluster-ca.key/.pem).
+    /// Active le mTLS : seuls les porteurs d'un certificat signé passent.
+    #[arg(long)]
+    keys: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -45,6 +49,13 @@ enum Cmd {
     Verify { file_hash: String },
     /// Liste les fichiers stockés.
     List,
+    /// Génère la clé de cluster (CA Ed25519) à distribuer aux nœuds.
+    Keygen {
+        #[arg(long, default_value = "./yog-keys")]
+        out: PathBuf,
+    },
+    /// Affiche l'identité de ce nœud (node-id dérivé de sa clé publique).
+    NodeInfo,
     /// Démarre le nœud en mode serveur QUIC (cluster si --peers est fourni).
     /// En mode consensus (--node-id), le port+1 est réservé au plan Raft :
     /// plusieurs nœuds sur un même hôte doivent espacer leurs ports de 2.
@@ -124,9 +135,37 @@ async fn main() -> Result<()> {
         )
         .init();
     let cli = Cli::parse();
+
+    // Identité cluster : à installer avant tout usage réseau. Un nœud
+    // (serve/node-info) utilise sa clé persistée ; les commandes clientes
+    // utilisent une identité éphémère signée par la même CA.
+    let node_tls = if let Some(keys_dir) = &cli.keys {
+        let identity = match &cli.cmd {
+            Cmd::Serve { .. } | Cmd::NodeInfo => Some(cli.data_dir.join("node.key")),
+            _ => None,
+        };
+        let tls = yog_transport::load_cluster_tls(keys_dir, identity.as_deref())?;
+        let info = (tls.node_id, tls.fingerprint.clone());
+        yog_transport::set_cluster_tls(tls);
+        Some(info)
+    } else {
+        None
+    };
+
     let store = ShardStore::open(&cli.data_dir)?;
 
     match cli.cmd {
+        Cmd::Keygen { out } => {
+            yog_transport::generate_cluster_ca(&out)?;
+            println!("clé de cluster générée dans {}", out.display());
+            println!("  à copier sur chaque nœud, puis: serve --keys {}", out.display());
+        }
+        Cmd::NodeInfo => {
+            let (node_id, fingerprint) =
+                node_tls.context("node-info nécessite --keys <dir>")?;
+            println!("node-id     : {node_id}");
+            println!("fingerprint : {fingerprint}");
+        }
         Cmd::Put { file, data_shards, parity_shards } => {
             let data = std::fs::read(&file)
                 .with_context(|| format!("lecture de {}", file.display()))?;
@@ -189,6 +228,25 @@ async fn main() -> Result<()> {
             let store = Arc::new(store);
             let interval = std::time::Duration::from_secs(scrub_interval);
             let mut raft_handler: Option<Arc<dyn yog_transport::server::RaftHandler>> = None;
+
+            // Avec une identité crypto, le node-id se PROUVE (dérivé de la
+            // clé publique) au lieu de se décréter.
+            let node_id = match (&node_tls, node_id) {
+                (Some((derived, fp)), cli_id) => {
+                    if let Some(cli_id) = cli_id {
+                        if cli_id != *derived {
+                            eprintln!(
+                                "--node-id {cli_id} ignoré: l'identité crypto impose {derived} \
+                                 (fingerprint {})",
+                                &fp[..16]
+                            );
+                        }
+                    }
+                    println!("identité: node-id {derived} (fingerprint {})", &fp[..16]);
+                    Some(*derived)
+                }
+                (None, id) => id,
+            };
 
             if let Some(id) = node_id {
                 // Mode consensus : membership et registre viennent de Raft.

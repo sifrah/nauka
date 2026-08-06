@@ -112,15 +112,36 @@ pub fn make_endpoint_pair(listen: SocketAddr) -> Result<(quinn::Endpoint, quinn:
 }
 
 fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> {
-    let cert = rcgen::generate_simple_self_signed(vec!["yogfile".into()])
-        .context("génération du certificat auto-signé")?;
-    let cert_der = CertificateDer::from(cert.cert);
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-
-    let mut crypto = rustls::ServerConfig::builder_with_provider(crate::crypto_provider())
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key.into())?;
+    let mut crypto = match crate::tls::cluster_tls() {
+        Some(tls) => {
+            // mTLS : seuls les porteurs d'un certificat signé par la clé de
+            // cluster peuvent se connecter.
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(tls.roots.clone()),
+                crate::crypto_provider(),
+            )
+            .build()
+            .context("construction du vérifieur de certificats clients")?;
+            rustls::ServerConfig::builder_with_provider(crate::crypto_provider())
+                .with_safe_default_protocol_versions()?
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(tls.cert_chain.clone(), tls.key.clone_key())?
+        }
+        None => {
+            warn!(
+                "mode INSECURE: aucune clé de cluster chargée — lien chiffré \
+                 mais pairs non authentifiés"
+            );
+            let cert = rcgen::generate_simple_self_signed(vec!["yogfile".into()])
+                .context("génération du certificat auto-signé")?;
+            let cert_der = CertificateDer::from(cert.cert);
+            let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+            rustls::ServerConfig::builder_with_provider(crate::crypto_provider())
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_single_cert(vec![cert_der], key.into())?
+        }
+    };
     crypto.alpn_protocols = vec![ALPN.to_vec()];
 
     let mut config =

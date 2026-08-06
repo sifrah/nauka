@@ -38,8 +38,14 @@ impl PeerClient {
             std::sync::Arc::new(quinn::TokioRuntime),
         )?;
         endpoint.set_default_client_config(client_config()?);
-        // Le SNI est requis par rustls mais non vérifié (cluster fermé, v0).
-        let conn = endpoint.connect(addr, "yogfile")?.await?;
+        // mTLS: le SNI doit correspondre au SAN des certificats de nœud.
+        // Insecure: SNI requis par rustls mais non vérifié.
+        let server_name = if crate::tls::cluster_tls().is_some() {
+            crate::tls::NODE_SAN
+        } else {
+            "yogfile"
+        };
+        let conn = endpoint.connect(addr, server_name)?.await?;
         Ok(Self { conn, addr })
     }
 
@@ -115,13 +121,23 @@ fn unexpected(resp: Response) -> anyhow::Error {
 }
 
 fn client_config() -> Result<quinn::ClientConfig> {
-    let mut crypto = rustls::ClientConfig::builder_with_provider(crate::crypto_provider())
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification(
-            crate::crypto_provider(),
-        )))
-        .with_no_client_auth();
+    let mut crypto = match crate::tls::cluster_tls() {
+        Some(tls) => {
+            // mTLS : vérifie le serveur contre la CA du cluster ET présente
+            // notre certificat signé.
+            rustls::ClientConfig::builder_with_provider(crate::crypto_provider())
+                .with_safe_default_protocol_versions()?
+                .with_root_certificates(tls.roots.clone())
+                .with_client_auth_cert(tls.cert_chain.clone(), tls.key.clone_key())?
+        }
+        None => rustls::ClientConfig::builder_with_provider(crate::crypto_provider())
+            .with_safe_default_protocol_versions()?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification(
+                crate::crypto_provider(),
+            )))
+            .with_no_client_auth(),
+    };
     crypto.alpn_protocols = vec![ALPN.to_vec()];
     let mut config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
     config.transport_config(crate::transport_config());
