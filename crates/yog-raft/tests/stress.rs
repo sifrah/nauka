@@ -25,7 +25,7 @@ async fn spawn_raft_node(id: u64, bind: &str) -> Node {
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint(bind.parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
-    let app = RaftApp::start(id).await.unwrap();
+    let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = app.clone();
     tokio::spawn(serve_endpoint(store, endpoint.clone(), Some(handler)));
     Node { addr, app, endpoint, _dir: dir }
@@ -196,7 +196,8 @@ async fn leader_crash_failover_and_catchup() {
         wait_registry_size(&n.app, BEFORE + AFTER, 30).await;
     }
 
-    // Résurrection : même id, même adresse, état totalement vide.
+    // Résurrection : même id, même adresse, état totalement vide (nouveau
+    // data-dir — le pire cas, disque perdu).
     // Le socket peut mettre un instant à se libérer après le drop.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
@@ -211,7 +212,7 @@ async fn leader_crash_failover_and_catchup() {
         }
     }
     let endpoint = endpoint.expect("socket jamais libéré");
-    let revived = RaftApp::start(leader_id).await.unwrap();
+    let revived = RaftApp::start(leader_id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = revived.clone();
     tokio::spawn(serve_endpoint(store, endpoint, Some(handler)));
 

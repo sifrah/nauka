@@ -173,7 +173,7 @@ async fn main() -> Result<()> {
 
             if let Some(id) = node_id {
                 // Mode consensus : membership et registre viennent de Raft.
-                let app = yog_raft::RaftApp::start(id).await?;
+                let app = yog_raft::RaftApp::start(id, &cli.data_dir.join("raft")).await?;
                 raft_handler = Some(app.clone());
                 let self_id = advertise.unwrap_or(listen).to_string();
                 let store_bg = store.clone();

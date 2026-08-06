@@ -33,21 +33,29 @@ pub struct RaftApp {
 }
 
 impl RaftApp {
-    /// Démarre le moteur Raft de ce nœud. Le nœud reste passif tant que le
-    /// cluster n'est pas initialisé (`AdminRequest::Init`) ou qu'il n'est
-    /// pas ajouté par un membre existant.
-    pub async fn start(id: NodeId) -> Result<Arc<Self>> {
+    /// Démarre le moteur Raft de ce nœud, avec état durable dans `dir`
+    /// (log + vote en redb, snapshots sur fichier). Un nœud qui redémarre
+    /// avec le même dir reprend là où il s'était arrêté ; un cluster entier
+    /// éteint redémarre sans perte. Le nœud reste passif tant que le cluster
+    /// n'est pas initialisé (`AdminRequest::Init`) ou qu'il n'est pas ajouté
+    /// par un membre existant.
+    pub async fn start(id: NodeId, dir: &std::path::Path) -> Result<Arc<Self>> {
         let config = Arc::new(
             Config {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
                 election_timeout_max: 3000,
+                // Snapshot régulier pour borner le log redb ; on garde une
+                // marge d'entrées pour que les followers un peu en retard
+                // rattrapent par le log plutôt que par snapshot complet.
+                snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(256),
+                max_in_snapshot_log_to_keep: 64,
                 ..Default::default()
             }
             .validate()?,
         );
-        let log_store = LogStore::default();
-        let state_machine = StateMachineStore::default();
+        let log_store = LogStore::open(dir)?;
+        let state_machine = StateMachineStore::open(dir)?;
         let raft = Raft::new(
             id,
             config,

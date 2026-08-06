@@ -23,7 +23,7 @@ async fn spawn_raft_node(id: u64) -> Node {
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
-    let app = RaftApp::start(id).await.unwrap();
+    let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn yog_transport::server::RaftHandler> = app.clone();
     tokio::spawn(serve_endpoint(store, endpoint, Some(handler)));
     Node { addr, app, _dir: dir }
