@@ -45,10 +45,19 @@ enum Cmd {
     Verify { file_hash: String },
     /// Liste les fichiers stockés.
     List,
-    /// Démarre le nœud en mode serveur QUIC.
+    /// Démarre le nœud en mode serveur QUIC (cluster si --peers est fourni).
     Serve {
         #[arg(long, default_value = "0.0.0.0:7311")]
         listen: SocketAddr,
+        /// Adresse annoncée aux autres nœuds (défaut : adresse d'écoute).
+        #[arg(long)]
+        advertise: Option<SocketAddr>,
+        /// Les autres nœuds du cluster. Active heartbeats + auto-healing.
+        #[arg(long, value_delimiter = ',')]
+        peers: Vec<SocketAddr>,
+        /// Intervalle du scrub d'auto-healing, en secondes.
+        #[arg(long, default_value_t = 30)]
+        scrub_interval: u64,
     },
     /// Encode un fichier et dispatche ses shards sur des peers (round-robin).
     PutRemote {
@@ -141,8 +150,17 @@ async fn main() -> Result<()> {
                 println!("{hash}  {} octets", m.file_size);
             }
         }
-        Cmd::Serve { listen } => {
-            yog_transport::serve(Arc::new(store), listen).await?;
+        Cmd::Serve { listen, advertise, peers, scrub_interval } => {
+            let store = Arc::new(store);
+            if !peers.is_empty() {
+                let view = yog_cluster::ClusterView::new(advertise.unwrap_or(listen), &peers);
+                tokio::spawn(yog_cluster::run_background(
+                    store.clone(),
+                    view,
+                    std::time::Duration::from_secs(scrub_interval),
+                ));
+            }
+            yog_transport::serve(store, listen).await?;
         }
         Cmd::PutRemote { file, peers, data_shards, parity_shards } => {
             let data = std::fs::read(&file)
@@ -155,11 +173,24 @@ async fn main() -> Result<()> {
             let clients = connect_all(&peers).await?;
             let (manifest, stripes) = encode_file(&data, &cfg)?;
 
-            // Round-robin par index de shard : deux shards d'une même stripe
-            // ne tombent sur le même nœud que si peers < k+m.
-            for stripe in &stripes {
+            // Placement rendezvous-hash : le même calcul que fait le scrubber
+            // des nœuds, pour que chaque shard parte directement chez son
+            // propriétaire. Adresses triées = même vue que le cluster.
+            let addrs: Vec<String> = clients.iter().map(|c| c.addr.to_string()).collect();
+            let mut view: Vec<&str> = addrs.iter().map(String::as_str).collect();
+            view.sort();
+            for (si, stripe) in stripes.iter().enumerate() {
                 for shard in stripe {
-                    let client = &clients[shard.index % clients.len()];
+                    let owner = yog_cluster::placement::shard_owner(
+                        &manifest.file_hash,
+                        si,
+                        shard.index,
+                        &view,
+                    );
+                    let client = clients
+                        .iter()
+                        .find(|c| c.addr.to_string() == owner)
+                        .expect("owner vient de la liste des clients");
                     client.put_shard(shard.data.clone()).await?;
                 }
             }

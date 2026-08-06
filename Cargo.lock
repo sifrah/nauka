@@ -1587,6 +1587,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "yog-cluster"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "yog-erasure",
+ "yog-store",
+ "yog-transport",
+]
+
+[[package]]
 name = "yog-erasure"
 version = "0.1.0"
 dependencies = [
@@ -1605,6 +1620,7 @@ dependencies = [
  "clap",
  "tokio",
  "tracing-subscriber",
+ "yog-cluster",
  "yog-erasure",
  "yog-store",
  "yog-transport",
