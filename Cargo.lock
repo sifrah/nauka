@@ -2274,6 +2274,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "openraft",
+ "quinn",
  "serde",
  "tempfile",
  "thiserror 2.0.19",

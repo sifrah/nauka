@@ -17,5 +17,6 @@ bincode = "1"
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 
 [dev-dependencies]
+quinn = "0.11"
 tempfile = "3"
 yog-store = { path = "../yog-store" }
