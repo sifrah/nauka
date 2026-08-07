@@ -406,6 +406,345 @@ impl S3 for NaukaS3 {
         }))
     }
 
+    // ── Multipart ─────────────────────────────────────────────────────
+    // Not an optional feature: `aws s3 cp` switches to multipart above
+    // 8 MB and rclone above 200 MB, so without it half the ecosystem
+    // breaks on large files. Each part is an ordinary erasure-coded
+    // manifest; Complete stitches their references together, which makes
+    // completing a 100 GB upload a metadata operation.
+
+    async fn create_multipart_upload(
+        &self,
+        req: S3Request<CreateMultipartUploadInput>,
+    ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
+        let input = req.input;
+        self.require_bucket(&input.bucket)?;
+        if !nauka_s3::naming::valid_key(&input.key) {
+            return Err(s3_error!(InvalidArgument, "invalid key"));
+        }
+        let upload_id = uuid_like();
+        let upload = nauka_s3::MultipartUpload {
+            upload_id: upload_id.clone(),
+            bucket: input.bucket.clone(),
+            key: input.key.clone(),
+            initiated: Self::now(),
+            owner: req.credentials.map(|c| c.access_key).unwrap_or_default(),
+            content_type: input.content_type.clone(),
+            user_metadata: input
+                .metadata
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default(),
+            system_metadata: BTreeMap::new(),
+            storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
+            tags: BTreeMap::new(),
+            sse: None,
+            parts: BTreeMap::new(),
+        };
+        self.write(nauka_raft::types::AppCommand::PutUpload(Box::new(upload)))
+            .await?;
+        Ok(S3Response::new(CreateMultipartUploadOutput {
+            bucket: Some(input.bucket),
+            key: Some(input.key),
+            upload_id: Some(upload_id),
+            ..Default::default()
+        }))
+    }
+
+    async fn upload_part(
+        &self,
+        req: S3Request<UploadPartInput>,
+    ) -> S3Result<S3Response<UploadPartOutput>> {
+        let input = req.input;
+        if !self
+            .state
+            .app
+            .app_state()
+            .s3
+            .uploads
+            .contains_key(&input.upload_id)
+        {
+            return Err(s3_error!(NoSuchUpload));
+        }
+        let part_number = u32::try_from(input.part_number)
+            .ok()
+            .filter(|n| (1..=10_000).contains(n))
+            .ok_or_else(|| s3_error!(InvalidArgument, "part number must be 1..=10000"))?;
+
+        let tmp = self.state.tmp_dir.join(format!("s3p-{}", uuid_like()));
+        let (size, blake, md5) = write_body(input.body, &tmp).await.map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            s3_error!(InternalError, "{e:#}")
+        })?;
+        if size == 0 {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(s3_error!(InvalidArgument, "an empty part is not allowed"));
+        }
+        let result = crate::api::dispatch_file(
+            &self.state,
+            &tmp,
+            size,
+            blake,
+            Some(format!("{}#part{}", input.key, part_number)),
+            None,
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let (manifest, _) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+
+        let etag = nauka_s3::naming::etag_single(&md5);
+        // One part at a time: parts arrive concurrently, so the merge
+        // belongs in the state machine. Re-uploading a part replaces it,
+        // as S3 allows.
+        self.write(nauka_raft::types::AppCommand::PutUploadPart {
+            upload_id: input.upload_id.clone(),
+            part_number,
+            part: Box::new(nauka_s3::UploadedPart {
+                content: manifest.file_hash,
+                size,
+                etag: etag.clone(),
+                last_modified: Self::now(),
+                checksums: BTreeMap::new(),
+            }),
+        })
+        .await?;
+        Ok(S3Response::new(UploadPartOutput {
+            e_tag: etag.parse().ok(),
+            ..Default::default()
+        }))
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        req: S3Request<CompleteMultipartUploadInput>,
+    ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
+        let input = req.input;
+        let upload = self
+            .state
+            .app
+            .app_state()
+            .s3
+            .uploads
+            .get(&input.upload_id)
+            .cloned()
+            .ok_or_else(|| s3_error!(NoSuchUpload))?;
+        let requested = input
+            .multipart_upload
+            .and_then(|m| m.parts)
+            .unwrap_or_default();
+        if requested.is_empty() {
+            return Err(s3_error!(InvalidRequest, "no parts listed"));
+        }
+
+        // The client re-sends the part list. Validate its STRUCTURE first —
+        // order, existence, ETags — and only then the size rule. Checking
+        // sizes inline lets a small early part mask a missing or
+        // misordered later one, so a client debugging its part list gets
+        // EntityTooSmall where AWS says InvalidPart.
+        let mut previous = 0i32;
+        let mut chosen = Vec::with_capacity(requested.len());
+        for part in requested.iter() {
+            let number = part.part_number.ok_or_else(|| s3_error!(InvalidPart))?;
+            if number <= previous {
+                return Err(s3_error!(InvalidPartOrder));
+            }
+            previous = number;
+            let stored = u32::try_from(number)
+                .ok()
+                .and_then(|n| upload.parts.get(&n))
+                .ok_or_else(|| s3_error!(InvalidPart))?;
+            if let Some(claimed) = &part.e_tag {
+                let ours: ETag = stored
+                    .etag
+                    .parse()
+                    .map_err(|_| s3_error!(InternalError, "bad stored etag"))?;
+                if !ours.strong_cmp(claimed) {
+                    return Err(s3_error!(InvalidPart));
+                }
+            }
+            chosen.push(stored.clone());
+        }
+        // Every part but the last must be at least 5 MiB — the rule that
+        // keeps multipart ETags reproducible across clients.
+        const MIN_PART: u64 = 5 * 1024 * 1024;
+        if chosen
+            .iter()
+            .take(chosen.len().saturating_sub(1))
+            .any(|p| p.size < MIN_PART)
+        {
+            return Err(s3_error!(EntityTooSmall));
+        }
+
+        // The multipart ETag: MD5 over the concatenated BINARY part
+        // digests, suffixed with the count.
+        let digests: Vec<[u8; 16]> = chosen
+            .iter()
+            .filter_map(|p| nauka_s3::naming::md5_from_etag(&p.etag))
+            .collect();
+        if digests.len() != chosen.len() {
+            return Err(s3_error!(InternalError, "unreadable part etag"));
+        }
+        let etag = nauka_s3::naming::etag_multipart(&digests);
+        let total: u64 = chosen.iter().map(|p| p.size).sum();
+
+        // Stitching the parts into one manifest is metadata only: the
+        // shards are already placed, so completing a huge upload costs a
+        // single Raft write, not a re-upload.
+        let mut stripes = Vec::new();
+        let state = self.state.app.app_state();
+        let mut config = None;
+        for part in &chosen {
+            let m = state
+                .manifests
+                .get(&part.content)
+                .ok_or_else(|| s3_error!(InternalError, "a part vanished before completion"))?;
+            config.get_or_insert(m.config);
+            stripes.extend(m.stripes.iter().cloned());
+        }
+        let joined = nauka_erasure::FileManifest {
+            // The assembled object is addressed by the parts it is made
+            // of, not by a hash of bytes we never held in one place.
+            file_hash: multipart_content_hash(&chosen),
+            file_size: total,
+            name: Some(upload.key.clone()),
+            expires_at: None,
+            config: config.unwrap_or(self.state.config),
+            stripes,
+        };
+        let content_hash = joined.file_hash.clone();
+        self.state
+            .store
+            .put_manifest(&joined)
+            .map_err(|e| s3_error!(InternalError, "{e}"))?;
+        self.write(nauka_raft::types::AppCommand::RegisterManifest(joined))
+            .await?;
+
+        let version = nauka_s3::ObjectVersion {
+            version_id: "null".into(),
+            content: Some(content_hash),
+            size: total,
+            etag: etag.clone(),
+            last_modified: Self::now(),
+            content_type: upload.content_type.clone(),
+            user_metadata: upload.user_metadata.clone(),
+            system_metadata: upload.system_metadata.clone(),
+            storage_class: upload.storage_class.clone(),
+            tags: upload.tags.clone(),
+            checksums: BTreeMap::new(),
+            retention: None,
+            legal_hold: false,
+            sse: upload.sse.clone(),
+        };
+        self.write(nauka_raft::types::AppCommand::PutObjectVersion {
+            bucket: upload.bucket.clone(),
+            key: upload.key.clone(),
+            version: Box::new(version),
+        })
+        .await?;
+        // Only now does the upload go: while it existed, its parts held
+        // references that kept the GC away from their shards.
+        self.write(nauka_raft::types::AppCommand::DeleteUpload {
+            upload_id: input.upload_id,
+        })
+        .await?;
+
+        Ok(S3Response::new(CompleteMultipartUploadOutput {
+            bucket: Some(upload.bucket),
+            key: Some(upload.key),
+            e_tag: etag.parse().ok(),
+            ..Default::default()
+        }))
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        req: S3Request<AbortMultipartUploadInput>,
+    ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
+        match self
+            .state
+            .app
+            .write(nauka_raft::types::AppCommand::DeleteUpload {
+                upload_id: req.input.upload_id,
+            })
+            .await
+        {
+            Ok(r) if r.ok => Ok(S3Response::new(AbortMultipartUploadOutput::default())),
+            Ok(_) => Err(s3_error!(NoSuchUpload)),
+            Err(e) => Err(s3_error!(InternalError, "{e:#}")),
+        }
+    }
+
+    async fn list_parts(
+        &self,
+        req: S3Request<ListPartsInput>,
+    ) -> S3Result<S3Response<ListPartsOutput>> {
+        let upload = self
+            .state
+            .app
+            .app_state()
+            .s3
+            .uploads
+            .get(&req.input.upload_id)
+            .cloned()
+            .ok_or_else(|| s3_error!(NoSuchUpload))?;
+        let after = req.input.part_number_marker.unwrap_or(0);
+        let max = req.input.max_parts.unwrap_or(1000).clamp(0, 1000) as usize;
+        let mut parts: Vec<Part> = Vec::new();
+        let mut truncated = false;
+        for (n, p) in upload.parts.iter().filter(|(n, _)| **n as i32 > after) {
+            if parts.len() >= max {
+                truncated = true;
+                break;
+            }
+            parts.push(Part {
+                part_number: Some(*n as i32),
+                size: Some(p.size as i64),
+                e_tag: p.etag.parse().ok(),
+                last_modified: Some(Self::timestamp(p.last_modified)),
+                ..Default::default()
+            });
+        }
+        Ok(S3Response::new(ListPartsOutput {
+            bucket: Some(upload.bucket),
+            key: Some(upload.key),
+            upload_id: Some(upload.upload_id),
+            parts: Some(parts),
+            max_parts: Some(max as i32),
+            is_truncated: Some(truncated),
+            ..Default::default()
+        }))
+    }
+
+    async fn list_multipart_uploads(
+        &self,
+        req: S3Request<ListMultipartUploadsInput>,
+    ) -> S3Result<S3Response<ListMultipartUploadsOutput>> {
+        let bucket = req.input.bucket;
+        self.require_bucket(&bucket)?;
+        let prefix = req.input.prefix.clone().unwrap_or_default();
+        let uploads: Vec<MultipartUpload> = self
+            .state
+            .app
+            .app_state()
+            .s3
+            .uploads
+            .values()
+            .filter(|u| u.bucket == bucket && u.key.starts_with(&prefix))
+            .map(|u| MultipartUpload {
+                upload_id: Some(u.upload_id.clone()),
+                key: Some(u.key.clone()),
+                initiated: Some(Self::timestamp(u.initiated)),
+                ..Default::default()
+            })
+            .collect();
+        Ok(S3Response::new(ListMultipartUploadsOutput {
+            bucket: Some(bucket),
+            prefix: Some(prefix),
+            uploads: Some(uploads),
+            is_truncated: Some(false),
+            ..Default::default()
+        }))
+    }
+
     async fn delete_objects(
         &self,
         req: S3Request<DeleteObjectsInput>,
@@ -734,4 +1073,20 @@ async fn reconstruct_range(
         offset += len;
     }
     Ok(out)
+}
+
+/// Content hash of an assembled multipart object.
+///
+/// A normal object is addressed by BLAKE3 over its bytes, but a multipart
+/// upload is never held in one place — the parts were hashed separately as
+/// they streamed in. Hashing the ordered list of part hashes instead is
+/// still content-addressed: the same parts in the same order always yield
+/// the same object, so two identical multipart uploads still deduplicate.
+fn multipart_content_hash(parts: &[nauka_s3::UploadedPart]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nauka-multipart-v1");
+    for p in parts {
+        hasher.update(p.content.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }

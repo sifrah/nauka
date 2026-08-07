@@ -523,6 +523,23 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 info: Some(id),
                             }
                         }
+                        AppCommand::PutUploadPart {
+                            upload_id,
+                            part_number,
+                            part,
+                        } => match inner.state.s3.uploads.get_mut(&upload_id) {
+                            Some(upload) => {
+                                upload.parts.insert(part_number, *part);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
+                            None => AppResponse {
+                                ok: false,
+                                info: Some("no such upload".into()),
+                            },
+                        },
                         AppCommand::DeleteUpload { upload_id } => {
                             let removed = inner.state.s3.uploads.remove(&upload_id).is_some();
                             AppResponse {

@@ -77,8 +77,21 @@ pub enum AppCommand {
         key: String,
         version_id: String,
     },
-    /// Registers or updates an in-flight multipart upload.
+    /// Registers an in-flight multipart upload.
     PutUpload(Box<nauka_s3::MultipartUpload>),
+    /// Adds ONE part to an existing upload.
+    ///
+    /// Not `PutUpload` with a modified copy: clients upload parts in
+    /// parallel (boto3 does by default), so read-modify-write of the whole
+    /// upload loses every part but the last to land — the upload then
+    /// fails at completion with InvalidPart. Merging a single part inside
+    /// the state machine, where the log serializes it, is the only correct
+    /// form.
+    PutUploadPart {
+        upload_id: String,
+        part_number: u32,
+        part: Box<nauka_s3::UploadedPart>,
+    },
     /// Forgets a multipart upload (completed or aborted); its parts lose
     /// their references and the GC reclaims what nothing else holds.
     DeleteUpload { upload_id: String },
