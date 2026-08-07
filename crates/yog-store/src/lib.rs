@@ -124,6 +124,15 @@ impl ShardStore {
         Ok(out)
     }
 
+    /// Supprime un manifest local (idempotent).
+    pub fn delete_manifest(&self, file_hash: &str) -> Result<(), StoreError> {
+        match fs::remove_file(self.manifest_path(file_hash)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn list_manifests(&self) -> Result<Vec<ContentHash>, StoreError> {
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join("manifests"))? {

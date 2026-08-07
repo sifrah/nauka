@@ -24,6 +24,56 @@ pub struct HealReport {
 pub struct GcReport {
     pub shards_released: usize,
     pub shards_kept: usize,
+    /// Shards purgés parce qu'aucun fichier vivant ne les référence
+    /// (fichier supprimé, expiré ou banni).
+    pub orphans_purged: usize,
+    /// Manifests locaux retirés car absents du registre répliqué.
+    pub manifests_purged: usize,
+}
+
+/// Purge des fichiers supprimés : retire les manifests locaux absents du
+/// registre répliqué, puis les shards que plus aucun manifest vivant ne
+/// référence.
+///
+/// `live_manifests` est la liste faisant autorité (le registre Raft). La
+/// purge n'a lieu QUE si cette liste est fiable : un nœud qui vient de
+/// démarrer et n'a pas encore reçu l'état ne doit rien effacer, d'où le
+/// paramètre `registry_ready`.
+pub fn purge_deleted(
+    store: &Arc<ShardStore>,
+    live_manifests: &std::collections::BTreeSet<String>,
+    registry_ready: bool,
+) -> Result<GcReport> {
+    let mut report = GcReport::default();
+    if !registry_ready {
+        return Ok(report);
+    }
+
+    // 1. Manifests locaux qui ne sont plus dans le registre → supprimés.
+    for local in store.list_manifests()? {
+        if !live_manifests.contains(&local) {
+            store.delete_manifest(&local)?;
+            report.manifests_purged += 1;
+        }
+    }
+
+    // 2. Shards qu'aucun manifest local restant ne référence.
+    let mut referenced: std::collections::BTreeSet<String> = Default::default();
+    for file_hash in store.list_manifests()? {
+        let manifest = store.get_manifest(&file_hash)?;
+        for stripe in &manifest.stripes {
+            for hash in &stripe.shard_hashes {
+                referenced.insert(hash.clone());
+            }
+        }
+    }
+    for shard in store.list_shards()? {
+        if !referenced.contains(&shard) {
+            store.delete_shard(&shard)?;
+            report.orphans_purged += 1;
+        }
+    }
+    Ok(report)
 }
 
 /// GC de rebalancement : libère les shards locaux dont ce nœud n'est plus

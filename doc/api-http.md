@@ -129,3 +129,33 @@ indisponible, navigateur restrictif), le lecteur bascule silencieusement
 sur un déchiffrement complet en mémoire + Blob URL : robuste, mais il
 faut attendre le fichier entier, donc plafonné à 600 Mo. Un badge
 « streaming » dans l'interface indique quel mode est actif.
+
+## Suppression, expiration et bannissement
+
+### `DELETE /f/{hash}`
+Retire le fichier du registre répliqué (`204 No Content`, `404` s'il est
+inconnu). Chaque nœud purge ensuite ses manifests et shards devenus
+orphelins à la passe de fond suivante. Mesuré : 6/6/6 shards → 0/0/0 en un
+cycle sur un cluster de 3.
+
+### TTL — `POST /api/upload?ttl=<secondes>`
+Le manifest porte un `expires_at`. Le **leader** retire les fichiers échus
+du registre (une fois pour tout le cluster), la purge suit partout. Les
+fichiers expirés disparaissent du listing et ne sont plus servis.
+
+### Bannissement — `yog-node ban <hash> --reason "…"`
+Pour honorer un signalement ou une réquisition **sans jamais lire le
+contenu** : le hash est banni dans l'état Raft, le fichier sort du
+registre, `GET` répond **`410 Gone` avec le motif**, les shards sont purgés,
+et tout **ré-upload du même contenu est refusé** (le registre rejette le
+manifest). `yog-node unban <hash>` lève la mesure.
+
+Limite structurelle assumée : le bannissement ne vise que ce contenu à
+l'octet près — un ré-upload chiffré avec une autre clé produit un autre
+hash. Voir [chiffrement.md](chiffrement.md#réquisition-judiciaire--ce-que-lopérateur-peut-fournir).
+
+### Sécurité de la purge
+Un nœud ne purge **que** si son registre est fiable (membre du cluster et
+leader connu) : un nœud fraîchement démarré, au registre encore vide,
+n'efface rien — sinon il détruirait le cluster. Un shard référencé par un
+autre fichier vivant n'est jamais supprimé (testé).

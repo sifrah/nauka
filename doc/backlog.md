@@ -14,6 +14,7 @@ Les chantiers, classés. Trois sections : ce qui est **livré**, les
 | Placement pondéré par capacité disque | `yog-cluster/placement` (WRH) |
 | Attestation de stockage (preuves de détention) | `yog-cluster/audit` + GC durci |
 | Géo-placement sans GeoIP (coordonnées Vivaldi) | `yog-cluster/vivaldi` + `stripe_owners_geo` |
+| Suppression, expiration (TTL) et blocage par hash | `DELETE /f/{hash}`, `ttl=`, `yog-node ban/unban` |
 | Découverte DHT zéro-config + élection de genèse | `yog-discovery` |
 | Identité crypto + mTLS de cluster | `yog-transport/tls` |
 | Consensus Raft durable + plan réseau dédié | `yog-raft` |
@@ -43,9 +44,7 @@ l'API native + webui pour le partage E2E grand public.
 3. **SigV4** : la signature AWS règle du même coup la consolidation B —
    les access keys S3 *sont* le système d'authentification.
 
-**Effort : moyen-haut** (1–2 sessions). **Prérequis : la suppression
-(consolidation A)** — un `DELETE Object` qui ne supprime rien n'est pas
-acceptable.
+**Effort : moyen-haut** (1–2 sessions). Le prérequis (suppression) est en place.
 
 ### 2. Le cluster héberge sa propre UI — *effort faible*
 L'interface est aujourd'hui servie depuis `webui/dist` sur le disque de
@@ -89,52 +88,34 @@ natif (voir C).
 
 ## Consolidations
 
-### A. Suppression, expiration et blocage par hash
-`UnregisterManifest` existe côté Raft ; il manque : `DELETE` sur l'API,
-TTL optionnel à l'upload, purge des manifests locaux absents du registre,
-et GC des shards orphelins (aujourd'hui explicitement hors périmètre).
-**Le plus attendu des utilisateurs — et prérequis à toute mise en ligne
-publique.**
-
-Même plomberie, à faire dans la foulée : **blocage par hash** (commande
-Raft `BanHash`) — l'API refuse de servir un hash banni (`410 Gone`), son
-manifest sort du registre, le GC purge ses shards. Permet d'honorer un
-signalement ou une réquisition **sans jamais lire les contenus** (on agit
-sur une empreinte), et de rejeter un ré-upload identique d'emblée. Limite
-structurelle assumée : ne bloque que ce fichier à l'octet près — un
-ré-upload chiffré avec une autre clé produit un autre hash. Prévoir aussi
-un point de contact abus et un registre des demandes (cf.
-[chiffrement.md](chiffrement.md) pour ce que l'opérateur peut/ne peut pas
-fournir).
-
-### B. Authentification et quotas sur l'API HTTP
+### A. Authentification et quotas sur l'API HTTP — *le plus urgent*
 Prérequis à toute exposition publique. Tokens d'upload, quotas par clé,
 rate limiting. (En attendant : reverse proxy.)
 
-### C. NAT traversal natif (hole punching QUIC + relais)
+### B. NAT traversal natif (hole punching QUIC + relais)
 Ouvre le produit aux machines de salon — le vrai marché self-hosted. Rend
 Yggdrasil définitivement inutile. **Effort : haut** (signaling via la DHT,
 relais optionnels à la iroh).
 
-### D. Garde-fou disque plein
+### C. Garde-fou disque plein
 Refus des écritures au-delà de ~95 % + débordement sur le suivant du
 classement HRW ; le scrubber rapatrie quand la place revient.
 
-### E. MediaSource Extensions (fMP4) pour le repli du lecteur
+### D. MediaSource Extensions (fMP4) pour le repli du lecteur
 Le streaming par Service Worker couvre le cas nominal. Le repli
 « déchiffrement complet en mémoire » (si le worker est indisponible) reste
 plafonné à 600 Mo. MSE + fMP4 lèverait ce plafond et améliorerait la
 compatibilité navigateurs.
 
-### F. Émission de certificats hors-ligne
+### E. Émission de certificats hors-ligne
 La clé de cluster ne quitte plus le poste d'admin ; chaque nœud reçoit un
 certificat pré-signé. Réduit le blast radius d'un nœud compromis.
 
-### G. Fair queuing entre uploads concurrents
+### F. Fair queuing entre uploads concurrents
 Les gros flux affament les petits (observé au stress test 15 Go — sans
 danger, juste inéquitable). Ordonnancement par connexion côté serveur.
 
-### H. Préparation open source
+### G. Préparation open source
 - **Nom définitif** : `chainrage` (libre sur GitHub) vs `nauka`
   (homonymes existants, rien de bloquant) vs autre.
 - **Licence** : tranché — dépôt entier en **AGPL-3.0** (`LICENSE` à la

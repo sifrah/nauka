@@ -105,6 +105,10 @@ pub struct FileManifest {
     /// Nom d'affichage (fourni à l'upload). N'entre pas dans le hash.
     #[serde(default)]
     pub name: Option<String>,
+    /// Expiration optionnelle (timestamp Unix, secondes) : au-delà, le
+    /// fichier est retiré du registre et ses shards purgés.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
     pub config: ErasureConfig,
     pub stripes: Vec<StripeMeta>,
 }
@@ -228,6 +232,7 @@ pub fn encode_file(
             file_hash: hash_bytes(data),
             file_size: data.len() as u64,
             name: None,
+            expires_at: None,
             config: *cfg,
             stripes: stripes_meta,
         },

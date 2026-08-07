@@ -335,8 +335,13 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                     let reply = match cmd {
                         AppCommand::RegisterManifest(manifest) => {
                             let hash = manifest.file_hash.clone();
-                            inner.state.manifests.insert(hash.clone(), manifest);
-                            AppResponse { ok: true, info: Some(hash) }
+                            if inner.state.banned.contains_key(&hash) {
+                                // Ré-upload d'un contenu banni : refusé net.
+                                AppResponse { ok: false, info: Some("banni".into()) }
+                            } else {
+                                inner.state.manifests.insert(hash.clone(), manifest);
+                                AppResponse { ok: true, info: Some(hash) }
+                            }
                         }
                         AppCommand::UnregisterManifest { file_hash } => {
                             let removed = inner.state.manifests.remove(&file_hash).is_some();
@@ -349,6 +354,18 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                         AppCommand::UpdateNodeCoord { addr, coord } => {
                             inner.state.node_coords.insert(addr, coord);
                             AppResponse { ok: true, info: None }
+                        }
+                        AppCommand::BanHash { file_hash, reason } => {
+                            // Bannir retire aussi du registre : le fichier
+                            // devient introuvable ET ses shards deviennent
+                            // orphelins, donc purgeables par le GC.
+                            inner.state.manifests.remove(&file_hash);
+                            inner.state.banned.insert(file_hash.clone(), reason);
+                            AppResponse { ok: true, info: Some(file_hash) }
+                        }
+                        AppCommand::UnbanHash { file_hash } => {
+                            let removed = inner.state.banned.remove(&file_hash).is_some();
+                            AppResponse { ok: removed, info: Some(file_hash) }
                         }
                     };
                     replies.push(reply);

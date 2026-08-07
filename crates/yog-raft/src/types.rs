@@ -33,6 +33,12 @@ pub enum AppCommand {
     /// Publie les coordonnées réseau Vivaldi d'un nœud : le placement s'en
     /// sert pour écarter géographiquement les shards d'une même stripe.
     UpdateNodeCoord { addr: String, coord: yog_cluster::vivaldi::Coord },
+    /// Bannit un hash : le fichier sort du registre, l'API refuse de le
+    /// servir (410) et le GC purge ses shards. Permet d'honorer un
+    /// signalement ou une réquisition sans jamais lire le contenu.
+    BanHash { file_hash: String, reason: String },
+    /// Lève un bannissement (erreur d'appréciation, décision annulée).
+    UnbanHash { file_hash: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,6 +59,9 @@ pub struct AppState {
     /// Coordonnées réseau déclarées par nœud (adresse → position Vivaldi).
     #[serde(default)]
     pub node_coords: BTreeMap<String, yog_cluster::vivaldi::Coord>,
+    /// Hashes bannis (hash → motif) : jamais servis, jamais ré-acceptés.
+    #[serde(default)]
+    pub banned: BTreeMap<String, String>,
 }
 
 /// Requêtes d'administration adressées à un nœud (hors log Raft).

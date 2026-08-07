@@ -59,7 +59,7 @@ pub async fn serve_http(
         .route("/api/upload", post(upload))
         .route("/api/files", get(files))
         .route("/api/status", get(status))
-        .route("/f/{hash}", get(download).head(download_head))
+        .route("/f/{hash}", get(download).head(download_head).delete(delete_file))
         .with_state(state);
     // Interface web (SPA) : fichiers statiques, et index.html pour les
     // routes applicatives (/files, /dashboard, /d/<hash>).
@@ -123,6 +123,9 @@ async fn download_head(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
 ) -> Response {
+    if let Some(resp) = unavailable(&state, &hash) {
+        return resp;
+    }
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
         Err(_) => match state.app.app_state().manifests.get(&hash) {
@@ -136,6 +139,50 @@ async fn download_head(
         .header(header::CONTENT_LENGTH, manifest.file_size)
         .body(Body::empty())
         .unwrap()
+}
+
+/// Un fichier banni n'est jamais servi (410), un fichier expiré non plus.
+fn unavailable(state: &ApiState, hash: &str) -> Option<Response> {
+    let app_state = state.app.app_state();
+    if let Some(reason) = app_state.banned.get(hash) {
+        return Some(
+            (StatusCode::GONE, format!("contenu retiré : {reason}")).into_response(),
+        );
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match app_state.manifests.get(hash) {
+        Some(m) if m.expires_at.is_some_and(|e| e <= now) => {
+            Some((StatusCode::GONE, "fichier expiré").into_response())
+        }
+        // Absent du registre : soit jamais enregistré, soit supprimé.
+        None if state.store.get_manifest(hash).is_ok() => {
+            Some((StatusCode::GONE, "fichier supprimé").into_response())
+        }
+        _ => None,
+    }
+}
+
+/// DELETE /f/{hash} : retire le fichier du registre répliqué. Les shards
+/// sont purgés par le GC de chaque nœud à la passe suivante.
+async fn delete_file(
+    State(state): State<Arc<ApiState>>,
+    Path(hash): Path<String>,
+) -> Result<Response, ApiError> {
+    if !state.app.app_state().manifests.contains_key(&hash) {
+        return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response());
+    }
+    let resp = state
+        .app
+        .write(yog_raft::types::AppCommand::UnregisterManifest { file_hash: hash.clone() })
+        .await
+        .context("suppression dans le registre")?;
+    if !resp.ok {
+        return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response());
+    }
+    Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
 /// Erreur HTTP uniforme.
@@ -156,6 +203,8 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 #[derive(serde::Deserialize)]
 struct UploadParams {
     name: Option<String>,
+    /// Durée de vie en secondes : au-delà, le fichier est purgé du cluster.
+    ttl: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -190,7 +239,15 @@ async fn upload(
     }
     tmp.flush().await?;
     drop(tmp);
-    let result = dispatch_file(&state, &tmp_path, size, hasher, params.name).await;
+    let expires_at = params.ttl.map(|ttl| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + ttl
+    });
+    let result =
+        dispatch_file(&state, &tmp_path, size, hasher, params.name, expires_at).await;
     let _ = tokio::fs::remove_file(&tmp_path).await;
     let manifest = result?;
 
@@ -213,6 +270,7 @@ async fn dispatch_file(
     size: u64,
     hasher: blake3::Hasher,
     name: Option<String>,
+    expires_at: Option<u64>,
 ) -> Result<FileManifest> {
     if size == 0 {
         bail!("fichier vide");
@@ -266,6 +324,7 @@ async fn dispatch_file(
         file_hash,
         file_size: size,
         name,
+        expires_at,
         config: cfg,
         stripes: stripes_meta,
     };
@@ -277,7 +336,7 @@ async fn dispatch_file(
         .await
         .context("enregistrement dans le registre Raft")?;
     if !resp.ok {
-        bail!("le registre a refusé le manifest");
+        bail!("le registre a refusé le manifest (contenu banni ?)");
     }
     Ok(manifest)
 }
@@ -335,6 +394,9 @@ async fn download(
     Path(hash): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
+    if let Some(resp) = unavailable(&state, &hash) {
+        return Ok(resp);
+    }
     // Manifest : store local (matérialisé), sinon registre répliqué.
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
@@ -586,11 +648,16 @@ struct FileEntry {
 }
 
 async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let entries = state
         .app
         .app_state()
         .manifests
         .values()
+        .filter(|m| !m.expires_at.is_some_and(|e| e <= now))
         .map(|m| FileEntry {
             hash: m.file_hash.clone(),
             size: m.file_size,

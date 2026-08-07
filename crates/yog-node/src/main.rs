@@ -125,6 +125,23 @@ enum Cmd {
         #[arg(required = true)]
         members: Vec<String>,
     },
+    /// Bannit un fichier : retiré du registre, refusé au téléchargement
+    /// (410) et purgé par le GC. Pour honorer un signalement ou une
+    /// réquisition sans lire le contenu.
+    Ban {
+        file_hash: String,
+        /// Motif consigné dans le registre (référence du signalement…).
+        #[arg(long, default_value = "signalement")]
+        reason: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        peers: Vec<SocketAddr>,
+    },
+    /// Lève un bannissement.
+    Unban {
+        file_hash: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        peers: Vec<SocketAddr>,
+    },
     /// Affiche l'état du cluster Raft vu par un nœud.
     ClusterMetrics {
         #[arg(long, default_value = "127.0.0.1:7311")]
@@ -431,6 +448,54 @@ async fn main() -> Result<()> {
                                 let _ = store_bg.put_manifest(manifest);
                             }
                         }
+
+                        // Expiration : le leader retire du registre les
+                        // fichiers dont le TTL est échu (une seule fois pour
+                        // tout le cluster, la réplication fait le reste).
+                        let is_leader =
+                            app.raft.metrics().borrow().current_leader == Some(app.id);
+                        if is_leader {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            for m in state.manifests.values() {
+                                if m.expires_at.is_some_and(|e| e <= now) {
+                                    match app
+                                        .write(yog_raft::types::AppCommand::UnregisterManifest {
+                                            file_hash: m.file_hash.clone(),
+                                        })
+                                        .await
+                                    {
+                                        Ok(_) => eprintln!("expiré: {}", m.file_hash),
+                                        Err(e) => eprintln!("expiration en échec: {e:#}"),
+                                    }
+                                }
+                            }
+                        }
+
+                        // Purge locale : manifests absents du registre et
+                        // shards que plus aucun fichier vivant ne référence.
+                        // `registry_ready` évite qu'un nœud fraîchement
+                        // démarré, au registre encore vide, n'efface tout.
+                        let live: std::collections::BTreeSet<String> =
+                            app.app_state().manifests.keys().cloned().collect();
+                        let registry_ready = app.members().contains_key(&app.id)
+                            && app.raft.metrics().borrow().current_leader.is_some();
+                        match yog_cluster::healer::purge_deleted(
+                            &store_bg,
+                            &live,
+                            registry_ready,
+                        ) {
+                            Ok(p) if p.manifests_purged > 0 || p.orphans_purged > 0 => {
+                                eprintln!(
+                                    "purge: {} manifest(s), {} shard(s) orphelin(s)",
+                                    p.manifests_purged, p.orphans_purged
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("purge en échec: {e}"),
+                        }
                         let members = app.members();
                         if members.len() < 2 || !members.values().any(|a| *a == self_id) {
                             continue;
@@ -559,6 +624,34 @@ async fn main() -> Result<()> {
             match yog_raft::admin_call(&client, &yog_raft::types::AdminRequest::Init(map)).await? {
                 yog_raft::types::AdminResponse::Ok(_) => println!("cluster initialisé"),
                 other => bail!("échec de l'init: {other:?}"),
+            }
+        }
+        Cmd::Ban { file_hash, reason, peers } => {
+            let resp = yog_raft::write_via_leader(
+                &peers,
+                yog_raft::types::AppCommand::BanHash {
+                    file_hash: file_hash.clone(),
+                    reason: reason.clone(),
+                },
+            )
+            .await?;
+            if resp.ok {
+                println!("banni : {file_hash} ({reason})");
+                println!("  retiré du registre, refusé en 410, shards purgés au prochain GC");
+            } else {
+                bail!("bannissement refusé");
+            }
+        }
+        Cmd::Unban { file_hash, peers } => {
+            let resp = yog_raft::write_via_leader(
+                &peers,
+                yog_raft::types::AppCommand::UnbanHash { file_hash: file_hash.clone() },
+            )
+            .await?;
+            if resp.ok {
+                println!("bannissement levé : {file_hash}");
+            } else {
+                println!("ce hash n'était pas banni");
             }
         }
         Cmd::ClusterMetrics { peer } => {
@@ -759,6 +852,7 @@ async fn main() -> Result<()> {
                 file_hash,
                 file_size,
                 name: file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                expires_at: None,
                 config: cfg,
                 stripes: stripes_meta,
             };
