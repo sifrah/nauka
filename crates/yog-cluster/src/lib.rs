@@ -3,6 +3,7 @@
 //! auto-healing. Le consensus Raft (openraft) remplacera la vue statique
 //! pour un membership dynamique et des métadonnées fortement cohérentes.
 
+pub mod audit;
 pub mod healer;
 pub mod placement;
 

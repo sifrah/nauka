@@ -93,6 +93,15 @@ impl PeerClient {
         }
     }
 
+    /// Demande une preuve de détention d'un shard : le pair doit renvoyer
+    /// `blake3(nonce ‖ octets)`, ce qu'il ne peut faire qu'en les relisant.
+    pub async fn prove_shard(&self, hash: &str, nonce: [u8; 32]) -> Result<Option<[u8; 32]>> {
+        match self.call(Request::ProveShard { hash: hash.to_string(), nonce }).await? {
+            Response::Proof(p) => Ok(p),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn put_manifest(&self, manifest: &FileManifest) -> Result<()> {
         match self.call(Request::PutManifest(manifest.clone())).await? {
             Response::PutManifestOk => Ok(()),

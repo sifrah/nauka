@@ -30,8 +30,10 @@ pub struct GcReport {
 /// propriétaire (la vue du cluster a changé — nœud ajouté/retiré).
 ///
 /// Prudence maximale : un shard n'est supprimé que si TOUS ses propriétaires
-/// actuels (un shard peut être référencé par plusieurs manifests) confirment
-/// le détenir. Un propriétaire injoignable → on garde. Les shards inconnus
+/// actuels (un shard peut être référencé par plusieurs manifests) en
+/// apportent la PREUVE — `blake3(nonce ‖ octets)`, vérifiée contre notre
+/// copie locale — et non une simple déclaration `has_shard`. Un
+/// propriétaire injoignable ou sans preuve → on garde. Les shards inconnus
 /// des manifests locaux ne sont jamais touchés.
 pub async fn gc_once(
     store: &Arc<ShardStore>,
@@ -63,6 +65,9 @@ pub async fn gc_once(
         if shard_owners.iter().any(|o| o == self_id) {
             continue; // toujours à nous, rien à faire
         }
+        // On détient encore les octets : on peut donc EXIGER une preuve de
+        // détention avant de les libérer.
+        let Ok(local_data) = store.get_shard(&shard) else { continue };
         let mut all_confirmed = true;
         for owner in shard_owners {
             let client = peers.entry(owner.clone()).or_insert_with(|| None);
@@ -71,12 +76,21 @@ pub async fn gc_once(
                     *client = PeerClient::connect(addr).await.ok();
                 }
             }
-            match client {
-                Some(c) if c.has_shard(&shard).await.unwrap_or(false) => {}
-                _ => {
-                    all_confirmed = false;
-                    break;
+            let proved = match client {
+                Some(c) => {
+                    let nonce: [u8; 32] = rand::random();
+                    match c.prove_shard(&shard, nonce).await {
+                        Ok(Some(proof)) => {
+                            proof == crate::audit::expected_proof(&nonce, &local_data)
+                        }
+                        _ => false,
+                    }
                 }
+                None => false,
+            };
+            if !proved {
+                all_confirmed = false;
+                break;
             }
         }
         if all_confirmed {

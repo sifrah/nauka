@@ -214,6 +214,16 @@ fn handle_request(store: &ShardStore, req: Request) -> Response {
         // sera reconstruit par Reed-Solomon depuis les autres nœuds.
         Request::GetShard(hash) => Response::Shard(store.get_shard(&hash).ok()),
         Request::HasShard(hash) => Response::Has(store.has_shard(&hash)),
+        // get_shard revérifie l'intégrité : un shard corrompu ne produit
+        // pas de preuve, il est donc traité comme absent.
+        Request::ProveShard { hash, nonce } => {
+            Response::Proof(store.get_shard(&hash).ok().map(|data| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&nonce);
+                hasher.update(&data);
+                *hasher.finalize().as_bytes()
+            }))
+        }
         Request::PutManifest(manifest) => match store.put_manifest(&manifest) {
             Ok(()) => Response::PutManifestOk,
             Err(e) => Response::Error(e.to_string()),

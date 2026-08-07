@@ -19,6 +19,10 @@ pub enum Request {
     GetShard(String),
     /// Le nœud possède-t-il ce shard ?
     HasShard(String),
+    /// Preuve de détention : `blake3(nonce ‖ octets du shard)`. Contrairement
+    /// à `HasShard`, impossible à honorer sans relire réellement les octets
+    /// (le nonce est tiré au hasard par le challengeur à chaque fois).
+    ProveShard { hash: String, nonce: [u8; 32] },
     /// Réplique un manifest sur le nœud distant.
     PutManifest(FileManifest),
     /// Récupère un manifest par hash de fichier.
@@ -47,6 +51,8 @@ pub enum Response {
     /// `None` si le shard est absent ou corrompu sur le nœud distant.
     Shard(Option<Vec<u8>>),
     Has(bool),
+    /// Réponse au challenge : `None` si le shard est absent ou corrompu.
+    Proof(Option<[u8; 32]>),
     PutManifestOk,
     Manifest(Option<FileManifest>),
     /// Réponse Raft : payload bincode opaque.

@@ -3430,6 +3430,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "rand 0.8.7",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

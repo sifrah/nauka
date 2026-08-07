@@ -455,6 +455,17 @@ async fn main() -> Result<()> {
                             Ok(_) => {}
                             Err(e) => eprintln!("gc en échec: {e}"),
                         }
+                        // Attestation : les pairs détiennent-ils vraiment ce
+                        // qu'ils déclarent ? (échantillonnage, coût minime)
+                        match yog_cluster::audit::audit_once(&store_bg, &self_id, &nodes).await {
+                            Ok(a) if a.failed > 0 => eprintln!(
+                                "AUDIT: {} preuve(s) invalide(s) sur {} challenges — \
+                                 un pair ne détient pas ce qu'il déclare",
+                                a.failed, a.challenged
+                            ),
+                            Ok(_) => {}
+                            Err(e) => eprintln!("audit en échec: {e}"),
+                        }
                     }
                 });
             } else if !peers.is_empty() {

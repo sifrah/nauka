@@ -112,3 +112,47 @@ heartbeats + scrub périodiques, pas de registre répliqué (les manifests
 sont répliqués sur tous les nœuds à l'upload par `put-remote`). Conservé
 pour les déploiements minimalistes et les tests ; le mode consensus est le
 mode nominal.
+
+## Attestation de stockage
+
+`has_shard` est déclaratif : un nœud peut répondre « oui » alors que son
+disque a été vidé ou silencieusement corrompu. Deux mécanismes de preuve,
+complémentaires, ferment cette faille — et bouclent la promesse du
+placement pondéré (capacité *déclarée* → capacité *honorée*).
+
+### 1. Challenge par nonce — utilisé par le GC
+
+`ProveShard { hash, nonce }` : le pair doit renvoyer
+`blake3(nonce ‖ octets)`. Le nonce est tiré au hasard à chaque fois :
+impossible à pré-calculer ou à rejouer, impossible à produire sans relire
+réellement les octets.
+
+Vérifiable seulement par qui détient déjà les octets — c'est exactement la
+situation du **GC de rebalancement** : avant de libérer sa copie, un nœud
+exige désormais cette preuve de chaque propriétaire actuel (au lieu d'un
+simple `has_shard`). Sans preuve, il garde. La redondance ne peut plus
+baisser sur une déclaration mensongère.
+
+### 2. Audit par échantillonnage — surveillance continue
+
+En régime permanent, chaque shard n'a qu'**un** détenteur : personne
+d'autre n'a les octets pour vérifier un challenge. L'auditeur échantillonne
+donc des shards que le pair **possède selon le placement**, les télécharge
+et vérifie leur hash contre le manifest. Le stockage étant
+content-addressed, tricher reviendrait à produire des octets ayant un
+BLAKE3 imposé — une préimage.
+
+Coût borné : `SAMPLE_PER_PEER` (3) shards par pair et par passe de scrub.
+
+Lecture des rapports :
+
+| Champ | Sens |
+|---|---|
+| `proved` | détention prouvée (hash conforme au manifest) |
+| `missing` | le pair ne fournit pas un shard qui lui revient — transitoire si son scrubber est en retard, **alerte si ça persiste** |
+| `failed` | octets au mauvais hash : anomalie sérieuse, tracée en `warn` |
+| `unreachable` | pair injoignable — pas une faute |
+
+Observé en conditions réelles : cluster sain `6/6 détentions prouvées` →
+`rm -rf` des shards d'un nœud → `3/6 prouvées, 3 absentes` → retour à
+`6/6` une fois son scrubber ayant tout régénéré.
