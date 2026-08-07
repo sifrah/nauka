@@ -165,12 +165,7 @@ pub async fn gc_once_geo(
         };
         let mut all_confirmed = true;
         for owner in shard_owners {
-            let client = peers.entry(owner.clone()).or_insert_with(|| None);
-            if client.is_none() {
-                if let Ok(addr) = owner.parse::<SocketAddr>() {
-                    *client = PeerClient::connect(addr).await.ok();
-                }
-            }
+            let client = peer_once(&mut peers, owner).await;
             let proved = match client {
                 Some(c) => {
                     let nonce: [u8; 32] = rand::random();
@@ -257,6 +252,26 @@ pub async fn scrub_once_geo(
     Ok(report)
 }
 
+/// Connection to a peer, attempted at most ONCE per pass.
+///
+/// `peers` doubles as a negative cache: a key present with `None` means
+/// "tried, unreachable — do not try again this pass". Retrying per shard
+/// multiplied the connect timeout by the number of shards and turned one
+/// dead node into a maintenance loop that never came back around.
+async fn peer_once<'a>(
+    peers: &'a mut HashMap<String, Option<PeerClient>>,
+    node: &str,
+) -> Option<&'a PeerClient> {
+    if !peers.contains_key(node) {
+        let client = match node.parse::<SocketAddr>() {
+            Ok(addr) => PeerClient::connect(addr).await.ok(),
+            Err(_) => None,
+        };
+        peers.insert(node.to_string(), client);
+    }
+    peers.get(node).and_then(|c| c.as_ref())
+}
+
 /// Regenerates one specific shard: collects ≥ k shards of the stripe
 /// (local + peers), decodes the original data, re-encodes the stripe and
 /// stores the missing shard. The manifest hashes guarantee that the healed
@@ -289,13 +304,7 @@ async fn heal_shard(
             }
         }
         for node in candidates {
-            let client = peers.entry(node.to_string()).or_insert_with(|| None);
-            if client.is_none() {
-                if let Ok(addr) = node.parse::<SocketAddr>() {
-                    *client = PeerClient::connect(addr).await.ok();
-                }
-            }
-            if let Some(c) = client {
+            if let Some(c) = peer_once(peers, node).await {
                 if let Ok(Some(data)) = c.get_shard(hash).await {
                     found = Some(data);
                     break;

@@ -16,6 +16,15 @@ use crate::protocol::{read_message, write_message, Request, Response, ALPN};
 /// stall a scrub, an audit or a download.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Upper bound on establishing a connection. A dead peer cannot refuse a
+/// UDP packet the way TCP sends a RST, so quinn keeps retransmitting the
+/// handshake until its idle timeout — 30 s per attempt. The maintenance
+/// loop connects to every owner of every shard, so a single dead node was
+/// enough to freeze scrub, GC and audit indefinitely (observed: a node's
+/// loop stuck for an hour after two peers died). Three seconds is far more
+/// than a healthy WAN handshake needs (~2 RTT, i.e. ~70 ms across Europe).
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Client connection to a cluster node.
 #[derive(Clone)]
 pub struct PeerClient {
@@ -35,6 +44,12 @@ impl PeerClient {
     }
 
     async fn connect_buf(addr: SocketAddr, buf: usize) -> Result<Self> {
+        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(addr, buf))
+            .await
+            .map_err(|_| anyhow!("peer {addr} unreachable after {CONNECT_TIMEOUT:?}"))?
+    }
+
+    async fn connect_inner(addr: SocketAddr, buf: usize) -> Result<Self> {
         let socket = crate::make_socket("0.0.0.0:0".parse().unwrap(), buf)?;
         let mut endpoint = quinn::Endpoint::new(
             crate::endpoint_config(),
