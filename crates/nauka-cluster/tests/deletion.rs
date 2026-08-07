@@ -50,7 +50,7 @@ fn purge_removes_deleted_files_and_their_shards() {
 
     // The registry no longer knows the first file (deleted).
     let live: BTreeSet<String> = manifests[1..].iter().map(|m| m.file_hash.clone()).collect();
-    let report = purge_deleted(&store, &live, true).unwrap();
+    let report = purge_deleted(&store, &live, true, std::time::Duration::ZERO).unwrap();
 
     assert_eq!(report.manifests_purged, 1);
     assert!(
@@ -71,7 +71,7 @@ fn purge_removes_deleted_files_and_their_shards() {
     assert!(store.list_shards().unwrap().len() < shards_before);
 
     // Idempotent: a second pass does nothing more.
-    let again = purge_deleted(&store, &live, true).unwrap();
+    let again = purge_deleted(&store, &live, true, std::time::Duration::ZERO).unwrap();
     assert_eq!(again.manifests_purged, 0);
     assert_eq!(again.orphans_purged, 0);
 }
@@ -84,11 +84,38 @@ fn purge_is_inert_when_registry_is_not_ready() {
     let before_shards = store.list_shards().unwrap().len();
     let before_manifests = store.list_manifests().unwrap().len();
 
-    let report = purge_deleted(&store, &BTreeSet::new(), false).unwrap();
+    let report = purge_deleted(&store, &BTreeSet::new(), false, std::time::Duration::ZERO).unwrap();
     assert_eq!(report.manifests_purged, 0);
     assert_eq!(report.orphans_purged, 0);
     assert_eq!(store.list_shards().unwrap().len(), before_shards);
     assert_eq!(store.list_manifests().unwrap().len(), before_manifests);
+}
+
+#[test]
+fn young_unreferenced_shards_survive_the_purge() {
+    // The shards of an upload in flight land BEFORE their manifest is
+    // registered. On a 5-node WAN cluster the GC purged 93 of a 21-second
+    // upload's 125 stripes as "orphans" while the client got a 200. With
+    // the grace period, a fresh unreferenced shard must survive; the same
+    // shard becomes purgeable once it has been unreferenced longer than
+    // the grace.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(ShardStore::open(dir.path()).unwrap());
+    let hash = store
+        .put_shard(b"upload in flight, manifest not yet written")
+        .unwrap();
+
+    let grace = std::time::Duration::from_secs(3600);
+    let report = purge_deleted(&store, &BTreeSet::new(), true, grace).unwrap();
+    assert_eq!(report.orphans_purged, 0, "in-flight shard must be kept");
+    assert_eq!(report.shards_kept, 1);
+    assert!(store.get_shard(&hash).is_ok());
+
+    // Same store, grace elapsed (simulated by a zero grace): now it is a
+    // genuine orphan and must go.
+    let report = purge_deleted(&store, &BTreeSet::new(), true, std::time::Duration::ZERO).unwrap();
+    assert_eq!(report.orphans_purged, 1);
+    assert!(store.get_shard(&hash).is_err());
 }
 
 #[test]
@@ -117,7 +144,7 @@ fn shards_shared_by_two_files_survive_one_deletion() {
 
     // m1 deleted, m2 live: the shared shards must stay.
     let live: BTreeSet<String> = [m2.file_hash.clone()].into_iter().collect();
-    let report = purge_deleted(&store, &live, true).unwrap();
+    let report = purge_deleted(&store, &live, true, std::time::Duration::ZERO).unwrap();
     assert_eq!(report.manifests_purged, 1);
     assert_eq!(report.orphans_purged, 0, "shards still referenced by m2");
     for stripe in &m2.stripes {

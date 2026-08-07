@@ -492,8 +492,12 @@ async fn main() -> Result<()> {
                             app.app_state().manifests.keys().cloned().collect();
                         let registry_ready = app.members().contains_key(&app.id)
                             && app.raft.metrics().borrow().current_leader.is_some();
-                        match nauka_cluster::healer::purge_deleted(&store_bg, &live, registry_ready)
-                        {
+                        match nauka_cluster::healer::purge_deleted(
+                            &store_bg,
+                            &live,
+                            registry_ready,
+                            nauka_cluster::healer::ORPHAN_GRACE,
+                        ) {
                             Ok(p) if p.manifests_purged > 0 || p.orphans_purged > 0 => {
                                 eprintln!(
                                     "purge: {} manifest(s), {} orphan shard(s)",

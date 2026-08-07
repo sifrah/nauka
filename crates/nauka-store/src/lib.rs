@@ -89,6 +89,16 @@ impl ShardStore {
         self.shard_path(hash).exists()
     }
 
+    /// Time elapsed since the shard file was written. `None` when the shard
+    /// is missing or the filesystem cannot answer — callers deciding whether
+    /// to DELETE must treat `None` as "too young", never the reverse.
+    pub fn shard_age(&self, hash: &str) -> Option<std::time::Duration> {
+        fs::metadata(self.shard_path(hash))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+    }
+
     pub fn delete_shard(&self, hash: &str) -> Result<(), StoreError> {
         match fs::remove_file(self.shard_path(hash)) {
             Ok(()) => Ok(()),

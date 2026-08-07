@@ -32,6 +32,17 @@ pub struct GcReport {
     pub manifests_purged: usize,
 }
 
+/// An unreferenced shard younger than this is NOT an orphan: it is an
+/// upload in flight. Shards land on their owners stripe by stripe and the
+/// manifest is only registered once the whole file is dispatched, so a
+/// slow upload keeps shards unreferenced for its entire duration. Purging
+/// them mid-flight destroys the file while the client is told "200 OK"
+/// (observed on a 5-node WAN cluster: a 21-second upload lost 93 of its
+/// 125 stripes to the GC). The grace must exceed any plausible upload
+/// duration; disk held by a genuinely abandoned upload is reclaimed one
+/// hour later.
+pub const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Purge of deleted files: removes the local manifests absent from the
 /// replicated registry, then the shards no live manifest references any
 /// more.
@@ -39,11 +50,14 @@ pub struct GcReport {
 /// `live_manifests` is the authoritative list (the Raft registry). The
 /// purge happens ONLY if that list is trustworthy: a node that has just
 /// started and has not received the state yet must erase nothing, hence
-/// the `registry_ready` parameter.
+/// the `registry_ready` parameter. `orphan_grace` is how long a shard may
+/// sit unreferenced before it is considered an orphan — production passes
+/// [`ORPHAN_GRACE`], tests shorten it.
 pub fn purge_deleted(
     store: &Arc<ShardStore>,
     live_manifests: &std::collections::BTreeSet<String>,
     registry_ready: bool,
+    orphan_grace: std::time::Duration,
 ) -> Result<GcReport> {
     let mut report = GcReport::default();
     if !registry_ready {
@@ -69,9 +83,19 @@ pub fn purge_deleted(
         }
     }
     for shard in store.list_shards()? {
-        if !referenced.contains(&shard) {
-            store.delete_shard(&shard)?;
-            report.orphans_purged += 1;
+        if referenced.contains(&shard) {
+            continue;
+        }
+        // Only a shard that has been unreferenced for a while is an orphan.
+        // A young one belongs to an upload still in flight — its manifest
+        // does not exist yet. `None` (unreadable age) counts as young:
+        // when in doubt, never delete.
+        match store.shard_age(&shard) {
+            Some(age) if age >= orphan_grace => {
+                store.delete_shard(&shard)?;
+                report.orphans_purged += 1;
+            }
+            _ => report.shards_kept += 1,
         }
     }
     Ok(report)
