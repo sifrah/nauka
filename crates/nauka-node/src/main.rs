@@ -6,6 +6,7 @@
 
 mod api;
 mod e2e;
+mod update;
 mod webui;
 
 use std::net::SocketAddr;
@@ -82,6 +83,12 @@ enum Cmd {
     },
     /// Print this node's identity (node-id derived from its public key).
     NodeInfo,
+    /// Update this binary to the latest release (checksum verified).
+    Update {
+        /// Only report whether an update exists, without installing it.
+        #[arg(long)]
+        check: bool,
+    },
     /// Start the node in QUIC server mode (cluster if --peers is given).
     /// In consensus mode (--node-id), port+1 is reserved for the Raft
     /// plane: several nodes on one host must space their ports by 2.
@@ -237,6 +244,7 @@ async fn main() -> Result<()> {
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
+        Cmd::Update { check } => update::run(check).await?,
         Cmd::Put {
             file,
             data_shards,
@@ -396,6 +404,47 @@ async fn main() -> Result<()> {
                     tokio::spawn(run_discovery(app.clone(), client, dht_kp, advertise_addr));
                 }
 
+                // Liveness map: a light pinger probes every member on the
+                // data plane; placement (uploads, scrub targets) only
+                // routes at peers that answer. Membership itself — votes,
+                // identity — is untouched.
+                let health = Arc::new(nauka_cluster::health::PeerHealth::default());
+                {
+                    let health = health.clone();
+                    let app = app.clone();
+                    let self_id = self_id.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                        loop {
+                            tick.tick().await;
+                            for (peer, _) in
+                                app.weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY)
+                            {
+                                if peer == self_id {
+                                    continue;
+                                }
+                                let Ok(addr) = peer.parse::<std::net::SocketAddr>() else {
+                                    continue;
+                                };
+                                let alive = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(2),
+                                    nauka_transport::PeerClient::connect(addr),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(c)) => c.ping().await.is_ok(),
+                                    _ => false,
+                                };
+                                if alive {
+                                    health.record_success(&peer);
+                                } else {
+                                    health.record_miss(&peer);
+                                }
+                            }
+                        }
+                    });
+                }
+
                 if !no_http {
                     let api_state = Arc::new(api::ApiState {
                         store: store.clone(),
@@ -403,6 +452,7 @@ async fn main() -> Result<()> {
                         self_id: self_id.clone(),
                         config: ErasureConfig::default(),
                         tmp_dir: cli.data_dir.join("tmp"),
+                        health: health.clone(),
                     });
                     // No fallback to ./webui/dist: the binary carries its own
                     // UI, so behaviour no longer depends on the directory the
@@ -416,6 +466,7 @@ async fn main() -> Result<()> {
                 }
                 let store_bg = store.clone();
                 let data_dir_bg = cli.data_dir.clone();
+                let health_bg = health.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
@@ -527,6 +578,13 @@ async fn main() -> Result<()> {
                                 Ok(c) => c.ping().await.is_ok(),
                                 Err(_) => false,
                             };
+                            // Free liveness signal: this loop already pings
+                            // everyone for the Vivaldi coordinates.
+                            if ok {
+                                health_bg.record_success(peer);
+                            } else {
+                                health_bg.record_miss(peer);
+                            }
                             if !ok {
                                 continue;
                             }
@@ -547,8 +605,19 @@ async fn main() -> Result<()> {
                         }
                         let coords = app.coords();
 
+                        // The scrubber repairs towards the LIVE view: with
+                        // a member down, its shards become the living
+                        // nodes' responsibility and redundancy climbs back
+                        // during the outage. The rebalancing GC and the
+                        // audit below keep the FULL view on purpose — a
+                        // liveness flap must never be a reason to release
+                        // a shard.
+                        let nodes_live = health_bg.filter_view(nodes.clone());
                         match nauka_cluster::healer::scrub_once_geo(
-                            &store_bg, &self_id, &nodes, &coords,
+                            &store_bg,
+                            &self_id,
+                            &nodes_live,
+                            &coords,
                         )
                         .await
                         {

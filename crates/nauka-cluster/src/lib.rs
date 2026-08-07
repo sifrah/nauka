@@ -5,6 +5,7 @@
 
 pub mod audit;
 pub mod healer;
+pub mod health;
 pub mod placement;
 pub mod vivaldi;
 

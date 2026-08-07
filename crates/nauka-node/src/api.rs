@@ -33,6 +33,9 @@ pub struct ApiState {
     pub config: ErasureConfig,
     /// Directory used to buffer in-flight uploads.
     pub tmp_dir: PathBuf,
+    /// Liveness map fed by the background pinger: uploads only route
+    /// shards at members currently answering.
+    pub health: Arc<nauka_cluster::health::PeerHealth>,
 }
 
 impl ApiState {
@@ -49,6 +52,14 @@ impl ApiState {
             ));
         }
         nodes
+    }
+
+    /// Placement view for NEW writes: the members currently answering. A
+    /// node marked down keeps its membership but takes no new shards; the
+    /// scrubber completes the redundancy when it returns (or elsewhere,
+    /// since it also works on the live view).
+    fn view_alive(&self) -> Vec<(String, u64)> {
+        self.health.filter_view(self.view())
     }
 }
 
@@ -228,6 +239,9 @@ struct UploadResponse {
     data_shards: usize,
     parity_shards: usize,
     link: String,
+    /// Shards that could not be delivered to their owner (degraded write,
+    /// completed later by the scrubber). 0 on a healthy cluster.
+    degraded_shards: usize,
 }
 
 async fn upload(
@@ -260,7 +274,7 @@ async fn upload(
     });
     let result = dispatch_file(&state, &tmp_path, size, hasher, params.name, expires_at).await;
     let _ = tokio::fs::remove_file(&tmp_path).await;
-    let manifest = result?;
+    let (manifest, degraded_shards) = result?;
 
     Ok(Json(UploadResponse {
         hash: manifest.file_hash.clone(),
@@ -270,6 +284,7 @@ async fn upload(
         data_shards: manifest.config.data_shards,
         parity_shards: manifest.config.parity_shards,
         link: format!("/f/{}", manifest.file_hash),
+        degraded_shards,
     }))
 }
 
@@ -282,12 +297,14 @@ async fn dispatch_file(
     hasher: blake3::Hasher,
     name: Option<String>,
     expires_at: Option<u64>,
-) -> Result<FileManifest> {
+) -> Result<(FileManifest, usize)> {
     if size == 0 {
         bail!("empty file");
     }
     let file_hash = hasher.finalize().to_hex().to_string();
-    let view = state.view();
+    // Place on the members currently answering: a dead node must cost a
+    // little redundancy (healed later), never the whole upload.
+    let view = state.view_alive();
     let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     let coords = state.app.coords();
     let cfg = state.config;
@@ -296,6 +313,15 @@ async fn dispatch_file(
     let mut f = tokio::fs::File::open(tmp_path).await?;
     let mut stripe_buf = vec![0u8; cfg.stripe_data_len()];
     let mut stripes_meta: Vec<StripeMeta> = Vec::new();
+    // Degraded-write bookkeeping. A stripe is durable once its k data
+    // shards' worth of pieces are placed; losing up to m deliveries is
+    // redundancy the scrubber rebuilds, not a failed upload. A destination
+    // that fails twice is skipped for the rest of the file (circuit
+    // breaker) so a freshly dead node costs seconds, not
+    // stripes × retries × timeout.
+    let mut undelivered: usize = 0;
+    let mut dest_failures: HashMap<String, u32> = HashMap::new();
+    const BREAKER_THRESHOLD: u32 = 2;
     loop {
         let mut filled = 0;
         while filled < stripe_buf.len() {
@@ -317,18 +343,50 @@ async fn dispatch_file(
             &view_refs,
             &coords,
         );
+        let mut placed = 0usize;
         for shard in &shards {
             let owner = owners[shard.index];
             if owner == state.self_id {
                 state.store.put_shard(&shard.data)?;
+                placed += 1;
                 continue;
             }
-            send_shard(&mut clients, owner, &shard.data).await?;
+            if dest_failures
+                .get(owner)
+                .is_some_and(|f| *f >= BREAKER_THRESHOLD)
+            {
+                undelivered += 1;
+                continue;
+            }
+            match send_shard(&mut clients, owner, &shard.data).await {
+                Ok(()) => placed += 1,
+                Err(_) => {
+                    *dest_failures.entry(owner.to_string()).or_insert(0) += 1;
+                    undelivered += 1;
+                }
+            }
+        }
+        // Below k placed shards the stripe is not reconstructible anywhere:
+        // that is a failed upload, not a degraded one.
+        if placed < cfg.data_shards {
+            bail!(
+                "stripe {si}: only {placed} of {} shards could be placed \
+                 ({} required) — upload aborted",
+                shards.len(),
+                cfg.data_shards
+            );
         }
         stripes_meta.push(StripeMeta {
             data_len: filled,
             shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
         });
+    }
+    if undelivered > 0 {
+        tracing::warn!(
+            file = %file_hash,
+            undelivered,
+            "degraded upload: redundancy will be completed by the scrubber"
+        );
     }
 
     let manifest = FileManifest {
@@ -351,7 +409,7 @@ async fn dispatch_file(
     if !resp.ok {
         bail!("the registry refused the manifest (banned content?)");
     }
-    Ok(manifest)
+    Ok((manifest, undelivered))
 }
 
 /// Sends a shard to a peer, reconnecting as needed (idempotent: storage is

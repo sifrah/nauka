@@ -28,6 +28,26 @@ Check that it worked:
 nauka --help
 ```
 
+## Updating
+
+The binary updates itself:
+
+```bash
+nauka update           # install the latest release
+nauka update --check   # only tell whether one exists
+```
+
+`update` queries the latest release, downloads the tarball for the current
+platform, verifies its SHA256 against the published `SHA256SUMS.txt` and
+swaps the binary atomically. A running node keeps executing the old
+version until it restarts — on a systemd deployment, follow with
+`systemctl restart nauka`. If the binary lives in a root-owned directory,
+run `sudo nauka update`.
+
+Re-running the install script performs the same upgrade; `nauka update` is
+the same thing without a shell pipeline, usable from cron or a fleet
+runner.
+
 ### Environment variables
 
 The script reads three variables, all optional:
