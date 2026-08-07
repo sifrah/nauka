@@ -159,3 +159,50 @@ Lecture des rapports :
 Observé en conditions réelles : cluster sain `6/6 détentions prouvées` →
 `rm -rf` des shards d'un nœud → `3/6 prouvées, 3 absentes` → retour à
 `6/6` une fois son scrubber ayant tout régénéré.
+
+## Géo-placement : coordonnées réseau Vivaldi
+
+Le WRH pondéré répartit selon la capacité, mais il ignore **où** sont les
+nœuds : rien n'empêche les shards d'une stripe d'atterrir sur trois
+machines du même datacenter — corrélées en panne. Le géo-placement corrige
+ça sans base GeoIP ni configuration.
+
+### Comment les positions sont apprises
+
+Chaque nœud mesure le RTT vers ses pairs (un ping QUIC, à chaque passe de
+fond) et ajuste sa position dans un espace euclidien où **la distance
+prédit la latence** (algorithme Vivaldi, SIGCOMM'04) : trop loin d'un pair
+rapide → il s'en rapproche ; trop près d'un pair lent → il s'en éloigne. Une
+« hauteur » modélise le coût d'accès incompressible du dernier kilomètre.
+
+La position est publiée dans l'état Raft (`UpdateNodeCoord`) dès qu'elle
+bouge sensiblement — donc **tous les nœuds placent à partir des mêmes
+valeurs**, condition non négociable pour que scrub et GC ne se contredisent
+pas. Comme pour le `ln` du WRH, la racine carrée est calculée maison
+(Newton, opérations IEEE de base) : les libm diffèrent entre plateformes, et
+deux nœuds qui classeraient différemment se disputeraient les shards.
+
+Chaque coordonnée porte une **erreur estimée** ; tant qu'elle n'est pas
+descendue sous 0,5 (`is_settled`), le nœud est ignoré du géo-placement.
+
+### Comment le placement s'en sert
+
+`stripe_owners_geo` part du classement WRH (capacité, déterminisme,
+migration minimale) et n'applique qu'un **réordonnancement local** : pour
+chaque shard, si le titulaire nominal est à moins de `NEARBY_MS` (15 ms)
+d'un nœud déjà retenu dans la stripe, on lui préfère un candidat plus
+éloigné — à condition qu'il appartienne à la même « couche » du classement,
+ce qui préserve exactement l'équilibre de charge et l'anti-affinité.
+
+Garanties (testées) :
+
+- deux régions de 3 nœuds, 6 shards par stripe : **aucune stripe ne tient
+  dans une seule région**, répartition systématiquement 3/3 ;
+- la charge reste uniforme à ±2 % par nœud ;
+- **sans coordonnées fiables, le placement est identique au WRH nominal** —
+  le géo-placement ne peut pas dégrader un cluster non convergé ;
+- cluster mono-région : aucun effet, aucune instabilité.
+
+Bénéfice : un fichier survit à la perte d'une **région entière**, pas
+seulement d'une machine. Bonus à venir : diriger les lectures vers le nœud
+le plus proche (les coordonnées sont déjà là).

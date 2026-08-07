@@ -106,6 +106,11 @@ impl RaftApp {
             .collect()
     }
 
+    /// Coordonnées réseau connues du cluster (adresse → position).
+    pub fn coords(&self) -> BTreeMap<String, yog_cluster::vivaldi::Coord> {
+        self.app_state().node_coords
+    }
+
     /// Vue pondérée du cluster pour le placement : membres du membership
     /// avec leur capacité déclarée (défaut si pas encore déclarée), triée.
     pub fn weighted_view(&self, default_capacity: u64) -> Vec<(String, u64)> {

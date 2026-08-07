@@ -30,6 +30,9 @@ pub enum AppCommand {
     /// Déclare la capacité disque d'un nœud (poids du placement pondéré).
     /// Keyé par adresse annoncée — la même identité que le placement.
     UpdateNodeStats { addr: String, capacity_bytes: u64 },
+    /// Publie les coordonnées réseau Vivaldi d'un nœud : le placement s'en
+    /// sert pour écarter géographiquement les shards d'une même stripe.
+    UpdateNodeCoord { addr: String, coord: yog_cluster::vivaldi::Coord },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -47,6 +50,9 @@ pub struct AppState {
     /// au placement pondéré ; absent = capacité par défaut.
     #[serde(default)]
     pub node_capacities: BTreeMap<String, u64>,
+    /// Coordonnées réseau déclarées par nœud (adresse → position Vivaldi).
+    #[serde(default)]
+    pub node_coords: BTreeMap<String, yog_cluster::vivaldi::Coord>,
 }
 
 /// Requêtes d'administration adressées à un nœud (hors log Raft).

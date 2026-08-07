@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 yog-erasure = { path = "../yog-erasure" }
 yog-transport = { path = "../yog-transport" }
+yog-cluster = { path = "../yog-cluster" }
 anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -20,5 +21,4 @@ redb = "2"
 [dev-dependencies]
 quinn = "0.11"
 tempfile = "3"
-yog-cluster = { path = "../yog-cluster" }
 yog-store = { path = "../yog-store" }

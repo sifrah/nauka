@@ -220,6 +220,7 @@ async fn dispatch_file(
     let file_hash = hasher.finalize().to_hex().to_string();
     let view = state.view();
     let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+    let coords = state.app.coords();
     let cfg = state.config;
 
     let mut clients: HashMap<String, PeerClient> = HashMap::new();
@@ -240,9 +241,15 @@ async fn dispatch_file(
         }
         let si = stripes_meta.len();
         let shards = encode_stripe(&stripe_buf[..filled], &cfg)?;
+        let owners = yog_cluster::placement::stripe_owners_geo(
+            &file_hash,
+            si,
+            shards.len(),
+            &view_refs,
+            &coords,
+        );
         for shard in &shards {
-            let owner =
-                yog_cluster::placement::shard_owner(&file_hash, si, shard.index, &view_refs);
+            let owner = owners[shard.index];
             if owner == state.self_id {
                 state.store.put_shard(&shard.data)?;
                 continue;

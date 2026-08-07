@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod healer;
 pub mod placement;
+pub mod vivaldi;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

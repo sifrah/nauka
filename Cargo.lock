@@ -3431,6 +3431,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "rand 0.8.7",
+ "serde",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

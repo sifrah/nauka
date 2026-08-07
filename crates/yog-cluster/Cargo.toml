@@ -11,6 +11,7 @@ yog-transport = { path = "../yog-transport" }
 anyhow.workspace = true
 blake3.workspace = true
 rand = "0.8"
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

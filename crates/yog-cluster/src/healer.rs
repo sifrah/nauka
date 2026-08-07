@@ -40,6 +40,16 @@ pub async fn gc_once(
     self_id: &str,
     all_nodes: &[(String, u64)],
 ) -> Result<GcReport> {
+    gc_once_geo(store, self_id, all_nodes, &Default::default()).await
+}
+
+/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+pub async fn gc_once_geo(
+    store: &Arc<ShardStore>,
+    self_id: &str,
+    all_nodes: &[(String, u64)],
+    coords: &crate::placement::CoordMap,
+) -> Result<GcReport> {
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
     // shard → propriétaires (tous manifests confondus).
@@ -47,10 +57,15 @@ pub async fn gc_once(
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
         for (si, stripe) in manifest.stripes.iter().enumerate() {
+            let stripe_owners = crate::placement::stripe_owners_geo(
+                &manifest.file_hash,
+                si,
+                stripe.shard_hashes.len(),
+                &node_refs,
+                coords,
+            );
             for (i, hash) in stripe.shard_hashes.iter().enumerate() {
-                let owner =
-                    crate::placement::shard_owner(&manifest.file_hash, si, i, &node_refs);
-                owners.entry(hash.clone()).or_default().insert(owner.to_string());
+                owners.entry(hash.clone()).or_default().insert(stripe_owners[i].to_string());
             }
         }
     }
@@ -113,6 +128,16 @@ pub async fn scrub_once(
     self_id: &str,
     all_nodes: &[(String, u64)],
 ) -> Result<HealReport> {
+    scrub_once_geo(store, self_id, all_nodes, &Default::default()).await
+}
+
+/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+pub async fn scrub_once_geo(
+    store: &Arc<ShardStore>,
+    self_id: &str,
+    all_nodes: &[(String, u64)],
+    coords: &crate::placement::CoordMap,
+) -> Result<HealReport> {
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     let mut peers: HashMap<String, Option<PeerClient>> = HashMap::new();
     let mut report = HealReport::default();
@@ -120,7 +145,7 @@ pub async fn scrub_once(
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
         for (stripe_idx, shard_idx, shard_hash) in
-            crate::placement::shards_owned_by(&manifest, self_id, &node_refs)
+            crate::placement::shards_owned_by_geo(&manifest, self_id, &node_refs, coords)
         {
             report.shards_checked += 1;
             // get_shard vérifie le hash : manquant OU corrompu → on répare.

@@ -346,6 +346,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             inner.state.node_capacities.insert(addr, capacity_bytes);
                             AppResponse { ok: true, info: None }
                         }
+                        AppCommand::UpdateNodeCoord { addr, coord } => {
+                            inner.state.node_coords.insert(addr, coord);
+                            AppResponse { ok: true, info: None }
+                        }
                     };
                     replies.push(reply);
                 }

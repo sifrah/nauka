@@ -96,6 +96,124 @@ pub fn uniform<'a>(nodes: &[&'a str]) -> Vec<WeightedNode<'a>> {
     nodes.iter().map(|n| (*n, 1)).collect()
 }
 
+/// Distance (ms) en dessous de laquelle deux nœuds sont jugés « voisins » :
+/// même datacenter ou même région, donc probablement corrélés en panne.
+pub const NEARBY_MS: f64 = 15.0;
+
+/// Placement GÉO-CONSCIENT : comme [`shard_owner`], mais les shards d'une
+/// même stripe sont poussés vers des nœuds réseau-distants les uns des
+/// autres. Un fichier survit ainsi à la perte d'une région entière, pas
+/// seulement d'une machine.
+///
+/// Le classement WRH pondéré reste la base (capacité, déterminisme,
+/// migration minimale) ; on n'y applique qu'un **réordonnancement local** :
+/// pour le shard i, on écarte les candidats trop proches des nœuds déjà
+/// retenus dans cette stripe, tant qu'il reste des alternatives. Sans
+/// coordonnées fiables, le comportement est exactement celui d'avant.
+///
+/// `coords` : position par nœud, telle que répliquée dans l'état Raft.
+pub fn stripe_owners_geo<'a>(
+    file_hash: &str,
+    stripe_idx: usize,
+    shard_count: usize,
+    nodes: &[WeightedNode<'a>],
+    coords: &std::collections::BTreeMap<String, crate::vivaldi::Coord>,
+) -> Vec<&'a str> {
+    let ranked = rank_nodes(&format!("{file_hash}/{stripe_idx}"), nodes);
+    let n = ranked.len();
+    let mut chosen: Vec<&str> = Vec::with_capacity(shard_count);
+
+    for i in 0..shard_count {
+        // Fenêtre de candidats : le titulaire WRH et les suivants. On ne
+        // regarde jamais au-delà d'un tour complet pour rester stable.
+        let base = i % n;
+        let mut pick = ranked[base];
+        // Ne pas déplacer un shard vers un nœud déjà utilisé plus de fois
+        // que nécessaire : on ne considère que des candidats de même
+        // « couche » (même quotient i/n), ce qui préserve l'anti-affinité
+        // et l'équilibre de charge du WRH.
+        let layer = i / n;
+        let candidates: Vec<&str> = (0..n)
+            .map(|off| ranked[(base + off) % n])
+            .filter(|c| {
+                // Un candidat n'est éligible que s'il n'a pas déjà pris
+                // plus de shards que la couche courante ne l'autorise.
+                chosen.iter().filter(|x| **x == *c).count() <= layer
+            })
+            .collect();
+
+        if let Some(best) = candidates.iter().copied().max_by(|a, b| {
+            let sa = min_distance_to(a, &chosen, coords);
+            let sb = min_distance_to(b, &chosen, coords);
+            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal).then(b.cmp(a))
+        }) {
+            // On ne dévie du titulaire WRH que si ça éloigne réellement :
+            // sinon on garde le placement nominal (stabilité).
+            let nominal = min_distance_to(pick, &chosen, coords);
+            let improved = min_distance_to(best, &chosen, coords);
+            if improved > nominal && nominal < NEARBY_MS {
+                pick = best;
+            }
+        }
+        chosen.push(pick);
+    }
+    chosen
+}
+
+/// Distance du candidat au plus proche des nœuds déjà choisis.
+/// `f64::MAX` si aucune comparaison n'est possible (pas de coordonnées
+/// fiables, ou premier shard) — le candidat est alors neutre.
+fn min_distance_to(
+    candidate: &str,
+    chosen: &[&str],
+    coords: &std::collections::BTreeMap<String, crate::vivaldi::Coord>,
+) -> f64 {
+    let Some(c) = coords.get(candidate).filter(|c| c.is_settled()) else {
+        return f64::MAX;
+    };
+    let mut min = f64::MAX;
+    for other in chosen {
+        if let Some(o) = coords.get(*other).filter(|o| o.is_settled()) {
+            let d = c.distance(o);
+            if d < min {
+                min = d;
+            }
+        }
+    }
+    min
+}
+
+
+/// Type des coordonnées telles que répliquées dans l'état Raft.
+pub type CoordMap = std::collections::BTreeMap<String, crate::vivaldi::Coord>;
+
+/// Variante géo-consciente de [`shards_owned_by`] : mêmes garanties, mais
+/// les shards d'une stripe sont écartés géographiquement quand des
+/// coordonnées fiables existent.
+pub fn shards_owned_by_geo<'m>(
+    manifest: &'m FileManifest,
+    node: &str,
+    nodes: &[WeightedNode<'_>],
+    coords: &CoordMap,
+) -> Vec<(usize, usize, &'m str)> {
+    let mut out = Vec::new();
+    for (si, stripe) in manifest.stripes.iter().enumerate() {
+        let owners = stripe_owners_geo(
+            &manifest.file_hash,
+            si,
+            stripe.shard_hashes.len(),
+            nodes,
+            coords,
+        );
+        for (i, hash) in stripe.shard_hashes.iter().enumerate() {
+            if owners[i] == node {
+                out.push((si, i, hash.as_str()));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +318,124 @@ mod tests {
         assert_eq!(moved_elsewhere, 0, "des shards ont migré entre nœuds inchangés");
         let frac = moved as f64 / total as f64;
         assert!((frac - 1.0 / 6.0).abs() < 0.05, "migration: {frac}");
+    }
+}
+
+#[cfg(test)]
+mod geo_tests {
+    use super::*;
+    use crate::vivaldi::Coord;
+    use std::collections::BTreeMap;
+
+    /// Deux régions : 3 nœuds à Paris, 3 à Miami (RTT intra ~2 ms,
+    /// inter ~90 ms).
+    fn two_regions() -> (Vec<(String, u64)>, BTreeMap<String, Coord>) {
+        let mut coords = BTreeMap::new();
+        let mut nodes = Vec::new();
+        for (i, (name, x)) in [
+            ("par-1", 0.0), ("par-2", 1.0), ("par-3", 2.0),
+            ("mia-1", 90.0), ("mia-2", 91.0), ("mia-3", 92.0),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let _ = i;
+            nodes.push((name.to_string(), 1u64));
+            coords.insert(
+                name.to_string(),
+                Coord { vec: [*x, 0.0], height: 1.0, error: 0.05 },
+            );
+        }
+        (nodes, coords)
+    }
+
+    #[test]
+    fn geo_placement_spreads_across_regions() {
+        let (nodes, coords) = two_regions();
+        let refs: Vec<WeightedNode> = nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+
+        // Sur beaucoup de stripes, compte celles dont les 6 shards sont
+        // tous dans la même région (le pire cas pour la durabilité).
+        let mut geo_mono = 0;
+        let mut plain_mono = 0;
+        for s in 0..200 {
+            let geo = stripe_owners_geo("fichier", s, 6, &refs, &coords);
+            let plain: Vec<&str> =
+                (0..6).map(|i| shard_owner("fichier", s, i, &refs)).collect();
+            let par = |v: &Vec<&str>| v.iter().filter(|n| n.starts_with("par")).count();
+            if par(&geo) == 6 || par(&geo) == 0 {
+                geo_mono += 1;
+            }
+            if par(&plain) == 6 || par(&plain) == 0 {
+                plain_mono += 1;
+            }
+        }
+        assert_eq!(geo_mono, 0, "aucune stripe ne doit tenir dans une seule région");
+        let _ = plain_mono;
+
+        // Et chaque stripe doit toucher les deux régions de façon
+        // équilibrée (3/3 avec 6 nœuds et 6 shards).
+        for s in 0..50 {
+            let geo = stripe_owners_geo("f2", s, 6, &refs, &coords);
+            let par = geo.iter().filter(|n| n.starts_with("par")).count();
+            assert_eq!(par, 3, "stripe {s} déséquilibrée: {geo:?}");
+        }
+    }
+
+    #[test]
+    fn geo_placement_preserves_load_balance() {
+        // Chaque nœud doit rester également chargé.
+        let (nodes, coords) = two_regions();
+        let refs: Vec<WeightedNode> = nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+        let mut counts: std::collections::HashMap<&str, usize> = Default::default();
+        for s in 0..600 {
+            for owner in stripe_owners_geo("charge", s, 6, &refs, &coords) {
+                *counts.entry(owner).or_default() += 1;
+            }
+        }
+        let total: usize = counts.values().sum();
+        assert_eq!(total, 600 * 6);
+        for (node, c) in &counts {
+            let share = *c as f64 / total as f64;
+            assert!(
+                (share - 1.0 / 6.0).abs() < 0.02,
+                "{node} déséquilibré: {:.1}%",
+                share * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn without_coordinates_behaviour_is_unchanged() {
+        let (nodes, _) = two_regions();
+        let refs: Vec<WeightedNode> = nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+        let empty = BTreeMap::new();
+        for s in 0..20 {
+            let geo = stripe_owners_geo("x", s, 6, &refs, &empty);
+            let plain: Vec<&str> = (0..6).map(|i| shard_owner("x", s, i, &refs)).collect();
+            assert_eq!(geo, plain, "sans coordonnées, le placement doit être le WRH nominal");
+        }
+    }
+
+    #[test]
+    fn single_region_falls_back_gracefully() {
+        // Tous les nœuds proches : rien à optimiser, pas de crash, charge
+        // toujours équilibrée.
+        let mut coords = BTreeMap::new();
+        let names = ["a", "b", "c"];
+        for (i, n) in names.iter().enumerate() {
+            coords.insert(
+                n.to_string(),
+                Coord { vec: [i as f64, 0.0], height: 1.0, error: 0.05 },
+            );
+        }
+        let refs: Vec<WeightedNode> = names.iter().map(|n| (*n, 1u64)).collect();
+        for s in 0..30 {
+            let owners = stripe_owners_geo("y", s, 6, &refs, &coords);
+            assert_eq!(owners.len(), 6);
+            for n in &names {
+                assert_eq!(owners.iter().filter(|o| *o == n).count(), 2);
+            }
+        }
     }
 }

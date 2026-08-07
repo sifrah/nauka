@@ -387,6 +387,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
+                    let mut my_coord = yog_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
                         // Déclare la capacité de ce nœud dans l'état répliqué
@@ -436,7 +437,44 @@ async fn main() -> Result<()> {
                         }
                         let nodes =
                             app.weighted_view(yog_cluster::placement::DEFAULT_CAPACITY);
-                        match yog_cluster::healer::scrub_once(&store_bg, &self_id, &nodes).await {
+
+                        // Coordonnées réseau : mesure les RTT vers les pairs,
+                        // ajuste notre position Vivaldi, et la publie si elle
+                        // a bougé sensiblement. Le placement s'en sert pour
+                        // écarter géographiquement les shards d'une stripe.
+                        let known = app.coords();
+                        for (peer, _) in nodes.iter().filter(|(n, _)| *n != self_id) {
+                            let Ok(addr) = peer.parse::<SocketAddr>() else { continue };
+                            let t0 = std::time::Instant::now();
+                            let ok = match yog_transport::PeerClient::connect(addr).await {
+                                Ok(c) => c.ping().await.is_ok(),
+                                Err(_) => false,
+                            };
+                            if !ok {
+                                continue;
+                            }
+                            let rtt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                            let peer_coord = known.get(peer).copied().unwrap_or_default();
+                            my_coord.observe(&peer_coord, rtt_ms);
+                        }
+                        let published = known.get(&self_id).copied().unwrap_or_default();
+                        let moved = my_coord.distance(&published) > 2.0
+                            || (my_coord.error - published.error).abs() > 0.1;
+                        if moved {
+                            let _ = app
+                                .write(yog_raft::types::AppCommand::UpdateNodeCoord {
+                                    addr: self_id.clone(),
+                                    coord: my_coord,
+                                })
+                                .await;
+                        }
+                        let coords = app.coords();
+
+                        match yog_cluster::healer::scrub_once_geo(
+                            &store_bg, &self_id, &nodes, &coords,
+                        )
+                        .await
+                        {
                             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                                 eprintln!(
                                     "scrub: {} vérifiés, {} régénérés, {} irréparables",
@@ -448,7 +486,11 @@ async fn main() -> Result<()> {
                         }
                         // Rebalancement : libère ce qui ne nous appartient
                         // plus (après confirmation chez le propriétaire).
-                        match yog_cluster::healer::gc_once(&store_bg, &self_id, &nodes).await {
+                        match yog_cluster::healer::gc_once_geo(
+                            &store_bg, &self_id, &nodes, &coords,
+                        )
+                        .await
+                        {
                             Ok(g) if g.shards_released > 0 => {
                                 eprintln!("gc: {} shards libérés", g.shards_released);
                             }
@@ -457,7 +499,11 @@ async fn main() -> Result<()> {
                         }
                         // Attestation : les pairs détiennent-ils vraiment ce
                         // qu'ils déclarent ? (échantillonnage, coût minime)
-                        match yog_cluster::audit::audit_once(&store_bg, &self_id, &nodes).await {
+                        match yog_cluster::audit::audit_once_geo(
+                            &store_bg, &self_id, &nodes, &coords,
+                        )
+                        .await
+                        {
                             Ok(a) if a.failed > 0 => eprintln!(
                                 "AUDIT: {} preuve(s) invalide(s) sur {} challenges — \
                                  un pair ne détient pas ce qu'il déclare",

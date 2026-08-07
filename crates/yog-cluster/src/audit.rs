@@ -67,6 +67,16 @@ pub async fn audit_once(
     self_id: &str,
     all_nodes: &[(String, u64)],
 ) -> Result<AuditReport> {
+    audit_once_geo(store, self_id, all_nodes, &Default::default()).await
+}
+
+/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+pub async fn audit_once_geo(
+    store: &Arc<ShardStore>,
+    self_id: &str,
+    all_nodes: &[(String, u64)],
+    coords: &crate::placement::CoordMap,
+) -> Result<AuditReport> {
     let mut report = AuditReport::default();
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
@@ -75,9 +85,15 @@ pub async fn audit_once(
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
         for (si, stripe) in manifest.stripes.iter().enumerate() {
+            let stripe_owners = crate::placement::stripe_owners_geo(
+                &manifest.file_hash,
+                si,
+                stripe.shard_hashes.len(),
+                &node_refs,
+                coords,
+            );
             for (i, hash) in stripe.shard_hashes.iter().enumerate() {
-                let owner =
-                    crate::placement::shard_owner(&manifest.file_hash, si, i, &node_refs);
+                let owner = stripe_owners[i];
                 if owner != self_id {
                     if let Some((node, _)) = node_refs.iter().find(|(n, _)| *n == owner) {
                         owned_by_peer
