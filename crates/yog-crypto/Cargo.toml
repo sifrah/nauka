@@ -1,0 +1,11 @@
+[package]
+name = "yog-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aes-gcm = "0.10"
+data-encoding = "2"
+rand = "0.8"
+thiserror.workspace = true

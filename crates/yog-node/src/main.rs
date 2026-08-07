@@ -4,6 +4,7 @@
 //! viendront se poser sur ces mêmes primitives.
 
 mod api;
+mod e2e;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -51,6 +52,24 @@ enum Cmd {
     Verify { file_hash: String },
     /// Liste les fichiers stockés.
     List,
+    /// Chiffre un fichier (AES-256-GCM, clé locale) puis l'uploade sur un
+    /// nœud. Les serveurs ne voient QUE du ciphertext ; le lien affiché
+    /// contient la clé dans son fragment (#…), jamais transmis au serveur.
+    Upload {
+        file: PathBuf,
+        /// URL de l'API d'un nœud du cluster.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+        /// Nom public (métadonnée EN CLAIR côté serveur — omis par défaut).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Télécharge un lien de partage complet (avec #clé) et déchiffre.
+    Download {
+        link: String,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Génère la clé de cluster (CA Ed25519) à distribuer aux nœuds.
     Keygen {
         #[arg(long, default_value = "./yog-keys")]
@@ -174,6 +193,12 @@ async fn main() -> Result<()> {
     let store = ShardStore::open(&cli.data_dir)?;
 
     match cli.cmd {
+        Cmd::Upload { file, api, name } => {
+            e2e::upload(&api, &file, name).await?;
+        }
+        Cmd::Download { link, output } => {
+            e2e::download(&link, &output).await?;
+        }
         Cmd::Keygen { out } => {
             yog_transport::generate_cluster_ca(&out)?;
             println!("clé de cluster générée dans {}", out.display());

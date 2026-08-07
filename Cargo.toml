@@ -8,6 +8,7 @@ members = [
     "crates/yog-cluster",
     "crates/yog-raft",
     "crates/yog-discovery",
+    "crates/yog-crypto",
 ]
 
 [workspace.package]

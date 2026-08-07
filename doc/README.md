@@ -31,6 +31,7 @@ fichier de configuration.
 | [cluster.md](cluster.md) | Placement HRW, auto-healing, GC, membership à chaud |
 | [identite-et-decouverte.md](identite-et-decouverte.md) | Clés de cluster, mTLS, node-id dérivé, DHT Mainline, élection de genèse |
 | [api-http.md](api-http.md) | API publique : upload, download, listing |
+| [chiffrement.md](chiffrement.md) | Bout en bout : AES-GCM côté client, la clé dans le fragment du lien |
 | [operations.md](operations.md) | Déploiement, référence CLI, ports, dépannage, limites connues |
 | [decisions.md](decisions.md) | Choix structurants et leçons des stress tests |
 
