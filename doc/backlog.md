@@ -71,11 +71,23 @@ natif (voir C).
 
 ## Consolidations
 
-### A. Suppression et expiration des fichiers
+### A. Suppression, expiration et blocage par hash
 `UnregisterManifest` existe côté Raft ; il manque : `DELETE` sur l'API,
 TTL optionnel à l'upload, purge des manifests locaux absents du registre,
 et GC des shards orphelins (aujourd'hui explicitement hors périmètre).
-**Le plus attendu des utilisateurs.**
+**Le plus attendu des utilisateurs — et prérequis à toute mise en ligne
+publique.**
+
+Même plomberie, à faire dans la foulée : **blocage par hash** (commande
+Raft `BanHash`) — l'API refuse de servir un hash banni (`410 Gone`), son
+manifest sort du registre, le GC purge ses shards. Permet d'honorer un
+signalement ou une réquisition **sans jamais lire les contenus** (on agit
+sur une empreinte), et de rejeter un ré-upload identique d'emblée. Limite
+structurelle assumée : ne bloque que ce fichier à l'octet près — un
+ré-upload chiffré avec une autre clé produit un autre hash. Prévoir aussi
+un point de contact abus et un registre des demandes (cf.
+[chiffrement.md](chiffrement.md) pour ce que l'opérateur peut/ne peut pas
+fournir).
 
 ### B. Authentification et quotas sur l'API HTTP
 Prérequis à toute exposition publique. Tokens d'upload, quotas par clé,

@@ -69,3 +69,25 @@ et le `Content-Disposition`) — par défaut, rien.
   couverture de trafic hors périmètre).
 - `curl` peut toujours uploader du clair via l'API brute — le chiffrement
   est côté client par nature ; l'UI web l'appliquera systématiquement.
+
+## Réquisition judiciaire : ce que l'opérateur peut fournir
+
+| Peut fournir | Ne peut pas fournir |
+|---|---|
+| les ciphertexts (fichiers chiffrés reconstitués) | le contenu en clair |
+| hashes, tailles, dates | les clés de déchiffrement |
+| logs réseau si l'opérateur en conserve | — |
+| suppression / blocage d'un hash (cf. backlog A) | — |
+
+La clé n'a jamais transité vers le serveur (elle vit dans le fragment de
+l'URL, que HTTP n'envoie pas) : il n'y a **rien à saisir** sur les nœuds
+qui permette de déchiffrer. Les autorités récupèrent le contenu par le
+**lien complet** — appareil de l'uploader ou d'un destinataire, messagerie
+où il a circulé — et non auprès de l'hébergeur.
+
+Corollaire pour l'opérateur : documenter ce dispositif, prévoir un point
+de contact abus, et implémenter suppression + blocage par hash (backlog A)
+**avant toute mise en ligne publique**. Les obligations de remise de clé
+visent qui détient la clé — l'utilisateur, pas l'hébergeur. Ceci n'est pas
+un avis juridique : faire valider par un avocat selon le pays et le statut
+(hébergeur / éditeur).
