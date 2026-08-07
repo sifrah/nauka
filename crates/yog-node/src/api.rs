@@ -243,18 +243,32 @@ async fn download(
     };
 
     // Reconstruction en streaming : une stripe à la fois vers le client.
+    // Par stripe : les k shards de DONNÉES sont récupérés en parallèle ;
+    // la parité n'est demandée que si l'un d'eux manque — sur un cluster
+    // sain, zéro octet de parité ne transite.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
-    let st = state.clone();
+    let fetcher = Arc::new(Fetcher::new(state.clone()));
     let expected_hash = manifest.file_hash.clone();
     let m = manifest.clone();
     tokio::spawn(async move {
-        let mut clients: HashMap<String, Option<PeerClient>> = HashMap::new();
-        let view = st.view();
         let mut hasher = blake3::Hasher::new();
+        let k = m.config.data_shards;
         for stripe in &m.stripes {
-            let mut slots: Vec<Option<Vec<u8>>> = Vec::with_capacity(stripe.shard_hashes.len());
-            for shard_hash in &stripe.shard_hashes {
-                slots.push(fetch_shard(&st, &mut clients, &view, shard_hash).await);
+            // 1) Les shards de données, en parallèle.
+            let data_fetches = stripe.shard_hashes[..k]
+                .iter()
+                .map(|h| fetcher.clone().fetch(h.clone()));
+            let mut slots: Vec<Option<Vec<u8>>> =
+                futures_join_all(data_fetches).await;
+            let missing = slots.iter().filter(|s| s.is_none()).count();
+            // 2) La parité, seulement si nécessaire (aussi en parallèle).
+            if missing > 0 {
+                let parity_fetches = stripe.shard_hashes[k..]
+                    .iter()
+                    .map(|h| fetcher.clone().fetch(h.clone()));
+                slots.extend(futures_join_all(parity_fetches).await);
+            } else {
+                slots.resize(stripe.shard_hashes.len(), None);
             }
             let data = match decode_stripe(slots, stripe, &m.config) {
                 Ok(d) => d,
@@ -289,36 +303,76 @@ async fn download(
     Ok(response.body(body).map_err(anyhow::Error::from)?)
 }
 
-/// Cherche un shard : local d'abord, puis chez chaque membre joignable.
-///
-/// `clients` mémorise aussi les ÉCHECS (`None`) : un nœud mort n'est
-/// recontacté qu'une fois par requête, pas une fois par shard — sinon un
-/// seul nœud disparu suffit à faire expirer tout le téléchargement.
-async fn fetch_shard(
-    state: &Arc<ApiState>,
-    clients: &mut HashMap<String, Option<PeerClient>>,
-    view: &[(String, u64)],
-    hash: &str,
-) -> Option<Vec<u8>> {
-    if let Ok(data) = state.store.get_shard(hash) {
-        return Some(data);
+/// `join_all` maison (ordre préservé) — évite une dépendance de plus.
+async fn futures_join_all<F, T>(futures: impl Iterator<Item = F>) -> Vec<Option<T>>
+where
+    F: std::future::Future<Output = Option<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let handles: Vec<_> = futures.map(tokio::spawn).collect();
+    let mut out = Vec::with_capacity(handles.len());
+    for h in handles {
+        out.push(h.await.ok().flatten());
     }
-    for (node, _) in view.iter().filter(|(n, _)| *n != state.self_id) {
-        let Ok(addr) = node.parse::<SocketAddr>() else { continue };
-        if !clients.contains_key(node) {
-            clients.insert(node.clone(), connect_with_timeout(addr).await);
+    out
+}
+
+/// Récupérateur de shards partagé par une requête de download : cache de
+/// connexions (échecs mémorisés — un nœud mort n'est contacté qu'une fois
+/// par requête) utilisable par des fetches parallèles.
+struct Fetcher {
+    state: Arc<ApiState>,
+    view: Vec<(String, u64)>,
+    clients: tokio::sync::Mutex<HashMap<String, Option<PeerClient>>>,
+}
+
+impl Fetcher {
+    fn new(state: Arc<ApiState>) -> Self {
+        let view = state.view();
+        Self { state, view, clients: tokio::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// Un client vers `node`, créé au premier besoin. `None` = déjà connu
+    /// injoignable.
+    async fn client_for(&self, node: &str) -> Option<PeerClient> {
+        if let Some(cached) = self.clients.lock().await.get(node) {
+            return cached.clone();
         }
-        let Some(client) = clients.get(node).and_then(|c| c.as_ref()) else { continue };
-        match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(hash)).await {
-            Ok(Ok(Some(data))) => return Some(data),
-            // Erreur ou timeout : la connexion est suspecte, on l'oublie.
-            Ok(Ok(None)) => {}
-            _ => {
-                clients.insert(node.clone(), None);
+        // Connexion hors verrou (3 s max) ; en cas de course, une seule
+        // des deux connexions est conservée — sans conséquence.
+        let connected = match node.parse::<SocketAddr>() {
+            Ok(addr) => connect_with_timeout(addr).await,
+            Err(_) => None,
+        };
+        self.clients
+            .lock()
+            .await
+            .entry(node.to_string())
+            .or_insert(connected)
+            .clone()
+    }
+
+    async fn mark_dead(&self, node: &str) {
+        self.clients.lock().await.insert(node.to_string(), None);
+    }
+
+    /// Cherche un shard : local d'abord, puis chez chaque membre joignable.
+    async fn fetch(self: Arc<Self>, hash: String) -> Option<Vec<u8>> {
+        if let Ok(data) = self.state.store.get_shard(&hash) {
+            return Some(data);
+        }
+        for (node, _) in self.view.iter().filter(|(n, _)| *n != self.state.self_id) {
+            let Some(client) = self.client_for(node).await else { continue };
+            match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
+                Ok(Ok(Some(data))) => return Some(data),
+                Ok(Ok(None)) => {}
+                // Erreur ou timeout : connexion suspecte, on la condamne
+                // pour le reste de la requête.
+                _ => self.mark_dead(node).await,
             }
         }
+        None
     }
-    None
 }
 
 /// Délai au-delà duquel un pair est considéré injoignable.
