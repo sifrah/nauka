@@ -1,0 +1,44 @@
+[Unit]
+Description=Nauka distributed storage node
+Documentation=https://getnauka.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=nauka
+Group=nauka
+# Cluster key: /etc/nauka/cluster-ca.key and .pem, copied from `nauka keygen`.
+# Without it the node runs unauthenticated — see EnvironmentFile to override.
+Environment=NAUKA_DATA_DIR=/var/lib/nauka
+Environment=NAUKA_KEYS_DIR=/etc/nauka
+EnvironmentFile=-/etc/nauka/nauka.env
+ExecStart=/usr/bin/nauka --data-dir ${NAUKA_DATA_DIR} --keys ${NAUKA_KEYS_DIR} serve $NAUKA_ARGS
+
+Restart=always
+RestartSec=5s
+# Rebuilding shards after a restart is normal; give the node room to settle.
+TimeoutStopSec=30s
+
+# Hardening. The node only ever needs its data directory and the network.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ReadWritePaths=/var/lib/nauka
+# Storage nodes hold many shards: one file each.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,8 @@ nauka-crypto = { path = "../nauka-crypto" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["fs"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
 anyhow.workspace = true
 axum = "0.8"
 blake3.workspace = true
@@ -31,3 +33,36 @@ tokio.workspace = true
 tokio-stream = "0.1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# ── Debian package (cargo-deb) ────────────────────────────────────────────
+[package.metadata.deb]
+name = "nauka"
+maintainer = "Nauka contributors"
+copyright = "Nauka contributors, AGPL-3.0"
+license-file = ["../../LICENSE", "0"]
+extended-description = """
+Nauka splits every file into Reed-Solomon shards scattered across the nodes \
+of a cluster and repairs itself continuously. Nodes find each other on the \
+BitTorrent DHT with no configuration."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["../../target/release/nauka", "usr/bin/", "755"],
+    ["../../packaging/nauka.env.example", "usr/share/doc/nauka/", "644"],
+    ["../../README.md", "usr/share/doc/nauka/", "644"],
+]
+maintainer-scripts = "../../packaging/deb"
+systemd-units = { unit-name = "nauka", unit-scripts = "../../packaging", enable = false, start = false }
+
+# ── RPM package (cargo-generate-rpm) ──────────────────────────────────────
+[package.metadata.generate-rpm]
+name = "nauka"
+license = "AGPL-3.0"
+summary = "Distributed storage engine that heals itself"
+assets = [
+    { source = "../../target/release/nauka", dest = "/usr/bin/nauka", mode = "755" },
+    { source = "../../packaging/nauka.service", dest = "/usr/lib/systemd/system/nauka.service", mode = "644" },
+    { source = "../../packaging/nauka.env.example", dest = "/usr/share/doc/nauka/nauka.env.example", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/nauka/README.md", mode = "644" },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/nauka/LICENSE", mode = "644" },
+]

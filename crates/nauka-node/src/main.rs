@@ -6,6 +6,7 @@
 
 mod api;
 mod e2e;
+mod webui;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -108,8 +109,8 @@ enum Cmd {
         /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
-        /// Directory of the web UI to serve (dist of webui/).
-        /// Default: ./webui/dist if it exists.
+        /// Serve the web UI from this directory instead of the one built
+        /// into the binary (front-end development).
         #[arg(long)]
         webui: Option<PathBuf>,
         /// Disable the HTTP API.
@@ -403,10 +404,10 @@ async fn main() -> Result<()> {
                         config: ErasureConfig::default(),
                         tmp_dir: cli.data_dir.join("tmp"),
                     });
-                    let webui_dir = webui.or_else(|| {
-                        let default = PathBuf::from("webui/dist");
-                        default.join("index.html").exists().then_some(default)
-                    });
+                    // No fallback to ./webui/dist: the binary carries its own
+                    // UI, so behaviour no longer depends on the directory the
+                    // node happens to be started from.
+                    let webui_dir = webui;
                     tokio::spawn(async move {
                         if let Err(e) = api::serve_http(http, api_state, webui_dir).await {
                             eprintln!("HTTP API stopped: {e:#}");

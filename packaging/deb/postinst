@@ -1,0 +1,43 @@
+#!/bin/sh
+set -e
+
+# Dedicated unprivileged user; the node never needs more than its data dir.
+if ! getent passwd nauka >/dev/null; then
+    adduser --system --group --no-create-home --home /var/lib/nauka \
+            --gecos "Nauka storage node" nauka >/dev/null
+fi
+
+mkdir -p /var/lib/nauka /etc/nauka
+chown nauka:nauka /var/lib/nauka
+chmod 750 /var/lib/nauka
+# The cluster key lives here and is a secret.
+chown root:nauka /etc/nauka
+chmod 750 /etc/nauka
+
+if [ ! -f /etc/nauka/nauka.env ] && [ -f /usr/share/doc/nauka/nauka.env.example ]; then
+    cp /usr/share/doc/nauka/nauka.env.example /etc/nauka/nauka.env
+fi
+
+if [ ! -f /etc/nauka/cluster-ca.key ]; then
+    cat <<'MSG'
+
+Nauka installed. One step left before starting it:
+
+  First node of a new cluster:
+      nauka --keys /etc/nauka keygen --out /etc/nauka
+
+  Joining an existing cluster:
+      copy that cluster's cluster-ca.key and cluster-ca.pem into /etc/nauka
+
+  Then:
+      chown root:nauka /etc/nauka/cluster-ca.* && chmod 640 /etc/nauka/cluster-ca.*
+      systemctl enable --now nauka
+
+  Open UDP 7311 and 7312, and TCP 8080 for the web interface.
+  Docs: https://getnauka.com
+
+MSG
+fi
+
+#DEBHELPER#
+exit 0

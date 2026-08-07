@@ -67,15 +67,22 @@ pub async fn serve_http(
             get(download).head(download_head).delete(delete_file),
         )
         .with_state(state);
-    // Web UI (SPA): static files, and index.html for the application
-    // routes (/files, /dashboard, /d/<hash>).
-    if let Some(dir) = webui_dir {
-        let index = dir.join("index.html");
-        router = router.fallback_service(
-            tower_http::services::ServeDir::new(&dir)
-                .fallback(tower_http::services::ServeFile::new(index)),
-        );
-        tracing::info!("webui served from {}", dir.display());
+    // Web UI (SPA). Served from the binary by default; --webui points at a
+    // dist directory instead, for front-end development.
+    match webui_dir {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            router = router.fallback_service(
+                tower_http::services::ServeDir::new(&dir)
+                    .fallback(tower_http::services::ServeFile::new(index)),
+            );
+            tracing::info!("web UI served from {}", dir.display());
+        }
+        None if crate::webui::is_embedded() => {
+            router = router.fallback(crate::webui::serve);
+            tracing::info!("web UI served from the binary");
+        }
+        None => tracing::warn!("no web UI in this build — API only"),
     }
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("HTTP API on http://{listen}");

@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04 # oldest glibc we support
+            packages: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            packages: true
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      # The web interface is compiled into the binary, so it must be built
+      # before cargo runs.
+      - name: Build web interface
+        run: npm ci && npm run build
+        working-directory: webui
+
+      - name: Build
+        run: cargo build --release --locked -p nauka-node
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ -n "${{ inputs.tag }}" ] && version="${{ inputs.tag }}"
+          name="nauka-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/release/nauka "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp packaging/nauka.service packaging/nauka.env.example "dist/$name/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "$name"
+          rm -rf "dist/$name"
+
+      - name: Build .deb and .rpm
+        if: matrix.packages
+        run: |
+          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo deb -p nauka-node --no-build --output dist/
+          cargo generate-rpm -p crates/nauka-node --output dist/
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            [ -f "$f" ] && sha256sum "$f" >> "SHA256SUMS-${{ matrix.target }}.txt" 2>/dev/null \
+              || shasum -a 256 "$f" >> "SHA256SUMS-${{ matrix.target }}.txt"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          cat dist/SHA256SUMS-*.txt > dist/SHA256SUMS.txt
+          rm -f dist/SHA256SUMS-*.txt
+          ls -la dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
