@@ -342,6 +342,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             let removed = inner.state.manifests.remove(&file_hash).is_some();
                             AppResponse { ok: removed, info: Some(file_hash) }
                         }
+                        AppCommand::UpdateNodeStats { addr, capacity_bytes } => {
+                            inner.state.node_capacities.insert(addr, capacity_bytes);
+                            AppResponse { ok: true, info: None }
+                        }
                     };
                     replies.push(reply);
                 }

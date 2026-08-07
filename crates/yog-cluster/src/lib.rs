@@ -60,7 +60,10 @@ pub async fn run_background(
             }
         }
 
-        match healer::scrub_once(&store, &view.self_id, &view.nodes).await {
+        // Mode statique : pas de capacités déclarées, poids uniformes.
+        let weighted: Vec<(String, u64)> =
+            view.nodes.iter().map(|n| (n.clone(), 1)).collect();
+        match healer::scrub_once(&store, &view.self_id, &weighted).await {
             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                 info!(
                     "scrub: {} vérifiés, {} régénérés, {} irréparables",

@@ -25,6 +25,18 @@ admin. Prix payé : le tuning (voir leçons).
 table à répliquer, pas de vnodes, anti-affinité par stripe naturelle, et
 un changement de vue ne déplace que le strict nécessaire.
 
+**WRH pondéré par la capacité TOTALE déclarée, jamais par l'espace libre.**
+Pondérer par le libre ferait dépendre le placement de ce qu'on vient de
+placer → oscillations sans fin. Avec la capacité totale, l'équilibre est
+« même pourcentage de remplissage partout ». Les poids vivent dans l'état
+Raft (vue partagée obligatoire : un placement calculé sur des mesures
+locales divergentes ferait se contredire scrub et GC). Et le `ln` du score
+est implémenté en opérations IEEE de base : les libm diffèrent entre
+plateformes, or deux nœuds qui classent différemment se disputent les
+shards. Enfin : l'anti-affinité prime sur la capacité quand elles sont en
+conflit (petit cluster) — un gros nœud qui concentrerait plus de m shards
+d'une stripe deviendrait un point de défaillance unique.
+
 **Mainline DHT + pkarr plutôt qu'IPFS pour le rendez-vous.** L'héritage
 ChainRage sans sa stack : kubo est en Go (inembarquable), rust-ipfs est
 mort, et IPFS est surdimensionné pour publier ~200 octets d'adresses. La

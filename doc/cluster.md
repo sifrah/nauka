@@ -1,14 +1,46 @@
 # Couche cluster : placement, healing, rebalancement
 
-## Placement par rendezvous hashing (HRW)
+## Placement par rendezvous hashing pondéré (WRH)
 
 « Qui doit détenir le shard i de la stripe s du fichier f ? » est une
-**fonction pure** de `(file_hash, stripe_idx, shard_idx, membres triés)` :
+**fonction pure** de `(file_hash, stripe_idx, shard_idx, vue pondérée)` :
 
-1. Pour la stripe s, les nœuds sont classés par
-   `blake3(node_id ‖ "\0" ‖ file_hash/s)` décroissant (Highest Random
-   Weight).
+1. Pour la stripe s, chaque nœud reçoit un score
+   `-poids / ln(h)` où `h` est un uniforme (0,1) dérivé de
+   `blake3(node_id ‖ "\0" ‖ file_hash/s)` et `poids` = sa **capacité disque
+   déclarée** (dans l'état Raft, commande `UpdateNodeStats` ; défaut
+   100 Gio tant qu'un nœud n'a pas déclaré). Classement par score
+   décroissant.
 2. Le shard i va au nœud de rang `i mod n`.
+
+Le `ln` est une implémentation maison en opérations IEEE de base
+uniquement (+,−,×,÷) : les `ln` de libm varient d'une plateforme à
+l'autre, et le placement doit être identique bit à bit sur tous les nœuds.
+
+### Capacité vs durabilité — la sémantique exacte
+
+La probabilité d'être **en tête** du classement est proportionnelle au
+poids. Ce que ça implique selon la taille du cluster :
+
+| Taille | Comportement |
+|---|---|
+| `n > k+m` | chaque stripe choisit ses k+m hébergeurs parmi n : sélection **pleinement proportionnelle** aux capacités, 1 shard/nœud/stripe |
+| `k+m ≥ n` | tous les nœuds hébergent chaque stripe ; les poids décident qui prend les shards « supplémentaires » (entre ⌊(k+m)/n⌋ et ⌈(k+m)/n⌉) |
+| cas forcé (ex. n=3, 4+2) | anti-affinité stricte 2/2/2 **quels que soient les poids** — concentrer > m shards d'une stripe sur le gros nœud en ferait un point de défaillance unique. Durabilité d'abord, capacité ensuite (choix délibéré, testé) |
+
+Mesuré (4 nœuds, 3×50 Go + 1×350 Go, 288 shards) : 66/63/66/93 — le gros
+nœud sature le plafond d'anti-affinité (~33 %), les petits descendent à
+~22 %.
+
+La capacité est **déclarée, quasi statique** (taille du filesystem du
+data-dir via statvfs, ou `--capacity` explicite), jamais l'espace *libre* :
+pondérer par le libre ferait osciller le placement à chaque écriture.
+L'équilibre visé est que tous les nœuds se remplissent au même
+**pourcentage**. Un changement de capacité (>1 %) est re-déclaré et le
+rebalancement suit par scrub+GC, comme tout changement de vue — le WRH
+garantit que seuls les shards migrant *vers* le nœud modifié bougent
+(testé : doubler un poids déplace ~1/6 des shards, zéro mouvement entre
+nœuds inchangés).
 
 Propriétés :
 

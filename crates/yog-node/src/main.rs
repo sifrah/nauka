@@ -78,6 +78,10 @@ enum Cmd {
         /// (la liste --peers devient inutile pour le healing).
         #[arg(long)]
         node_id: Option<u64>,
+        /// Capacité de stockage de ce nœud en octets (poids du placement
+        /// pondéré). Défaut : taille du système de fichiers du data-dir.
+        #[arg(long)]
+        capacity: Option<u64>,
         /// Adresse de l'API HTTP publique (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
@@ -245,6 +249,7 @@ async fn main() -> Result<()> {
             peers,
             scrub_interval,
             node_id,
+            capacity,
             http,
             no_http,
             no_discover,
@@ -344,10 +349,44 @@ async fn main() -> Result<()> {
                     });
                 }
                 let store_bg = store.clone();
+                let data_dir_bg = cli.data_dir.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
+                    let mut declared_capacity: Option<u64> = None;
                     loop {
                         ticker.tick().await;
+                        // Déclare la capacité de ce nœud dans l'état répliqué
+                        // (poids du placement) — au premier tick puis quand
+                        // elle change de plus de 1 %.
+                        if app.members().contains_key(&app.id) {
+                            let cap = capacity
+                                .unwrap_or_else(|| filesystem_capacity(&data_dir_bg));
+                            let changed = match declared_capacity {
+                                None => true,
+                                Some(prev) => {
+                                    (cap as i128 - prev as i128).unsigned_abs()
+                                        > (prev as u128) / 100
+                                }
+                            };
+                            if changed {
+                                match app
+                                    .write(yog_raft::types::AppCommand::UpdateNodeStats {
+                                        addr: self_id.clone(),
+                                        capacity_bytes: cap,
+                                    })
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        eprintln!(
+                                            "capacité déclarée: {:.1} Go",
+                                            cap as f64 / 1e9
+                                        );
+                                        declared_capacity = Some(cap);
+                                    }
+                                    Err(e) => eprintln!("déclaration de capacité: {e:#}"),
+                                }
+                            }
+                        }
                         // Le registre répliqué est la source de vérité :
                         // matérialise localement les manifests que ce nœud
                         // ne connaît pas encore, puis scrub.
@@ -361,8 +400,8 @@ async fn main() -> Result<()> {
                         if members.len() < 2 || !members.values().any(|a| *a == self_id) {
                             continue;
                         }
-                        let mut nodes: Vec<String> = members.into_values().collect();
-                        nodes.sort();
+                        let nodes =
+                            app.weighted_view(yog_cluster::placement::DEFAULT_CAPACITY);
                         match yog_cluster::healer::scrub_once(&store_bg, &self_id, &nodes).await {
                             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                                 eprintln!(
@@ -434,10 +473,22 @@ async fn main() -> Result<()> {
         Cmd::ClusterMetrics { peer } => {
             let client = PeerClient::connect(peer).await?;
             match yog_raft::admin_call(&client, &yog_raft::types::AdminRequest::Metrics).await? {
-                yog_raft::types::AdminResponse::Metrics { id, leader, members, last_applied } => {
+                yog_raft::types::AdminResponse::Metrics {
+                    id,
+                    leader,
+                    members,
+                    last_applied,
+                    capacities,
+                } => {
                     println!("nœud {id} — leader: {leader:?}, log appliqué: {last_applied:?}");
                     for (id, addr) in members {
-                        println!("  membre {id} @ {addr}");
+                        match capacities.get(&addr) {
+                            Some(cap) => println!(
+                                "  membre {id} @ {addr} — capacité {:.1} Go",
+                                *cap as f64 / 1e9
+                            ),
+                            None => println!("  membre {id} @ {addr} — capacité non déclarée"),
+                        }
                     }
                 }
                 other => bail!("réponse inattendue: {other:?}"),
@@ -521,8 +572,28 @@ async fn main() -> Result<()> {
             let file_hash = hasher.finalize().to_hex().to_string();
 
             let clients = connect_all(&peers).await?;
+            // Placement pondéré : les capacités viennent des Metrics du
+            // cluster (mode Raft) ; à défaut, poids par défaut uniformes.
+            let capacities = match yog_raft::admin_via_leader(
+                &peers,
+                &yog_raft::types::AdminRequest::Metrics,
+            )
+            .await
+            {
+                Ok(yog_raft::types::AdminResponse::Metrics { capacities, .. }) => capacities,
+                _ => Default::default(),
+            };
             let addrs: Vec<String> = clients.iter().map(|c| c.addr.to_string()).collect();
-            let mut view: Vec<&str> = addrs.iter().map(String::as_str).collect();
+            let mut view: Vec<(&str, u64)> = addrs
+                .iter()
+                .map(|a| {
+                    let w = capacities
+                        .get(a)
+                        .copied()
+                        .unwrap_or(yog_cluster::placement::DEFAULT_CAPACITY);
+                    (a.as_str(), w)
+                })
+                .collect();
             view.sort();
 
             // Passe 2 : encode et dispatche stripe par stripe — la mémoire
@@ -821,6 +892,24 @@ async fn run_discovery(
         },
     )
     .await;
+}
+
+/// Capacité totale du système de fichiers hébergeant `path` (statvfs).
+/// Repli sur la capacité par défaut si la mesure échoue.
+fn filesystem_capacity(path: &std::path::Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return yog_cluster::placement::DEFAULT_CAPACITY,
+        };
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
+            return (stat.f_blocks as u64).saturating_mul(stat.f_frsize as u64);
+        }
+    }
+    yog_cluster::placement::DEFAULT_CAPACITY
 }
 
 /// Publie notre candidature de genèse ; false si la DHT n'a pas pris.

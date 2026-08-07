@@ -16,6 +16,7 @@ axum = "0.8"
 blake3.workspace = true
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

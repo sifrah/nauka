@@ -36,9 +36,9 @@ pub struct GcReport {
 pub async fn gc_once(
     store: &Arc<ShardStore>,
     self_id: &str,
-    all_nodes: &[String],
+    all_nodes: &[(String, u64)],
 ) -> Result<GcReport> {
-    let node_refs: Vec<&str> = all_nodes.iter().map(String::as_str).collect();
+    let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
     // shard → propriétaires (tous manifests confondus).
     let mut owners: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
@@ -97,9 +97,9 @@ pub async fn gc_once(
 pub async fn scrub_once(
     store: &Arc<ShardStore>,
     self_id: &str,
-    all_nodes: &[String],
+    all_nodes: &[(String, u64)],
 ) -> Result<HealReport> {
-    let node_refs: Vec<&str> = all_nodes.iter().map(String::as_str).collect();
+    let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     let mut peers: HashMap<String, Option<PeerClient>> = HashMap::new();
     let mut report = HealReport::default();
 
@@ -145,7 +145,7 @@ async fn heal_shard(
     manifest: &FileManifest,
     stripe_idx: usize,
     shard_idx: usize,
-    all_nodes: &[&str],
+    all_nodes: &[(&str, u64)],
     self_id: &str,
     peers: &mut HashMap<String, Option<PeerClient>>,
 ) -> Result<()> {
@@ -162,7 +162,7 @@ async fn heal_shard(
         let mut found = None;
         let mut candidates = crate::placement::rank_nodes(hash, all_nodes);
         candidates.retain(|n| *n != self_id);
-        for node in all_nodes.iter().filter(|n| **n != self_id) {
+        for (node, _) in all_nodes.iter().filter(|(n, _)| *n != self_id) {
             if !candidates.contains(node) {
                 candidates.push(node);
             }

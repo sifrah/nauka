@@ -36,13 +36,15 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    /// Vue du cluster pour le placement — la même que celle des scrubbers.
-    fn view(&self) -> Vec<String> {
-        let mut nodes: Vec<String> = self.app.members().into_values().collect();
+    /// Vue pondérée du cluster pour le placement — la même que celle des
+    /// scrubbers (capacités déclarées dans l'état Raft).
+    fn view(&self) -> Vec<(String, u64)> {
+        let mut nodes = self
+            .app
+            .weighted_view(yog_cluster::placement::DEFAULT_CAPACITY);
         if nodes.is_empty() {
-            nodes.push(self.self_id.clone());
+            nodes.push((self.self_id.clone(), yog_cluster::placement::DEFAULT_CAPACITY));
         }
-        nodes.sort();
         nodes
     }
 }
@@ -141,7 +143,7 @@ async fn dispatch_file(
     }
     let file_hash = hasher.finalize().to_hex().to_string();
     let view = state.view();
-    let view_refs: Vec<&str> = view.iter().map(String::as_str).collect();
+    let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     let cfg = state.config;
 
     let mut clients: HashMap<String, PeerClient> = HashMap::new();
@@ -295,13 +297,13 @@ async fn download(
 async fn fetch_shard(
     state: &Arc<ApiState>,
     clients: &mut HashMap<String, Option<PeerClient>>,
-    view: &[String],
+    view: &[(String, u64)],
     hash: &str,
 ) -> Option<Vec<u8>> {
     if let Ok(data) = state.store.get_shard(hash) {
         return Some(data);
     }
-    for node in view.iter().filter(|n| **n != state.self_id) {
+    for (node, _) in view.iter().filter(|(n, _)| *n != state.self_id) {
         let Ok(addr) = node.parse::<SocketAddr>() else { continue };
         if !clients.contains_key(node) {
             clients.insert(node.clone(), connect_with_timeout(addr).await);

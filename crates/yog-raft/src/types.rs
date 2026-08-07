@@ -27,6 +27,9 @@ pub enum AppCommand {
     RegisterManifest(FileManifest),
     /// Retire un fichier du registre (les shards seront purgés par le GC).
     UnregisterManifest { file_hash: String },
+    /// Déclare la capacité disque d'un nœud (poids du placement pondéré).
+    /// Keyé par adresse annoncée — la même identité que le placement.
+    UpdateNodeStats { addr: String, capacity_bytes: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -35,10 +38,15 @@ pub struct AppResponse {
     pub info: Option<String>,
 }
 
-/// État matérialisé par la state machine : le registre des fichiers.
+/// État matérialisé par la state machine : le registre des fichiers et
+/// les capacités déclarées des nœuds.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
     pub manifests: BTreeMap<String, FileManifest>,
+    /// Capacité disque déclarée par nœud (adresse → octets). Sert de poids
+    /// au placement pondéré ; absent = capacité par défaut.
+    #[serde(default)]
+    pub node_capacities: BTreeMap<String, u64>,
 }
 
 /// Requêtes d'administration adressées à un nœud (hors log Raft).
@@ -68,6 +76,10 @@ pub enum AdminResponse {
         leader: Option<NodeId>,
         members: BTreeMap<NodeId, String>,
         last_applied: Option<u64>,
+        /// Capacités déclarées (adresse → octets) — la vue pondérée du
+        /// placement, pour que les clients placent comme le cluster.
+        #[serde(default)]
+        capacities: BTreeMap<String, u64>,
     },
     Manifests(Vec<String>),
     Err(String),

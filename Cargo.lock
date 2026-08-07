@@ -3306,6 +3306,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

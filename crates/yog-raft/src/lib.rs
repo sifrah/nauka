@@ -106,6 +106,22 @@ impl RaftApp {
             .collect()
     }
 
+    /// Vue pondérée du cluster pour le placement : membres du membership
+    /// avec leur capacité déclarée (défaut si pas encore déclarée), triée.
+    pub fn weighted_view(&self, default_capacity: u64) -> Vec<(String, u64)> {
+        let capacities = self.app_state().node_capacities;
+        let mut view: Vec<(String, u64)> = self
+            .members()
+            .into_values()
+            .map(|addr| {
+                let w = capacities.get(&addr).copied().unwrap_or(default_capacity);
+                (addr, w)
+            })
+            .collect();
+        view.sort();
+        view
+    }
+
     async fn handle_admin(&self, req: AdminRequest) -> AdminResponse {
         match req {
             AdminRequest::Init(nodes) => {
@@ -150,6 +166,7 @@ impl RaftApp {
                     leader: metrics.current_leader,
                     members: self.members(),
                     last_applied: metrics.last_applied.map(|l| l.index),
+                    capacities: self.app_state().node_capacities,
                 }
             }
             AdminRequest::ListManifests => {

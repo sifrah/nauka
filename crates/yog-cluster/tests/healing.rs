@@ -28,8 +28,8 @@ async fn spawn_node() -> Node {
 #[tokio::test]
 async fn node_heals_lost_and_corrupted_shards() {
     let nodes = [spawn_node().await, spawn_node().await, spawn_node().await];
-    let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let ids: Vec<(String, u64)> = nodes.iter().map(|n| (n.id.clone(), 1)).collect();
+    let id_refs: Vec<(&str, u64)> = ids.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
     // Un fichier 4+2 de 3 stripes, placé selon le placement officiel.
     let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 32 * 1024 };

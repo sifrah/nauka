@@ -35,15 +35,15 @@ async fn spawn(id: u64) -> Node {
 }
 
 /// Vue triée des adresses membres, comme la boucle de fond des nœuds.
-fn view_of(members: &BTreeMap<u64, String>) -> Vec<String> {
-    let mut v: Vec<String> = members.values().cloned().collect();
+fn view_of(members: &BTreeMap<u64, String>) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = members.values().map(|a| (a.clone(), 1)).collect();
     v.sort();
     v
 }
 
 /// Synchronise manifests + scrub + gc sur chaque nœud listé (une passe de
 /// la boucle de fond, en synchrone pour le déterminisme du test).
-async fn converge(nodes: &[&Node], view: &[String]) {
+async fn converge(nodes: &[&Node], view: &[(String, u64)]) {
     for n in nodes {
         for manifest in n.app.app_state().manifests.values() {
             if n.store.get_manifest(&manifest.file_hash).is_err() {
@@ -61,8 +61,8 @@ async fn converge(nodes: &[&Node], view: &[String]) {
 
 /// Vérifie que chaque shard de chaque manifest est présent chez son
 /// propriétaire selon `view`, et que les non-propriétaires ne gardent rien.
-fn assert_placement_clean(nodes: &[&Node], view: &[String]) {
-    let refs: Vec<&str> = view.iter().map(String::as_str).collect();
+fn assert_placement_clean(nodes: &[&Node], view: &[(String, u64)]) {
+    let refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     for n in nodes {
         let id = n.addr.to_string();
         let mut owned: std::collections::BTreeSet<String> = Default::default();
@@ -106,12 +106,12 @@ async fn grow_to_four_then_remove_one_rebalances() {
             .collect();
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
         // Dépose les shards chez leurs propriétaires (vue à 3 nœuds).
-        let view3: Vec<String> = {
-            let mut v: Vec<String> = peers.iter().map(|a| a.to_string()).collect();
+        let view3: Vec<(String, u64)> = {
+            let mut v: Vec<(String, u64)> = peers.iter().map(|a| (a.to_string(), 1)).collect();
             v.sort();
             v
         };
-        let refs: Vec<&str> = view3.iter().map(String::as_str).collect();
+        let refs: Vec<(&str, u64)> = view3.iter().map(|(n, w)| (n.as_str(), *w)).collect();
         for node in [&n1, &n2, &n3] {
             node.store.put_manifest(&manifest).unwrap();
             for (si, sj, _) in shards_owned_by(&manifest, &node.addr.to_string(), &refs) {
@@ -178,7 +178,7 @@ async fn grow_to_four_then_remove_one_rebalances() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let view3b = view_of(&n1.app.members());
-    assert!(!view3b.contains(&n3.addr.to_string()));
+    assert!(!view3b.iter().any(|(n, _)| *n == n3.addr.to_string()));
 
     // Les 3 restants convergent (n3 encore allumé mais plus dans la vue —
     // il sert encore les lectures pendant le drain).

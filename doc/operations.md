@@ -47,6 +47,7 @@ Options de `serve` :
 | `--advertise` | auto-détecté (DHT) sinon `--listen` | adresse annoncée aux autres |
 | `--http` / `--no-http` | `0.0.0.0:8080` | API HTTP publique |
 | `--scrub-interval` | `30` s | cadence healing + GC |
+| `--capacity` | taille du filesystem du data-dir | poids du placement pondéré, en octets |
 | `--no-discover` | — | désactive la DHT (statique/air-gapped) |
 | `--peers a,b,c` | — | mode statique (désactive la DHT) |
 | `--node-id` | dérivé des clés | id Raft manuel (mode sans clés uniquement) |
@@ -87,3 +88,5 @@ Options de `serve` :
 | Clé de cluster présente sur chaque nœud | émission de certificats hors-ligne à venir |
 | Partage de bande passante inéquitable entre uploads concurrents (les gros flux dominent) | sans danger — fair queuing en backlog |
 | Fenêtre ≤ 2 min de republication DHT après bascule de leader | n'affecte que les nouveaux arrivants pendant la fenêtre |
+| À n ≤ k+m nœuds, la capacité ne peut pas primer sur l'anti-affinité (voir cluster.md) | ajouter des nœuds, ou accepter que le petit disque limite |
+| Pas de refus d'écriture sur disque plein (garde-fou ~95 %) | surveiller le remplissage ; garde-fou à venir |
