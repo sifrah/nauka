@@ -11,6 +11,11 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
 use crate::protocol::{read_message, write_message, Request, Response, ALPN};
 
+/// Upper bound on a single request/response exchange. Generous enough for a
+/// 1 MiB shard over a slow WAN link, short enough that a wedged peer cannot
+/// stall a scrub, an audit or a download.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Client connection to a cluster node.
 #[derive(Clone)]
 pub struct PeerClient {
@@ -55,10 +60,22 @@ impl PeerClient {
     }
 
     async fn call(&self, req: Request) -> Result<Response> {
-        let (mut send, mut recv) = self.conn.open_bi().await?;
-        write_message(&mut send, &req).await?;
-        send.finish()?;
-        let resp = read_message::<Response>(&mut recv).await?;
+        // Every exchange is bounded. A peer that accepts the stream and then
+        // goes silent — a stalled path, a wedged process — must surface as an
+        // error the caller can retry or route around, never as an indefinite
+        // hang. Callers layer their own, shorter deadlines on top.
+        let exchange = async {
+            let (mut send, mut recv) = self.conn.open_bi().await?;
+            write_message(&mut send, &req).await?;
+            send.finish()?;
+            read_message::<Response>(&mut recv)
+                .await
+                .map_err(anyhow::Error::from)
+        };
+        let resp = tokio::time::timeout(REQUEST_TIMEOUT, exchange)
+            .await
+            .map_err(|_| anyhow::anyhow!("peer {} timed out after {REQUEST_TIMEOUT:?}", self.addr))?
+            .map_err(|e: anyhow::Error| e)?;
         if let Response::Error(e) = resp {
             bail!("error from peer {}: {e}", self.addr);
         }

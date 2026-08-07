@@ -35,9 +35,12 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
     // Realistic initial RTT for a cluster (quinn's default is 333 ms, which
     // throttles the pacer as long as no sample has been taken).
     t.initial_rtt(std::time::Duration::from_millis(2));
-    // Larger initial datagrams: 1200 bytes/packet is the Internet worst case;
-    // our nodes sit on jumbo-frame networks or on loopback.
-    t.initial_mtu(8940);
+    // Start at the safe 1200-byte datagram and let MTU discovery climb to the
+    // upper bound above. Forcing a large initial MTU is tempting on loopback
+    // but fatal anywhere the path cannot carry it: every early packet is
+    // dropped and the connection stalls with no error (observed hanging a
+    // 1.5 MB transfer indefinitely on Linux CI while macOS was fine).
+    t.initial_mtu(1200);
     t.min_mtu(1200);
     t.stream_receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
     t.receive_window(quinn::VarInt::from_u32(256 * 1024 * 1024));
@@ -48,8 +51,11 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
     // BBR measures the actual throughput instead of probing through losses; on
     // fast links with small buffers (loopback, datacenter) Cubic collapses
     // (measured: 7 MB/s, 5k losses) where BBR sustains the path's throughput.
+    // The initial window stays moderate: OS receive buffers are capped well
+    // below what we request (Linux honours net.core.rmem_max, often 208 kB),
+    // and firing multiple megabytes before the first ACK simply overruns them.
     let mut bbr = quinn::congestion::BbrConfig::default();
-    bbr.initial_window(4 * 1024 * 1024);
+    bbr.initial_window(256 * 1024);
     t.congestion_controller_factory(Arc::new(bbr));
     // Under severe congestion, a quiet connection must not die silently:
     // keep-alive enabled, explicit idle timeout.
