@@ -1,57 +1,58 @@
 ---
 title: "Deploy a cluster"
-description: "Generate the cluster key once, copy it to every machine, run the same command everywhere — and open the right UDP ports, which is the step that catches everyone out."
+description: "Generate the cluster token once, paste it on every machine, run the same command everywhere — and open the right UDP ports, which is the step that catches everyone out."
 ---
 
 import { Aside, Tabs, TabItem, Steps } from "@astrojs/starlight/components";
 
 A Nauka cluster is formed by running the same command on every machine. There
 is no leader to designate, no seed list to maintain, no configuration file to
-write. The only thing you distribute is the cluster key.
+write. The only thing you distribute is one string: the cluster token.
 
 ## The whole procedure
 
 <Steps>
 
-1. **Generate the cluster key — once, on your workstation.**
+1. **Generate the cluster token — once, anywhere.**
 
    ```bash
-   nauka keygen --out ./nauka-keys
+   nauka token
+   # nauka1_hT9xK2… (50 characters)
    ```
 
-   This writes `cluster-ca.key` (an Ed25519 CA, mode 0600 — the secret) and
-   `cluster-ca.pem`. Owning this directory *is* membership of the cluster.
-   `keygen` refuses to overwrite an existing key, so it cannot silently
-   orphan a running cluster.
+   The token is 32 random bytes. The cluster's Ed25519 CA — and everything
+   downstream: node certificates, the DHT rendezvous — is derived from it
+   deterministically, so machines that hold the token need to share nothing
+   else. Holding the token *is* membership of the cluster: treat it like a
+   password.
 
-2. **Copy it to every machine.**
-
-   ```bash
-   scp -r nauka-keys vps1:/etc/nauka-keys
-   scp -r nauka-keys vps2:/etc/nauka-keys
-   scp -r nauka-keys vps3:/etc/nauka-keys
-   ```
-
-   Nothing else is distributed. Node identities, the Raft node ids, and the
-   DHT rendezvous key are all derived from this one directory.
-
-3. **Open the ports.** See [the section below](#firewall-the-step-that-catches-everyone-out)
+2. **Open the ports.** See [the section below](#firewall-the-step-that-catches-everyone-out)
    — this is where deployments fail.
 
-4. **Run the same command on every machine.**
+3. **Run the same command on every machine.**
 
    ```bash
-   nauka --data-dir /var/lib/nauka --keys /etc/nauka-keys serve
+   NAUKA_TOKEN=nauka1_… nauka --data-dir /var/lib/nauka serve
    ```
 
-   Each node derives its identity from the key, detects its public address
+   Prefer the environment variable (or `EnvironmentFile` under systemd)
+   over the `--token` flag: command lines are visible to every local user
+   in `ps`. Each node derives its identity, detects its public address
    through the DHT, looks for the cluster, and either joins it or — if no
-   cluster exists yet — stands as a genesis candidate and founds it. Startup
-   order does not matter, and no node is privileged.
+   cluster exists yet — stands as a genesis candidate and founds it.
+   Startup order does not matter, and no node is privileged.
 
-5. **Check that the cluster formed.** See [Verifying it works](#verifying-it-works).
+4. **Check that the cluster formed.** See [Verifying it works](#verifying-it-works).
 
 </Steps>
+
+<Aside type="note" title="Key files still work">
+  `nauka keygen --out ./nauka-keys` and `--keys /etc/nauka-keys` remain
+  supported: same trust model, spelled as a directory instead of a string.
+  Existing clusters keep working unchanged. A token cannot be mixed with
+  `--keys`, and a cluster created from key files has no token equivalent —
+  the derivation only goes one way.
+</Aside>
 
 ## Firewall: the step that catches everyone out
 
@@ -172,19 +173,18 @@ user with `ProtectSystem=strict` and write access to nothing but
 
 <Steps>
 
-1. **Install the cluster key** into `/etc/nauka/`, which the package created
-   with mode 0750, owned by `root:nauka`:
+1. **Install the cluster token** in `/etc/nauka/nauka.env`, which the
+   systemd unit reads (the package created `/etc/nauka` with mode 0750,
+   owned by `root:nauka`):
 
    ```bash
-   # first node of a new cluster
-   sudo nauka --keys /etc/nauka keygen --out /etc/nauka
-
-   # or, joining an existing cluster: copy that cluster's key over
-   sudo scp cluster-ca.key cluster-ca.pem root@node2:/etc/nauka/
-
-   sudo chown root:nauka /etc/nauka/cluster-ca.*
-   sudo chmod 640 /etc/nauka/cluster-ca.*
+   sudo sh -c 'echo "NAUKA_TOKEN=nauka1_…" >> /etc/nauka/nauka.env'
+   sudo chmod 640 /etc/nauka/nauka.env
    ```
+
+   The same line on every machine of the cluster. (File-based deployments
+   put `cluster-ca.key`/`cluster-ca.pem` in `/etc/nauka` instead and pass
+   `--keys /etc/nauka`.)
 
 2. **Adjust the configuration**, if the defaults are not right. The unit reads
    `/etc/nauka/nauka.env`, which the package seeds from

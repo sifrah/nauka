@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+data-encoding = "2"
+rand = "0.8"
 nauka-erasure = { path = "../nauka-erasure" }
 nauka-store = { path = "../nauka-store" }
 anyhow.workspace = true

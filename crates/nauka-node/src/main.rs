@@ -32,6 +32,17 @@ struct Cli {
     /// Enables mTLS: only holders of a signed certificate get through.
     #[arg(long)]
     keys: Option<PathBuf>,
+    /// Cluster token (nauka1_…): one string instead of a key directory.
+    /// The cluster key is derived from it — same security, nothing to
+    /// copy around. Prefer the environment variable over the flag: command
+    /// lines are visible in `ps`.
+    #[arg(
+        long,
+        env = "NAUKA_TOKEN",
+        conflicts_with = "keys",
+        hide_env_values = true
+    )]
+    token: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -83,6 +94,8 @@ enum Cmd {
     },
     /// Print this node's identity (node-id derived from its public key).
     NodeInfo,
+    /// Generate a cluster token: the one string every machine needs.
+    Token,
     /// Update this binary to the latest release (checksum verified).
     Update {
         /// Only report whether an update exists, without installing it.
@@ -204,7 +217,26 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Cmd::Token = cli.cmd {
+        // Straight to stdout and nothing else: pipeable into a secret
+        // store. The reminder goes to stderr.
+        println!("{}", nauka_transport::generate_token());
+        eprintln!("# every machine joins with: NAUKA_TOKEN=<token> nauka serve");
+        eprintln!(
+            "# anyone holding this token is a member of the cluster — treat it like a password"
+        );
+        return Ok(());
+    }
+    // A token is sugar over the key directory: derive the key material into
+    // a private corner of the data dir, then follow the exact same paths as
+    // --keys. One trust model, two spellings.
+    if let Some(token) = cli.token.clone() {
+        let dir = cli.data_dir.join("token-keys");
+        nauka_transport::materialize_token_keys(&token, &dir)
+            .context("deriving the cluster key from the token")?;
+        cli.keys = Some(dir);
+    }
 
     // Cluster identity: to be installed before any network use. A node
     // (serve/node-info) uses its persisted key; client commands use an
@@ -245,6 +277,8 @@ async fn main() -> Result<()> {
             println!("fingerprint : {fingerprint}");
         }
         Cmd::Update { check } => update::run(check).await?,
+        // Handled before the match (needs no data dir, no keys).
+        Cmd::Token => unreachable!("handled at startup"),
         Cmd::Put {
             file,
             data_shards,

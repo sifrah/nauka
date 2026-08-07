@@ -141,9 +141,9 @@ main() {
 
     printf "\nStart a cluster:\n"
     printf "  ${DIM}# once, on your machine${NC}\n"
-    printf "  %s keygen --out ./nauka-keys\n\n" "$BINARY"
+    printf "  %s token\n\n" "$BINARY"
     printf "  ${DIM}# then on every machine, the same command${NC}\n"
-    printf "  %s --keys ./nauka-keys serve\n\n" "$BINARY"
+    printf "  NAUKA_TOKEN=<token> %s serve\n\n" "$BINARY"
     printf "The web interface is built in, on http://localhost:8080\n"
     printf "Docs: https://getnauka.com\n"
 }

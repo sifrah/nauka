@@ -33,9 +33,8 @@ network distance, then repair and rebalance themselves — continuously, with no
 central server and no configuration file.
 
 ```bash
-nauka keygen --out ./nauka-keys      # once
-scp -r nauka-keys vps:/etc/          # to every machine
-nauka --keys /etc/nauka-keys serve   # the same command everywhere
+nauka token                          # once — prints the cluster token
+NAUKA_TOKEN=nauka1_… nauka serve     # the same command on every machine
 ```
 
 That's it. The cluster forms itself.

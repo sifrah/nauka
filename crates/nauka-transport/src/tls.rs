@@ -63,6 +63,69 @@ impl Clone for ClusterTls {
     }
 }
 
+/// Prefix of a cluster token. The `1` is the derivation scheme version:
+/// bumping it changes every derived key, so it must never move silently.
+const TOKEN_PREFIX: &str = "nauka1_";
+
+/// Generates a cluster token: 32 random bytes, base64url. The token IS the
+/// cluster key — the Ed25519 CA (and everything downstream: certificates,
+/// the DHT rendezvous) is derived from it deterministically. Same entropy
+/// as the key file it replaces; what changes is ergonomics, one string
+/// instead of a directory to copy around.
+pub fn generate_token() -> String {
+    use rand::RngCore;
+    let mut secret = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut secret);
+    format!(
+        "{TOKEN_PREFIX}{}",
+        data_encoding::BASE64URL_NOPAD.encode(&secret)
+    )
+}
+
+/// The CA keypair derived from a token. Deterministic: every holder of the
+/// token computes the exact same key, so nodes need to share nothing else.
+fn ca_keypair_from_token(token: &str) -> Result<KeyPair> {
+    let payload = token
+        .trim()
+        .strip_prefix(TOKEN_PREFIX)
+        .with_context(|| format!("a cluster token starts with {TOKEN_PREFIX}"))?;
+    let secret = data_encoding::BASE64URL_NOPAD
+        .decode(payload.as_bytes())
+        .context("token payload is not valid base64url")?;
+    let secret: [u8; 32] = secret
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a cluster token carries exactly 32 bytes"))?;
+    let seed = blake3::derive_key("nauka cluster-ca v1", &secret);
+    // PKCS#8 v1 document for an Ed25519 seed: fixed 16-byte header + seed.
+    let mut der = Vec::with_capacity(48);
+    der.extend_from_slice(&[
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ]);
+    der.extend_from_slice(&seed);
+    KeyPair::from_pkcs8_der_and_sign_algo(&PrivatePkcs8KeyDer::from(der), &PKCS_ED25519)
+        .context("deriving the CA key from the token")
+}
+
+/// Materializes the token's key material in `dir` (0600), overwriting: the
+/// token is the source of truth and the files are a deterministic cache,
+/// kept only so that every existing consumer (mTLS load, DHT derivation)
+/// reads the same two files whether the cluster uses a token or key files.
+pub fn materialize_token_keys(token: &str, dir: &Path) -> Result<()> {
+    let key = ca_keypair_from_token(token)?;
+    let cert = ca_params()?.self_signed(&key)?;
+    std::fs::create_dir_all(dir)?;
+    let key_path = dir.join(CA_KEY_FILE);
+    std::fs::write(&key_path, key.serialize_pem())?;
+    std::fs::write(dir.join(CA_CERT_FILE), cert.pem())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Generates the cluster key in `dir` (refuses to overwrite).
 pub fn generate_cluster_ca(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -162,4 +225,60 @@ pub fn set_cluster_tls(tls: ClusterTls) {
 
 pub(crate) fn cluster_tls() -> Option<Arc<ClusterTls>> {
     CLUSTER_TLS.get_or_init(|| None).clone()
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_derive_deterministically() {
+        let t = generate_token();
+        let a = ca_keypair_from_token(&t).unwrap();
+        let b = ca_keypair_from_token(&t).unwrap();
+        assert_eq!(
+            a.serialize_der(),
+            b.serialize_der(),
+            "same token must derive the same CA on every machine"
+        );
+        // Whitespace from copy-paste must not change the cluster.
+        let c = ca_keypair_from_token(&format!("  {t}\n")).unwrap();
+        assert_eq!(a.serialize_der(), c.serialize_der());
+    }
+
+    #[test]
+    fn different_tokens_are_different_clusters() {
+        let a = ca_keypair_from_token(&generate_token()).unwrap();
+        let b = ca_keypair_from_token(&generate_token()).unwrap();
+        assert_ne!(a.serialize_der(), b.serialize_der());
+    }
+
+    #[test]
+    fn malformed_tokens_are_refused() {
+        assert!(ca_keypair_from_token("nope").is_err(), "missing prefix");
+        assert!(
+            ca_keypair_from_token("nauka1_c2hvcnQ").is_err(),
+            "payload shorter than 32 bytes"
+        );
+        assert!(
+            ca_keypair_from_token("nauka1_!!!invalid!!!").is_err(),
+            "payload that is not base64url"
+        );
+    }
+
+    #[test]
+    fn materialized_keys_load_and_agree() {
+        let t = generate_token();
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        materialize_token_keys(&t, d1.path()).unwrap();
+        materialize_token_keys(&t, d2.path()).unwrap();
+        // Two machines materializing independently hold the same CA key…
+        let k1 = std::fs::read_to_string(d1.path().join("cluster-ca.key")).unwrap();
+        let k2 = std::fs::read_to_string(d2.path().join("cluster-ca.key")).unwrap();
+        assert_eq!(k1, k2);
+        // …and the standard loader accepts the directory as-is.
+        let tls = load_cluster_tls(d1.path(), None).unwrap();
+        assert!(!tls.cert_chain.is_empty());
+    }
 }

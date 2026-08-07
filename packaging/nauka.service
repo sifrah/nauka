@@ -11,9 +11,12 @@ Group=nauka
 # Cluster key: /etc/nauka/cluster-ca.key and .pem, copied from `nauka keygen`.
 # Without it the node runs unauthenticated — see EnvironmentFile to override.
 Environment=NAUKA_DATA_DIR=/var/lib/nauka
-Environment=NAUKA_KEYS_DIR=/etc/nauka
+# NAUKA_TOKEN (from `nauka token`) or NAUKA_KEYS_ARG=--keys /etc/nauka —
+# whichever the deployment uses. The token is read straight from the
+# environment by the binary, so it never appears in `ps`.
+Environment=NAUKA_KEYS_ARG=
 EnvironmentFile=-/etc/nauka/nauka.env
-ExecStart=/usr/bin/nauka --data-dir ${NAUKA_DATA_DIR} --keys ${NAUKA_KEYS_DIR} serve $NAUKA_ARGS
+ExecStart=/usr/bin/nauka --data-dir ${NAUKA_DATA_DIR} $NAUKA_KEYS_ARG serve $NAUKA_ARGS
 
 Restart=always
 RestartSec=5s

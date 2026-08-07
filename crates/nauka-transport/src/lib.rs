@@ -16,7 +16,10 @@ pub mod tls;
 pub use client::PeerClient;
 pub use protocol::{Request, Response};
 pub use server::serve;
-pub use tls::{generate_cluster_ca, load_cluster_tls, set_cluster_tls, ClusterTls};
+pub use tls::{
+    generate_cluster_ca, generate_token, load_cluster_tls, materialize_token_keys, set_cluster_tls,
+    ClusterTls,
+};
 
 use std::sync::Arc;
 
