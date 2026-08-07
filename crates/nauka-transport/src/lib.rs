@@ -20,6 +20,9 @@ pub use tls::{generate_cluster_ca, load_cluster_tls, set_cluster_tls, ClusterTls
 
 use std::sync::Arc;
 
+/// Largest UDP datagram we send or accept: a standard jumbo frame.
+pub(crate) const JUMBO_MTU: u16 = 9000;
+
 fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
@@ -29,8 +32,14 @@ fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// datacenter) and wide windows to keep several shards in flight.
 fn transport_config() -> Arc<quinn::TransportConfig> {
     let mut t = quinn::TransportConfig::default();
+    // Ceiling at jumbo-frame size. Anything larger only exists on loopback,
+    // and asking for it makes bulk transfers stall outright on some hosts
+    // (virtualised Linux, container networking) — the datagrams simply never
+    // arrive and the connection wedges. 9000 is what real datacenter links
+    // offer and already lifts throughput an order of magnitude over quinn's
+    // 1472-byte default.
     let mut mtu = quinn::MtuDiscoveryConfig::default();
-    mtu.upper_bound(65_527);
+    mtu.upper_bound(JUMBO_MTU);
     t.mtu_discovery_config(Some(mtu));
     // Realistic initial RTT for a cluster (quinn's default is 333 ms, which
     // throttles the pacer as long as no sample has been taken).
@@ -70,7 +79,8 @@ fn transport_config() -> Arc<quinn::TransportConfig> {
 /// regardless of initial_mtu and of discovery).
 pub(crate) fn endpoint_config() -> quinn::EndpointConfig {
     let mut ec = quinn::EndpointConfig::default();
-    ec.max_udp_payload_size(65_527).expect("valid payload size");
+    ec.max_udp_payload_size(JUMBO_MTU)
+        .expect("valid payload size");
     ec
 }
 
