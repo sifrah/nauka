@@ -270,16 +270,34 @@ impl S3 for NaukaS3 {
         &self,
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
-        self.require_bucket(&req.input.bucket)?;
+        let input = req.input;
+        self.require_bucket(&input.bucket)?;
         let s3 = self.state.app.app_state().s3;
         let entry = s3
             .objects
-            .get(&(req.input.bucket, req.input.key))
+            .get(&(input.bucket.clone(), input.key.clone()))
             .ok_or_else(|| s3_error!(NoSuchKey))?;
         let v = entry
             .current_content()
             .cloned()
             .ok_or_else(|| s3_error!(NoSuchKey))?;
+
+        check_preconditions(
+            &v,
+            input.if_match.as_ref(),
+            input.if_none_match.as_ref(),
+            input.if_modified_since.as_ref(),
+            input.if_unmodified_since.as_ref(),
+        )?;
+
+        // A Range narrows what we reconstruct: only the stripes covering
+        // the window are fetched from the cluster.
+        let (start, end) = match &input.range {
+            None => (0, v.size.saturating_sub(1)),
+            Some(r) => resolve_range(r, v.size)?,
+        };
+        let length = if v.size == 0 { 0 } else { end - start + 1 };
+        let partial = input.range.is_some();
 
         let body = match &v.content {
             None => StreamingBlob::from(Body::from(Vec::<u8>::new())),
@@ -292,7 +310,7 @@ impl S3 for NaukaS3 {
                     .get(hash)
                     .cloned()
                     .ok_or_else(|| s3_error!(NoSuchKey))?;
-                let bytes = reconstruct_whole(&self.state, &manifest)
+                let bytes = reconstruct_range(&self.state, &manifest, start, end)
                     .await
                     .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
                 StreamingBlob::from(Body::from(bytes))
@@ -301,11 +319,130 @@ impl S3 for NaukaS3 {
 
         Ok(S3Response::new(GetObjectOutput {
             body: Some(body),
-            content_length: Some(v.size as i64),
+            content_length: Some(length as i64),
+            content_range: partial.then(|| format!("bytes {start}-{end}/{}", v.size)),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
             content_type: v.content_type.clone(),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
+            ..Default::default()
+        }))
+    }
+
+    async fn copy_object(
+        &self,
+        req: S3Request<CopyObjectInput>,
+    ) -> S3Result<S3Response<CopyObjectOutput>> {
+        let input = req.input;
+        self.require_bucket(&input.bucket)?;
+        let (src_bucket, src_key) = match &input.copy_source {
+            CopySource::Bucket { bucket, key, .. } => (bucket.to_string(), key.to_string()),
+            // Access points and Outposts are AWS-side routing concepts
+            // with no meaning in a self-hosted cluster.
+            CopySource::AccessPoint { .. } | CopySource::Outpost { .. } => {
+                return Err(s3_error!(NotImplemented, "access point copy sources"))
+            }
+        };
+        let s3 = self.state.app.app_state().s3;
+        let source = s3
+            .objects
+            .get(&(src_bucket, src_key))
+            .and_then(|e| e.current_content())
+            .cloned()
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+
+        check_preconditions(
+            &source,
+            input.copy_source_if_match.as_ref(),
+            input.copy_source_if_none_match.as_ref(),
+            input.copy_source_if_modified_since.as_ref(),
+            input.copy_source_if_unmodified_since.as_ref(),
+        )?;
+
+        // The copy shares the source's shards: content addressing makes
+        // this free, and the derived refcount keeps both alive until the
+        // last key referencing them goes.
+        // COPY (the default) keeps the source metadata; REPLACE takes it
+        // from the request.
+        let replace = input
+            .metadata_directive
+            .as_ref()
+            .is_some_and(|d| d.as_str() == MetadataDirective::REPLACE);
+        let now = Self::now();
+        let copy = nauka_s3::ObjectVersion {
+            version_id: "null".into(),
+            last_modified: now,
+            content_type: if replace {
+                input.content_type.clone()
+            } else {
+                source.content_type.clone()
+            },
+            user_metadata: if replace {
+                input
+                    .metadata
+                    .clone()
+                    .map(|m| m.into_iter().collect())
+                    .unwrap_or_default()
+            } else {
+                source.user_metadata.clone()
+            },
+            ..source.clone()
+        };
+        let etag = copy.etag.clone();
+        self.write(nauka_raft::types::AppCommand::PutObjectVersion {
+            bucket: input.bucket,
+            key: input.key,
+            version: Box::new(copy),
+        })
+        .await?;
+
+        Ok(S3Response::new(CopyObjectOutput {
+            copy_object_result: Some(CopyObjectResult {
+                e_tag: etag.parse().ok(),
+                last_modified: Some(Self::timestamp(now)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+    }
+
+    async fn delete_objects(
+        &self,
+        req: S3Request<DeleteObjectsInput>,
+    ) -> S3Result<S3Response<DeleteObjectsOutput>> {
+        let bucket = req.input.bucket;
+        self.require_bucket(&bucket)?;
+        let mut deleted = Vec::new();
+        let mut errors = Vec::new();
+        for obj in req.input.delete.objects {
+            // S3 reports per-object outcomes rather than failing the batch,
+            // and deleting an absent key counts as success.
+            match self
+                .state
+                .app
+                .write(nauka_raft::types::AppCommand::DeleteObjectVersion {
+                    bucket: bucket.clone(),
+                    key: obj.key.clone(),
+                    version_id: obj.version_id.clone().unwrap_or_else(|| "null".into()),
+                })
+                .await
+            {
+                Ok(_) => deleted.push(DeletedObject {
+                    key: Some(obj.key),
+                    version_id: obj.version_id,
+                    ..Default::default()
+                }),
+                Err(e) => errors.push(s3s::dto::Error {
+                    key: Some(obj.key),
+                    code: Some("InternalError".into()),
+                    message: Some(format!("{e:#}")),
+                    version_id: obj.version_id,
+                }),
+            }
+        }
+        Ok(S3Response::new(DeleteObjectsOutput {
+            deleted: Some(deleted),
+            errors: Some(errors),
             ..Default::default()
         }))
     }
@@ -439,23 +576,6 @@ async fn write_body(
     Ok((size, blake, md5.finalize().into()))
 }
 
-/// Rebuilds a whole object from the cluster.
-///
-/// Buffered for now: S3 GET will stream like `/f/{hash}` does once the
-/// core operations are settled — correctness first, then the plumbing.
-async fn reconstruct_whole(
-    state: &Arc<ApiState>,
-    manifest: &nauka_erasure::FileManifest,
-) -> anyhow::Result<Vec<u8>> {
-    let fetcher = Arc::new(crate::api::Fetcher::new(state.clone()));
-    let mut out = Vec::with_capacity(manifest.file_size as usize);
-    for stripe in &manifest.stripes {
-        let data = crate::api::reconstruct_stripe(&fetcher, stripe, manifest).await?;
-        out.extend_from_slice(&data);
-    }
-    Ok(out)
-}
-
 fn uuid_like() -> String {
     use rand::Rng;
     let mut b = [0u8; 16];
@@ -509,4 +629,109 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
         let svc = self.0.clone();
         Box::pin(async move { hyper::service::Service::call(svc.as_ref(), req).await })
     }
+}
+
+/// Applies the conditional headers S3 defines on reads and copies.
+///
+/// The order is imposed by RFC 9110 and checked by the conformance suite:
+/// `If-Match` first (412 on mismatch), then `If-None-Match` (304 — or 412
+/// on a copy source), then the date conditions.
+fn check_preconditions(
+    v: &nauka_s3::ObjectVersion,
+    if_match: Option<&ETagCondition>,
+    if_none_match: Option<&ETagCondition>,
+    if_modified_since: Option<&Timestamp>,
+    if_unmodified_since: Option<&Timestamp>,
+) -> S3Result<()> {
+    // `s3s` has already parsed the header into a structured condition, so
+    // "*" and quoting are handled for us.
+    let matches = |cond: &ETagCondition| match cond {
+        ETagCondition::Any => true,
+        // strong_cmp is the RFC 9110 comparison: a weak ETag never
+        // satisfies If-Match.
+        ETagCondition::ETag(tag) => v
+            .etag
+            .parse::<ETag>()
+            .is_ok_and(|ours| ours.strong_cmp(tag)),
+    };
+    if let Some(want) = if_match {
+        if !matches(want) {
+            return Err(s3_error!(PreconditionFailed));
+        }
+    }
+    if let Some(reject) = if_none_match {
+        if matches(reject) {
+            return Err(s3_error!(NotModified));
+        }
+    }
+    if let Some(since) = if_unmodified_since {
+        if timestamp_secs(since).is_some_and(|s| v.last_modified > s) {
+            return Err(s3_error!(PreconditionFailed));
+        }
+    }
+    if let Some(since) = if_modified_since {
+        if timestamp_secs(since).is_some_and(|s| v.last_modified <= s) {
+            return Err(s3_error!(NotModified));
+        }
+    }
+    Ok(())
+}
+
+fn timestamp_secs(t: &Timestamp) -> Option<u64> {
+    let odt: time::OffsetDateTime = t.clone().into();
+    u64::try_from(odt.unix_timestamp()).ok()
+}
+
+/// Resolves an S3 range into inclusive byte offsets, or the 416 S3 returns
+/// for a window that starts past the end.
+fn resolve_range(range: &Range, size: u64) -> S3Result<(u64, u64)> {
+    let (start, end) = match *range {
+        Range::Int { first, last } => {
+            if first >= size {
+                return Err(s3_error!(InvalidRange));
+            }
+            (first, last.unwrap_or(size - 1).min(size - 1))
+        }
+        // "bytes=-N": the LAST n bytes.
+        Range::Suffix { length } => {
+            if length == 0 {
+                return Err(s3_error!(InvalidRange));
+            }
+            (size.saturating_sub(length), size - 1)
+        }
+    };
+    if start > end {
+        return Err(s3_error!(InvalidRange));
+    }
+    Ok((start, end))
+}
+
+/// Rebuilds `[start, end]` of an object, fetching only the stripes that
+/// cover it — a range read of a 1 GB object touches a few megabytes.
+async fn reconstruct_range(
+    state: &Arc<ApiState>,
+    manifest: &nauka_erasure::FileManifest,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<Vec<u8>> {
+    let fetcher = Arc::new(crate::api::Fetcher::new(state.clone()));
+    let mut out = Vec::with_capacity((end - start + 1) as usize);
+    let mut offset = 0u64;
+    for stripe in &manifest.stripes {
+        let len = stripe.data_len as u64;
+        let stripe_end = offset + len - 1;
+        if stripe_end < start {
+            offset += len;
+            continue;
+        }
+        if offset > end {
+            break;
+        }
+        let data = crate::api::reconstruct_stripe(&fetcher, stripe, manifest).await?;
+        let from = start.saturating_sub(offset) as usize;
+        let to = (end.min(stripe_end) - offset) as usize;
+        out.extend_from_slice(&data[from..=to]);
+        offset += len;
+    }
+    Ok(out)
 }
