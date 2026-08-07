@@ -1,9 +1,9 @@
-//! Régression anti-affamement : pendant que le plan de données est saturé
-//! de shards, le consensus (plan dédié port+1) doit rester stable — pas de
-//! ré-élection, écritures de registre toujours possibles.
+//! Anti-starvation regression: while the data plane is saturated with shards,
+//! consensus (its own plane on port+1) must stay stable — no re-election,
+//! registry writes still going through.
 //!
-//! C'est le scénario qui a fait basculer le leader pendant le stress test
-//! 15 GB quand tout partageait le même socket UDP.
+//! This is the scenario that flipped the leader during the 15 GB stress test
+//! back when everything shared the same UDP socket.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -50,7 +50,7 @@ async fn leader_stable_under_data_flood() {
         AdminResponse::Ok(_)
     ));
 
-    // Leader initial.
+    // Initial leader.
     let mut leader0 = None;
     for _ in 0..50 {
         let m = nodes[0].app.raft.metrics().borrow().clone();
@@ -60,10 +60,10 @@ async fn leader_stable_under_data_flood() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let leader0 = leader0.expect("pas de leader");
+    let leader0 = leader0.expect("no leader");
 
-    // Inondation du plan de données : 12 flooders × shards de 1 Mio en
-    // continu vers les 3 nœuds.
+    // Flood the data plane: 12 flooders × 1 MiB shards, continuously, at all
+    // 3 nodes.
     let stop = Arc::new(AtomicBool::new(false));
     let mut flooders = Vec::new();
     for node in &nodes {
@@ -88,7 +88,7 @@ async fn leader_stable_under_data_flood() {
         }
     }
 
-    // Pendant le déluge : surveille le leader et écrit dans le registre.
+    // During the flood: watch the leader and write to the registry.
     let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
     let deadline = Instant::now() + Duration::from_secs(FLOOD_SECS);
     let mut leader_changes = 0;
@@ -137,12 +137,12 @@ async fn leader_stable_under_data_flood() {
     }
 
     println!(
-        "flood: {total_shards} shards ({} Mo) en {FLOOD_SECS}s, \
-         {writes_ok} écritures ok / {writes_failed} échouées, \
-         {leader_changes} changement(s) de leader",
+        "flood: {total_shards} shards ({} MB) in {FLOOD_SECS}s, \
+         {writes_ok} writes ok / {writes_failed} failed, \
+         {leader_changes} leader change(s)",
         total_shards
     );
-    assert!(total_shards > 100, "le flood n'a pas réellement saturé ({total_shards} shards)");
-    assert_eq!(leader_changes, 0, "le leader a basculé sous charge données");
-    assert_eq!(writes_failed, 0, "des écritures registre ont échoué sous charge");
+    assert!(total_shards > 100, "the flood did not actually saturate ({total_shards} shards)");
+    assert_eq!(leader_changes, 0, "the leader flipped under data load");
+    assert_eq!(writes_failed, 0, "registry writes failed under load");
 }

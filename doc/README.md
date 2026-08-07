@@ -1,69 +1,68 @@
 # Documentation
 
-Deux projets, une base de code aujourd'hui :
+Two projects, one code base for now:
 
-- **Nauka** — le **moteur** : un binaire Rust unique qui forme un cluster
-  auto-organisé, découpe chaque fichier en shards Reed-Solomon dispersés
-  sur les nœuds, et garantit l'intégrité de bout en bout. Quoi qu'il
-  arrive (nœud mort, disque corrompu, région perdue), tant que k shards
-  par stripe survivent quelque part, le fichier est reconstruit à
-  l'identique, bit à bit. C'est ce qui sera ouvert en AGPL-3.0.
-- **Yogfile** — le **service** de partage de fichiers bâti dessus :
-  chiffrement de bout en bout, liens de partage, lecteur vidéo,
-  interface web. Propulsé par Nauka.
+- **Nauka** — the **engine**: a single Rust binary that forms a
+  self-organizing cluster, splits every file into Reed-Solomon shards
+  scattered across the nodes, and guarantees end-to-end integrity. Whatever
+  happens (dead node, rotting disk, region wiped out), as long as k shards
+  per stripe survive somewhere, the file comes back byte-for-byte
+  identical. This is what will be released under AGPL-3.0.
+- **Yogfile** — the file-sharing **service** built on top of it:
+  end-to-end encryption, share links, video player, web interface. Powered
+  by Nauka.
 
-Les crates `nauka-*` sont le moteur ; l'API HTTP, la webui et le
-chiffrement client relèvent du service.
+The `nauka-*` crates are the engine; the HTTP API, the webui and
+client-side encryption belong to the service.
 
-L'expérience opérateur tient en deux commandes :
+The whole operator experience is two commands:
 
 ```
-nauka keygen --out nauka-keys        # une fois
-nauka --keys ./nauka-keys serve      # sur chaque machine — la même commande
+nauka keygen --out nauka-keys        # once
+nauka --keys ./nauka-keys serve      # on every machine — the same command
 ```
 
-Les nœuds se découvrent via la DHT BitTorrent (Mainline), élisent un
-fondateur si le cluster n'existe pas encore, s'authentifient mutuellement
-(mTLS Ed25519), se répartissent les shards, se réparent et se rééquilibrent
-en continu. Aucun serveur central, aucune infrastructure annexe, aucun
-fichier de configuration.
+Nodes find each other on the BitTorrent DHT (Mainline), elect a founder if
+the cluster does not exist yet, authenticate one another (Ed25519 mTLS),
+divide up the shards, then repair and rebalance themselves continuously. No
+central server, no side infrastructure, no configuration file.
 
-## Sommaire
+## Table of contents
 
-| Document | Contenu |
+| Document | Contents |
 |---|---|
-| [architecture.md](architecture.md) | Vue d'ensemble, crates, invariants, flux upload/download |
-| [coeur-erasure.md](coeur-erasure.md) | Reed-Solomon, stripes, intégrité BLAKE3, stockage content-addressed |
-| [transport.md](transport.md) | QUIC (quinn), protocole inter-nœuds, tuning débit |
-| [consensus.md](consensus.md) | Raft (openraft), persistance, plan réseau dédié |
-| [cluster.md](cluster.md) | Placement HRW, auto-healing, GC, membership à chaud |
-| [identite-et-decouverte.md](identite-et-decouverte.md) | Clés de cluster, mTLS, node-id dérivé, DHT Mainline, élection de genèse |
-| [api-http.md](api-http.md) | API publique : upload, download, listing |
-| [chiffrement.md](chiffrement.md) | Bout en bout : AES-GCM côté client, la clé dans le fragment du lien |
-| [operations.md](operations.md) | Déploiement, référence CLI, ports, dépannage, limites connues |
-| [decisions.md](decisions.md) | Choix structurants et leçons des stress tests |
-| [backlog.md](backlog.md) | Chantiers à venir : innovations et consolidations, priorisés |
+| [architecture.md](architecture.md) | Overview, crates, invariants, upload/download flows |
+| [erasure-core.md](erasure-core.md) | Reed-Solomon, stripes, BLAKE3 integrity, content-addressed storage |
+| [transport.md](transport.md) | QUIC (quinn), inter-node protocol, throughput tuning |
+| [consensus.md](consensus.md) | Raft (openraft), persistence, dedicated network plane |
+| [cluster.md](cluster.md) | HRW placement, self-healing, GC, live membership changes |
+| [identity-and-discovery.md](identity-and-discovery.md) | Cluster keys, mTLS, derived node-id, Mainline DHT, genesis election |
+| [api-http.md](api-http.md) | Public API: upload, download, listing |
+| [encryption.md](encryption.md) | End-to-end: AES-GCM on the client, the key in the link fragment |
+| [operations.md](operations.md) | Deployment, CLI reference, ports, troubleshooting, known limitations |
+| [decisions.md](decisions.md) | Structural choices and stress-test lessons |
+| [backlog.md](backlog.md) | Upcoming work: innovations and consolidation, prioritized |
 
-## En un coup d'œil
-
-```
-                       ┌─────────── un nœud yogfile (un seul binaire) ───────────┐
-  utilisateur ──HTTP──▶│ API :8080  ─┐                                            │
-                       │             ▼                                            │
-  autres nœuds ─QUIC──▶│ :7311 data ─┼─▶ nauka-erasure (Reed-Solomon k+m, BLAKE3)   │
-   (mTLS Ed25519)      │             │   nauka-store  (shards content-addressed)    │
-                       │ :7312 Raft ─┼─▶ nauka-raft   (openraft durable, redb)      │
-  DHT Mainline ◀─UDP──▶│             └─▶ nauka-cluster (placement HRW, heal, GC)    │
-   (découverte)        │                 nauka-discovery (pkarr, genèse, IP)        │
-                       └──────────────────────────────────────────────────────────┘
-```
-
-## Vérifier que tout marche
+## At a glance
 
 ```
-cargo test            # 48 tests (unitaires + intégration, DHT locale incluse)
-cargo test --release  # idem, optimisé (les tests raft/stress y sont plus rapides)
+                       ┌────────── one yogfile node (a single binary) ──────────┐
+       user ───HTTP───▶│ API :8080  ─┐                                          │
+                       │             ▼                                          │
+ other nodes ──QUIC───▶│ :7311 data ─┼─▶ nauka-erasure (Reed-Solomon k+m, BLAKE3)│
+ (Ed25519 mTLS)        │             │   nauka-store  (content-addressed shards) │
+                       │ :7312 Raft ─┼─▶ nauka-raft   (durable openraft, redb)   │
+Mainline DHT ◀──UDP───▶│             └─▶ nauka-cluster (HRW placement, heal, GC) │
+  (discovery)          │                 nauka-discovery (pkarr, genesis, IP)    │
+                       └────────────────────────────────────────────────────────┘
+```
 
-# Benchs transport (mesures de débit, non exécutés par défaut) :
+## Checking that everything works
+
+```
+cargo test            # 48 tests (unit + integration, local DHT included)
+cargo test --release  # same, optimized (raft/stress tests run faster there)
+
+# Transport benchmarks (throughput measurements, not run by default):
 cargo test -p nauka-transport --release --test bench -- --ignored --nocapture
 ```

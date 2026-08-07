@@ -1,10 +1,10 @@
-// Client de l'API yogfile + trousseau local.
+// yogfile API client + local keyring.
 //
-// Zéro-connaissance oblige : le serveur ne connaît que des hashes de
-// ciphertext. Les CLÉS des fichiers uploadés depuis ce navigateur sont
-// conservées dans localStorage — c'est le trousseau. Un fichier dont la
-// clé n'est pas dans le trousseau (uploadé ailleurs) reste listé mais
-// indéchiffrable ici, sauf à coller son lien complet.
+// Zero-knowledge by design: the server only ever knows ciphertext hashes. The
+// KEYS of files uploaded from this browser are kept in localStorage — that is
+// the keyring. A file whose key is not in the keyring (uploaded elsewhere)
+// still shows up in the listing but cannot be decrypted here, unless its full
+// link is pasted in.
 
 import { ciphertextSize, decodeKey, encodeKey, encryptStream, generateKey } from "./crypto";
 
@@ -54,7 +54,7 @@ export function keyringAdd(hash: string, entry: KeyringEntry) {
 }
 
 export function keyringImport(hash: string, keyB64: string) {
-  decodeKey(keyB64); // valide
+  decodeKey(keyB64); // validates
   const all = keyring();
   all[hash] = all[hash] ?? { key: keyB64, name: "", size: 0, uploadedAt: Date.now() };
   all[hash].key = keyB64;
@@ -76,10 +76,10 @@ export async function fetchStatus(): Promise<ClusterStatus> {
 export interface UploadResult {
   hash: string;
   size: number;
-  link: string; // lien de partage complet, clé comprise
+  link: string; // full share link, key included
 }
 
-/** Chiffre puis uploade un fichier ; enregistre la clé dans le trousseau. */
+/** Encrypts then uploads a file; stores the key in the keyring. */
 export async function uploadEncrypted(
   file: File,
   onProgress?: (fraction: number) => void,
@@ -89,16 +89,16 @@ export async function uploadEncrypted(
     onProgress?.(Math.min(0.99, bytes / Math.max(1, file.size)));
   });
 
-  // fetch(duplex) streaming n'est pas encore fiable partout : on
-  // matérialise le ciphertext en Blob (streaming du chiffrement, mémoire
-  // le temps de l'envoi) — suffisant jusqu'à quelques Go.
+  // fetch(duplex) streaming is not reliable everywhere yet: the ciphertext is
+  // materialised into a Blob (encryption still streams, memory is held only
+  // for the duration of the upload) — good enough up to a few GB.
   const ctBlob = await new Response(encrypted).blob();
   if (ctBlob.size !== ciphertextSize(file.size)) {
-    throw new Error("taille de ciphertext inattendue (bug de chiffrement ?)");
+    throw new Error("unexpected ciphertext size (encryption bug?)");
   }
 
   const resp = await fetch("/api/upload", { method: "POST", body: ctBlob });
-  if (!resp.ok) throw new Error(`upload refusé (${resp.status}): ${await resp.text()}`);
+  if (!resp.ok) throw new Error(`upload rejected (${resp.status}): ${await resp.text()}`);
   const up = (await resp.json()) as { hash: string; size: number };
   onProgress?.(1);
 
@@ -111,7 +111,7 @@ export async function uploadEncrypted(
   return { hash: up.hash, size: up.size, link: shareLink(up.hash, encodeKey(rawKey)) };
 }
 
-/** Lien de partage : la clé vit dans le fragment, jamais envoyée au serveur. */
+/** Share link: the key lives in the fragment, never sent to the server. */
 export function shareLink(hash: string, keyB64: string): string {
   return `${location.origin}/d/${hash}#${keyB64}`;
 }

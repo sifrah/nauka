@@ -1,82 +1,82 @@
-# Consensus Raft
+# Raft consensus
 
-## Ce que Raft réplique (et ce qu'il ne réplique pas)
+## What Raft replicates (and what it does not)
 
-La state machine répliquée contient **uniquement des métadonnées** :
+The replicated state machine holds **metadata only**:
 
-- le **registre des fichiers** : `file_hash → FileManifest` (commandes
-  `RegisterManifest` / `UnregisterManifest`) ;
-- le **membership** du cluster (géré nativement par openraft).
+- the **file registry**: `file_hash → FileManifest` (`RegisterManifest` /
+  `UnregisterManifest` commands);
+- the cluster **membership** (handled natively by openraft).
 
-Les octets des shards ne passent **jamais** par le log de consensus — ils
-voyagent en direct par le plan data QUIC. Un manifest pèse quelques Kio
-quel que soit le fichier : le consensus reste léger à n'importe quelle
-échelle de stockage.
+Shard bytes **never** go through the consensus log — they travel directly
+over the QUIC data plane. A manifest weighs a few KiB whatever the file's
+size: consensus stays lightweight at any storage scale.
 
-Le registre répliqué est la **source de vérité** : chaque nœud matérialise
-localement les manifests qu'il y découvre, puis son scrubber va chercher
-les shards qui lui reviennent. Un nœud qui a raté un upload converge tout
-seul.
+The replicated registry is the **source of truth**: every node
+materializes the manifests it discovers there, then its scrubber goes and
+fetches the shards it owns. A node that missed an upload converges on its
+own.
 
-## Paramètres openraft
+## openraft parameters
 
 ```
 heartbeat_interval        500 ms
-election_timeout          1,5 – 3 s
+election_timeout          1.5 – 3 s
 snapshot_policy           LogsSinceLast(256)
 max_in_snapshot_log_to_keep  64
 ```
 
-Réseau : les RPCs (`append_entries`, `vote`, `install_snapshot`) sont
-transportées par notre QUIC, sur le **plan consensus dédié (port+1)** —
-voir [transport.md](transport.md).
+Network: RPCs (`append_entries`, `vote`, `install_snapshot`) ride on our
+own QUIC, over the **dedicated consensus plane (port+1)** — see
+[transport.md](transport.md).
 
-## Persistance (data-dir/raft/)
+## Persistence (data-dir/raft/)
 
-| Élément | Support | Durabilité |
+| Item | Backing | Durability |
 |---|---|---|
-| Log + vote + committed + last_purged | `raft-log.redb` (redb) | **fsync avant l'ack** — exigence de correction de Raft : un vote ou une entrée acquittés doivent survivre au crash |
-| State machine (registre) | mémoire | reconstruite au démarrage : snapshot + replay du log par openraft — **aucun fsync sur le chemin d'apply** |
-| Snapshot | `snapshot.bin` | écriture atomique (tmp + fsync + rename) |
+| Log + vote + committed + last_purged | `raft-log.redb` (redb) | **fsync before the ack** — a Raft correctness requirement: an acknowledged vote or entry must survive a crash |
+| State machine (registry) | memory | rebuilt at startup: snapshot + log replay by openraft — **no fsync on the apply path** |
+| Snapshot | `snapshot.bin` | atomic write (tmp + fsync + rename) |
 
-Le log redb reste borné : snapshot tous les 256 entrées puis purge (en
-gardant 64 entrées de marge pour que les followers en retard rattrapent par
-le log plutôt que par snapshot complet).
+The redb log stays bounded: a snapshot every 256 entries, then a purge
+(keeping 64 entries of slack so that lagging followers can catch up from
+the log rather than from a full snapshot).
 
-Scénarios couverts par les tests :
+Scenarios covered by the tests:
 
-- **Crash du leader en plein trafic** → ré-élection ~2 s, reprise des
-  écritures, zéro perte de ce qui était committé.
-- **Résurrection à état vide** (disque perdu) → rattrapage complet depuis
-  le leader (snapshot + log).
-- **Coupure totale du cluster** (les n nœuds éteints, `kill -9` compris) →
-  redémarrage depuis les data-dirs, registre intact, cluster à nouveau
-  écrivable. Testé en pur replay de log ET en snapshot+purge+reliquat.
+- **Leader crash under live traffic** → re-election in ~2 s, writes resume,
+  zero loss of anything already committed.
+- **Resurrection from empty state** (disk lost) → full catch-up from the
+  leader (snapshot + log).
+- **Total cluster outage** (all n nodes down, `kill -9` included) →
+  restart from the data-dirs, registry intact, cluster writable again.
+  Tested both as a pure log replay AND as snapshot + purge + leftovers.
 
-## Écritures et administration
+## Writes and administration
 
-Toute écriture passe par le leader. Deux chemins :
+Every write goes through the leader. Two paths:
 
-- **Côté nœud** : `RaftApp::write(cmd)` — `client_write` local si leader,
-  sinon transmission au leader via le transport (utilisé par l'API HTTP).
-- **Côté client CLI** : `admin_via_leader(peers, req)` — essaie chaque
-  peer, suit les redirections `ForwardTo`, retente pendant les bascules.
+- **Node side**: `RaftApp::write(cmd)` — local `client_write` if leader,
+  otherwise forwarded to the leader over the transport (used by the HTTP
+  API).
+- **CLI client side**: `admin_via_leader(peers, req)` — tries each peer,
+  follows `ForwardTo` redirects, retries across leader changes.
 
-RPCs d'admin (portées par `RaftRpc::Admin`) :
+Admin RPCs (carried by `RaftRpc::Admin`):
 
 ```
-Init(members)                  initialisation du cluster (une fois)
-AddLearner { id, addr }        ajout en learner (rattrape sans voter)
-ChangeMembership([ids])        changement de l'ensemble des votants
-Write(cmd)                     écriture dans le registre
-Metrics                        id, leader, membres, index appliqué
-ListManifests                  clés du registre
+Init(members)                  cluster initialization (once)
+AddLearner { id, addr }        add as learner (catches up without voting)
+ChangeMembership([ids])        change the set of voters
+Write(cmd)                     write to the registry
+Metrics                        id, leader, members, applied index
+ListManifests                  registry keys
 ```
 
-## Performances mesurées
+## Measured performance
 
-- ~1 300–1 500 écritures/s dans le registre (32 writers concurrents, build
-  debug, avant persistance redb — la version durable paie un fsync par
-  batch d'append, amorti par le batching d'openraft).
-- 500 écritures concurrentes convergées sur 3 nœuds : voir
+- ~1,300–1,500 registry writes/s (32 concurrent writers, debug build,
+  before redb persistence — the durable version pays one fsync per append
+  batch, amortized by openraft's batching).
+- 500 concurrent writes converged across 3 nodes: see
   `nauka-raft/tests/stress.rs`.

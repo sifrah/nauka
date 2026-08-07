@@ -1,7 +1,7 @@
-//! Couche cluster de Nauka — v0 : vue statique du cluster (liste de peers
-//! en config), placement déterministe par rendezvous hashing, heartbeats et
-//! auto-healing. Le consensus Raft (openraft) remplacera la vue statique
-//! pour un membership dynamique et des métadonnées fortement cohérentes.
+//! Nauka cluster layer — v0: static cluster view (peer list from config),
+//! deterministic placement via rendezvous hashing, heartbeats and
+//! self-healing. Raft consensus (openraft) will replace the static view to
+//! provide dynamic membership and strongly consistent metadata.
 
 pub mod audit;
 pub mod healer;
@@ -16,13 +16,13 @@ use tracing::{info, warn};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
 
-/// Vue du cluster pour ce nœud.
+/// This node's view of the cluster.
 #[derive(Debug, Clone)]
 pub struct ClusterView {
-    /// Identité de ce nœud = son adresse annoncée (host:port).
+    /// This node's identity = its advertised address (host:port).
     pub self_id: String,
-    /// Tous les nœuds du cluster, ce nœud inclus. Trié pour que tous les
-    /// nœuds partagent la même vue.
+    /// Every node in the cluster, this one included. Sorted so that all
+    /// nodes share the same view.
     pub nodes: Vec<String>,
 }
 
@@ -39,8 +39,8 @@ impl ClusterView {
     }
 }
 
-/// Boucle de fond d'un nœud cluster : heartbeat des peers + scrub périodique.
-/// Tourne indéfiniment ; à lancer via `tokio::spawn` à côté du serveur QUIC.
+/// Background loop of a cluster node: peer heartbeats + periodic scrub.
+/// Runs forever; spawn it with `tokio::spawn` alongside the QUIC server.
 pub async fn run_background(
     store: Arc<ShardStore>,
     view: ClusterView,
@@ -51,29 +51,29 @@ pub async fn run_background(
     loop {
         ticker.tick().await;
 
-        // Heartbeat : trace les peers injoignables (le healing s'en sort
-        // quand même tant que k shards par stripe restent accessibles).
+        // Heartbeat: log unreachable peers (healing still works as long as
+        // k shards per stripe remain reachable).
         for node in view.nodes.iter().filter(|n| **n != view.self_id) {
             if let Ok(addr) = node.parse::<SocketAddr>() {
                 match PeerClient::connect(addr).await {
                     Ok(c) if c.ping().await.is_ok() => {}
-                    _ => warn!("peer {node} injoignable"),
+                    _ => warn!("peer {node} unreachable"),
                 }
             }
         }
 
-        // Mode statique : pas de capacités déclarées, poids uniformes.
+        // Static mode: no declared capacities, uniform weights.
         let weighted: Vec<(String, u64)> =
             view.nodes.iter().map(|n| (n.clone(), 1)).collect();
         match healer::scrub_once(&store, &view.self_id, &weighted).await {
             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                 info!(
-                    "scrub: {} vérifiés, {} régénérés, {} irréparables",
+                    "scrub: {} checked, {} healed, {} unrecoverable",
                     r.shards_checked, r.shards_healed, r.shards_unrecoverable
                 );
             }
             Ok(_) => {}
-            Err(e) => warn!("scrub en échec: {e}"),
+            Err(e) => warn!("scrub failed: {e}"),
         }
     }
 }

@@ -1,29 +1,29 @@
-# API HTTP publique
+# Public HTTP API
 
-Chaque nœud en mode consensus expose l'API (défaut `0.0.0.0:8080`,
-réglable par `--http <addr>`, désactivable par `--no-http`). **N'importe
-quel nœud est un point d'entrée complet** — upload, download et listing
-donnent le même résultat partout.
+Every node in consensus mode exposes the API (default `0.0.0.0:8080`,
+tunable with `--http <addr>`, disabled with `--no-http`). **Any node is a
+complete entry point** — upload, download and listing give the same result
+everywhere.
 
-L'API est aujourd'hui **sans authentification** (v1) : à exposer derrière
-un reverse proxy si besoin, en attendant la couche comptes/quotas.
+The API currently has **no authentication** (v1): put it behind a reverse
+proxy if you need one, until the accounts/quotas layer lands.
 
-## `POST /api/upload?name=<nom>`
+## `POST /api/upload?name=<name>`
 
-Corps : les octets bruts du fichier (`--data-binary` avec curl).
+Body: the file's raw bytes (`--data-binary` with curl).
 
-Le nœud bufferise le flux sur disque (`data-dir/tmp`, hash BLAKE3 calculé
-au fil de l'eau), encode stripe par stripe, pousse chaque shard chez son
-propriétaire HRW (lui-même inclus), écrit le manifest localement puis
-l'enregistre dans le registre Raft (via le leader). Mémoire bornée à
-quelques stripes quel que soit la taille du fichier.
+The node buffers the stream to disk (`data-dir/tmp`, BLAKE3 hash computed
+on the fly), encodes stripe by stripe, pushes each shard to its HRW owner
+(itself included), writes the manifest locally, then records it in the Raft
+registry (via the leader). Memory stays bounded to a few stripes whatever
+the file's size.
 
 ```
 curl -X POST --data-binary @video.mp4 \
   "http://node1:8080/api/upload?name=video.mp4"
 ```
 
-Réponse `200` :
+`200` response:
 
 ```json
 {
@@ -37,24 +37,25 @@ Réponse `200` :
 }
 ```
 
-Erreurs : `500` avec message texte (fichier vide, shard non transmissible
-après retries, registre injoignable…).
+Errors: `500` with a text message (empty file, shard undeliverable after
+retries, registry unreachable, …).
 
 ## `GET /f/{hash}`
 
-Télécharge le fichier, reconstruit en **streaming** (une stripe en mémoire
-à la fois) depuis l'ensemble du cluster : shards locaux d'abord, puis
-demandés aux autres membres. k shards valides par stripe suffisent — nœuds
-morts et shards corrompus sont compensés par Reed-Solomon, de façon
-invisible pour le client.
+Downloads the file, rebuilt in a **streaming** fashion (one stripe in
+memory at a time) from the whole cluster: local shards first, then fetched
+from the other members. k valid shards per stripe are enough — dead nodes
+and corrupted shards are compensated by Reed-Solomon, invisibly to the
+client.
 
-- `Content-Length` : taille exacte du fichier.
-- `Content-Disposition: attachment; filename="<name>"` si un nom a été
-  fourni à l'upload.
-- Intégrité : hash global recalculé pendant le stream ; un pair injoignable
-  est mémorisé par requête (timeout connexion 3 s, transfert 20 s) et
-  n'est pas recontacté à chaque shard.
-- `404` si le hash est inconnu du registre.
+- `Content-Length`: the file's exact size.
+- `Content-Disposition: attachment; filename="<name>"` if a name was
+  supplied at upload time.
+- Integrity: the global hash is recomputed during the stream; an
+  unreachable peer is remembered for the duration of the request (3 s
+  connection timeout, 20 s transfer timeout) and is not contacted again for
+  every shard.
+- `404` if the hash is unknown to the registry.
 
 ```
 curl -o video.mp4 http://node3:8080/f/988f6e61…
@@ -62,8 +63,8 @@ curl -o video.mp4 http://node3:8080/f/988f6e61…
 
 ## `GET /api/files`
 
-Le registre répliqué (état local du nœud, éventuellement en retard de
-quelques centaines de ms sur le leader) :
+The replicated registry (the node's local state, possibly a few hundred ms
+behind the leader):
 
 ```json
 [
@@ -72,90 +73,90 @@ quelques centaines de ms sur le leader) :
 ]
 ```
 
-## Ce qui n'existe pas encore (v1)
+## What does not exist yet (v1)
 
-- `DELETE` / expiration des fichiers (l'`UnregisterManifest` existe côté
-  Raft ; il manque le nettoyage des shards orphelins).
-- Authentification, quotas, rate-limiting.
-- Uploads multipart / reprise d'upload interrompu.
+- `DELETE` / file expiry (`UnregisterManifest` already exists on the Raft
+  side; what is missing is orphan-shard cleanup).
+- Authentication, quotas, rate limiting.
+- Multipart uploads / resuming an interrupted upload.
 
-## Interface web
+## Web interface
 
-Chaque nœud sert la webui (si `webui/dist` existe, ou `--webui <dir>`) :
-pages Fichiers (upload chiffré drag & drop, trousseau local de clés,
-liens de partage), Cluster (statut live via `GET /api/status`), et
-`/d/{hash}#clé` (téléchargement + déchiffrement dans le navigateur).
+Every node serves the webui (if `webui/dist` exists, or via
+`--webui <dir>`): Files (drag-and-drop encrypted upload, local key ring,
+share links), Cluster (live status via `GET /api/status`), and
+`/d/{hash}#key` (download + decryption in the browser).
 
-L'interface est dérivée de la webui de **ZeroFS**
-(https://github.com/Barre/ZeroFS, AGPL-3.0) — voir `webui/ATTRIBUTION.md`.
-Le chiffrement navigateur (WebCrypto AES-256-GCM) est compatible bit à bit
-avec `nauka-crypto` : un fichier uploadé par la CLI se déchiffre dans le
-navigateur et réciproquement.
+The interface derives from the **ZeroFS** webui
+(https://github.com/Barre/ZeroFS, AGPL-3.0) — see `webui/ATTRIBUTION.md`.
+Browser-side encryption (WebCrypto AES-256-GCM) is bit-for-bit compatible
+with `nauka-crypto`: a file uploaded from the CLI decrypts in the browser
+and vice versa.
 
-Construire : `cd webui && npm install && npm run build`.
+Build it with `cd webui && npm install && npm run build`.
 
-### Requêtes partielles (Range)
+### Partial requests (Range)
 
-`GET /f/{hash}` accepte `Range: bytes=…` et répond `206 Partial Content`
-avec `Content-Range` (`416` si la plage est hors fichier ; `Accept-Ranges:
-bytes` annoncé partout, y compris en `HEAD`). Seules les stripes qui
-intersectent la plage sont récupérées du cluster et décodées — lire 64
-octets au milieu d'un fichier de 81 Mo ne coûte qu'un aller-retour
-(mesuré : ~400 ms sur un cluster local, plutôt que le fichier entier).
+`GET /f/{hash}` accepts `Range: bytes=…` and answers `206 Partial Content`
+with `Content-Range` (`416` if the range falls outside the file;
+`Accept-Ranges: bytes` advertised everywhere, `HEAD` included). Only the
+stripes intersecting the range are fetched from the cluster and decoded —
+reading 64 bytes in the middle of an 81 MB file costs a single round trip
+(measured: ~400 ms on a local cluster, instead of the entire file).
 
-Sert à la reprise de téléchargement et à la lecture média.
+Useful for resuming downloads and for media playback.
 
-### Lecteur média chiffré (`/w/{hash}#clé`)
+### Encrypted media player (`/w/{hash}#key`)
 
-**Mode nominal — streaming.** Un Service Worker sert `/stream/{hash}` en
-clair à partir du ciphertext : pour chaque plage demandée par `<video>`,
-seuls les chunks AES-GCM concernés sont tirés du cluster (Range sur le
-ciphertext), déchiffrés et rendus. **Rien n'est chargé d'avance** — la
-lecture démarre immédiatement et un seek ne coûte qu'un aller-retour,
-quelle que soit la taille du fichier. La clé est transmise au worker par
-IndexedDB, jamais par le réseau.
+**Nominal mode — streaming.** A Service Worker serves `/stream/{hash}` in
+cleartext from the ciphertext: for every range the `<video>` element asks
+for, only the relevant AES-GCM chunks are pulled from the cluster (a Range
+request over the ciphertext), decrypted and handed back. **Nothing is
+loaded ahead of time** — playback starts immediately and a seek costs a
+single round trip, whatever the file's size. The key reaches the worker
+through IndexedDB, never over the network.
 
-Deux pièges rencontrés et corrigés, utiles à connaître avant de toucher
-`webui/public/sw-stream.js` :
+Two traps we hit and fixed, worth knowing before touching
+`webui/public/sw-stream.js`:
 
-- l'état mémoire d'un Service Worker est **volatile** (le navigateur
-  l'arrête entre deux événements) — d'où IndexedDB plutôt qu'une `Map` ;
-- un worker qui streame une réponse pendant des dizaines de secondes est
-  **tué** (le lecteur reçoit un 503) — d'où des réponses bornées à 4 Mio,
-  renvoyées en 206, que le lecteur enchaîne.
+- a Service Worker's in-memory state is **volatile** (the browser stops it
+  between events) — hence IndexedDB rather than a `Map`;
+- a worker that streams one response for tens of seconds gets **killed**
+  (the player receives a 503) — hence responses capped at 4 MiB, returned
+  as 206, which the player stitches together.
 
-**Repli.** Si la lecture n'a pas démarré au bout de 6 s (worker
-indisponible, navigateur restrictif), le lecteur bascule silencieusement
-sur un déchiffrement complet en mémoire + Blob URL : robuste, mais il
-faut attendre le fichier entier, donc plafonné à 600 Mo. Un badge
-« streaming » dans l'interface indique quel mode est actif.
+**Fallback.** If playback has not started after 6 s (worker unavailable,
+restrictive browser), the player silently switches to full in-memory
+decryption + a Blob URL: robust, but it has to wait for the entire file, so
+it is capped at 600 MB. A "streaming" badge in the interface shows which
+mode is active.
 
-## Suppression, expiration et bannissement
+## Deletion, expiry and banning
 
 ### `DELETE /f/{hash}`
-Retire le fichier du registre répliqué (`204 No Content`, `404` s'il est
-inconnu). Chaque nœud purge ensuite ses manifests et shards devenus
-orphelins à la passe de fond suivante. Mesuré : 6/6/6 shards → 0/0/0 en un
-cycle sur un cluster de 3.
+Removes the file from the replicated registry (`204 No Content`, `404` if
+it is unknown). Every node then purges the manifests and shards that have
+become orphans on its next background pass. Measured: 6/6/6 shards →
+0/0/0 in a single cycle on a 3-node cluster.
 
-### TTL — `POST /api/upload?ttl=<secondes>`
-Le manifest porte un `expires_at`. Le **leader** retire les fichiers échus
-du registre (une fois pour tout le cluster), la purge suit partout. Les
-fichiers expirés disparaissent du listing et ne sont plus servis.
+### TTL — `POST /api/upload?ttl=<seconds>`
+The manifest carries an `expires_at`. The **leader** removes expired files
+from the registry (once for the whole cluster), and the purge follows
+everywhere. Expired files vanish from the listing and are no longer served.
 
-### Bannissement — `nauka ban <hash> --reason "…"`
-Pour honorer un signalement ou une réquisition **sans jamais lire le
-contenu** : le hash est banni dans l'état Raft, le fichier sort du
-registre, `GET` répond **`410 Gone` avec le motif**, les shards sont purgés,
-et tout **ré-upload du même contenu est refusé** (le registre rejette le
-manifest). `nauka-node unban <hash>` lève la mesure.
+### Banning — `nauka ban <hash> --reason "…"`
+To honor a takedown notice or a legal order **without ever reading the
+content**: the hash is banned in the Raft state, the file leaves the
+registry, `GET` answers **`410 Gone` with the reason**, the shards are
+purged, and **re-uploading the same content is refused** (the registry
+rejects the manifest). `nauka-node unban <hash>` lifts the measure.
 
-Limite structurelle assumée : le bannissement ne vise que ce contenu à
-l'octet près — un ré-upload chiffré avec une autre clé produit un autre
-hash. Voir [chiffrement.md](chiffrement.md#réquisition-judiciaire--ce-que-lopérateur-peut-fournir).
+Accepted structural limitation: a ban targets that content byte for byte
+only — a re-upload encrypted under a different key yields a different hash.
+See [encryption.md](encryption.md#legal-requests-what-the-operator-can-hand-over).
 
-### Sécurité de la purge
-Un nœud ne purge **que** si son registre est fiable (membre du cluster et
-leader connu) : un nœud fraîchement démarré, au registre encore vide,
-n'efface rien — sinon il détruirait le cluster. Un shard référencé par un
-autre fichier vivant n'est jamais supprimé (testé).
+### Purge safety
+A node purges **only** if its registry is trustworthy (member of the
+cluster, leader known): a freshly started node whose registry is still
+empty erases nothing — otherwise it would destroy the cluster. A shard
+referenced by another live file is never deleted (tested).

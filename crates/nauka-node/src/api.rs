@@ -1,12 +1,12 @@
-//! API HTTP publique d'un nœud : n'importe quel nœud du cluster est un
-//! point d'entrée complet.
+//! Public HTTP API of a node: any node of the cluster is a complete entry
+//! point.
 //!
-//! - `POST /api/upload?name=…` : reçoit le fichier, l'encode en Reed-Solomon
-//!   stripe par stripe et dispatche chaque shard chez son propriétaire HRW,
-//!   puis enregistre le manifest dans le registre Raft.
-//! - `GET /f/{hash}` : reconstruit le fichier en streaming depuis le cluster
-//!   (k shards suffisent, où qu'ils soient), intégrité vérifiée.
-//! - `GET /api/files` : le registre répliqué.
+//! - `POST /api/upload?name=…`: takes in the file, encodes it Reed-Solomon
+//!   stripe by stripe and dispatches every shard to its HRW owner, then
+//!   records the manifest in the Raft registry.
+//! - `GET /f/{hash}`: rebuilds the file, streaming, from the cluster
+//!   (k shards are enough, wherever they live), integrity verified.
+//! - `GET /api/files`: the replicated registry.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,16 +28,16 @@ use nauka_transport::PeerClient;
 pub struct ApiState {
     pub store: Arc<ShardStore>,
     pub app: Arc<nauka_raft::RaftApp>,
-    /// Adresse annoncée de CE nœud (son identité de placement).
+    /// Advertised address of THIS node (its placement identity).
     pub self_id: String,
     pub config: ErasureConfig,
-    /// Répertoire pour bufferiser les uploads en cours.
+    /// Directory used to buffer in-flight uploads.
     pub tmp_dir: PathBuf,
 }
 
 impl ApiState {
-    /// Vue pondérée du cluster pour le placement — la même que celle des
-    /// scrubbers (capacités déclarées dans l'état Raft).
+    /// Weighted view of the cluster used for placement — the very same one
+    /// the scrubbers use (capacities declared in the Raft state).
     fn view(&self) -> Vec<(String, u64)> {
         let mut nodes = self
             .app
@@ -61,18 +61,18 @@ pub async fn serve_http(
         .route("/api/status", get(status))
         .route("/f/{hash}", get(download).head(download_head).delete(delete_file))
         .with_state(state);
-    // Interface web (SPA) : fichiers statiques, et index.html pour les
-    // routes applicatives (/files, /dashboard, /d/<hash>).
+    // Web UI (SPA): static files, and index.html for the application
+    // routes (/files, /dashboard, /d/<hash>).
     if let Some(dir) = webui_dir {
         let index = dir.join("index.html");
         router = router.fallback_service(
             tower_http::services::ServeDir::new(&dir)
                 .fallback(tower_http::services::ServeFile::new(index)),
         );
-        tracing::info!("webui servie depuis {}", dir.display());
+        tracing::info!("webui served from {}", dir.display());
     }
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!("API HTTP sur http://{listen}");
+    tracing::info!("HTTP API on http://{listen}");
     axum::serve(listener, router).await?;
     Ok(())
 }
@@ -118,7 +118,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
     })
 }
 
-/// HEAD /f/{hash} : taille sans corps (la page de téléchargement s'en sert).
+/// HEAD /f/{hash}: size without a body (the download page relies on it).
 async fn download_head(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
@@ -141,12 +141,12 @@ async fn download_head(
         .unwrap()
 }
 
-/// Un fichier banni n'est jamais servi (410), un fichier expiré non plus.
+/// A banned file is never served (410), and neither is an expired one.
 fn unavailable(state: &ApiState, hash: &str) -> Option<Response> {
     let app_state = state.app.app_state();
     if let Some(reason) = app_state.banned.get(hash) {
         return Some(
-            (StatusCode::GONE, format!("contenu retiré : {reason}")).into_response(),
+            (StatusCode::GONE, format!("content removed: {reason}")).into_response(),
         );
     }
     let now = std::time::SystemTime::now()
@@ -155,37 +155,37 @@ fn unavailable(state: &ApiState, hash: &str) -> Option<Response> {
         .as_secs();
     match app_state.manifests.get(hash) {
         Some(m) if m.expires_at.is_some_and(|e| e <= now) => {
-            Some((StatusCode::GONE, "fichier expiré").into_response())
+            Some((StatusCode::GONE, "file expired").into_response())
         }
-        // Absent du registre : soit jamais enregistré, soit supprimé.
+        // Absent from the registry: either never registered, or deleted.
         None if state.store.get_manifest(hash).is_ok() => {
-            Some((StatusCode::GONE, "fichier supprimé").into_response())
+            Some((StatusCode::GONE, "file deleted").into_response())
         }
         _ => None,
     }
 }
 
-/// DELETE /f/{hash} : retire le fichier du registre répliqué. Les shards
-/// sont purgés par le GC de chaque nœud à la passe suivante.
+/// DELETE /f/{hash}: removes the file from the replicated registry. The
+/// shards are purged by each node's GC on the following pass.
 async fn delete_file(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
 ) -> Result<Response, ApiError> {
     if !state.app.app_state().manifests.contains_key(&hash) {
-        return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response());
+        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
     }
     let resp = state
         .app
         .write(nauka_raft::types::AppCommand::UnregisterManifest { file_hash: hash.clone() })
         .await
-        .context("suppression dans le registre")?;
+        .context("deleting from the registry")?;
     if !resp.ok {
-        return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response());
+        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
     }
     Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
-/// Erreur HTTP uniforme.
+/// Uniform HTTP error.
 struct ApiError(anyhow::Error);
 
 impl IntoResponse for ApiError {
@@ -203,7 +203,7 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 #[derive(serde::Deserialize)]
 struct UploadParams {
     name: Option<String>,
-    /// Durée de vie en secondes : au-delà, le fichier est purgé du cluster.
+    /// Time to live in seconds: past that, the file is purged from the cluster.
     ttl: Option<u64>,
 }
 
@@ -223,8 +223,8 @@ async fn upload(
     Query(params): Query<UploadParams>,
     request: Request,
 ) -> Result<Json<UploadResponse>, ApiError> {
-    // 1. Bufferise le corps sur disque en hashant au fil de l'eau : le
-    //    placement est keyé sur le hash du fichier, connu seulement à la fin.
+    // 1. Buffer the body to disk, hashing as it streams in: placement is
+    //    keyed on the file hash, which is only known at the very end.
     let tmp_path = state.tmp_dir.join(format!("upload-{}", uuid_ish()));
     let mut tmp = tokio::fs::File::create(&tmp_path).await?;
     let mut hasher = blake3::Hasher::new();
@@ -232,7 +232,7 @@ async fn upload(
     let mut body = request.into_body().into_data_stream();
     use tokio_stream::StreamExt;
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.context("lecture du corps de la requête")?;
+        let chunk = chunk.context("reading the request body")?;
         hasher.update(&chunk);
         tmp.write_all(&chunk).await?;
         size += chunk.len() as u64;
@@ -262,8 +262,8 @@ async fn upload(
     }))
 }
 
-/// Encode le fichier temporaire stripe par stripe et pousse chaque shard
-/// chez son propriétaire (ce nœud inclus), puis enregistre le manifest.
+/// Encodes the temporary file stripe by stripe and pushes every shard to
+/// its owner (this node included), then records the manifest.
 async fn dispatch_file(
     state: &Arc<ApiState>,
     tmp_path: &std::path::Path,
@@ -273,7 +273,7 @@ async fn dispatch_file(
     expires_at: Option<u64>,
 ) -> Result<FileManifest> {
     if size == 0 {
-        bail!("fichier vide");
+        bail!("empty file");
     }
     let file_hash = hasher.finalize().to_hex().to_string();
     let view = state.view();
@@ -328,21 +328,21 @@ async fn dispatch_file(
         config: cfg,
         stripes: stripes_meta,
     };
-    // Disponible immédiatement en local, puis répliqué par le registre.
+    // Available locally right away, then replicated by the registry.
     state.store.put_manifest(&manifest)?;
     let resp = state
         .app
         .write(nauka_raft::types::AppCommand::RegisterManifest(manifest.clone()))
         .await
-        .context("enregistrement dans le registre Raft")?;
+        .context("recording in the Raft registry")?;
     if !resp.ok {
-        bail!("le registre a refusé le manifest (contenu banni ?)");
+        bail!("the registry refused the manifest (banned content?)");
     }
     Ok(manifest)
 }
 
-/// Envoie un shard à un pair, avec reconnexion (idempotent : le stockage
-/// est content-addressed, un renvoi ne duplique rien).
+/// Sends a shard to a peer, reconnecting as needed (idempotent: storage is
+/// content-addressed, so a resend duplicates nothing).
 async fn send_shard(
     clients: &mut HashMap<String, PeerClient>,
     owner: &str,
@@ -368,17 +368,17 @@ async fn send_shard(
             return Ok(());
         }
     }
-    bail!("shard non transmis à {owner}")
+    bail!("shard not delivered to {owner}")
 }
 
-/// Plage d'octets demandée, résolue en (début, fin inclusive).
+/// Requested byte range, resolved to (start, inclusive end).
 fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
     let spec = header?.strip_prefix("bytes=")?.trim();
-    // Une seule plage supportée (suffisant pour la lecture média).
+    // A single range is supported (enough for media playback).
     let (start, end) = spec.split_once('-')?;
     let (start, end) = match (start.trim(), end.trim()) {
         ("", "") => return None,
-        // bytes=-N : les N derniers octets.
+        // bytes=-N: the last N bytes.
         ("", n) => {
             let n: u64 = n.parse().ok()?;
             (size.saturating_sub(n.min(size)), size.saturating_sub(1))
@@ -397,17 +397,17 @@ async fn download(
     if let Some(resp) = unavailable(&state, &hash) {
         return Ok(resp);
     }
-    // Manifest : store local (matérialisé), sinon registre répliqué.
+    // Manifest: local store (materialized), else the replicated registry.
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
         Err(_) => match state.app.app_state().manifests.get(&hash) {
             Some(m) => m.clone(),
-            None => return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response()),
+            None => return Ok((StatusCode::NOT_FOUND, "unknown file").into_response()),
         },
     };
 
-    // Requête partielle (lecture média, reprise de téléchargement) : seules
-    // les stripes couvrant la plage sont récupérées du cluster.
+    // Partial request (media playback, resumed download): only the stripes
+    // covering the range are fetched from the cluster.
     let range = parse_range(
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         manifest.file_size,
@@ -423,10 +423,10 @@ async fn download(
         return serve_range(state, manifest, start, end).await;
     }
 
-    // Reconstruction en streaming : une stripe à la fois vers le client.
-    // Par stripe : les k shards de DONNÉES sont récupérés en parallèle ;
-    // la parité n'est demandée que si l'un d'eux manque — sur un cluster
-    // sain, zéro octet de parité ne transite.
+    // Streaming reconstruction: one stripe at a time towards the client.
+    // Per stripe: the k DATA shards are fetched in parallel; parity is only
+    // requested if one of them is missing — on a healthy cluster, not a
+    // single parity byte crosses the wire.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
     let expected_hash = manifest.file_hash.clone();
@@ -435,14 +435,14 @@ async fn download(
         let mut hasher = blake3::Hasher::new();
         let k = m.config.data_shards;
         for stripe in &m.stripes {
-            // 1) Les shards de données, en parallèle.
+            // 1) The data shards, in parallel.
             let data_fetches = stripe.shard_hashes[..k]
                 .iter()
                 .map(|h| fetcher.clone().fetch(h.clone()));
             let mut slots: Vec<Option<Vec<u8>>> =
                 futures_join_all(data_fetches).await;
             let missing = slots.iter().filter(|s| s.is_none()).count();
-            // 2) La parité, seulement si nécessaire (aussi en parallèle).
+            // 2) The parity, only if needed (in parallel as well).
             if missing > 0 {
                 let parity_fetches = stripe.shard_hashes[k..]
                     .iter()
@@ -455,18 +455,18 @@ async fn download(
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::other(format!("stripe irrécupérable: {e}"))))
+                        .send(Err(std::io::Error::other(format!("unrecoverable stripe: {e}"))))
                         .await;
                     return;
                 }
             };
             hasher.update(&data);
             if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
-                return; // client parti
+                return; // client gone
             }
         }
         if hasher.finalize().to_hex().to_string() != expected_hash {
-            let _ = tx.send(Err(std::io::Error::other("intégrité violée"))).await;
+            let _ = tx.send(Err(std::io::Error::other("integrity violated"))).await;
         }
     });
 
@@ -485,8 +485,8 @@ async fn download(
     Ok(response.body(body).map_err(anyhow::Error::from)?)
 }
 
-/// Sert une plage d'octets : seules les stripes qui l'intersectent sont
-/// récupérées et décodées (le reste du fichier n'est jamais touché).
+/// Serves a byte range: only the stripes that intersect it are fetched and
+/// decoded (the rest of the file is never touched).
 async fn serve_range(
     state: Arc<ApiState>,
     manifest: FileManifest,
@@ -498,11 +498,11 @@ async fn serve_range(
     let m = manifest.clone();
     tokio::spawn(async move {
         let k = m.config.data_shards;
-        let mut offset: u64 = 0; // début de la stripe courante dans le fichier
+        let mut offset: u64 = 0; // start of the current stripe in the file
         for stripe in &m.stripes {
             let stripe_len = stripe.data_len as u64;
-            let stripe_end = offset + stripe_len; // exclusif
-            // Stripe entièrement avant/après la plage : rien à faire.
+            let stripe_end = offset + stripe_len; // exclusive
+            // Stripe entirely before/after the range: nothing to do.
             if stripe_end <= start {
                 offset = stripe_end;
                 continue;
@@ -524,17 +524,17 @@ async fn serve_range(
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::other(format!("stripe irrécupérable: {e}"))))
+                        .send(Err(std::io::Error::other(format!("unrecoverable stripe: {e}"))))
                         .await;
                     return;
                 }
             };
-            // Découpe la portion utile de cette stripe.
+            // Cut out the useful portion of this stripe.
             let from = start.saturating_sub(offset) as usize;
             let to = ((end - offset + 1).min(stripe_len)) as usize;
             if from < to && to <= data.len() {
                 if tx.send(Ok(bytes::Bytes::from(data[from..to].to_vec()))).await.is_err() {
-                    return; // client parti
+                    return; // client gone
                 }
             }
             offset = stripe_end;
@@ -555,7 +555,7 @@ async fn serve_range(
         .map_err(anyhow::Error::from)?)
 }
 
-/// `join_all` maison (ordre préservé) — évite une dépendance de plus.
+/// Hand-rolled `join_all` (order preserved) — saves one more dependency.
 async fn futures_join_all<F, T>(futures: impl Iterator<Item = F>) -> Vec<Option<T>>
 where
     F: std::future::Future<Output = Option<T>> + Send + 'static,
@@ -569,9 +569,9 @@ where
     out
 }
 
-/// Récupérateur de shards partagé par une requête de download : cache de
-/// connexions (échecs mémorisés — un nœud mort n'est contacté qu'une fois
-/// par requête) utilisable par des fetches parallèles.
+/// Shard fetcher shared across one download request: a connection cache
+/// (failures are memoized — a dead node is contacted only once per
+/// request) usable from parallel fetches.
 struct Fetcher {
     state: Arc<ApiState>,
     view: Vec<(String, u64)>,
@@ -584,14 +584,14 @@ impl Fetcher {
         Self { state, view, clients: tokio::sync::Mutex::new(HashMap::new()) }
     }
 
-    /// Un client vers `node`, créé au premier besoin. `None` = déjà connu
-    /// injoignable.
+    /// A client towards `node`, created on first need. `None` = already
+    /// known to be unreachable.
     async fn client_for(&self, node: &str) -> Option<PeerClient> {
         if let Some(cached) = self.clients.lock().await.get(node) {
             return cached.clone();
         }
-        // Connexion hors verrou (3 s max) ; en cas de course, une seule
-        // des deux connexions est conservée — sans conséquence.
+        // Connect outside the lock (3 s max); on a race, only one of the
+        // two connections is kept — with no consequence.
         let connected = match node.parse::<SocketAddr>() {
             Ok(addr) => connect_with_timeout(addr).await,
             Err(_) => None,
@@ -608,7 +608,7 @@ impl Fetcher {
         self.clients.lock().await.insert(node.to_string(), None);
     }
 
-    /// Cherche un shard : local d'abord, puis chez chaque membre joignable.
+    /// Looks for a shard: locally first, then on every reachable member.
     async fn fetch(self: Arc<Self>, hash: String) -> Option<Vec<u8>> {
         if let Ok(data) = self.state.store.get_shard(&hash) {
             return Some(data);
@@ -618,8 +618,8 @@ impl Fetcher {
             match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
                 Ok(Ok(Some(data))) => return Some(data),
                 Ok(Ok(None)) => {}
-                // Erreur ou timeout : connexion suspecte, on la condamne
-                // pour le reste de la requête.
+                // Error or timeout: the connection is suspect, we write it
+                // off for the rest of the request.
                 _ => self.mark_dead(node).await,
             }
         }
@@ -627,9 +627,9 @@ impl Fetcher {
     }
 }
 
-/// Délai au-delà duquel un pair est considéré injoignable.
+/// Delay past which a peer is considered unreachable.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-/// Délai d'un transfert de shard.
+/// Timeout of a single shard transfer.
 const SHARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 async fn connect_with_timeout(addr: SocketAddr) -> Option<PeerClient> {
@@ -677,22 +677,22 @@ mod tests {
         let size = 1000;
         assert_eq!(parse_range(Some("bytes=0-99"), size), Some((0, 99)));
         assert_eq!(parse_range(Some("bytes=100-"), size), Some((100, 999)));
-        // Suffixe : les N derniers octets.
+        // Suffix: the last N bytes.
         assert_eq!(parse_range(Some("bytes=-50"), size), Some((950, 999)));
-        // Fin au-delà du fichier : bornée.
+        // End past the file: clamped.
         assert_eq!(parse_range(Some("bytes=900-99999"), size), Some((900, 999)));
         assert_eq!(parse_range(Some("bytes=0-0"), size), Some((0, 0)));
-        // Invalides.
+        // Invalid.
         assert_eq!(parse_range(Some("bytes=1000-1100"), size), None);
         assert_eq!(parse_range(Some("bytes=500-100"), size), None);
         assert_eq!(parse_range(Some("bytes=-"), size), None);
-        assert_eq!(parse_range(Some("octets=0-10"), size), None);
+        assert_eq!(parse_range(Some("bits=0-10"), size), None);
         assert_eq!(parse_range(None, size), None);
     }
 }
 
-/// Identifiant de fichier temporaire unique (pas besoin de vraie
-/// cryptographie ici, juste d'éviter les collisions entre uploads).
+/// Unique temporary file identifier (no need for real cryptography here,
+/// just to avoid collisions between uploads).
 fn uuid_ish() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

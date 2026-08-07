@@ -1,23 +1,23 @@
 # Attribution
 
-Cette interface web est dérivée de la **webui de ZeroFS**
-(https://github.com/Barre/ZeroFS), créée par Pierre Barre et les
-contributeurs de ZeroFS, sous licence **AGPL-3.0** (voir `LICENSE` dans ce
-répertoire — la licence s'applique à tout le contenu de `webui/`).
+This web interface is derived from the **ZeroFS webui**
+(https://github.com/Barre/ZeroFS), created by Pierre Barre and the ZeroFS
+contributors, under the **AGPL-3.0** license (see `LICENSE` in this
+directory — the license applies to everything under `webui/`).
 
-Merci à ZeroFS pour ce travail remarquable. ❤️
+Thanks to ZeroFS for this remarkable work. ❤️
 
-## Modifications apportées ici
+## Changes made here
 
-- La couche d'accès aux données ZeroFS (ConnectRPC/gRPC, `lib/zerofs`,
-  `lib/grpc`) est remplacée par un client HTTP vers l'API yogfile
-  (`lib/yog`), avec chiffrement de bout en bout WebCrypto (AES-256-GCM,
-  format compatible avec la crate `yog-crypto`).
-- Les pages liées aux sémantiques de système de fichiers (gestionnaire
-  arborescent, terminal/VM v86) sont retirées ; les pages fichiers et
-  monitoring sont réécrites pour un store plat content-addressed.
-- Le design system (composants `ui/`, layout, styles Tailwind) et la
-  structure de l'application sont conservés de ZeroFS.
+- The ZeroFS data access layer (ConnectRPC/gRPC, `lib/zerofs`, `lib/grpc`)
+  is replaced by an HTTP client for the yogfile API (`lib/yog`), with
+  WebCrypto end-to-end encryption (AES-256-GCM, format compatible with the
+  `nauka-crypto` crate).
+- The pages tied to filesystem semantics (tree-based file manager,
+  terminal/v86 VM) are removed; the files and monitoring pages are rewritten
+  for a flat content-addressed store.
+- The design system (`ui/` components, layout, Tailwind styles) and the
+  application structure are kept from ZeroFS.
 
-Le source complet de cette interface, modifications comprises, est
-distribué dans ce dépôt conformément à l'AGPL-3.0.
+The full source of this interface, modifications included, is distributed in
+this repository in accordance with the AGPL-3.0.

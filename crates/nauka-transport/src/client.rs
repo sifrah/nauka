@@ -1,4 +1,4 @@
-//! Côté client : connexion à un peer et helpers typés par requête.
+//! Client side: connection to a peer and typed per-request helpers.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use nauka_erasure::FileManifest;
 
 use crate::protocol::{read_message, write_message, Request, Response, ALPN};
 
-/// Connexion client vers un nœud du cluster.
+/// Client connection to a cluster node.
 #[derive(Clone)]
 pub struct PeerClient {
     conn: quinn::Connection,
@@ -23,8 +23,8 @@ impl PeerClient {
         Self::connect_buf(addr, crate::DATA_SOCKET_BUF).await
     }
 
-    /// Connexion au plan consensus d'un nœud (petits buffers : latence
-    /// bornée plutôt que débit). `addr` est déjà l'adresse consensus.
+    /// Connects to a node's consensus plane (small buffers: bounded latency
+    /// rather than throughput). `addr` is already the consensus address.
     pub async fn connect_consensus(addr: SocketAddr) -> Result<Self> {
         Self::connect_buf(addr, crate::CONSENSUS_SOCKET_BUF).await
     }
@@ -38,8 +38,8 @@ impl PeerClient {
             std::sync::Arc::new(quinn::TokioRuntime),
         )?;
         endpoint.set_default_client_config(client_config()?);
-        // mTLS: le SNI doit correspondre au SAN des certificats de nœud.
-        // Insecure: SNI requis par rustls mais non vérifié.
+        // mTLS: the SNI must match the SAN of the node certificates.
+        // Insecure: SNI is required by rustls but never verified.
         let server_name = if crate::tls::cluster_tls().is_some() {
             crate::tls::NODE_SAN
         } else {
@@ -49,7 +49,7 @@ impl PeerClient {
         Ok(Self { conn, addr })
     }
 
-    /// Accès à la connexion quinn sous-jacente (benchs, usages avancés).
+    /// Access to the underlying quinn connection (benches, advanced uses).
     pub fn connection(&self) -> &quinn::Connection {
         &self.conn
     }
@@ -60,7 +60,7 @@ impl PeerClient {
         send.finish()?;
         let resp = read_message::<Response>(&mut recv).await?;
         if let Response::Error(e) = resp {
-            bail!("erreur du peer {}: {e}", self.addr);
+            bail!("error from peer {}: {e}", self.addr);
         }
         Ok(resp)
     }
@@ -93,8 +93,8 @@ impl PeerClient {
         }
     }
 
-    /// Demande une preuve de détention d'un shard : le pair doit renvoyer
-    /// `blake3(nonce ‖ octets)`, ce qu'il ne peut faire qu'en les relisant.
+    /// Asks for a proof of possession of a shard: the peer must return
+    /// `blake3(nonce ‖ bytes)`, which it can only do by re-reading them.
     pub async fn prove_shard(&self, hash: &str, nonce: [u8; 32]) -> Result<Option<[u8; 32]>> {
         match self.call(Request::ProveShard { hash: hash.to_string(), nonce }).await? {
             Response::Proof(p) => Ok(p),
@@ -116,7 +116,7 @@ impl PeerClient {
         }
     }
 
-    /// Envoie une RPC Raft et retourne le payload de réponse opaque.
+    /// Sends a Raft RPC and returns the opaque response payload.
     pub async fn raft(&self, rpc: crate::protocol::RaftRpc) -> Result<Vec<u8>> {
         match self.call(Request::Raft(rpc)).await? {
             Response::Raft(payload) => Ok(payload),
@@ -126,14 +126,14 @@ impl PeerClient {
 }
 
 fn unexpected(resp: Response) -> anyhow::Error {
-    anyhow!("réponse inattendue du peer: {resp:?}")
+    anyhow!("unexpected response from peer: {resp:?}")
 }
 
 fn client_config() -> Result<quinn::ClientConfig> {
     let mut crypto = match crate::tls::cluster_tls() {
         Some(tls) => {
-            // mTLS : vérifie le serveur contre la CA du cluster ET présente
-            // notre certificat signé.
+            // mTLS: verify the server against the cluster CA AND present our
+            // own signed certificate.
             rustls::ClientConfig::builder_with_provider(crate::crypto_provider())
                 .with_safe_default_protocol_versions()?
                 .with_root_certificates(tls.roots.clone())
@@ -153,9 +153,9 @@ fn client_config() -> Result<quinn::ClientConfig> {
     Ok(config)
 }
 
-/// v0 : accepte le certificat auto-signé des peers. Le chiffrement QUIC reste
-/// actif ; seule l'identité du serveur n'est pas vérifiée. À remplacer par une
-/// PKI de cluster (clé partagée / mTLS) avec la couche membership.
+/// v0: accepts the peers' self-signed certificate. QUIC encryption stays on;
+/// only the server identity goes unverified. To be replaced by a cluster PKI
+/// (shared key / mTLS) with the membership layer.
 #[derive(Debug)]
 struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
 

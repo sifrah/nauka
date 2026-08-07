@@ -1,10 +1,10 @@
-//! LE test de durabilité : le cluster ENTIER s'éteint (crash total, coupure
-//! électrique) et redémarre depuis les data-dirs. Le registre doit revenir
-//! intact, sans aucun nœud sain pour aider.
+//! THE durability test: the ENTIRE cluster goes down (total crash, power cut)
+//! and restarts from the data-dirs. The registry must come back intact, with
+//! no healthy node left to help.
 //!
-//! Phase 1 : peu d'écritures (< seuil de snapshot) → recovery par replay du
-//! log redb pur. Phase 2 : assez d'écritures pour déclencher snapshot +
-//! purge du log → recovery par snapshot + replay du reliquat.
+//! Phase 1: few writes (< snapshot threshold) → recovery by pure redb log
+//! replay. Phase 2: enough writes to trigger a snapshot + log purge →
+//! recovery by snapshot + replay of the remainder.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -28,7 +28,7 @@ struct Node {
 
 async fn spawn(id: u64, dir: &PathBuf, addr: SocketAddr) -> Node {
     let store = Arc::new(ShardStore::open(dir.join("store")).unwrap());
-    // Après un arrêt, les sockets peuvent mettre un instant à se libérer.
+    // After a shutdown, the sockets can take a moment to be released.
     let mut pair = None;
     for _ in 0..50 {
         match make_endpoint_pair(addr) {
@@ -39,7 +39,7 @@ async fn spawn(id: u64, dir: &PathBuf, addr: SocketAddr) -> Node {
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
     }
-    let (endpoint, consensus_endpoint) = pair.expect("sockets jamais libérés");
+    let (endpoint, consensus_endpoint) = pair.expect("sockets never released");
     let addr = endpoint.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.join("raft")).await.unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
@@ -68,7 +68,7 @@ async fn wait_any_leader(nodes: &[Node]) -> u64 {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    panic!("pas de leader après redémarrage");
+    panic!("no leader after restart");
 }
 
 async fn wait_registry(nodes: &[Node], expected: usize) {
@@ -81,7 +81,7 @@ async fn wait_registry(nodes: &[Node], expected: usize) {
             }
             assert!(
                 Instant::now() < deadline,
-                "nœud {} bloqué à {count}/{expected}",
+                "node {} stuck at {count}/{expected}",
                 n.app.id
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -91,11 +91,11 @@ async fn wait_registry(nodes: &[Node], expected: usize) {
 
 fn manifest(i: usize) -> nauka_erasure::FileManifest {
     let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
-    encode_file(format!("persistance {i}").as_bytes(), &cfg).unwrap().0
+    encode_file(format!("persistence {i}").as_bytes(), &cfg).unwrap().0
 }
 
 async fn write_batch(nodes: &[Node], range: std::ops::Range<usize>) {
-    // Écrit via le leader courant, avec retry pendant les bascules.
+    // Write through the current leader, retrying across leader changes.
     for i in range {
         let cmd = AppCommand::RegisterManifest(manifest(i));
         let mut done = false;
@@ -113,7 +113,7 @@ async fn write_batch(nodes: &[Node], range: std::ops::Range<usize>) {
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        assert!(done, "écriture {i} impossible");
+        assert!(done, "write {i} impossible");
     }
 }
 
@@ -122,7 +122,7 @@ async fn full_cluster_power_cut_and_restart() {
     let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
     let dir_paths: Vec<PathBuf> = dirs.iter().map(|d| d.path().to_path_buf()).collect();
 
-    // Démarrage initial sur ports éphémères, adresses mémorisées.
+    // Initial startup on ephemeral ports, addresses remembered.
     let mut nodes = Vec::new();
     for (i, dir) in dir_paths.iter().enumerate() {
         nodes.push(spawn((i + 1) as u64, dir, "127.0.0.1:0".parse().unwrap()).await);
@@ -139,36 +139,36 @@ async fn full_cluster_power_cut_and_restart() {
     ));
     wait_any_leader(&nodes).await;
 
-    // ── Phase 1 : 40 écritures (< 256, aucun snapshot) puis coupure totale.
+    // ── Phase 1: 40 writes (< 256, no snapshot) then a full power cut.
     write_batch(&nodes, 0..40).await;
     wait_registry(&nodes, 40).await;
     full_shutdown(nodes).await;
 
-    // Redémarrage complet depuis les data-dirs : replay du log redb.
+    // Full restart from the data-dirs: redb log replay.
     let mut nodes = Vec::new();
     for (i, dir) in dir_paths.iter().enumerate() {
         nodes.push(spawn((i + 1) as u64, dir, addrs[i]).await);
     }
     let leader = wait_any_leader(&nodes).await;
-    println!("redémarrage 1 : leader {leader}");
+    println!("restart 1: leader {leader}");
     wait_registry(&nodes, 40).await;
 
-    // ── Phase 2 : 300 écritures de plus → snapshots + purge du log,
-    //    puis nouvelle coupure totale.
+    // ── Phase 2: 300 more writes → snapshots + log purge, then another full
+    //    power cut.
     write_batch(&nodes, 40..340).await;
     wait_registry(&nodes, 340).await;
     full_shutdown(nodes).await;
 
-    // Redémarrage : recovery par snapshot + reliquat de log.
+    // Restart: recovery by snapshot + leftover log.
     let mut nodes = Vec::new();
     for (i, dir) in dir_paths.iter().enumerate() {
         nodes.push(spawn((i + 1) as u64, dir, addrs[i]).await);
     }
     let leader = wait_any_leader(&nodes).await;
-    println!("redémarrage 2 : leader {leader}");
+    println!("restart 2: leader {leader}");
     wait_registry(&nodes, 340).await;
 
-    // Et le cluster reste fonctionnel : une écriture de plus passe.
+    // And the cluster stays functional: one more write goes through.
     write_batch(&nodes, 340..341).await;
     wait_registry(&nodes, 341).await;
 }

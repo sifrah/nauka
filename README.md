@@ -1,106 +1,106 @@
 # Nauka
 
-**Un moteur de stockage distribué qui se répare tout seul — un binaire, une
-clé, zéro configuration.**
+**A distributed storage engine that heals itself — one binary, one key,
+zero configuration.**
 
-Nauka découpe chaque fichier en shards Reed-Solomon dispersés sur les nœuds
-d'un cluster. Tant que `k` shards par stripe survivent quelque part, le
-fichier est reconstruit **à l'identique, bit à bit** — nœud mort, disque
-corrompu, région entière perdue.
+Nauka splits every file into Reed-Solomon shards scattered across the nodes
+of a cluster. As long as `k` shards per stripe survive somewhere, the file
+comes back **byte-for-byte identical** — dead node, rotting disk, entire
+region wiped out.
 
-Les nœuds se découvrent via la DHT BitTorrent, élisent un fondateur si le
-cluster n'existe pas encore, s'authentifient mutuellement, se répartissent
-les données selon leur capacité disque et leur distance réseau, se
-réparent et se rééquilibrent en continu. Aucun serveur central, aucune
-infrastructure annexe, aucun fichier de configuration.
+Nodes find each other on the BitTorrent DHT, elect a founder if the cluster
+does not exist yet, authenticate one another, spread data according to disk
+capacity and network distance, then repair and rebalance themselves
+continuously. No central server, no side infrastructure, no configuration
+file.
 
 ```bash
-nauka keygen --out ./nauka-keys      # une fois
-scp -r nauka-keys vps:/etc/           # sur chaque machine
-nauka --keys /etc/nauka-keys serve    # la même commande partout
+nauka keygen --out ./nauka-keys      # once
+scp -r nauka-keys vps:/etc/          # on every machine
+nauka --keys /etc/nauka-keys serve   # the same command everywhere
 ```
 
-C'est tout. Le cluster se forme.
+That's it. The cluster forms itself.
 
-## Ce qui le distingue
+## What sets it apart
 
 |  | Nauka | Garage | MinIO | IPFS |
 |---|:---:|:---:|:---:|:---:|
-| Erasure coding (pas de réplication ×3) | ✅ | ❌ | ✅ | ❌ |
-| Auto-réparation | ✅ | partiel | ✅ | ❌ |
-| Formation du cluster sans configuration | ✅ | ❌ | ❌ | ✅ |
-| Binaire unique | ✅ | ✅ | ~ | ~ |
-| Placement pondéré par capacité | ✅ | ✅ | ❌ | ❌ |
-| Placement conscient de la topologie réseau | ✅ | ❌ | ❌ | ❌ |
+| Erasure coding (no ×3 replication) | ✅ | ❌ | ✅ | ❌ |
+| Self-healing | ✅ | partial | ✅ | ❌ |
+| Config-free cluster formation | ✅ | ❌ | ❌ | ✅ |
+| Single binary | ✅ | ✅ | ~ | ~ |
+| Capacity-weighted placement | ✅ | ✅ | ❌ | ❌ |
+| Topology-aware placement | ✅ | ❌ | ❌ | ❌ |
 
-**Durabilité.** 4+2 par défaut : chaque stripe survit à la perte de 2 shards
-sur 6, pour +50 % de stockage — là où une réplication ×3 coûte +200 % pour
-la même tolérance. Intégrité BLAKE3 vérifiée à chaque frontière : un shard
-corrompu est détecté à la lecture et traité comme perdu, jamais servi.
+**Durability.** 4+2 by default: every stripe survives the loss of any 2
+shards out of 6, for a 50% storage overhead — where ×3 replication charges
+200% for the same tolerance. BLAKE3 integrity is checked at every boundary:
+a corrupted shard is caught on read and treated as lost, never served.
 
-**Zéro configuration.** L'identité d'un nœud est dérivée de sa clé publique
-Ed25519. Son adresse est auto-détectée. Le cluster se trouve sur la DHT
-Mainline sous une clé dérivée de la clé de cluster — rien d'autre à
-distribuer, pas même une URL. Si aucun cluster n'existe, une élection de
-genèse en désigne le fondateur, sans nœud privilégié.
+**Zero configuration.** A node's identity is derived from its Ed25519
+public key. Its address is auto-detected. The cluster is found on the
+Mainline DHT under a key derived from the cluster key — nothing else to
+distribute, not even a URL. If no cluster exists yet, a genesis election
+picks the founder, with no privileged node.
 
-**Placement intelligent.** Rendezvous hashing pondéré par la capacité
-disque déclarée : tous les nœuds se remplissent au même pourcentage. Et les
-nœuds apprennent leurs positions réseau à partir des RTT qu'ils mesurent
-(coordonnées Vivaldi, sans base GeoIP) pour **écarter les shards d'une même
-stripe** — un fichier survit à la perte d'une région, pas seulement d'une
-machine.
+**Smart placement.** Rendezvous hashing weighted by declared disk capacity:
+every node fills to the same percentage. And nodes learn their network
+positions from the round-trip times they measure (Vivaldi coordinates, no
+GeoIP database) in order to **pull the shards of a stripe apart** — a file
+survives the loss of a region, not merely of a machine.
 
-**Preuves, pas déclarations.** Un nœud peut prétendre stocker ce qu'il a
-perdu. Nauka exige des preuves de détention `blake3(nonce ‖ octets)` avant
-toute libération de redondance, et audite ses pairs en continu par
-échantillonnage.
+**Proofs, not claims.** A node can assert it still holds what it has
+quietly lost. Nauka demands `blake3(nonce ‖ bytes)` proofs of possession
+before it gives up any redundancy, and audits its peers continuously by
+sampling.
 
-## Démarrage
+## Getting started
 
 ```bash
-cargo build --release          # binaire dans target/release/nauka
-cargo test                     # 48 tests (unitaires + intégration)
+cargo build --release          # binary lands in target/release/nauka
+cargo test                     # 48 tests (unit + integration)
 ```
 
-Déploiement, référence CLI et dépannage : [`doc/operations.md`](doc/operations.md).
+Deployment, CLI reference and troubleshooting:
+[`doc/operations.md`](doc/operations.md).
 
 ## Documentation
 
-| Document | Contenu |
+| Document | Contents |
 |---|---|
-| [architecture.md](doc/architecture.md) | Crates, invariants, flux upload/download |
-| [coeur-erasure.md](doc/coeur-erasure.md) | Reed-Solomon, stripes, intégrité, stockage |
-| [transport.md](doc/transport.md) | QUIC, protocole inter-nœuds, tuning débit |
-| [consensus.md](doc/consensus.md) | Raft durable, plan réseau dédié |
-| [cluster.md](doc/cluster.md) | Placement, healing, attestation, géo-placement |
-| [identite-et-decouverte.md](doc/identite-et-decouverte.md) | mTLS, DHT, élection de genèse |
-| [api-http.md](doc/api-http.md) | API publique, suppression, expiration |
-| [chiffrement.md](doc/chiffrement.md) | Bout en bout, modèle de menace |
-| [operations.md](doc/operations.md) | Déploiement, CLI, limites connues |
-| [decisions.md](doc/decisions.md) | Choix structurants et leçons des stress tests |
-| [backlog.md](doc/backlog.md) | Chantiers à venir |
+| [architecture.md](doc/architecture.md) | Crates, invariants, upload/download flows |
+| [erasure-core.md](doc/erasure-core.md) | Reed-Solomon, stripes, integrity, storage |
+| [transport.md](doc/transport.md) | QUIC, inter-node protocol, throughput tuning |
+| [consensus.md](doc/consensus.md) | Durable Raft, dedicated network plane |
+| [cluster.md](doc/cluster.md) | Placement, healing, attestation, topology-aware placement |
+| [identity-and-discovery.md](doc/identity-and-discovery.md) | mTLS, DHT, genesis election |
+| [api-http.md](doc/api-http.md) | Public API, deletion, expiry |
+| [encryption.md](doc/encryption.md) | End-to-end, threat model |
+| [operations.md](doc/operations.md) | Deployment, CLI, known limitations |
+| [decisions.md](doc/decisions.md) | Structural choices and stress-test lessons |
+| [backlog.md](doc/backlog.md) | Upcoming work |
 
 ## Yogfile
 
-[Yogfile](https://github.com/sifrah/yogfile) est le service de partage de
-fichiers bâti sur Nauka : chiffrement de bout en bout dans le navigateur,
-liens de partage dont la clé ne quitte jamais le client, lecteur vidéo
-chiffré avec seek. Son code vit aujourd'hui dans ce dépôt
-(`crates/nauka-node/src/api.rs`, `webui/`) et en sera extrait.
+[Yogfile](https://github.com/sifrah/yogfile) is the file-sharing service
+built on top of Nauka: end-to-end encryption in the browser, share links
+whose key never leaves the client, encrypted video playback with seeking.
+Its code currently lives in this repository
+(`crates/nauka-node/src/api.rs`, `webui/`) and will be split out.
 
-## État
+## Status
 
-Jeune mais sérieux. Le socle est éprouvé par des tests d'intégration qui
-tuent des processus, coupent l'alimentation du cluster entier, saturent le
-réseau et corrompent des disques à dessein. Ce qui manque avant une mise en
-production est listé sans détour dans
-[operations.md](doc/operations.md#limites-connues-v1) et
-[backlog.md](doc/backlog.md) — notamment l'authentification de l'API, la
-traversée de NAT et une API S3.
+Young, but serious. The foundation is proven by integration tests that kill
+processes, cut power to the whole cluster, saturate the network and corrupt
+disks on purpose. What is still missing before production use is spelled
+out without hedging in
+[operations.md](doc/operations.md#known-limitations-v1) and
+[backlog.md](doc/backlog.md) — chiefly API authentication, NAT traversal
+and an S3 API.
 
-## Licence
+## License
 
-[AGPL-3.0](LICENSE). L'interface web dérive de la webui de
-[ZeroFS](https://github.com/Barre/ZeroFS) (AGPL-3.0) — voir
+[AGPL-3.0](LICENSE). The web interface derives from the
+[ZeroFS](https://github.com/Barre/ZeroFS) webui (AGPL-3.0) — see
 [`webui/ATTRIBUTION.md`](webui/ATTRIBUTION.md).

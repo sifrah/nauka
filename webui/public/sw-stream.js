@@ -1,23 +1,23 @@
-// Service Worker de streaming déchiffré.
+// Decrypting streaming Service Worker.
 //
-// Intercepte /stream/<hash> et sert le PLAINTEXT à <video>/<audio> sans
-// jamais charger le fichier entier : pour chaque plage demandée, seuls les
-// chunks chiffrés (1 Mio) qui la couvrent sont tirés du cluster (requêtes
-// Range sur le ciphertext), déchiffrés, et rendus.
+// Intercepts /stream/<hash> and serves the PLAINTEXT to <video>/<audio>
+// without ever loading the whole file: for each requested range, only the
+// encrypted chunks (1 MiB) covering it are pulled from the cluster (Range
+// requests on the ciphertext), decrypted, and returned.
 //
-// Deux pièges corrigés ici, tous deux rencontrés en vrai :
-//  1. L'état mémoire d'un Service Worker est volatile — le navigateur
-//     l'arrête et le redémarre entre deux événements. Les clés vivent donc
-//     dans IndexedDB, pas dans une Map.
-//  2. Un Service Worker qui streame une réponse pendant des dizaines de
-//     secondes est tué (le lecteur reçoit alors un 503). Chaque réponse est
-//     donc bornée à MAX_RESPONSE et renvoyée en 206 : le lecteur enchaîne
-//     les requêtes Range, exactement comme avec un serveur média classique.
+// Two pitfalls fixed here, both hit for real:
+//  1. A Service Worker's in-memory state is volatile — the browser stops and
+//     restarts it between two events. So the keys live in IndexedDB, not in
+//     a Map.
+//  2. A Service Worker that streams a response for tens of seconds gets
+//     killed (the player then receives a 503). Each response is therefore
+//     capped at MAX_RESPONSE and returned as a 206: the player chains Range
+//     requests, exactly as it would with a classic media server.
 
 const CHUNK_SIZE = 1024 * 1024;
 const TAG_SIZE = 16;
-const HEADER_SIZE = 12; // "YGE1" + préfixe(8)
-const FRAME_OVERHEAD = 5; // longueur u32 LE + flags u8
+const HEADER_SIZE = 12; // "YGE1" + prefix(8)
+const FRAME_OVERHEAD = 5; // length u32 LE + flags u8
 const MAX_RESPONSE = 4 * CHUNK_SIZE;
 
 const DB_NAME = "yogfile-streams";
@@ -46,7 +46,7 @@ async function loadEntry(hash) {
   });
 }
 
-/** Cache mémoire des clés importées (reconstruit après un redémarrage). */
+/** In-memory cache of imported keys (rebuilt after a restart). */
 const imported = new Map();
 
 async function entryFor(hash) {
@@ -67,7 +67,7 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(handleStream(match[1], event.request));
 });
 
-/** Offset du chunk d'index i dans le ciphertext, et sa taille de frame. */
+/** Offset of the chunk at index i within the ciphertext, and its frame size. */
 function frameAt(index, plainSize) {
   const fullChunks = Math.floor(plainSize / CHUNK_SIZE);
   const plainBefore = Math.min(index, fullChunks) * CHUNK_SIZE;
@@ -84,7 +84,7 @@ function nonceFor(prefix, counter) {
   return nonce;
 }
 
-/** Lit une plage d'octets du CIPHERTEXT sur le cluster. */
+/** Reads a byte range of the CIPHERTEXT from the cluster. */
 async function fetchCipherRange(hash, from, to) {
   const resp = await fetch(`/f/${hash}`, { headers: { Range: `bytes=${from}-${to}` } });
   if (!resp.ok) throw new Error(`range ${from}-${to}: HTTP ${resp.status}`);
@@ -95,7 +95,7 @@ async function ensurePrefix(hash, entry) {
   if (entry.prefix) return entry.prefix;
   const header = await fetchCipherRange(hash, 0, HEADER_SIZE - 1);
   if (header[0] !== 0x59 || header[1] !== 0x47 || header[2] !== 0x45 || header[3] !== 0x31) {
-    throw new Error("pas un flux chiffré yogfile");
+    throw new Error("not a yogfile encrypted stream");
   }
   entry.prefix = header.slice(4, 12);
   return entry.prefix;
@@ -121,10 +121,10 @@ async function handleStream(hash, request) {
   try {
     entry = await entryFor(hash);
   } catch (err) {
-    return new Response(`trousseau illisible: ${err}`, { status: 500 });
+    return new Response(`unreadable keyring: ${err}`, { status: 500 });
   }
   if (!entry) {
-    return new Response("clé absente — ouvrir le lien de partage complet (#clé)", { status: 404 });
+    return new Response("key missing — open the full share link (#key)", { status: 404 });
   }
 
   try {
@@ -148,9 +148,9 @@ async function handleStream(hash, request) {
     }
     end = Math.min(end, start + MAX_RESPONSE - 1);
 
-    // Corps complet (et non un ReadableStream) : la réponse est courte, et
-    // le moteur média la consomme sans risque que le worker soit arrêté en
-    // cours de route. Les chunks sont déchiffrés en parallèle.
+    // A full body (rather than a ReadableStream): the response is short, and
+    // the media engine consumes it with no risk of the worker being stopped
+    // midway. The chunks are decrypted in parallel.
     const firstChunk = Math.floor(start / CHUNK_SIZE);
     const lastChunk = Math.floor(end / CHUNK_SIZE);
     const plains = await Promise.all(
@@ -181,6 +181,6 @@ async function handleStream(hash, request) {
       },
     });
   } catch (err) {
-    return new Response(`erreur de déchiffrement: ${err}`, { status: 500 });
+    return new Response(`decryption error: ${err}`, { status: 500 });
   }
 }

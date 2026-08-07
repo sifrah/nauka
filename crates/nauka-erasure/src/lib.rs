@@ -1,37 +1,37 @@
-//! Cœur Reed-Solomon de Nauka : découpage en stripes, encodage k+m,
-//! reconstruction tolérante aux pertes, intégrité vérifiée par BLAKE3.
+//! Nauka's Reed-Solomon core: splitting into stripes, k+m encoding,
+//! loss-tolerant reconstruction, integrity verified with BLAKE3.
 //!
-//! Aucune I/O ici : cette crate ne manipule que des octets. Le stockage
-//! et le réseau vivent dans d'autres crates.
+//! No I/O here: this crate only ever handles bytes. Storage and networking
+//! live in other crates.
 
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
-/// Taille par défaut d'un shard de données au sein d'une stripe (1 MiB).
-/// Une stripe couvre donc `data_shards * SHARD_SIZE` octets du fichier.
+/// Default size of a data shard within a stripe (1 MiB).
+/// A stripe therefore covers `data_shards * SHARD_SIZE` bytes of the file.
 pub const DEFAULT_SHARD_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ErasureError {
-    #[error("configuration invalide: {0}")]
+    #[error("invalid configuration: {0}")]
     InvalidConfig(String),
-    #[error("shards insuffisants: {available} disponibles, {needed} requis")]
+    #[error("not enough shards: {available} available, {needed} required")]
     NotEnoughShards { available: usize, needed: usize },
-    #[error("intégrité violée: {0}")]
+    #[error("integrity violation: {0}")]
     IntegrityViolation(String),
-    #[error("erreur reed-solomon: {0}")]
+    #[error("reed-solomon error: {0}")]
     ReedSolomon(#[from] reed_solomon_erasure::Error),
 }
 
-/// Paramètres d'encodage, définis au niveau du cluster.
+/// Encoding parameters, set at the cluster level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErasureConfig {
-    /// k : nombre de shards de données par stripe.
+    /// k: number of data shards per stripe.
     pub data_shards: usize,
-    /// m : nombre de shards de parité par stripe. Le fichier survit à la
-    /// perte de n'importe quels m shards par stripe.
+    /// m: number of parity shards per stripe. The file survives the loss of
+    /// any m shards per stripe.
     pub parity_shards: usize,
-    /// Taille d'un shard en octets.
+    /// Shard size in bytes.
     pub shard_size: usize,
 }
 
@@ -45,16 +45,16 @@ impl ErasureConfig {
     pub fn validate(&self) -> Result<(), ErasureError> {
         if self.data_shards == 0 || self.parity_shards == 0 {
             return Err(ErasureError::InvalidConfig(
-                "data_shards et parity_shards doivent être > 0".into(),
+                "data_shards and parity_shards must be > 0".into(),
             ));
         }
         if self.data_shards + self.parity_shards > 255 {
             return Err(ErasureError::InvalidConfig(
-                "data_shards + parity_shards doit tenir sur GF(2^8), max 255".into(),
+                "data_shards + parity_shards must fit in GF(2^8), max 255".into(),
             ));
         }
         if self.shard_size == 0 {
-            return Err(ErasureError::InvalidConfig("shard_size doit être > 0".into()));
+            return Err(ErasureError::InvalidConfig("shard_size must be > 0".into()));
         }
         Ok(())
     }
@@ -63,68 +63,68 @@ impl ErasureConfig {
         self.data_shards + self.parity_shards
     }
 
-    /// Octets de données couverts par une stripe complète.
+    /// Data bytes covered by a full stripe.
     pub fn stripe_data_len(&self) -> usize {
         self.data_shards * self.shard_size
     }
 }
 
-/// Identifiant de contenu : hash BLAKE3, hex.
+/// Content identifier: BLAKE3 hash, hex-encoded.
 pub type ContentHash = String;
 
 pub fn hash_bytes(data: &[u8]) -> ContentHash {
     blake3::hash(data).to_hex().to_string()
 }
 
-/// Un shard encodé, prêt à être dispatché sur un nœud.
+/// An encoded shard, ready to be dispatched to a node.
 #[derive(Debug, Clone)]
 pub struct Shard {
-    /// Index dans la stripe : [0, k) = données, [k, k+m) = parité.
+    /// Index within the stripe: [0, k) = data, [k, k+m) = parity.
     pub index: usize,
     pub hash: ContentHash,
     pub data: Vec<u8>,
 }
 
-/// Métadonnées d'une stripe encodée (sans les octets).
+/// Metadata of an encoded stripe (without the bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StripeMeta {
-    /// Nombre d'octets réels du fichier couverts par cette stripe
-    /// (la dernière stripe est généralement partielle avant padding).
+    /// Number of real file bytes covered by this stripe (the last stripe is
+    /// usually partial before padding).
     pub data_len: usize,
-    /// Hash de chaque shard, indexé par position dans la stripe.
+    /// Hash of every shard, indexed by position within the stripe.
     pub shard_hashes: Vec<ContentHash>,
 }
 
-/// Manifest d'un fichier encodé : tout ce qu'il faut pour le reconstruire
-/// et prouver son intégrité, sans les octets eux-mêmes.
+/// Manifest of an encoded file: everything needed to reconstruct it and prove
+/// its integrity, without the bytes themselves.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileManifest {
-    /// BLAKE3 du fichier original complet.
+    /// BLAKE3 of the complete original file.
     pub file_hash: ContentHash,
     pub file_size: u64,
-    /// Nom d'affichage (fourni à l'upload). N'entre pas dans le hash.
+    /// Display name (supplied at upload time). Does not feed into the hash.
     #[serde(default)]
     pub name: Option<String>,
-    /// Expiration optionnelle (timestamp Unix, secondes) : au-delà, le
-    /// fichier est retiré du registre et ses shards purgés.
+    /// Optional expiration (Unix timestamp, seconds): past it, the file is
+    /// dropped from the registry and its shards purged.
     #[serde(default)]
     pub expires_at: Option<u64>,
     pub config: ErasureConfig,
     pub stripes: Vec<StripeMeta>,
 }
 
-/// Encode une stripe : `data` (≤ stripe_data_len octets) → k+m shards.
+/// Encodes one stripe: `data` (≤ stripe_data_len bytes) → k+m shards.
 pub fn encode_stripe(data: &[u8], cfg: &ErasureConfig) -> Result<Vec<Shard>, ErasureError> {
     cfg.validate()?;
     if data.is_empty() || data.len() > cfg.stripe_data_len() {
         return Err(ErasureError::InvalidConfig(format!(
-            "stripe de {} octets, attendu entre 1 et {}",
+            "stripe of {} bytes, expected between 1 and {}",
             data.len(),
             cfg.stripe_data_len()
         )));
     }
 
-    // k shards de données, zero-padded à shard_size.
+    // k data shards, zero-padded to shard_size.
     let mut shards: Vec<Vec<u8>> = (0..cfg.data_shards)
         .map(|i| {
             let start = (i * cfg.shard_size).min(data.len());
@@ -134,7 +134,7 @@ pub fn encode_stripe(data: &[u8], cfg: &ErasureConfig) -> Result<Vec<Shard>, Era
             buf
         })
         .collect();
-    // + m shards de parité, calculés en place.
+    // ...then m parity shards, computed in place.
     shards.extend(std::iter::repeat_with(|| vec![0u8; cfg.shard_size]).take(cfg.parity_shards));
 
     let rs = ReedSolomon::new(cfg.data_shards, cfg.parity_shards)?;
@@ -147,12 +147,11 @@ pub fn encode_stripe(data: &[u8], cfg: &ErasureConfig) -> Result<Vec<Shard>, Era
         .collect())
 }
 
-/// Reconstruit les octets originaux d'une stripe à partir d'au moins k shards.
+/// Reconstructs the original bytes of a stripe from at least k shards.
 ///
-/// `shards[i]` est `None` si le shard i est perdu. Chaque shard présent est
-/// vérifié contre son hash du manifest avant reconstruction : un shard
-/// corrompu est traité comme perdu plutôt que de corrompre silencieusement
-/// la sortie.
+/// `shards[i]` is `None` when shard i is lost. Every shard present is checked
+/// against its manifest hash before reconstruction: a corrupted shard is
+/// treated as lost rather than silently corrupting the output.
 pub fn decode_stripe(
     mut shards: Vec<Option<Vec<u8>>>,
     meta: &StripeMeta,
@@ -161,13 +160,13 @@ pub fn decode_stripe(
     cfg.validate()?;
     if shards.len() != cfg.total_shards() {
         return Err(ErasureError::InvalidConfig(format!(
-            "{} slots de shards fournis, {} attendus",
+            "{} shard slots provided, {} expected",
             shards.len(),
             cfg.total_shards()
         )));
     }
 
-    // Écarte tout shard dont le hash ne correspond pas au manifest.
+    // Drop any shard whose hash does not match the manifest.
     for (i, slot) in shards.iter_mut().enumerate() {
         if let Some(data) = slot {
             if data.len() != cfg.shard_size || hash_bytes(data) != meta.shard_hashes[i] {
@@ -187,12 +186,12 @@ pub fn decode_stripe(
     let rs = ReedSolomon::new(cfg.data_shards, cfg.parity_shards)?;
     rs.reconstruct(&mut shards)?;
 
-    // Vérifie que les shards reconstruits correspondent bien au manifest.
+    // Check the reconstructed shards really do match the manifest.
     for (i, slot) in shards.iter().enumerate().take(cfg.data_shards) {
-        let data = slot.as_ref().expect("reconstruct garantit les shards de données");
+        let data = slot.as_ref().expect("reconstruct guarantees the data shards");
         if hash_bytes(data) != meta.shard_hashes[i] {
             return Err(ErasureError::IntegrityViolation(format!(
-                "shard reconstruit {i} ne correspond pas au hash du manifest"
+                "reconstructed shard {i} does not match the manifest hash"
             )));
         }
     }
@@ -205,15 +204,15 @@ pub fn decode_stripe(
     Ok(out)
 }
 
-/// Encode un fichier complet en stripes. Retourne le manifest et, par stripe,
-/// les shards à dispatcher.
+/// Encodes a whole file into stripes. Returns the manifest and, per stripe, the
+/// shards to dispatch.
 pub fn encode_file(
     data: &[u8],
     cfg: &ErasureConfig,
 ) -> Result<(FileManifest, Vec<Vec<Shard>>), ErasureError> {
     cfg.validate()?;
     if data.is_empty() {
-        return Err(ErasureError::InvalidConfig("fichier vide".into()));
+        return Err(ErasureError::InvalidConfig("empty file".into()));
     }
 
     let mut stripes_meta = Vec::new();
@@ -240,15 +239,15 @@ pub fn encode_file(
     ))
 }
 
-/// Reconstruit un fichier complet depuis ses stripes (shards possiblement
-/// manquants ou corrompus), puis vérifie le hash global du fichier.
+/// Reconstructs a whole file from its stripes (shards possibly missing or
+/// corrupted), then verifies the file-wide hash.
 pub fn decode_file(
     manifest: &FileManifest,
     stripes: Vec<Vec<Option<Vec<u8>>>>,
 ) -> Result<Vec<u8>, ErasureError> {
     if stripes.len() != manifest.stripes.len() {
         return Err(ErasureError::InvalidConfig(format!(
-            "{} stripes fournies, {} attendues",
+            "{} stripes provided, {} expected",
             stripes.len(),
             manifest.stripes.len()
         )));
@@ -261,7 +260,7 @@ pub fn decode_file(
 
     if hash_bytes(&out) != manifest.file_hash {
         return Err(ErasureError::IntegrityViolation(
-            "hash du fichier reconstruit différent du manifest".into(),
+            "reconstructed file hash differs from the manifest".into(),
         ));
     }
     Ok(out)
@@ -297,7 +296,7 @@ mod tests {
     #[test]
     fn roundtrip_multi_stripe_uneven() {
         let cfg = cfg_small();
-        // 2 stripes pleines + une partielle d'un seul octet.
+        // Two full stripes, then a partial one holding a single byte.
         let data = random_bytes(cfg.stripe_data_len() * 2 + 1, 2);
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
         assert_eq!(manifest.stripes.len(), 3);
@@ -311,7 +310,7 @@ mod tests {
         let data = random_bytes(cfg.stripe_data_len(), 3);
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
-        // Toutes les paires de shards perdus possibles (m = 2).
+        // Every possible pair of lost shards (m = 2).
         for a in 0..cfg.total_shards() {
             for b in (a + 1)..cfg.total_shards() {
                 let mut slots = to_slots(&stripes[0]);
@@ -319,7 +318,7 @@ mod tests {
                 slots[b] = None;
                 let decoded =
                     decode_stripe(slots, &manifest.stripes[0], &cfg).unwrap();
-                assert_eq!(decoded, data, "échec avec shards {a} et {b} perdus");
+                assert_eq!(decoded, data, "failed with shards {a} and {b} lost");
             }
         }
     }
@@ -335,7 +334,7 @@ mod tests {
         slots[2] = None;
         match decode_stripe(slots, &manifest.stripes[0], &cfg) {
             Err(ErasureError::NotEnoughShards { available: 3, needed: 4 }) => {}
-            other => panic!("attendu NotEnoughShards, obtenu {other:?}"),
+            other => panic!("expected NotEnoughShards, got {other:?}"),
         }
     }
 
@@ -345,7 +344,7 @@ mod tests {
         let data = random_bytes(cfg.stripe_data_len(), 5);
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
-        // Corrompt un shard : il doit être détecté via son hash et reconstruit.
+        // Corrupt one shard: it must be caught by its hash and reconstructed.
         let mut slots = to_slots(&stripes[0]);
         slots[1].as_mut().unwrap()[42] ^= 0xFF;
         let decoded = decode_stripe(slots, &manifest.stripes[0], &cfg).unwrap();
@@ -358,7 +357,7 @@ mod tests {
         let data = random_bytes(cfg.stripe_data_len(), 6);
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
-        // 2 perdus + 1 corrompu = 3 indisponibles > m : doit échouer proprement.
+        // 2 lost + 1 corrupted = 3 unavailable > m: must fail cleanly.
         let mut slots = to_slots(&stripes[0]);
         slots[0] = None;
         slots[5] = None;

@@ -1,7 +1,7 @@
-//! Auto-healing : chaque nœud vérifie périodiquement qu'il détient bien les
-//! shards dont le placement le rend responsable. Un shard manquant ou
-//! corrompu est régénéré par Reed-Solomon depuis le reste du cluster, sans
-//! intervention humaine.
+//! Self-healing: every node periodically checks that it really holds the
+//! shards placement makes it responsible for. A missing or corrupted shard
+//! is regenerated with Reed-Solomon from the rest of the cluster, without
+//! human intervention.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -24,21 +24,22 @@ pub struct HealReport {
 pub struct GcReport {
     pub shards_released: usize,
     pub shards_kept: usize,
-    /// Shards purgés parce qu'aucun fichier vivant ne les référence
-    /// (fichier supprimé, expiré ou banni).
+    /// Shards purged because no live file references them any more
+    /// (file deleted, expired or banned).
     pub orphans_purged: usize,
-    /// Manifests locaux retirés car absents du registre répliqué.
+    /// Local manifests removed because they are absent from the replicated
+    /// registry.
     pub manifests_purged: usize,
 }
 
-/// Purge des fichiers supprimés : retire les manifests locaux absents du
-/// registre répliqué, puis les shards que plus aucun manifest vivant ne
-/// référence.
+/// Purge of deleted files: removes the local manifests absent from the
+/// replicated registry, then the shards no live manifest references any
+/// more.
 ///
-/// `live_manifests` est la liste faisant autorité (le registre Raft). La
-/// purge n'a lieu QUE si cette liste est fiable : un nœud qui vient de
-/// démarrer et n'a pas encore reçu l'état ne doit rien effacer, d'où le
-/// paramètre `registry_ready`.
+/// `live_manifests` is the authoritative list (the Raft registry). The
+/// purge happens ONLY if that list is trustworthy: a node that has just
+/// started and has not received the state yet must erase nothing, hence
+/// the `registry_ready` parameter.
 pub fn purge_deleted(
     store: &Arc<ShardStore>,
     live_manifests: &std::collections::BTreeSet<String>,
@@ -49,7 +50,7 @@ pub fn purge_deleted(
         return Ok(report);
     }
 
-    // 1. Manifests locaux qui ne sont plus dans le registre → supprimés.
+    // 1. Local manifests no longer in the registry → deleted.
     for local in store.list_manifests()? {
         if !live_manifests.contains(&local) {
             store.delete_manifest(&local)?;
@@ -57,7 +58,7 @@ pub fn purge_deleted(
         }
     }
 
-    // 2. Shards qu'aucun manifest local restant ne référence.
+    // 2. Shards that none of the remaining local manifests reference.
     let mut referenced: std::collections::BTreeSet<String> = Default::default();
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
@@ -76,15 +77,15 @@ pub fn purge_deleted(
     Ok(report)
 }
 
-/// GC de rebalancement : libère les shards locaux dont ce nœud n'est plus
-/// propriétaire (la vue du cluster a changé — nœud ajouté/retiré).
+/// Rebalancing GC: releases the local shards this node no longer owns (the
+/// cluster view changed — node added/removed).
 ///
-/// Prudence maximale : un shard n'est supprimé que si TOUS ses propriétaires
-/// actuels (un shard peut être référencé par plusieurs manifests) en
-/// apportent la PREUVE — `blake3(nonce ‖ octets)`, vérifiée contre notre
-/// copie locale — et non une simple déclaration `has_shard`. Un
-/// propriétaire injoignable ou sans preuve → on garde. Les shards inconnus
-/// des manifests locaux ne sont jamais touchés.
+/// Maximum caution: a shard is deleted only if ALL of its current owners
+/// (a shard may be referenced by several manifests) supply a PROOF of
+/// possession — `blake3(nonce ‖ bytes)`, checked against our local copy —
+/// and not a mere `has_shard` claim. An unreachable owner, or one without
+/// a proof → we keep the shard. Shards unknown to the local manifests are
+/// never touched.
 pub async fn gc_once(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -93,7 +94,7 @@ pub async fn gc_once(
     gc_once_geo(store, self_id, all_nodes, &Default::default()).await
 }
 
-/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+/// Geo-aware variant (see [`crate::placement::stripe_owners_geo`]).
 pub async fn gc_once_geo(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -102,7 +103,7 @@ pub async fn gc_once_geo(
 ) -> Result<GcReport> {
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
-    // shard → propriétaires (tous manifests confondus).
+    // shard → owners (across all manifests).
     let mut owners: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
@@ -124,14 +125,14 @@ pub async fn gc_once_geo(
     let mut report = GcReport::default();
     for shard in store.list_shards()? {
         let Some(shard_owners) = owners.get(&shard) else {
-            // Shard orphelin (fichier désenregistré ?) : hors périmètre v1.
+            // Orphan shard (deregistered file?): out of scope for v1.
             continue;
         };
         if shard_owners.iter().any(|o| o == self_id) {
-            continue; // toujours à nous, rien à faire
+            continue; // still ours, nothing to do
         }
-        // On détient encore les octets : on peut donc EXIGER une preuve de
-        // détention avant de les libérer.
+        // We still hold the bytes, so we can DEMAND a proof of possession
+        // before releasing them.
         let Ok(local_data) = store.get_shard(&shard) else { continue };
         let mut all_confirmed = true;
         for owner in shard_owners {
@@ -168,11 +169,11 @@ pub async fn gc_once_geo(
     Ok(report)
 }
 
-/// Une passe de scrub complète sur tous les manifests connus localement.
+/// A full scrub pass over every locally known manifest.
 ///
-/// `self_id` est l'adresse annoncée de ce nœud, `all_nodes` la vue du cluster
-/// (ce nœud inclus) — les deux doivent être cohérents avec ce que les autres
-/// nœuds utilisent pour que le placement converge.
+/// `self_id` is this node's advertised address, `all_nodes` the cluster
+/// view (this node included) — both must be consistent with what the other
+/// nodes use, so that placement converges.
 pub async fn scrub_once(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -181,7 +182,7 @@ pub async fn scrub_once(
     scrub_once_geo(store, self_id, all_nodes, &Default::default()).await
 }
 
-/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+/// Geo-aware variant (see [`crate::placement::stripe_owners_geo`]).
 pub async fn scrub_once_geo(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -198,7 +199,7 @@ pub async fn scrub_once_geo(
             crate::placement::shards_owned_by_geo(&manifest, self_id, &node_refs, coords)
         {
             report.shards_checked += 1;
-            // get_shard vérifie le hash : manquant OU corrompu → on répare.
+            // get_shard verifies the hash: missing OR corrupted → we heal.
             if store.get_shard(shard_hash).is_ok() {
                 continue;
             }
@@ -208,14 +209,14 @@ pub async fn scrub_once_geo(
                 Ok(()) => {
                     info!(
                         file = %file_hash, stripe = stripe_idx, shard = shard_idx,
-                        "shard régénéré"
+                        "shard healed"
                     );
                     report.shards_healed += 1;
                 }
                 Err(e) => {
                     warn!(
                         file = %file_hash, stripe = stripe_idx, shard = shard_idx,
-                        "irréparable pour l'instant: {e}"
+                        "unrecoverable for now: {e}"
                     );
                     report.shards_unrecoverable += 1;
                 }
@@ -225,10 +226,10 @@ pub async fn scrub_once_geo(
     Ok(report)
 }
 
-/// Régénère un shard précis : collecte ≥ k shards de la stripe (local +
-/// peers), décode les données originales, ré-encode la stripe et stocke le
-/// shard manquant. Les hashes du manifest garantissent que le shard régénéré
-/// est identique à l'original.
+/// Regenerates one specific shard: collects ≥ k shards of the stripe
+/// (local + peers), decodes the original data, re-encodes the stripe and
+/// stores the missing shard. The manifest hashes guarantee that the healed
+/// shard is identical to the original.
 async fn heal_shard(
     store: &Arc<ShardStore>,
     manifest: &FileManifest,
@@ -242,8 +243,8 @@ async fn heal_shard(
     let mut slots: Vec<Option<Vec<u8>>> = Vec::with_capacity(meta.shard_hashes.len());
 
     for hash in &meta.shard_hashes {
-        // D'abord le store local, sinon on demande aux autres nœuds
-        // (le propriétaire théorique en premier, puis les autres).
+        // Local store first, otherwise ask the other nodes (the nominal
+        // owner first, then the rest).
         if let Ok(data) = store.get_shard(hash) {
             slots.push(Some(data));
             continue;
@@ -273,12 +274,12 @@ async fn heal_shard(
         slots.push(found);
     }
 
-    // decode_stripe écarte les shards corrompus et exige ≥ k valides.
+    // decode_stripe discards corrupted shards and requires ≥ k valid ones.
     let stripe_data = decode_stripe(slots, meta, &manifest.config)?;
     let shards = encode_stripe(&stripe_data, &manifest.config)?;
     let shard = &shards[shard_idx];
     if shard.hash != meta.shard_hashes[shard_idx] {
-        bail!("shard ré-encodé incohérent avec le manifest");
+        bail!("re-encoded shard inconsistent with the manifest");
     }
     store.put_shard(&shard.data)?;
     Ok(())

@@ -1,28 +1,26 @@
-//! Attestation de stockage : vérifier qu'un pair détient RÉELLEMENT les
-//! shards dont le placement le rend responsable.
+//! Storage attestation: verify that a peer REALLY holds the shards
+//! placement makes it responsible for.
 //!
-//! `has_shard` est déclaratif — un nœud peut répondre « oui » alors que le
-//! disque a été vidé ou silencieusement corrompu. Deux mécanismes de
-//! preuve, complémentaires :
+//! `has_shard` is declarative — a node can answer "yes" while its disk has
+//! been wiped or silently corrupted. Two complementary proof mechanisms:
 //!
-//! 1. **Challenge par nonce** (`ProveShard`) : le pair renvoie
-//!    `blake3(nonce ‖ octets)`, imprévisible et non rejouable. Vérifiable
-//!    seulement si le vérificateur détient les octets — c'est exactement le
-//!    cas du GC, qui exige désormais cette preuve avant de libérer sa
-//!    copie (voir healer.rs).
+//! 1. **Nonce challenge** (`ProveShard`): the peer returns
+//!    `blake3(nonce ‖ bytes)`, unpredictable and non-replayable. Verifiable
+//!    only if the verifier holds the bytes — which is exactly the GC's
+//!    case, as it now demands this proof before releasing its copy (see
+//!    healer.rs).
 //!
-//! 2. **Audit par échantillonnage** (ce module) : en régime permanent,
-//!    chaque shard n'a qu'UN détenteur — personne d'autre n'a les octets
-//!    pour vérifier un challenge. L'auditeur échantillonne donc des shards
-//!    que le pair POSSÈDE selon le placement, les télécharge, et vérifie
-//!    leur hash contre le manifest. Le stockage étant content-addressed,
-//!    tricher = produire des octets ayant un BLAKE3 imposé — une préimage.
-//!    Coût : `SAMPLE_PER_PEER` × 1 Mio par pair et par passe, borné et
-//!    réglable.
+//! 2. **Sampling audit** (this module): in steady state each shard has only
+//!    ONE holder — nobody else has the bytes to verify a challenge. So the
+//!    auditor samples shards the peer OWNS according to placement,
+//!    downloads them, and checks their hash against the manifest. Since
+//!    storage is content-addressed, cheating means producing bytes with an
+//!    imposed BLAKE3 — a preimage. Cost: `SAMPLE_PER_PEER` x 1 MiB per peer
+//!    per pass, bounded and tunable.
 //!
-//! Un « absent » sur un shard que le pair possède selon le placement est le
-//! signal utile : soit son scrubber est en retard (transitoire), soit le
-//! nœud a perdu des données (persistant → alerte).
+//! A "missing" answer for a shard the peer owns according to placement is
+//! the useful signal: either its scrubber is lagging (transient), or the
+//! node has lost data (persistent → alert).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,25 +32,26 @@ use tracing::{info, warn};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
 
-/// Shards téléchargés et vérifiés par pair et par passe.
+/// Shards downloaded and verified per peer per pass.
 pub const SAMPLE_PER_PEER: usize = 3;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AuditReport {
-    /// Vérifications tentées.
+    /// Verifications attempted.
     pub challenged: usize,
-    /// Shards téléchargés dont le hash correspond au manifest.
+    /// Downloaded shards whose hash matches the manifest.
     pub proved: usize,
-    /// Le pair n'a pas pu fournir le shard (absent ou corrompu chez lui).
+    /// The peer could not supply the shard (missing or corrupted on its
+    /// side).
     pub missing: usize,
-    /// Le pair a fourni des octets au MAUVAIS hash — anomalie sérieuse
-    /// (impossible sans bug ou malveillance, le transport vérifie aussi).
+    /// The peer supplied bytes with the WRONG hash — a serious anomaly
+    /// (impossible short of a bug or malice, the transport checks too).
     pub failed: usize,
-    /// Pairs injoignables (non comptés comme fautes).
+    /// Unreachable peers (not counted as faults).
     pub unreachable: usize,
 }
 
-/// Preuve de détention attendue pour un challenge par nonce.
+/// Expected proof of possession for a nonce challenge.
 pub fn expected_proof(nonce: &[u8; 32], data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(nonce);
@@ -60,8 +59,8 @@ pub fn expected_proof(nonce: &[u8; 32], data: &[u8]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-/// Une passe d'audit : pour chaque pair, échantillonne des shards qui lui
-/// appartiennent selon le placement et vérifie qu'il les détient vraiment.
+/// One audit pass: for each peer, samples shards it owns according to
+/// placement and verifies that it really holds them.
 pub async fn audit_once(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -70,7 +69,7 @@ pub async fn audit_once(
     audit_once_geo(store, self_id, all_nodes, &Default::default()).await
 }
 
-/// Variante géo-consciente (voir [`crate::placement::stripe_owners_geo`]).
+/// Geo-aware variant (see [`crate::placement::stripe_owners_geo`]).
 pub async fn audit_once_geo(
     store: &Arc<ShardStore>,
     self_id: &str,
@@ -80,7 +79,7 @@ pub async fn audit_once_geo(
     let mut report = AuditReport::default();
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
-    // Qui possède quoi, d'après les manifests connus localement.
+    // Who owns what, according to the locally known manifests.
     let mut owned_by_peer: HashMap<&str, Vec<(String, String)>> = HashMap::new();
     for file_hash in store.list_manifests()? {
         let manifest = store.get_manifest(&file_hash)?;
@@ -126,16 +125,16 @@ pub async fn audit_once_geo(
                 }
                 Ok(Some(_)) => {
                     warn!(peer = %peer, shard = %shard_hash, file = %file,
-                          "AUDIT: octets au mauvais hash — le pair ne détient pas ce qu'il sert");
+                          "AUDIT: bytes with the wrong hash — the peer does not hold what it serves");
                     report.failed += 1;
                 }
                 Ok(None) => {
-                    // Absent alors que le placement le lui attribue : son
-                    // scrubber devrait le régénérer — à surveiller si ça dure.
+                    // Missing although placement assigns it to this peer:
+                    // its scrubber should heal it — watch if it persists.
                     report.missing += 1;
                 }
                 Err(e) => {
-                    warn!(peer = %peer, "audit interrompu: {e}");
+                    warn!(peer = %peer, "audit interrupted: {e}");
                     report.challenged -= 1;
                     report.unreachable += 1;
                     break;
@@ -146,12 +145,12 @@ pub async fn audit_once_geo(
 
     if report.failed > 0 {
         warn!(
-            "audit: {} vérification(s) en ÉCHEC sur {} — un pair sert des octets invalides",
+            "audit: {} verification(s) FAILED out of {} — a peer is serving invalid bytes",
             report.failed, report.challenged
         );
     } else if report.challenged > 0 {
         info!(
-            "audit: {}/{} détentions prouvées, {} absentes",
+            "audit: {}/{} possessions proved, {} missing",
             report.proved, report.challenged, report.missing
         );
     }
@@ -166,11 +165,11 @@ mod tests {
     fn proof_binds_nonce_and_content() {
         let n1 = [1u8; 32];
         let n2 = [2u8; 32];
-        // Même contenu, nonce différent → preuve différente (pas de rejeu).
+        // Same content, different nonce → different proof (no replay).
         assert_ne!(expected_proof(&n1, b"data"), expected_proof(&n2, b"data"));
-        // Même nonce, contenu différent → preuve différente.
+        // Same nonce, different content → different proof.
         assert_ne!(expected_proof(&n1, b"data"), expected_proof(&n1, b"datb"));
-        // Déterministe.
+        // Deterministic.
         assert_eq!(expected_proof(&n1, b"data"), expected_proof(&n1, b"data"));
     }
 }

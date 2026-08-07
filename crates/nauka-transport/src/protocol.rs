@@ -1,63 +1,64 @@
-//! Protocole inter-nœuds : messages sérialisés en bincode, framés par une
-//! longueur u32 LE, un échange requête/réponse par stream bidirectionnel QUIC.
+//! Inter-node protocol: messages serialized with bincode, framed by a
+//! little-endian u32 length, one request/response exchange per bidirectional
+//! QUIC stream.
 
 use serde::{Deserialize, Serialize};
 use nauka_erasure::FileManifest;
 
-/// Garde-fou : taille max d'un message (shard 1 MiB + marge, manifests).
+/// Safety net: max size of a message (1 MiB shard + headroom, manifests).
 pub const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024;
 
-/// ALPN du protocole yogfile.
+/// ALPN of the yogfile protocol.
 pub const ALPN: &[u8] = b"yog/0";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     Ping,
-    /// Stocke un shard sur le nœud distant (idempotent, content-addressed).
+    /// Stores a shard on the remote node (idempotent, content-addressed).
     PutShard(Vec<u8>),
-    /// Récupère un shard par hash.
+    /// Fetches a shard by hash.
     GetShard(String),
-    /// Le nœud possède-t-il ce shard ?
+    /// Does the node hold this shard?
     HasShard(String),
-    /// Preuve de détention : `blake3(nonce ‖ octets du shard)`. Contrairement
-    /// à `HasShard`, impossible à honorer sans relire réellement les octets
-    /// (le nonce est tiré au hasard par le challengeur à chaque fois).
+    /// Proof of possession: `blake3(nonce ‖ shard bytes)`. Unlike `HasShard`,
+    /// it cannot be answered without actually re-reading the bytes (the nonce
+    /// is drawn at random by the challenger every time).
     ProveShard { hash: String, nonce: [u8; 32] },
-    /// Réplique un manifest sur le nœud distant.
+    /// Replicates a manifest on the remote node.
     PutManifest(FileManifest),
-    /// Récupère un manifest par hash de fichier.
+    /// Fetches a manifest by file hash.
     GetManifest(String),
-    /// Message Raft (openraft) : payload bincode opaque pour le transport.
+    /// Raft (openraft) message: bincode payload, opaque to the transport.
     Raft(RaftRpc),
 }
 
-/// RPCs du consensus, transportées telles quelles ; seule la couche nauka-raft
-/// sait les désérialiser.
+/// Consensus RPCs, carried as-is; only the nauka-raft layer knows how to
+/// deserialize them.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RaftRpc {
     AppendEntries(Vec<u8>),
     Vote(Vec<u8>),
     InstallSnapshot(Vec<u8>),
-    /// Commande d'admin/cliente (init, add-learner, change-membership,
-    /// client-write, metrics) — traitée par le nœud local.
+    /// Admin/client command (init, add-learner, change-membership,
+    /// client-write, metrics) — handled by the local node.
     Admin(Vec<u8>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Pong,
-    /// Hash du shard stocké.
+    /// Hash of the stored shard.
     PutShardOk(String),
-    /// `None` si le shard est absent ou corrompu sur le nœud distant.
+    /// `None` if the shard is missing or corrupt on the remote node.
     Shard(Option<Vec<u8>>),
     Has(bool),
-    /// Réponse au challenge : `None` si le shard est absent ou corrompu.
+    /// Answer to the challenge: `None` if the shard is missing or corrupt.
     Proof(Option<[u8; 32]>),
     PutManifestOk,
     Manifest(Option<FileManifest>),
-    /// Réponse Raft : payload bincode opaque.
+    /// Raft response: opaque bincode payload.
     Raft(Vec<u8>),
-    /// Erreur applicative côté serveur.
+    /// Application-level error on the server side.
     Error(String),
 }
 
@@ -65,15 +66,15 @@ pub enum Response {
 pub enum WireError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("message trop grand: {0} octets (max {MAX_MESSAGE_SIZE})")]
+    #[error("message too large: {0} bytes (max {MAX_MESSAGE_SIZE})")]
     TooLarge(u32),
-    #[error("sérialisation: {0}")]
+    #[error("serialization: {0}")]
     Codec(#[from] bincode::Error),
-    #[error("stream quic: {0}")]
+    #[error("quic stream: {0}")]
     Stream(String),
 }
 
-/// Écrit un message framé sur un stream QUIC sortant.
+/// Writes a framed message to an outgoing QUIC stream.
 pub async fn write_message<T: Serialize>(
     send: &mut quinn::SendStream,
     msg: &T,
@@ -92,7 +93,7 @@ pub async fn write_message<T: Serialize>(
     Ok(())
 }
 
-/// Lit un message framé sur un stream QUIC entrant.
+/// Reads a framed message from an incoming QUIC stream.
 pub async fn read_message<T: serde::de::DeserializeOwned>(
     recv: &mut quinn::RecvStream,
 ) -> Result<T, WireError> {

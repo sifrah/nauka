@@ -1,6 +1,6 @@
-//! mTLS de cluster : seuls les porteurs d'un certificat signé par la clé
-//! de cluster passent la poignée de main — dans les deux sens.
-//! (Binaire de test séparé : l'identité TLS d'un process est un singleton.)
+//! Cluster mTLS: only holders of a certificate signed by the cluster key get
+//! through the handshake — in both directions.
+//! (Separate test binary: a process's TLS identity is a singleton.)
 
 use std::sync::Arc;
 
@@ -13,8 +13,8 @@ fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// Client quinn brut avec une config rustls arbitraire (pour simuler des
-/// attaquants sans passer par PeerClient, qui utilise l'identité globale).
+/// Raw quinn client with an arbitrary rustls config (to simulate attackers
+/// without going through PeerClient, which uses the global identity).
 async fn raw_connect(
     addr: std::net::SocketAddr,
     crypto: rustls::ClientConfig,
@@ -31,7 +31,7 @@ async fn raw_connect(
 
 #[tokio::test]
 async fn cluster_mtls_accepts_members_rejects_strangers() {
-    // Clé de cluster + identité du process (nœud ET client de test).
+    // Cluster key + process identity (both the node AND the test client).
     let keys_dir = tempfile::tempdir().unwrap();
     nauka_transport::generate_cluster_ca(keys_dir.path()).unwrap();
     let tls =
@@ -40,27 +40,27 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
     let node_id = tls.node_id;
     set_cluster_tls(tls);
 
-    // L'identité est stable et dérivée de la clé : recharger donne le même id.
+    // The identity is stable and key-derived: reloading yields the same id.
     let again =
         load_cluster_tls(keys_dir.path(), Some(&keys_dir.path().join("node.key"))).unwrap();
     assert_eq!(again.fingerprint, fingerprint);
     assert_eq!(again.node_id, node_id);
 
-    // Nœud mTLS.
+    // mTLS node.
     let store_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(store_dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
     tokio::spawn(serve_endpoint(store, endpoint, None));
 
-    // 1. Membre légitime (notre identité globale) : tout fonctionne.
+    // 1. Legitimate member (our global identity): everything works.
     let client = PeerClient::connect(addr).await.unwrap();
     client.ping().await.unwrap();
-    let hash = client.put_shard(b"authentifie".to_vec()).await.unwrap();
-    assert_eq!(client.get_shard(&hash).await.unwrap().unwrap(), b"authentifie");
+    let hash = client.put_shard(b"authenticated".to_vec()).await.unwrap();
+    assert_eq!(client.get_shard(&hash).await.unwrap().unwrap(), b"authenticated");
 
-    // 2. Client SANS certificat (vérifie quand même la CA) : rejeté au
-    //    handshake par le serveur.
+    // 2. Client WITHOUT a certificate (still verifies the CA): rejected at
+    //    handshake time by the server.
     let ca_only = rustls::ClientConfig::builder_with_provider(crypto_provider())
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -70,7 +70,7 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
         .with_no_client_auth();
     assert_rejected(raw_connect(addr, ca_only, nauka_transport::tls::NODE_SAN).await).await;
 
-    // 3. Client d'un AUTRE cluster (CA étrangère) : rejeté.
+    // 3. Client from ANOTHER cluster (foreign CA): rejected.
     let other_dir = tempfile::tempdir().unwrap();
     nauka_transport::generate_cluster_ca(other_dir.path()).unwrap();
     let other = load_cluster_tls(other_dir.path(), None).unwrap();
@@ -83,9 +83,9 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
     assert_rejected(raw_connect(addr, foreign, nauka_transport::tls::NODE_SAN).await).await;
 }
 
-/// Un rejet mTLS peut apparaître soit à `connect` (alerte reçue pendant le
-/// handshake), soit juste après (fermeture immédiate) : dans les deux cas
-/// la connexion doit être inutilisable.
+/// An mTLS rejection can surface either at `connect` (alert received during
+/// the handshake) or just after it (immediate close): either way the
+/// connection must be unusable.
 async fn assert_rejected(result: anyhow::Result<quinn::Connection>) {
     let conn = match result {
         Err(_) => return,
@@ -93,9 +93,9 @@ async fn assert_rejected(result: anyhow::Result<quinn::Connection>) {
     };
     match tokio::time::timeout(std::time::Duration::from_secs(3), conn.closed()).await {
         Ok(quinn::ConnectionError::ApplicationClosed(_)) => {
-            panic!("connexion fermée proprement au lieu d'être rejetée")
+            panic!("connection closed gracefully instead of being rejected")
         }
-        Ok(_) => {} // fermée par erreur TLS/transport : rejetée
-        Err(_) => panic!("la connexion non authentifiée est restée ouverte"),
+        Ok(_) => {} // closed by a TLS/transport error: rejected
+        Err(_) => panic!("the unauthenticated connection stayed open"),
     }
 }

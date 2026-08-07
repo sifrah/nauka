@@ -1,5 +1,5 @@
-//! Intégration : un cluster de 3 nœuds QUIC, un nœud perd/corrompt ses
-//! shards, son scrubber les régénère depuis les autres.
+//! Integration: a 3-node QUIC cluster, one node loses/corrupts its shards,
+//! its scrubber regenerates them from the others.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +31,7 @@ async fn node_heals_lost_and_corrupted_shards() {
     let ids: Vec<(String, u64)> = nodes.iter().map(|n| (n.id.clone(), 1)).collect();
     let id_refs: Vec<(&str, u64)> = ids.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
-    // Un fichier 4+2 de 3 stripes, placé selon le placement officiel.
+    // A 4+2 file of 3 stripes, laid out with the official placement.
     let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 32 * 1024 };
     let data: Vec<u8> = (0..cfg.stripe_data_len() * 3).map(|i| (i % 253) as u8).collect();
     let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
@@ -43,12 +43,12 @@ async fn node_heals_lost_and_corrupted_shards() {
         }
     }
 
-    // Sanité : rien à réparer au départ.
+    // Sanity: nothing to heal at first.
     let r = scrub_once(&nodes[0].store, &nodes[0].id, &ids).await.unwrap();
     assert_eq!(r.shards_healed, 0);
     assert!(r.shards_checked > 0);
 
-    // Désastre sur le nœud 0 : il perd TOUS ses shards.
+    // Disaster on node 0: it loses ALL of its shards.
     let victim = &nodes[0];
     let owned = shards_owned_by(&manifest, &victim.id, &id_refs);
     assert!(!owned.is_empty());
@@ -56,15 +56,15 @@ async fn node_heals_lost_and_corrupted_shards() {
         victim.store.delete_shard(hash).unwrap();
     }
 
-    // Son scrubber régénère tout depuis les deux autres nœuds.
+    // Its scrubber regenerates everything from the other two nodes.
     let r = scrub_once(&victim.store, &victim.id, &ids).await.unwrap();
     assert_eq!(r.shards_healed, owned.len());
     assert_eq!(r.shards_unrecoverable, 0);
     for (_, _, hash) in &owned {
-        assert!(victim.store.get_shard(hash).is_ok(), "shard {hash} non régénéré");
+        assert!(victim.store.get_shard(hash).is_ok(), "shard {hash} not healed");
     }
 
-    // Deuxième passe : plus rien à faire.
+    // Second pass: nothing left to do.
     let r = scrub_once(&victim.store, &victim.id, &ids).await.unwrap();
     assert_eq!(r.shards_healed, 0);
     assert_eq!(r.shards_unrecoverable, 0);

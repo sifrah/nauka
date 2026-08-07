@@ -1,10 +1,10 @@
-// Chiffrement de bout en bout, côté navigateur — WebCrypto AES-256-GCM.
-// Format STRICTEMENT identique à la crate Rust `nauka-crypto` :
-//   en-tête  : "YGE1" ‖ préfixe_nonce(8)
-//   par chunk: longueur_ct u32 LE ‖ flags u8 (1 = dernier) ‖ ct(+tag 16 o)
-//   nonce    : préfixe(8) ‖ compteur u32 BE ; AAD = [flags]
-// Un fichier chiffré ici se déchiffre avec `nauka-node download`, et
-// réciproquement.
+// End-to-end encryption, in the browser — WebCrypto AES-256-GCM.
+// Format STRICTLY identical to the Rust crate `nauka-crypto`:
+//   header   : "YGE1" ‖ nonce_prefix(8)
+//   per chunk: ct_length u32 LE ‖ flags u8 (1 = last) ‖ ct(+16-byte tag)
+//   nonce    : prefix(8) ‖ counter u32 BE ; AAD = [flags]
+// A file encrypted here can be decrypted with `nauka-node download`, and
+// the other way around.
 
 export const CHUNK_SIZE = 1024 * 1024;
 const TAG_SIZE = 16;
@@ -32,7 +32,7 @@ export function decodeKey(s: string): Uint8Array {
   let bits = 0;
   for (const ch of cleaned) {
     const v = B64URL.indexOf(ch);
-    if (v < 0) throw new Error("clé invalide");
+    if (v < 0) throw new Error("invalid key");
     buffer = (buffer << 6) | v;
     bits += 6;
     if (bits >= 8) {
@@ -41,7 +41,7 @@ export function decodeKey(s: string): Uint8Array {
     }
   }
   const key = new Uint8Array(bytes);
-  if (key.length !== 32) throw new Error("clé invalide (32 octets attendus)");
+  if (key.length !== 32) throw new Error("invalid key (32 bytes expected)");
   return key;
 }
 
@@ -65,15 +65,15 @@ function nonceFor(prefix: Uint8Array, counter: number): Uint8Array {
   return nonce;
 }
 
-/** Taille du ciphertext pour une taille de plaintext donnée. */
+/** Ciphertext size for a given plaintext size. */
 export function ciphertextSize(plainSize: number): number {
   const chunks = Math.max(1, Math.ceil(plainSize / CHUNK_SIZE));
   return 12 + plainSize + chunks * (4 + 1 + TAG_SIZE);
 }
 
 /**
- * Chiffre un flux (fichier) en flux : mémoire bornée à ~un chunk.
- * `onProgress(octets_de_plaintext_traités)` optionnel.
+ * Encrypts a stream (a file) as a stream: memory stays bounded to ~one chunk.
+ * `onProgress(plaintext_bytes_processed)` is optional.
  */
 export function encryptStream(
   input: ReadableStream<Uint8Array>,
@@ -92,8 +92,8 @@ export function encryptStream(
   let processed = 0;
 
   async function nextChunk(): Promise<Uint8Array | null> {
-    // Accumule jusqu'à CHUNK_SIZE + 1 octet de lookahead (pour connaître
-    // le dernier chunk sans lecture supplémentaire).
+    // Accumulate up to CHUNK_SIZE + 1 byte of lookahead (so the last chunk
+    // can be identified without an extra read).
     while (!done && pending.length <= CHUNK_SIZE) {
       const { value, done: d } = await reader.read();
       if (d) {
@@ -158,7 +158,7 @@ export function encryptStream(
   });
 }
 
-/** Déchiffre un flux chiffré au format YGE1. Rejette si altéré/tronqué. */
+/** Decrypts a YGE1-encrypted stream. Rejects tampered/truncated input. */
 export function decryptStream(
   input: ReadableStream<Uint8Array>,
   rawKey: Uint8Array,
@@ -194,9 +194,9 @@ export function decryptStream(
       keyPromise ??= importKey(rawKey);
       const key = await keyPromise;
       if (!headerParsed) {
-        if (!(await fill(12))) throw new Error("flux tronqué (en-tête)");
+        if (!(await fill(12))) throw new Error("truncated stream (header)");
         for (let i = 0; i < 4; i++) {
-          if (pending[i] !== MAGIC[i]) throw new Error("pas un flux chiffré yogfile");
+          if (pending[i] !== MAGIC[i]) throw new Error("not a yogfile encrypted stream");
         }
         prefix = pending.slice(4, 12);
         pending = pending.slice(12);
@@ -204,18 +204,18 @@ export function decryptStream(
       }
       if (sawLast) {
         if (pending.length > 0 || (await fill(1))) {
-          throw new Error("données après le dernier chunk");
+          throw new Error("data after the last chunk");
         }
         controller.close();
         return;
       }
-      if (!(await fill(5))) throw new Error("flux tronqué (chunk manquant)");
+      if (!(await fill(5))) throw new Error("truncated stream (missing chunk)");
       const len = new DataView(pending.buffer, pending.byteOffset).getUint32(0, true);
       const flags = pending[4];
       if (len < TAG_SIZE || len > CHUNK_SIZE + TAG_SIZE) {
-        throw new Error("taille de chunk invalide");
+        throw new Error("invalid chunk size");
       }
-      if (!(await fill(5 + len))) throw new Error("chunk incomplet");
+      if (!(await fill(5 + len))) throw new Error("incomplete chunk");
       const ct = pending.slice(5, 5 + len);
       pending = pending.slice(5 + len);
       let plain: ArrayBuffer;
@@ -230,7 +230,7 @@ export function decryptStream(
           ct as BufferSource,
         );
       } catch {
-        throw new Error("déchiffrement refusé : données altérées ou mauvaise clé");
+        throw new Error("decryption refused: tampered data or wrong key");
       }
       counter += 1;
       processed += plain.byteLength;

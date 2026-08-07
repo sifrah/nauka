@@ -1,12 +1,12 @@
-# Transport QUIC inter-nœuds
+# Inter-node QUIC transport
 
-## Protocole
+## Protocol
 
-Un échange = **un stream bidirectionnel QUIC** : le client écrit une
-`Request`, le serveur répond une `Response`, framées `u32 LE longueur +
-bincode` (taille max d'un message : 64 Mio). Les streams d'une même
-connexion sont multiplexés — plusieurs shards transitent en parallèle sans
-head-of-line blocking entre eux.
+One exchange = **one bidirectional QUIC stream**: the client writes a
+`Request`, the server answers with a `Response`, framed as
+`u32 little-endian length + bincode` (maximum message size: 64 MiB).
+Streams on the same connection are multiplexed — several shards fly in
+parallel with no head-of-line blocking between them.
 
 ```
 Request:  Ping | PutShard(bytes) | GetShard(hash) | HasShard(hash)
@@ -15,74 +15,76 @@ Response: Pong | PutShardOk(hash) | Shard(Option<bytes>) | Has(bool)
         | PutManifestOk | Manifest(Option<m>) | Raft(bytes) | Error(str)
 ```
 
-Détails de comportement :
+Behavioral details:
 
-- `GetShard` d'un shard **corrompu côté serveur → `None`** (comme absent) :
-  le client le reconstruit par Reed-Solomon au lieu de recevoir des octets
-  faux.
-- Les RPCs Raft (`RaftRpc::{AppendEntries,Vote,InstallSnapshot,Admin}`)
-  sont des payloads bincode opaques pour le transport, remis au moteur
-  openraft local via le trait `RaftHandler` branché sur le serveur.
-- ALPN : `yog/0`.
+- `GetShard` on a shard that is **corrupted server-side returns `None`**
+  (as if absent): the client rebuilds it with Reed-Solomon instead of
+  receiving wrong bytes.
+- Raft RPCs (`RaftRpc::{AppendEntries,Vote,InstallSnapshot,Admin}`) are
+  opaque bincode payloads as far as the transport is concerned, handed to
+  the local openraft engine through the `RaftHandler` trait wired into the
+  server.
+- ALPN: `yog/0`.
 
-## Les deux plans réseau
+## The two network planes
 
-Chaque nœud en mode consensus ouvre **deux endpoints QUIC** :
+Every node in consensus mode opens **two QUIC endpoints**:
 
-| Plan | Port | Buffers socket UDP | Rôle |
+| Plane | Port | UDP socket buffers | Role |
 |---|---|---|---|
-| Data | P (défaut 7311) | 8 Mio | shards, manifests, RPCs d'admin |
-| Consensus | **P + 1** | 1 Mio | RPCs Raft exclusivement |
+| Data | P (default 7311) | 8 MiB | shards, manifests, admin RPCs |
+| Consensus | **P + 1** | 1 MiB | Raft RPCs exclusively |
 
-Pourquoi : sous saturation, les heartbeats Raft faisaient la queue derrière
-des mégaoctets de shards dans le même socket → timeouts → ré-élections en
-pleine charge (observé pendant le stress test 15 Go). Sockets séparés =
-files kernel séparées ; les petits buffers du plan consensus **bornent le
-délai de queue**. Le plan consensus **refuse toute requête non-Raft** : une
-collision de ports ne peut pas le transformer en faux plan de données.
+Why: under saturation, Raft heartbeats queued behind megabytes of shards in
+the same socket → timeouts → re-elections at peak load (observed during the
+15 GB stress test). Separate sockets mean separate kernel queues, and the
+small buffers on the consensus plane **bound the queuing delay**. The
+consensus plane **refuses every non-Raft request**: a port collision cannot
+turn it into a bogus data plane.
 
-Conséquence opérationnelle : ouvrir **P et P+1 en UDP**, et espacer les
-ports d'au moins 2 si plusieurs nœuds cohabitent sur un hôte.
+Operational consequence: open **P and P+1 over UDP**, and space ports at
+least 2 apart if several nodes share a host.
 
-Test de régression (`nauka-raft/tests/priority.rs`) : 2,2 Go injectés en 12 s
-pendant des écritures registre — 0 changement de leader, 0 écriture échouée.
+Regression test (`nauka-raft/tests/priority.rs`): 2.2 GB pushed through in
+12 s while registry writes were running — 0 leader changes, 0 failed
+writes.
 
-## Tuning débit (leçons du stress test 15 Go)
+## Throughput tuning (lessons from the 15 GB stress test)
 
-Le débit est passé de **6 Mo/s à ~120 Mo/s** par la levée successive de
-quatre goulots, dans l'ordre où ils ont été découverts :
+Throughput went from **6 MB/s to ~120 MB/s** by lifting four bottlenecks in
+the order they were discovered:
 
-1. **`max_udp_payload_size`** (le vrai coupable, ×10) : le défaut quinn
-   (1472 o) plafonnait le MTU quels que soient `initial_mtu` et la
-   découverte. Porté à 65527 ; le MTU découvert atteint ~16k sur loopback,
-   les jumbo frames en datacenter, et retombe proprement à 1200 sur
-   Internet.
-2. **BBR** au lieu de Cubic : sur lien rapide à petit buffer, Cubic
-   s'effondre aux pertes (mesuré : 7 Mo/s, 5 495 pertes, RTT 526 ms de
-   bufferbloat) ; BBR mesure le débit réel et pace ses envois. Fenêtre
-   initiale 4 Mio.
-3. **Buffers socket UDP 8 Mio** : le défaut macOS d'envoi est de… 9216
-   octets.
-4. **Keep-alive 2 s + idle timeout 30 s** explicites : une connexion
-   silencieuse sous congestion ne meurt pas en douce ; les échecs sont
-   francs et les retries (idempotents) reprennent.
+1. **`max_udp_payload_size`** (the real culprit, ×10): quinn's default
+   (1472 B) capped the MTU regardless of `initial_mtu` and of path
+   discovery. Raised to 65527; the discovered MTU reaches ~16k on loopback,
+   jumbo frames in a datacenter, and falls back cleanly to 1200 over the
+   internet.
+2. **BBR instead of Cubic**: on a fast link with small buffers, Cubic
+   collapses on loss (measured: 7 MB/s, 5,495 losses, 526 ms RTT of
+   bufferbloat); BBR measures the actual bandwidth and paces its sends.
+   Initial window 4 MiB.
+3. **8 MiB UDP socket buffers**: the macOS default send buffer is… 9216
+   bytes.
+4. **Explicit 2 s keep-alive + 30 s idle timeout**: a silent connection
+   under congestion no longer dies quietly; failures are loud and the
+   (idempotent) retries take over.
 
-Micro-benchs reproductibles :
+Reproducible micro-benchmarks:
 
 ```
 cargo test -p nauka-transport --release --test bench -- --ignored --nocapture
-# raw_quinn_single_stream   : débit quinn brut + stats de chemin (rtt, cwnd, mtu, pertes)
-# raw_put_shard_throughput  : débit du protocole put_shard pipeliné
-# single_put_shard_latency  : latence par taille de payload
+# raw_quinn_single_stream   : raw quinn throughput + path stats (rtt, cwnd, mtu, loss)
+# raw_put_shard_throughput  : throughput of the pipelined put_shard protocol
+# single_put_shard_latency  : latency by payload size
 ```
 
 ## TLS
 
-Deux modes, choisis au démarrage du process (voir
-[identite-et-decouverte.md](identite-et-decouverte.md)) :
+Two modes, chosen when the process starts (see
+[identity-and-discovery.md](identity-and-discovery.md)):
 
-- **mTLS de cluster** (des clés sont fournies) : certificats Ed25519 signés
-  par la clé de cluster, vérification mutuelle, SNI `node.nauka`.
-- **Insecure** (aucune clé) : certificat auto-signé, client sans
-  vérification — lien chiffré mais pairs non authentifiés. Conservé pour le
-  développement, avec warning au démarrage.
+- **Cluster mTLS** (keys provided): Ed25519 certificates signed by the
+  cluster key, mutual verification, SNI `node.nauka`.
+- **Insecure** (no keys): self-signed certificate, client verification
+  disabled — encrypted link, unauthenticated peers. Kept for development,
+  with a warning at startup.

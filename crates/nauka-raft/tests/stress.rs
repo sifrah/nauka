@@ -1,5 +1,5 @@
-//! Stress tests du consensus : volume d'écritures concurrentes, crash du
-//! leader en plein trafic, résurrection d'un nœud à état vide.
+//! Consensus stress tests: concurrent write volume, leader crash in the
+//! middle of traffic, revival of a node with empty state.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -35,7 +35,7 @@ async fn spawn_raft_node(id: u64, bind: &str) -> Node {
 
 fn test_manifest(i: usize) -> nauka_erasure::FileManifest {
     let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
-    let data = format!("manifest de stress numero {i}");
+    let data = format!("stress manifest number {i}");
     encode_file(data.as_bytes(), &cfg).unwrap().0
 }
 
@@ -66,7 +66,7 @@ async fn wait_leader(nodes: &[Node], exclude: Option<u64>) -> (u64, SocketAddr) 
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    panic!("pas de leader élu");
+    panic!("no leader elected");
 }
 
 async fn wait_registry_size(app: &Arc<RaftApp>, expected: usize, timeout_s: u64) {
@@ -78,15 +78,15 @@ async fn wait_registry_size(app: &Arc<RaftApp>, expected: usize, timeout_s: u64)
         }
         assert!(
             Instant::now() < deadline,
-            "nœud {} bloqué à {n}/{expected} manifests",
+            "node {} stuck at {n}/{expected} manifests",
             app.id
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
-/// 1. Volume : 500 écritures par 32 workers concurrents sur le leader,
-///    convergence vérifiée sur les 3 nœuds.
+/// 1. Volume: 500 writes from 32 concurrent workers against the leader,
+///    convergence checked on all 3 nodes.
 #[tokio::test]
 async fn concurrent_write_volume_converges() {
     const WRITES: usize = 500;
@@ -111,7 +111,7 @@ async fn concurrent_write_volume_converges() {
                 let cmd = AppCommand::RegisterManifest(test_manifest(i));
                 match admin_call(&client, &AdminRequest::Write(cmd)).await {
                     Ok(AdminResponse::Ok(r)) if r.ok => ok += 1,
-                    other => panic!("écriture {i}: {other:?}"),
+                    other => panic!("write {i}: {other:?}"),
                 }
             }
             ok
@@ -124,7 +124,7 @@ async fn concurrent_write_volume_converges() {
     let elapsed = start.elapsed();
     assert_eq!(total, WRITES);
     println!(
-        "{WRITES} écritures en {elapsed:?} ({:.0} writes/s)",
+        "{WRITES} writes in {elapsed:?} ({:.0} writes/s)",
         WRITES as f64 / elapsed.as_secs_f64()
     );
 
@@ -133,10 +133,10 @@ async fn concurrent_write_volume_converges() {
     }
 }
 
-/// 2. Crash du leader en plein trafic : les survivants ré-élisent et les
-///    écritures reprennent sans perte de ce qui a été committé.
-/// 3. Résurrection : le nœud crashé revient avec un état VIDE (log mémoire)
-///    et rattrape tout le registre depuis le nouveau leader.
+/// 2. Leader crash in the middle of traffic: the survivors re-elect and
+///    writes resume without losing anything that was committed.
+/// 3. Revival: the crashed node comes back with EMPTY state (in-memory log)
+///    and catches up on the whole registry from the new leader.
 #[tokio::test]
 async fn leader_crash_failover_and_catchup() {
     const BEFORE: usize = 100;
@@ -150,18 +150,18 @@ async fn leader_crash_failover_and_catchup() {
     init_cluster(&nodes).await;
     let (leader_id, leader_addr) = wait_leader(&nodes, None).await;
 
-    // Trafic initial.
+    // Initial traffic.
     let client = PeerClient::connect(leader_addr).await.unwrap();
     for i in 0..BEFORE {
         let cmd = AppCommand::RegisterManifest(test_manifest(i));
         match admin_call(&client, &AdminRequest::Write(cmd)).await.unwrap() {
             AdminResponse::Ok(r) if r.ok => {}
-            other => panic!("écriture {i}: {other:?}"),
+            other => panic!("write {i}: {other:?}"),
         }
     }
 
-    // Crash brutal du leader : moteur Raft arrêté, endpoint fermé, et tout
-    // son état droppé (données perdues, socket libéré).
+    // Hard leader crash: Raft engine stopped, endpoint closed, and all of its
+    // state dropped (data lost, socket released).
     let idx = nodes.iter().position(|n| n.app.id == leader_id).unwrap();
     let crashed = nodes.remove(idx);
     let crashed_addr = crashed.addr;
@@ -169,15 +169,15 @@ async fn leader_crash_failover_and_catchup() {
     crashed.endpoint.close(0u32.into(), b"crash");
     crashed.consensus_endpoint.close(0u32.into(), b"crash");
     drop(crashed);
-    println!("leader {leader_id} crashé");
+    println!("leader {leader_id} crashed");
 
-    // Ré-élection parmi les survivants.
+    // Re-election among the survivors.
     let (new_leader, new_leader_addr) = wait_leader(&nodes, Some(leader_id)).await;
     assert_ne!(new_leader, leader_id);
-    println!("nouveau leader: {new_leader}");
+    println!("new leader: {new_leader}");
 
-    // Le trafic reprend. Les premières écritures peuvent échouer pendant la
-    // bascule : on retente.
+    // Traffic resumes. The first writes may fail during the switchover, so we
+    // retry.
     let client = PeerClient::connect(new_leader_addr).await.unwrap();
     for i in BEFORE..BEFORE + AFTER {
         let cmd = AppCommand::RegisterManifest(test_manifest(i));
@@ -191,17 +191,17 @@ async fn leader_crash_failover_and_catchup() {
                 _ => tokio::time::sleep(Duration::from_millis(250)).await,
             }
         }
-        assert!(done, "écriture {i} impossible après failover");
+        assert!(done, "write {i} impossible after failover");
     }
 
-    // Les 2 survivants convergent à BEFORE+AFTER.
+    // The 2 survivors converge at BEFORE+AFTER.
     for n in &nodes {
         wait_registry_size(&n.app, BEFORE + AFTER, 30).await;
     }
 
-    // Résurrection : même id, même adresse, état totalement vide (nouveau
-    // data-dir — le pire cas, disque perdu).
-    // Le socket peut mettre un instant à se libérer après le drop.
+    // Revival: same id, same address, completely empty state (fresh data-dir
+    // — the worst case, disk lost).
+    // The socket can take a moment to be released after the drop.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let mut pair = None;
@@ -214,16 +214,16 @@ async fn leader_crash_failover_and_catchup() {
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
     }
-    let (endpoint, consensus_endpoint) = pair.expect("sockets jamais libérés");
+    let (endpoint, consensus_endpoint) = pair.expect("sockets never released");
     let revived = RaftApp::start(leader_id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = revived.clone();
     tokio::spawn(serve_endpoint(store.clone(), endpoint, Some(handler.clone())));
     tokio::spawn(serve_consensus_endpoint(consensus_endpoint, handler));
 
-    // Il doit rattraper tout le registre (snapshot ou replay du log).
+    // It must catch up on the whole registry (snapshot or log replay).
     wait_registry_size(&revived, BEFORE + AFTER, 60).await;
     println!(
-        "nœud {leader_id} ressuscité et à jour: {} manifests",
+        "node {leader_id} revived and up to date: {} manifests",
         revived.app_state().manifests.len()
     );
 }

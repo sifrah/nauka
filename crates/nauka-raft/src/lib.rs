@@ -1,9 +1,9 @@
-//! Consensus Raft de Nauka (openraft sur QUIC).
+//! Nauka's Raft consensus (openraft over QUIC).
 //!
-//! Le log Raft ne réplique que des MÉTADONNÉES (registre des manifests,
-//! membership) — jamais les octets des shards, qui transitent en direct
-//! par nauka-transport. Le cluster élit un leader ; les écritures passent
-//! par lui, les lectures d'état se font localement sur chaque nœud.
+//! The Raft log replicates METADATA only (manifest registry, membership) —
+//! never shard bytes, which travel directly over nauka-transport. The cluster
+//! elects a leader; writes go through it, while state reads are served
+//! locally on every node.
 
 pub mod network;
 pub mod store;
@@ -26,7 +26,7 @@ use types::{
 pub use types::AppResponse;
 pub use openraft;
 
-/// Instance Raft d'un nœud + accès à l'état matérialisé.
+/// A node's Raft instance, with access to the materialized state.
 pub struct RaftApp {
     pub id: NodeId,
     pub raft: Raft<TypeConfig>,
@@ -34,21 +34,21 @@ pub struct RaftApp {
 }
 
 impl RaftApp {
-    /// Démarre le moteur Raft de ce nœud, avec état durable dans `dir`
-    /// (log + vote en redb, snapshots sur fichier). Un nœud qui redémarre
-    /// avec le même dir reprend là où il s'était arrêté ; un cluster entier
-    /// éteint redémarre sans perte. Le nœud reste passif tant que le cluster
-    /// n'est pas initialisé (`AdminRequest::Init`) ou qu'il n'est pas ajouté
-    /// par un membre existant.
+    /// Starts this node's Raft engine, with durable state under `dir`
+    /// (log + vote in redb, snapshots on file). A node restarting with the
+    /// same dir picks up where it left off; a whole cluster powered off
+    /// comes back without loss. The node stays passive until the cluster is
+    /// initialized (`AdminRequest::Init`) or until an existing member adds
+    /// it.
     pub async fn start(id: NodeId, dir: &std::path::Path) -> Result<Arc<Self>> {
         let config = Arc::new(
             Config {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
                 election_timeout_max: 3000,
-                // Snapshot régulier pour borner le log redb ; on garde une
-                // marge d'entrées pour que les followers un peu en retard
-                // rattrapent par le log plutôt que par snapshot complet.
+                // Snapshot regularly to bound the redb log; keep a margin of
+                // entries so slightly lagging followers catch up from the log
+                // rather than from a full snapshot.
                 snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(256),
                 max_in_snapshot_log_to_keep: 64,
                 ..Default::default()
@@ -65,38 +65,38 @@ impl RaftApp {
             state_machine.clone(),
         )
         .await?;
-        info!("raft démarré, node_id={id}");
+        info!("raft started, node_id={id}");
         Ok(Arc::new(Self { id, raft, state_machine }))
     }
 
-    /// État répliqué courant (lecture locale, éventuellement en retard sur
-    /// le leader — suffisant pour le healer et l'affichage).
+    /// Current replicated state (local read, possibly lagging behind the
+    /// leader — good enough for the healer and for display).
     pub fn app_state(&self) -> AppState {
         self.state_machine.read_state()
     }
 
-    /// Écrit une commande dans le registre : localement si ce nœud est
-    /// leader, sinon en la transmettant au leader via le transport.
+    /// Writes a command to the registry: locally if this node is the leader,
+    /// otherwise by forwarding it to the leader over the transport.
     pub async fn write(&self, cmd: AppCommand) -> Result<AppResponse> {
         match self.raft.client_write(cmd.clone()).await {
             Ok(resp) => Ok(resp.data),
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {
                 let addr: std::net::SocketAddr = f
                     .leader_node
-                    .ok_or_else(|| anyhow::anyhow!("pas de leader connu"))?
+                    .ok_or_else(|| anyhow::anyhow!("no known leader"))?
                     .addr
                     .parse()?;
                 let client = nauka_transport::PeerClient::connect(addr).await?;
                 match admin_call(&client, &AdminRequest::Write(cmd)).await? {
                     AdminResponse::Ok(resp) => Ok(resp),
-                    other => anyhow::bail!("écriture via le leader: {other:?}"),
+                    other => anyhow::bail!("write via leader: {other:?}"),
                 }
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Membres actuels (id → adresse), d'après les métriques Raft.
+    /// Current members (id → address), from the Raft metrics.
     pub fn members(&self) -> BTreeMap<NodeId, String> {
         let metrics = self.raft.metrics().borrow().clone();
         metrics
@@ -106,13 +106,13 @@ impl RaftApp {
             .collect()
     }
 
-    /// Coordonnées réseau connues du cluster (adresse → position).
+    /// Network coordinates known to the cluster (address → position).
     pub fn coords(&self) -> BTreeMap<String, nauka_cluster::vivaldi::Coord> {
         self.app_state().node_coords
     }
 
-    /// Vue pondérée du cluster pour le placement : membres du membership
-    /// avec leur capacité déclarée (défaut si pas encore déclarée), triée.
+    /// Weighted view of the cluster for placement: membership members with
+    /// their declared capacity (default if not declared yet), sorted.
     pub fn weighted_view(&self, default_capacity: u64) -> Vec<(String, u64)> {
         let capacities = self.app_state().node_capacities;
         let mut view: Vec<(String, u64)> = self
@@ -193,8 +193,8 @@ impl RaftApp {
     }
 }
 
-/// Adaptateur : reçoit les RPCs Raft arrivées par le transport QUIC et les
-/// remet au moteur openraft local.
+/// Adapter: takes the Raft RPCs arriving over the QUIC transport and hands
+/// them to the local openraft engine.
 #[async_trait::async_trait]
 impl nauka_transport::server::RaftHandler for RaftApp {
     async fn handle(
@@ -228,7 +228,7 @@ impl nauka_transport::server::RaftHandler for RaftApp {
     }
 }
 
-/// Helper client : envoie une AdminRequest à un nœud et décode la réponse.
+/// Client helper: sends an AdminRequest to a node and decodes the response.
 pub async fn admin_call(
     client: &nauka_transport::PeerClient,
     req: &AdminRequest,
@@ -240,14 +240,14 @@ pub async fn admin_call(
     Ok(bincode::deserialize(&resp)?)
 }
 
-/// Exécute une AdminRequest en suivant la redirection vers le leader :
-/// essaie chaque peer, suit les `ForwardTo`, retente pendant les bascules.
+/// Runs an AdminRequest following the redirect to the leader: tries each
+/// peer, follows `ForwardTo`, retries across leader changes.
 pub async fn admin_via_leader(
     peers: &[std::net::SocketAddr],
     req: &AdminRequest,
 ) -> Result<AdminResponse> {
     let mut targets: Vec<std::net::SocketAddr> = peers.to_vec();
-    let mut last_err = String::from("aucun peer joignable");
+    let mut last_err = String::from("no reachable peer");
     for _ in 0..4 {
         for addr in targets.clone() {
             let Ok(client) = nauka_transport::PeerClient::connect(addr).await else {
@@ -260,7 +260,7 @@ pub async fn admin_via_leader(
                     }
                 }
                 Ok(AdminResponse::ForwardTo { leader: None }) => {
-                    last_err = "pas de leader élu pour l'instant".into();
+                    last_err = "no leader elected yet".into();
                 }
                 Ok(AdminResponse::Err(e)) => last_err = e,
                 Ok(resp) => return Ok(resp),
@@ -269,17 +269,17 @@ pub async fn admin_via_leader(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    anyhow::bail!("échec via le leader: {last_err}")
+    anyhow::bail!("failed via leader: {last_err}")
 }
 
-/// Écrit une commande dans le registre en suivant la redirection vers le
-/// leader si nécessaire.
+/// Writes a command to the registry, following the redirect to the leader
+/// if needed.
 pub async fn write_via_leader(
     peers: &[std::net::SocketAddr],
     cmd: AppCommand,
 ) -> Result<AppResponse> {
     match admin_via_leader(peers, &AdminRequest::Write(cmd)).await? {
         AdminResponse::Ok(resp) => Ok(resp),
-        other => anyhow::bail!("réponse inattendue: {other:?}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
     }
 }

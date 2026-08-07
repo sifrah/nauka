@@ -1,39 +1,39 @@
-//! Placement déterministe des shards : rendezvous hashing PONDÉRÉ (WRH).
+//! Deterministic shard placement: WEIGHTED rendezvous hashing (WRH).
 //!
-//! Chaque nœud du cluster calcule le même placement à partir des mêmes
-//! entrées (manifest + vue pondérée des nœuds), sans aucune coordination :
-//! « qui doit détenir ce shard ? » est une pure fonction.
+//! Every node in the cluster computes the same placement from the same
+//! inputs (manifest + weighted node view), with zero coordination: "who
+//! should hold this shard?" is a pure function.
 //!
-//! Le poids d'un nœud est sa capacité disque (déclarée dans l'état Raft) :
-//! un nœud de 10 To reçoit ~10× plus de shards qu'un nœud de 1 To, et tous
-//! convergent vers le même pourcentage de remplissage. Score WRH classique
-//! `-poids / ln(h)` avec h uniforme dérivé de blake3(node ‖ clé).
+//! A node's weight is its disk capacity (declared in the Raft state): a
+//! 10 TB node receives ~10x more shards than a 1 TB node, and all of them
+//! converge to the same fill percentage. Classic WRH score
+//! `-weight / ln(h)` with h uniform, derived from blake3(node ‖ key).
 //!
-//! DÉTERMINISME : le placement doit être identique bit à bit sur toutes les
-//! plateformes. Les fonctions transcendantes (`f64::ln`) dépendent de la
-//! libm du système — on utilise donc un ln maison n'employant que des
-//! opérations IEEE 754 de base (+,-,×,÷), strictement reproductibles.
+//! DETERMINISM: placement must be bit-for-bit identical on every platform.
+//! Transcendental functions (`f64::ln`) depend on the system libm — so we
+//! use an in-house ln that relies only on basic IEEE 754 operations
+//! (+,-,x,/), which are strictly reproducible.
 
 use nauka_erasure::FileManifest;
 
-/// Vue pondérée du cluster : (identité du nœud, poids > 0).
-/// Le poids est en unités arbitraires mais cohérentes (octets de capacité).
+/// Weighted cluster view: (node identity, weight > 0).
+/// The weight is in arbitrary but consistent units (capacity bytes).
 pub type WeightedNode<'a> = (&'a str, u64);
 
-/// Capacité par défaut d'un nœud qui n'a pas encore déclaré la sienne
-/// (100 Gio) — le temps d'un tick de déclaration, il participe sainement.
+/// Default capacity for a node that has not declared its own yet
+/// (100 GiB) — it takes part sanely until the next declaration tick.
 pub const DEFAULT_CAPACITY: u64 = 100 * 1024 * 1024 * 1024;
 
-/// ln(x) déterministe pour x ∈ (0, 1), en opérations de base uniquement.
-/// Précision ~1e-7 relative — largement assez : seule la COHÉRENCE du
-/// classement entre nœuds compte, pas la précision absolue.
+/// Deterministic ln(x) for x ∈ (0, 1), using basic operations only.
+/// Relative accuracy ~1e-7 — more than enough: only the CONSISTENCY of the
+/// ranking across nodes matters, not absolute precision.
 fn det_ln(x: f64) -> f64 {
     const LN2: f64 = 0.693_147_180_559_945_3;
     let bits = x.to_bits();
     let e = ((bits >> 52) & 0x7ff) as i64 - 1023;
-    // Mantisse ramenée dans [1, 2).
+    // Mantissa brought back into [1, 2).
     let m = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
-    // ln(m) par série d'artanh, |z| ≤ 1/3.
+    // ln(m) via the artanh series, |z| ≤ 1/3.
     let z = (m - 1.0) / (m + 1.0);
     let z2 = z * z;
     let ln_m = 2.0 * z
@@ -41,20 +41,20 @@ fn det_ln(x: f64) -> f64 {
     ln_m + (e as f64) * LN2
 }
 
-/// Score WRH d'un nœud pour une clé. Plus grand = mieux classé.
+/// WRH score of a node for a key. Higher = ranked better.
 fn score(node: &str, key: &str, weight: u64) -> f64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(node.as_bytes());
     hasher.update(b"\0");
     hasher.update(key.as_bytes());
     let h = u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap());
-    // h uniforme → x ∈ (0, 1), jamais exactement 0 ni 1.
+    // h uniform → x ∈ (0, 1), never exactly 0 nor 1.
     let x = (h as f64 + 0.5) * (1.0 / 18_446_744_073_709_551_616.0);
     -(weight.max(1) as f64) / det_ln(x)
 }
 
-/// Classe les nœuds pour une clé donnée (score WRH décroissant ; égalité
-/// départagée par l'identité pour un ordre total stable).
+/// Ranks the nodes for a given key (decreasing WRH score; ties broken by
+/// identity for a stable total order).
 pub fn rank_nodes<'a>(key: &str, nodes: &[WeightedNode<'a>]) -> Vec<&'a str> {
     let mut scored: Vec<(f64, &str)> =
         nodes.iter().map(|(n, w)| (score(n, key, *w), *n)).collect();
@@ -62,7 +62,7 @@ pub fn rank_nodes<'a>(key: &str, nodes: &[WeightedNode<'a>]) -> Vec<&'a str> {
     scored.into_iter().map(|(_, n)| n).collect()
 }
 
-/// Nœud responsable du shard `shard_idx` de la stripe `stripe_idx` d'un fichier.
+/// Node responsible for shard `shard_idx` of stripe `stripe_idx` of a file.
 pub fn shard_owner<'a>(
     file_hash: &str,
     stripe_idx: usize,
@@ -73,8 +73,8 @@ pub fn shard_owner<'a>(
     ranked[shard_idx % ranked.len()]
 }
 
-/// Pour un manifest : la liste (stripe_idx, shard_idx, shard_hash) des shards
-/// dont `node` est responsable.
+/// For a manifest: the list of (stripe_idx, shard_idx, shard_hash) shards
+/// that `node` is responsible for.
 pub fn shards_owned_by<'m>(
     manifest: &'m FileManifest,
     node: &str,
@@ -91,27 +91,27 @@ pub fn shards_owned_by<'m>(
     out
 }
 
-/// Vue uniforme (tous à poids égal) — mode statique et tests.
+/// Uniform view (every node equally weighted) — static mode and tests.
 pub fn uniform<'a>(nodes: &[&'a str]) -> Vec<WeightedNode<'a>> {
     nodes.iter().map(|n| (*n, 1)).collect()
 }
 
-/// Distance (ms) en dessous de laquelle deux nœuds sont jugés « voisins » :
-/// même datacenter ou même région, donc probablement corrélés en panne.
+/// Distance (ms) below which two nodes are considered "nearby": same
+/// datacenter or same region, hence likely to share a correlated failure.
 pub const NEARBY_MS: f64 = 15.0;
 
-/// Placement GÉO-CONSCIENT : comme [`shard_owner`], mais les shards d'une
-/// même stripe sont poussés vers des nœuds réseau-distants les uns des
-/// autres. Un fichier survit ainsi à la perte d'une région entière, pas
-/// seulement d'une machine.
+/// GEO-AWARE placement: like [`shard_owner`], but the shards of a single
+/// stripe are pushed towards nodes that are network-distant from one
+/// another. A file then survives the loss of a whole region, not just of a
+/// single machine.
 ///
-/// Le classement WRH pondéré reste la base (capacité, déterminisme,
-/// migration minimale) ; on n'y applique qu'un **réordonnancement local** :
-/// pour le shard i, on écarte les candidats trop proches des nœuds déjà
-/// retenus dans cette stripe, tant qu'il reste des alternatives. Sans
-/// coordonnées fiables, le comportement est exactement celui d'avant.
+/// Weighted WRH ranking remains the foundation (capacity, determinism,
+/// minimal migration); we only apply a **local reordering** on top: for
+/// shard i, candidates too close to the nodes already picked for this
+/// stripe are set aside, as long as alternatives remain. Without reliable
+/// coordinates, the behaviour is exactly what it was before.
 ///
-/// `coords` : position par nœud, telle que répliquée dans l'état Raft.
+/// `coords`: per-node position, as replicated in the Raft state.
 pub fn stripe_owners_geo<'a>(
     file_hash: &str,
     stripe_idx: usize,
@@ -124,20 +124,20 @@ pub fn stripe_owners_geo<'a>(
     let mut chosen: Vec<&str> = Vec::with_capacity(shard_count);
 
     for i in 0..shard_count {
-        // Fenêtre de candidats : le titulaire WRH et les suivants. On ne
-        // regarde jamais au-delà d'un tour complet pour rester stable.
+        // Candidate window: the WRH holder and the ones after it. We never
+        // look beyond a full turn, so as to stay stable.
         let base = i % n;
         let mut pick = ranked[base];
-        // Ne pas déplacer un shard vers un nœud déjà utilisé plus de fois
-        // que nécessaire : on ne considère que des candidats de même
-        // « couche » (même quotient i/n), ce qui préserve l'anti-affinité
-        // et l'équilibre de charge du WRH.
+        // Never move a shard to a node already used more times than
+        // necessary: only candidates from the same "layer" (same quotient
+        // i/n) are considered, which preserves WRH's anti-affinity and
+        // load balance.
         let layer = i / n;
         let candidates: Vec<&str> = (0..n)
             .map(|off| ranked[(base + off) % n])
             .filter(|c| {
-                // Un candidat n'est éligible que s'il n'a pas déjà pris
-                // plus de shards que la couche courante ne l'autorise.
+                // A candidate is eligible only if it has not already taken
+                // more shards than the current layer allows.
                 chosen.iter().filter(|x| **x == *c).count() <= layer
             })
             .collect();
@@ -147,8 +147,8 @@ pub fn stripe_owners_geo<'a>(
             let sb = min_distance_to(b, &chosen, coords);
             sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal).then(b.cmp(a))
         }) {
-            // On ne dévie du titulaire WRH que si ça éloigne réellement :
-            // sinon on garde le placement nominal (stabilité).
+            // Deviate from the WRH holder only if it actually increases
+            // the spread; otherwise keep the nominal placement (stability).
             let nominal = min_distance_to(pick, &chosen, coords);
             let improved = min_distance_to(best, &chosen, coords);
             if improved > nominal && nominal < NEARBY_MS {
@@ -160,9 +160,9 @@ pub fn stripe_owners_geo<'a>(
     chosen
 }
 
-/// Distance du candidat au plus proche des nœuds déjà choisis.
-/// `f64::MAX` si aucune comparaison n'est possible (pas de coordonnées
-/// fiables, ou premier shard) — le candidat est alors neutre.
+/// Distance from the candidate to the nearest already-chosen node.
+/// `f64::MAX` when no comparison is possible (no reliable coordinates, or
+/// first shard) — the candidate is then neutral.
 fn min_distance_to(
     candidate: &str,
     chosen: &[&str],
@@ -184,12 +184,12 @@ fn min_distance_to(
 }
 
 
-/// Type des coordonnées telles que répliquées dans l'état Raft.
+/// Type of the coordinates as replicated in the Raft state.
 pub type CoordMap = std::collections::BTreeMap<String, crate::vivaldi::Coord>;
 
-/// Variante géo-consciente de [`shards_owned_by`] : mêmes garanties, mais
-/// les shards d'une stripe sont écartés géographiquement quand des
-/// coordonnées fiables existent.
+/// Geo-aware variant of [`shards_owned_by`]: same guarantees, but the
+/// shards of a stripe are spread geographically whenever reliable
+/// coordinates exist.
 pub fn shards_owned_by_geo<'m>(
     manifest: &'m FileManifest,
     node: &str,
@@ -222,20 +222,20 @@ mod tests {
     #[test]
     fn deterministic_and_stable() {
         let nodes = uniform(&["a:1", "b:1", "c:1"]);
-        let r1 = rank_nodes("clef", &nodes);
-        let r2 = rank_nodes("clef", &nodes);
+        let r1 = rank_nodes("key", &nodes);
+        let r2 = rank_nodes("key", &nodes);
         assert_eq!(r1, r2);
-        // L'ordre d'entrée des nœuds ne change pas le classement.
+        // The input order of the nodes does not change the ranking.
         let shuffled = uniform(&["c:1", "a:1", "b:1"]);
-        assert_eq!(rank_nodes("clef", &shuffled), r1);
+        assert_eq!(rank_nodes("key", &shuffled), r1);
     }
 
     #[test]
     fn same_stripe_shards_spread_across_nodes() {
         let nodes = uniform(&["a:1", "b:1", "c:1", "d:1", "e:1", "f:1"]);
-        // 6 nœuds, 6 shards par stripe → tous sur des nœuds distincts.
+        // 6 nodes, 6 shards per stripe → all on distinct nodes.
         let owners: std::collections::HashSet<_> =
-            (0..6).map(|i| shard_owner("fichier", 0, i, &nodes)).collect();
+            (0..6).map(|i| shard_owner("file", 0, i, &nodes)).collect();
         assert_eq!(owners.len(), 6);
     }
 
@@ -251,24 +251,23 @@ mod tests {
             .map(|(n, _)| shards_owned_by(&manifest, n, &nodes).len())
             .sum();
         let expected: usize = manifest.stripes.iter().map(|s| s.shard_hashes.len()).sum();
-        assert_eq!(total, expected, "chaque shard a exactement un propriétaire");
+        assert_eq!(total, expected, "every shard has exactly one owner");
     }
 
     #[test]
     fn weights_drive_proportional_selection() {
-        // La probabilité d'être EN TÊTE du classement est proportionnelle
-        // au poids — c'est ce qui pilote la sélection du sous-ensemble
-        // hébergeur quand n > k+m, et l'attribution des shards
-        // « supplémentaires » sinon.
+        // The probability of ranking FIRST is proportional to the weight —
+        // this is what drives the selection of the hosting subset when
+        // n > k+m, and the assignment of the "extra" shards otherwise.
         let nodes: Vec<WeightedNode> =
             vec![("a:1", 100), ("b:1", 100), ("c:1", 200), ("d:1", 400)];
         let mut counts = std::collections::HashMap::new();
         for f in 0..4000 {
-            let top = rank_nodes(&format!("fichier-{f}"), &nodes)[0];
+            let top = rank_nodes(&format!("file-{f}"), &nodes)[0];
             *counts.entry(top).or_insert(0usize) += 1;
         }
         let share = |n: &str| counts[n] as f64 / 4000.0;
-        // Parts attendues: a=b=12,5 %, c=25 %, d=50 %.
+        // Expected shares: a=b=12.5%, c=25%, d=50%.
         assert!((share("a:1") - 0.125).abs() < 0.03, "a: {}", share("a:1"));
         assert!((share("b:1") - 0.125).abs() < 0.03, "b: {}", share("b:1"));
         assert!((share("c:1") - 0.25).abs() < 0.04, "c: {}", share("c:1"));
@@ -277,26 +276,26 @@ mod tests {
 
     #[test]
     fn anti_affinity_beats_capacity_on_small_clusters() {
-        // Avec n ≤ k+m, chaque stripe couvre tous les nœuds presque
-        // uniformément QUELS QUE SOIENT les poids : un gros nœud qui
-        // concentrerait > m shards d'une stripe deviendrait un point de
-        // défaillance unique. Durabilité d'abord, capacité ensuite.
+        // With n ≤ k+m, every stripe covers all nodes almost uniformly
+        // WHATEVER the weights are: a large node concentrating > m shards
+        // of a stripe would become a single point of failure. Durability
+        // first, capacity second.
         let nodes: Vec<WeightedNode> = vec![("a:1", 1), ("b:1", 1), ("c:1", 1000)];
         for f in 0..50 {
             let mut counts = std::collections::HashMap::new();
             for i in 0..6 {
-                let owner = shard_owner(&format!("fichier-{f}"), 0, i, &nodes);
+                let owner = shard_owner(&format!("file-{f}"), 0, i, &nodes);
                 *counts.entry(owner).or_insert(0usize) += 1;
             }
-            // 6 shards sur 3 nœuds : exactement 2 chacun, toujours.
-            assert!(counts.values().all(|c| *c == 2), "répartition {counts:?}");
+            // 6 shards over 3 nodes: exactly 2 each, always.
+            assert!(counts.values().all(|c| *c == 2), "distribution {counts:?}");
         }
     }
 
     #[test]
     fn weight_change_moves_minimal_shards() {
-        // Doubler le poids d'un nœud ne doit PAS rebrasser tout le cluster :
-        // seuls les shards qui migrent VERS lui changent de propriétaire.
+        // Doubling a node's weight must NOT reshuffle the whole cluster:
+        // only the shards migrating TOWARDS it change owner.
         let before: Vec<WeightedNode> = vec![("a:1", 100), ("b:1", 100), ("c:1", 100)];
         let after: Vec<WeightedNode> = vec![("a:1", 200), ("b:1", 100), ("c:1", 100)];
         let mut moved = 0usize;
@@ -313,9 +312,9 @@ mod tests {
                 }
             }
         }
-        // Part de a: 1/3 → 1/2, donc ~1/6 du total doit migrer, vers a
-        // exclusivement.
-        assert_eq!(moved_elsewhere, 0, "des shards ont migré entre nœuds inchangés");
+        // a's share goes 1/3 → 1/2, so ~1/6 of the total must migrate, and
+        // exclusively towards a.
+        assert_eq!(moved_elsewhere, 0, "shards migrated between unchanged nodes");
         let frac = moved as f64 / total as f64;
         assert!((frac - 1.0 / 6.0).abs() < 0.05, "migration: {frac}");
     }
@@ -327,8 +326,8 @@ mod geo_tests {
     use crate::vivaldi::Coord;
     use std::collections::BTreeMap;
 
-    /// Deux régions : 3 nœuds à Paris, 3 à Miami (RTT intra ~2 ms,
-    /// inter ~90 ms).
+    /// Two regions: 3 nodes in Paris, 3 in Miami (intra-region RTT ~2 ms,
+    /// inter-region ~90 ms).
     fn two_regions() -> (Vec<(String, u64)>, BTreeMap<String, Coord>) {
         let mut coords = BTreeMap::new();
         let mut nodes = Vec::new();
@@ -354,14 +353,14 @@ mod geo_tests {
         let (nodes, coords) = two_regions();
         let refs: Vec<WeightedNode> = nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
-        // Sur beaucoup de stripes, compte celles dont les 6 shards sont
-        // tous dans la même région (le pire cas pour la durabilité).
+        // Over many stripes, count those whose 6 shards all land in the
+        // same region (the worst case for durability).
         let mut geo_mono = 0;
         let mut plain_mono = 0;
         for s in 0..200 {
-            let geo = stripe_owners_geo("fichier", s, 6, &refs, &coords);
+            let geo = stripe_owners_geo("file", s, 6, &refs, &coords);
             let plain: Vec<&str> =
-                (0..6).map(|i| shard_owner("fichier", s, i, &refs)).collect();
+                (0..6).map(|i| shard_owner("file", s, i, &refs)).collect();
             let par = |v: &Vec<&str>| v.iter().filter(|n| n.starts_with("par")).count();
             if par(&geo) == 6 || par(&geo) == 0 {
                 geo_mono += 1;
@@ -370,26 +369,26 @@ mod geo_tests {
                 plain_mono += 1;
             }
         }
-        assert_eq!(geo_mono, 0, "aucune stripe ne doit tenir dans une seule région");
+        assert_eq!(geo_mono, 0, "no stripe may fit inside a single region");
         let _ = plain_mono;
 
-        // Et chaque stripe doit toucher les deux régions de façon
-        // équilibrée (3/3 avec 6 nœuds et 6 shards).
+        // And every stripe must reach both regions in a balanced way
+        // (3/3 with 6 nodes and 6 shards).
         for s in 0..50 {
             let geo = stripe_owners_geo("f2", s, 6, &refs, &coords);
             let par = geo.iter().filter(|n| n.starts_with("par")).count();
-            assert_eq!(par, 3, "stripe {s} déséquilibrée: {geo:?}");
+            assert_eq!(par, 3, "stripe {s} unbalanced: {geo:?}");
         }
     }
 
     #[test]
     fn geo_placement_preserves_load_balance() {
-        // Chaque nœud doit rester également chargé.
+        // Every node must stay equally loaded.
         let (nodes, coords) = two_regions();
         let refs: Vec<WeightedNode> = nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
         let mut counts: std::collections::HashMap<&str, usize> = Default::default();
         for s in 0..600 {
-            for owner in stripe_owners_geo("charge", s, 6, &refs, &coords) {
+            for owner in stripe_owners_geo("load", s, 6, &refs, &coords) {
                 *counts.entry(owner).or_default() += 1;
             }
         }
@@ -399,7 +398,7 @@ mod geo_tests {
             let share = *c as f64 / total as f64;
             assert!(
                 (share - 1.0 / 6.0).abs() < 0.02,
-                "{node} déséquilibré: {:.1}%",
+                "{node} unbalanced: {:.1}%",
                 share * 100.0
             );
         }
@@ -413,14 +412,14 @@ mod geo_tests {
         for s in 0..20 {
             let geo = stripe_owners_geo("x", s, 6, &refs, &empty);
             let plain: Vec<&str> = (0..6).map(|i| shard_owner("x", s, i, &refs)).collect();
-            assert_eq!(geo, plain, "sans coordonnées, le placement doit être le WRH nominal");
+            assert_eq!(geo, plain, "without coordinates, placement must be nominal WRH");
         }
     }
 
     #[test]
     fn single_region_falls_back_gracefully() {
-        // Tous les nœuds proches : rien à optimiser, pas de crash, charge
-        // toujours équilibrée.
+        // All nodes close together: nothing to optimise, no crash, load
+        // still balanced.
         let mut coords = BTreeMap::new();
         let names = ["a", "b", "c"];
         for (i, n) in names.iter().enumerate() {

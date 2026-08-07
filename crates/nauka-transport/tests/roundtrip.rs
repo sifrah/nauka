@@ -1,4 +1,4 @@
-//! Test d'intégration : deux nœuds réels en QUIC sur localhost.
+//! Integration test: two real nodes talking QUIC over localhost.
 
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ async fn shard_and_manifest_roundtrip_over_quic() {
 
     client.ping().await.unwrap();
 
-    // Push d'un shard, présence, récupération.
+    // Push a shard, check presence, fetch it back.
     let hash = client.put_shard(b"shard over quic".to_vec()).await.unwrap();
     assert!(client.has_shard(&hash).await.unwrap());
     assert!(server_store.has_shard(&hash));
@@ -32,14 +32,14 @@ async fn shard_and_manifest_roundtrip_over_quic() {
         b"shard over quic"
     );
 
-    // Shard inconnu → None, pas d'erreur.
+    // Unknown shard → None, not an error.
     let missing = nauka_erasure::hash_bytes(b"nope");
     assert!(client.get_shard(&missing).await.unwrap().is_none());
     assert!(!client.has_shard(&missing).await.unwrap());
 
     // Manifests.
     let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 128 };
-    let (manifest, _) = encode_file(b"contenu du fichier", &cfg).unwrap();
+    let (manifest, _) = encode_file(b"file contents", &cfg).unwrap();
     client.put_manifest(&manifest).await.unwrap();
     let loaded = client.get_manifest(&manifest.file_hash).await.unwrap().unwrap();
     assert_eq!(loaded.file_hash, manifest.file_hash);
@@ -48,9 +48,9 @@ async fn shard_and_manifest_roundtrip_over_quic() {
 
 #[tokio::test]
 async fn full_file_dispatch_across_three_nodes() {
-    // 3 nœuds, config 4+2 : les 6 shards de chaque stripe sont répartis
-    // en round-robin, puis le fichier est reconstruit en lisant les nœuds —
-    // même avec un nœud entièrement mort.
+    // 3 nodes, 4+2 config: the 6 shards of each stripe are spread round-robin,
+    // then the file is rebuilt by reading from the nodes — even with one node
+    // completely dead.
     let mut nodes = Vec::new();
     for _ in 0..3 {
         nodes.push(spawn_node().await);
@@ -64,7 +64,7 @@ async fn full_file_dispatch_across_three_nodes() {
     let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 64 * 1024 };
     let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
-    // Dispatch round-robin + manifest répliqué partout.
+    // Round-robin dispatch + manifest replicated everywhere.
     for stripe in &stripes {
         for shard in stripe {
             let client = &clients[shard.index % clients.len()];
@@ -75,7 +75,7 @@ async fn full_file_dispatch_across_three_nodes() {
         client.put_manifest(&manifest).await.unwrap();
     }
 
-    // Nœud 2 meurt : on ne lit que les nœuds 0 et 1.
+    // Node 2 dies: we only read from nodes 0 and 1.
     let survivors = &clients[..2];
     let mut stripes_slots = Vec::new();
     for stripe in &manifest.stripes {

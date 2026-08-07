@@ -1,17 +1,16 @@
-// Lecture média chiffrée.
+// Encrypted media playback.
 //
-// Mode nominal : un Service Worker sert /stream/<hash> en clair à partir
-// du ciphertext du cluster, plage par plage — rien n'est chargé d'avance,
-// le seek ne coûte qu'un aller-retour. La clé lui est transmise par
-// IndexedDB (jamais par le réseau : elle vient du fragment de l'URL).
+// Nominal mode: a Service Worker serves /stream/<hash> in the clear from the
+// cluster's ciphertext, range by range — nothing is loaded ahead of time, and
+// a seek costs a single round trip. The key reaches the worker through
+// IndexedDB (never over the network: it comes from the URL fragment).
 //
-// IndexedDB et non postMessage : un Service Worker est arrêté/redémarré
-// librement par le navigateur, tout état mémoire disparaît entre deux
-// événements.
+// IndexedDB rather than postMessage: the browser stops and restarts a Service
+// Worker at will, so any in-memory state is gone between two events.
 //
-// Repli : si le worker n'est pas disponible (contexte non sécurisé,
-// navigateur restrictif), le lecteur déchiffre le fichier entier en
-// mémoire et passe par un Blob URL.
+// Fallback: if the worker is unavailable (insecure context, restrictive
+// browser), the player decrypts the whole file in memory and goes through a
+// Blob URL.
 
 import { CHUNK_SIZE } from "./crypto";
 
@@ -22,7 +21,7 @@ const TAG_SIZE = 16;
 const HEADER_SIZE = 12;
 const FRAME_OVERHEAD = 5;
 
-/** Taille du plaintext déduite de celle du ciphertext (format YGE1). */
+/** Plaintext size derived from the ciphertext size (YGE1 format). */
 export function plainSizeFromCipher(cipherSize: number): number {
   const perChunk = FRAME_OVERHEAD + TAG_SIZE;
   const body = cipherSize - HEADER_SIZE;
@@ -74,11 +73,11 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 /**
- * Prépare la lecture par plages : dépose la clé pour le worker et attend
- * qu'il CONTRÔLE la page (sans contrôleur, la requête de <video> partirait
- * au serveur, qui ne détient que du ciphertext).
- * Renvoie l'URL à donner à <video>, ou null si le streaming est
- * indisponible (l'appelant se rabat sur le déchiffrement complet).
+ * Prepares range-based playback: hands the key over to the worker and waits
+ * until it CONTROLS the page (with no controller, the <video> request would
+ * go to the server, which only holds ciphertext).
+ * Returns the URL to give to <video>, or null if streaming is unavailable
+ * (the caller then falls back to full decryption).
  */
 export async function prepareStream(
   hash: string,
@@ -112,12 +111,13 @@ export async function prepareStream(
     }
     if (!navigator.serviceWorker.controller) return null;
 
-    // Vérifie que le worker sert bien du déchiffré avant d'y envoyer <video>.
+    // Check that the worker really serves decrypted bytes before pointing
+    // <video> at it.
     const probe = await fetch(`/stream/${hash}`, { headers: { Range: "bytes=0-11" } });
     if (probe.status !== 206) return null;
     const magic = new Uint8Array(await probe.arrayBuffer());
-    // Un flux encore chiffré commencerait par "YGE1" : ce serait le signe
-    // que la requête est passée au serveur au lieu du worker.
+    // A still-encrypted stream would start with "YGE1": that would mean the
+    // request went to the server instead of the worker.
     const isCipher = magic[0] === 0x59 && magic[1] === 0x47 && magic[2] === 0x45;
     return isCipher ? null : `/stream/${hash}`;
   } catch {

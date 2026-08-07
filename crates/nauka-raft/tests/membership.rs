@@ -1,6 +1,6 @@
-//! Membership à chaud : un cluster de 3 nœuds grandit à 4, les shards se
-//! rebalancent (le nouveau acquiert, les anciens libèrent), puis un nœud
-//! est retiré et le cluster re-réplique sans lui.
+//! Live membership changes: a 3-node cluster grows to 4, shards rebalance
+//! (the newcomer acquires, the old ones release), then a node is removed and
+//! the cluster re-replicates without it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -34,15 +34,15 @@ async fn spawn(id: u64) -> Node {
     Node { addr, app, store, _dir: dir }
 }
 
-/// Vue triée des adresses membres, comme la boucle de fond des nœuds.
+/// Sorted view of the member addresses, like the nodes' background loop.
 fn view_of(members: &BTreeMap<u64, String>) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = members.values().map(|a| (a.clone(), 1)).collect();
     v.sort();
     v
 }
 
-/// Synchronise manifests + scrub + gc sur chaque nœud listé (une passe de
-/// la boucle de fond, en synchrone pour le déterminisme du test).
+/// Syncs manifests + scrub + gc on each listed node (one pass of the
+/// background loop, run synchronously so the test stays deterministic).
 async fn converge(nodes: &[&Node], view: &[(String, u64)]) {
     for n in nodes {
         for manifest in n.app.app_state().manifests.values() {
@@ -59,8 +59,8 @@ async fn converge(nodes: &[&Node], view: &[(String, u64)]) {
     }
 }
 
-/// Vérifie que chaque shard de chaque manifest est présent chez son
-/// propriétaire selon `view`, et que les non-propriétaires ne gardent rien.
+/// Checks that every shard of every manifest is present on its owner
+/// according to `view`, and that non-owners keep nothing.
 fn assert_placement_clean(nodes: &[&Node], view: &[(String, u64)]) {
     let refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     for n in nodes {
@@ -73,17 +73,17 @@ fn assert_placement_clean(nodes: &[&Node], view: &[(String, u64)]) {
             }
         }
         for h in &owned {
-            assert!(n.store.get_shard(h).is_ok(), "{id} devrait avoir {h}");
+            assert!(n.store.get_shard(h).is_ok(), "{id} should hold {h}");
         }
         for h in n.store.list_shards().unwrap() {
-            assert!(owned.contains(&h), "{id} garde un shard étranger {h}");
+            assert!(owned.contains(&h), "{id} keeps a foreign shard {h}");
         }
     }
 }
 
 #[tokio::test]
 async fn grow_to_four_then_remove_one_rebalances() {
-    // ── Cluster initial : 3 nœuds + 5 fichiers.
+    // ── Initial cluster: 3 nodes + 5 files.
     let n1 = spawn(1).await;
     let n2 = spawn(2).await;
     let n3 = spawn(3).await;
@@ -105,7 +105,7 @@ async fn grow_to_four_then_remove_one_rebalances() {
             .map(|b| ((b + i * 31) % 251) as u8)
             .collect();
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
-        // Dépose les shards chez leurs propriétaires (vue à 3 nœuds).
+        // Store the shards on their owners (3-node view).
         let view3: Vec<(String, u64)> = {
             let mut v: Vec<(String, u64)> = peers.iter().map(|a| (a.to_string(), 1)).collect();
             v.sort();
@@ -124,7 +124,7 @@ async fn grow_to_four_then_remove_one_rebalances() {
         manifests.push(manifest);
     }
 
-    // ── Croissance : nœud 4 rejoint (learner → votant).
+    // ── Growth: node 4 joins (learner → voter).
     let n4 = spawn(4).await;
     match admin_via_leader(
         &peers,
@@ -144,32 +144,32 @@ async fn grow_to_four_then_remove_one_rebalances() {
         other => panic!("promotion: {other:?}"),
     }
 
-    // Le membership à 4 se propage partout (y compris au nouveau).
+    // The 4-member membership propagates everywhere (including the newcomer).
     for _ in 0..50 {
         if n4.app.members().len() == 4 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert_eq!(n4.app.members().len(), 4, "membership pas propagé au nœud 4");
+    assert_eq!(n4.app.members().len(), 4, "membership not propagated to node 4");
 
-    // Rebalancement : scrub (n4 acquiert) puis gc (les anciens libèrent).
+    // Rebalance: scrub (n4 acquires) then gc (the old ones release).
     let all4 = [&n1, &n2, &n3, &n4];
     let view4 = view_of(&n4.app.members());
     converge(&all4, &view4).await;
-    converge(&all4, &view4).await; // 2e passe : gc après que tous ont scrubé
+    converge(&all4, &view4).await; // 2nd pass: gc once everyone has scrubbed
 
     let n4_shards = n4.store.list_shards().unwrap().len();
-    assert!(n4_shards > 0, "le nouveau nœud n'a acquis aucun shard");
+    assert!(n4_shards > 0, "the new node acquired no shard");
     assert_placement_clean(&all4, &view4);
 
-    // ── Retrait : le nœud 3 quitte le cluster.
+    // ── Removal: node 3 leaves the cluster.
     match admin_via_leader(&peers, &AdminRequest::ChangeMembership(vec![1, 2, 4]))
         .await
         .unwrap()
     {
         AdminResponse::Ok(_) => {}
-        other => panic!("retrait: {other:?}"),
+        other => panic!("removal: {other:?}"),
     }
     for _ in 0..50 {
         if n1.app.members().len() == 3 {
@@ -180,14 +180,14 @@ async fn grow_to_four_then_remove_one_rebalances() {
     let view3b = view_of(&n1.app.members());
     assert!(!view3b.iter().any(|(n, _)| *n == n3.addr.to_string()));
 
-    // Les 3 restants convergent (n3 encore allumé mais plus dans la vue —
-    // il sert encore les lectures pendant le drain).
+    // The remaining 3 converge (n3 is still up but out of the view — it keeps
+    // serving reads while draining).
     let rest = [&n1, &n2, &n4];
     converge(&rest, &view3b).await;
     converge(&rest, &view3b).await;
     assert_placement_clean(&rest, &view3b);
 
-    // Chaque fichier reste entièrement reconstructible SANS le nœud 3.
+    // Every file stays fully reconstructible WITHOUT node 3.
     for manifest in &manifests {
         for (si, stripe) in manifest.stripes.iter().enumerate() {
             let mut slots = Vec::new();
@@ -202,7 +202,7 @@ async fn grow_to_four_then_remove_one_rebalances() {
                 slots.push(found);
             }
             nauka_erasure::decode_stripe(slots, stripe, &manifest.config)
-                .unwrap_or_else(|e| panic!("stripe {si} irrécupérable sans n3: {e}"));
+                .unwrap_or_else(|e| panic!("stripe {si} unrecoverable without n3: {e}"));
         }
     }
 }

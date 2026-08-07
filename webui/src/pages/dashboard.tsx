@@ -46,7 +46,7 @@ export function DashboardPage() {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 text-muted">
         <Loader2 size={20} className="animate-spin" />
-        <span className="text-sm">Connexion au cluster…</span>
+        <span className="text-sm">Connecting to the cluster…</span>
       </div>
     );
   }
@@ -67,22 +67,22 @@ export function DashboardPage() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard
-          title="Nœuds"
+          title="Nodes"
           value={String(status.nodes.length)}
           icon={<Server size={18} strokeWidth={1.5} />}
         />
         <StatCard
-          title="Fichiers"
+          title="Files"
           value={status.files.toLocaleString()}
           icon={<Files size={18} strokeWidth={1.5} />}
         />
         <StatCard
-          title="Stocké (chiffré)"
+          title="Stored (encrypted)"
           value={formatSize(status.total_bytes)}
           icon={<Database size={18} strokeWidth={1.5} />}
         />
         <StatCard
-          title="Capacité déclarée"
+          title="Declared capacity"
           value={formatSize(totalCapacity)}
           icon={<HardDrive size={18} strokeWidth={1.5} />}
         />
@@ -91,16 +91,16 @@ export function DashboardPage() {
       <div className="card-surface rounded-lg overflow-hidden">
         <div className="px-5 pt-4 pb-2">
           <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Membres
+            Members
           </p>
         </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground border-b border-border">
-              <th className="px-5 py-2 font-medium">Adresse</th>
-              <th className="px-5 py-2 font-medium">Capacité</th>
-              <th className="px-5 py-2 font-medium">Part du placement</th>
-              <th className="px-5 py-2 font-medium text-right">Rôle</th>
+              <th className="px-5 py-2 font-medium">Address</th>
+              <th className="px-5 py-2 font-medium">Capacity</th>
+              <th className="px-5 py-2 font-medium">Placement share</th>
+              <th className="px-5 py-2 font-medium text-right">Role</th>
             </tr>
           </thead>
           <tbody>
@@ -108,7 +108,7 @@ export function DashboardPage() {
               <tr key={n.addr} className="border-b border-border/50">
                 <td className="px-5 py-2.5 font-mono text-xs">
                   {n.addr}
-                  {n.is_self && <span className="text-muted-foreground"> (ce nœud)</span>}
+                  {n.is_self && <span className="text-muted-foreground"> (this node)</span>}
                 </td>
                 <td className="px-5 py-2.5 font-mono tabular-nums">
                   {formatSize(n.capacity_bytes)}
@@ -129,7 +129,7 @@ export function DashboardPage() {
                       <Crown size={12} /> leader
                     </span>
                   ) : (
-                    <span className="text-xs text-muted-foreground">votant</span>
+                    <span className="text-xs text-muted-foreground">voter</span>
                   )}
                 </td>
               </tr>
@@ -139,9 +139,9 @@ export function DashboardPage() {
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Chaque fichier est chiffré côté client puis découpé en shards Reed-Solomon dispersés sur
-        les nœuds — le cluster répare et rééquilibre en continu, sans pouvoir lire quoi que ce
-        soit.
+        Every file is encrypted client-side, then split into Reed-Solomon shards spread across the
+        nodes — the cluster repairs and rebalances continuously, without ever being able to read
+        anything.
       </p>
     </div>
   );

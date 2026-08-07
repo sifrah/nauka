@@ -1,5 +1,5 @@
-//! Intégration : cluster Raft 3 nœuds sur QUIC — init, élection, écriture
-//! répliquée du registre de manifests, redirection vers le leader.
+//! Integration: 3-node Raft cluster over QUIC — init, election, replicated
+//! write to the manifest registry, redirect to the leader.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ async fn three_node_raft_replicates_manifest_registry() {
         spawn_raft_node(3).await,
     ];
 
-    // Init du cluster depuis le nœud 1 avec les 3 membres.
+    // Init the cluster from node 1 with all 3 members.
     let members: BTreeMap<u64, String> = nodes
         .iter()
         .enumerate()
@@ -50,7 +50,7 @@ async fn three_node_raft_replicates_manifest_registry() {
         other => panic!("init: {other:?}"),
     }
 
-    // Attend l'élection d'un leader.
+    // Wait for a leader to be elected.
     let mut leader = None;
     for _ in 0..50 {
         if let AdminResponse::Metrics { leader: Some(l), .. } =
@@ -61,12 +61,12 @@ async fn three_node_raft_replicates_manifest_registry() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let leader = leader.expect("pas de leader élu");
+    let leader = leader.expect("no leader elected");
     assert!((1..=3).contains(&leader));
 
-    // Écrit un manifest via write_via_leader (peu importe le point d'entrée).
+    // Write a manifest through write_via_leader (entry point does not matter).
     let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
-    let (manifest, _) = encode_file(b"fichier replique par raft", &cfg).unwrap();
+    let (manifest, _) = encode_file(b"file replicated by raft", &cfg).unwrap();
     let resp = write_via_leader(
         &nodes.iter().map(|n| n.addr).collect::<Vec<_>>(),
         AppCommand::RegisterManifest(manifest.clone()),
@@ -75,7 +75,7 @@ async fn three_node_raft_replicates_manifest_registry() {
     .unwrap();
     assert!(resp.ok);
 
-    // Le registre est visible sur les 3 nœuds (réplication).
+    // The registry is visible on all 3 nodes (replication).
     for node in &nodes {
         let mut found = false;
         for _ in 0..25 {
@@ -85,10 +85,10 @@ async fn three_node_raft_replicates_manifest_registry() {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        assert!(found, "manifest absent du nœud {}", node.app.id);
+        assert!(found, "manifest missing from node {}", node.app.id);
     }
 
-    // Le membership est cohérent partout.
+    // Membership is consistent everywhere.
     for node in &nodes {
         assert_eq!(node.app.members().len(), 3);
     }

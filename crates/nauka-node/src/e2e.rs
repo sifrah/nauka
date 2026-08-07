@@ -1,7 +1,7 @@
-//! Client HTTP chiffré de bout en bout : `upload` chiffre AVANT d'envoyer,
-//! `download` déchiffre après réception. Les nœuds ne voient que du
-//! ciphertext ; la clé vit dans le fragment du lien (`#...`), que le
-//! protocole HTTP ne transmet jamais aux serveurs.
+//! End-to-end encrypted HTTP client: `upload` encrypts BEFORE sending,
+//! `download` decrypts after receiving. Nodes only ever see ciphertext;
+//! the key lives in the link fragment (`#...`), which the HTTP protocol
+//! never transmits to servers.
 
 use std::path::Path;
 
@@ -15,13 +15,13 @@ struct UploadResponse {
     size: u64,
 }
 
-/// Chiffre `file` puis l'uploade sur `api` (ex: http://1.2.3.4:8080).
-/// Affiche le lien de partage complet, clé comprise.
+/// Encrypts `file` then uploads it to `api` (e.g. http://1.2.3.4:8080).
+/// Prints the complete share link, key included.
 pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Result<()> {
     let api = api.trim_end_matches('/');
     let key = FileKey::generate();
 
-    // Chiffrement streaming vers un fichier temporaire (mémoire bornée).
+    // Streaming encryption into a temporary file (bounded memory).
     let tmp = tempfile_path(file)?;
     {
         let key = key.clone();
@@ -29,7 +29,7 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
         let dst = tmp.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut input = std::fs::File::open(&src)
-                .with_context(|| format!("lecture de {}", src.display()))?;
+                .with_context(|| format!("reading {}", src.display()))?;
             let mut output = std::io::BufWriter::new(std::fs::File::create(&dst)?);
             nauka_crypto::encrypt(&key, &mut input, &mut output)?;
             use std::io::Write;
@@ -44,7 +44,7 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
         let ct_len = ct_file.metadata().await?.len();
         let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(ct_file));
         let mut url = format!("{api}/api/upload");
-        // Par défaut, AUCUN nom en clair ne part au serveur (métadonnée).
+        // By default, NO plaintext name reaches the server (metadata).
         if let Some(name) = &public_name {
             url.push_str(&format!("?name={}", urlencode(name)));
         }
@@ -56,7 +56,7 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
             .await
             .with_context(|| format!("POST {url}"))?;
         if !resp.status().is_success() {
-            bail!("upload refusé ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+            bail!("upload refused ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
         }
         let up: UploadResponse = resp.json().await?;
         Ok::<_, anyhow::Error>((up, ct_len))
@@ -66,31 +66,31 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
     let (up, ct_len) = result?;
 
     let plain_len = std::fs::metadata(file)?.len();
-    println!("chiffré : {plain_len} octets → {ct_len} (AES-256-GCM, clé jamais transmise)");
-    println!("stocké  : {} ({} octets de ciphertext)", up.hash, up.size);
+    println!("encrypted: {plain_len} bytes → {ct_len} (AES-256-GCM, key never transmitted)");
+    println!("stored   : {} ({} bytes of ciphertext)", up.hash, up.size);
     println!();
-    println!("lien de partage (la partie après # est la clé — elle ne quitte jamais le client) :");
+    println!("share link (the part after # is the key — it never leaves the client):");
     println!("{api}/f/{}#{}", up.hash, key.encode());
     Ok(())
 }
 
-/// Télécharge un lien `http://…/f/<hash>#<clé>` et déchiffre vers `output`.
+/// Downloads a `http://…/f/<hash>#<key>` link and decrypts it to `output`.
 pub async fn download(link: &str, output: &Path) -> Result<()> {
     let (url, key) = match link.split_once('#') {
         Some((url, frag)) if !frag.is_empty() => (url, FileKey::decode(frag)?),
         _ => bail!(
-            "lien sans clé (#…) — sans elle le contenu est indéchiffrable. \
-             Lien complet requis, ex: http://hôte:8080/f/<hash>#<clé>"
+            "link without a key (#…) — without it the content cannot be decrypted. \
+             The complete link is required, e.g. http://host:8080/f/<hash>#<key>"
         ),
     };
 
     let resp = reqwest::get(url).await.with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
-        bail!("téléchargement refusé ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+        bail!("download refused ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
     }
 
-    // Déchiffrement streaming : les octets réseau alimentent un pipe lu par
-    // le décodeur synchrone dans une tâche bloquante.
+    // Streaming decryption: the network bytes feed a pipe read by the
+    // synchronous decoder running in a blocking task.
     let (reader, mut writer) = std::io::pipe()?;
     let out_path = output.to_path_buf();
     let decrypt_task = tokio::task::spawn_blocking(move || -> Result<()> {
@@ -109,7 +109,7 @@ pub async fn download(link: &str, output: &Path) -> Result<()> {
             Ok(bytes) => {
                 use std::io::Write;
                 if writer.write_all(&bytes).is_err() {
-                    break; // le décodeur a refusé (erreur d'auth) — il dira pourquoi
+                    break; // the decoder refused (auth error) — it will say why
                 }
             }
             Err(e) => {
@@ -118,13 +118,13 @@ pub async fn download(link: &str, output: &Path) -> Result<()> {
             }
         }
     }
-    drop(writer); // EOF pour le décodeur
+    drop(writer); // EOF for the decoder
     decrypt_task.await?.map_err(|e| {
-        anyhow::anyhow!("{e:#}{}", net_err.map(|n| format!(" (réseau: {n})")).unwrap_or_default())
+        anyhow::anyhow!("{e:#}{}", net_err.map(|n| format!(" (network: {n})")).unwrap_or_default())
     })?;
 
     println!(
-        "déchiffré et vérifié : {} octets → {}",
+        "decrypted and verified: {} bytes → {}",
         std::fs::metadata(output)?.len(),
         output.display()
     );

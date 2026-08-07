@@ -1,8 +1,8 @@
-//! Nauka — le binaire du moteur : CLI et serveur.
+//! Nauka — the engine binary: CLI and server.
 //!
-//! Assemble erasure coding, stockage content-addressed, transport QUIC,
-//! consensus Raft, placement/healing et découverte DHT. Expose aussi
-//! l'API HTTP et l'interface web du service Yogfile bâti dessus.
+//! Ties together erasure coding, content-addressed storage, QUIC transport,
+//! Raft consensus, placement/healing and DHT discovery. Also exposes the
+//! HTTP API and the web UI of the Yogfile service built on top of it.
 
 mod api;
 mod e2e;
@@ -18,13 +18,13 @@ use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
 
 #[derive(Parser)]
-#[command(name = "nauka", about = "Nauka — moteur de stockage distribué (erasure coding, auto-réparation, zéro-config)")]
+#[command(name = "nauka", about = "Nauka — distributed storage engine (erasure coding, self-healing, zero-config)")]
 struct Cli {
-    /// Répertoire de données du nœud.
+    /// Data directory of the node.
     #[arg(long, default_value = "./nauka-data")]
     data_dir: PathBuf,
-    /// Répertoire contenant la clé de cluster (cluster-ca.key/.pem).
-    /// Active le mTLS : seuls les porteurs d'un certificat signé passent.
+    /// Directory holding the cluster key (cluster-ca.key/.pem).
+    /// Enables mTLS: only holders of a signed certificate get through.
     #[arg(long)]
     keys: Option<PathBuf>,
     #[command(subcommand)]
@@ -33,142 +33,142 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Encode un fichier en shards Reed-Solomon et le stocke.
+    /// Encode a file into Reed-Solomon shards and store it.
     Put {
         file: PathBuf,
-        /// k : shards de données par stripe.
+        /// k: data shards per stripe.
         #[arg(long, default_value_t = 4)]
         data_shards: usize,
-        /// m : shards de parité par stripe (tolérance de perte).
+        /// m: parity shards per stripe (loss tolerance).
         #[arg(long, default_value_t = 2)]
         parity_shards: usize,
     },
-    /// Reconstruit un fichier depuis ses shards (tolère pertes/corruptions).
+    /// Rebuild a file from its shards (tolerates losses/corruption).
     Get {
         file_hash: String,
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Vérifie qu'un fichier est reconstructible et intact.
+    /// Check that a file is reconstructible and intact.
     Verify { file_hash: String },
-    /// Liste les fichiers stockés.
+    /// List stored files.
     List,
-    /// Chiffre un fichier (AES-256-GCM, clé locale) puis l'uploade sur un
-    /// nœud. Les serveurs ne voient QUE du ciphertext ; le lien affiché
-    /// contient la clé dans son fragment (#…), jamais transmis au serveur.
+    /// Encrypt a file (AES-256-GCM, local key) then upload it to a node.
+    /// Servers see ONLY ciphertext; the printed link carries the key in
+    /// its fragment (#…), which is never sent to the server.
     Upload {
         file: PathBuf,
-        /// URL de l'API d'un nœud du cluster.
+        /// API URL of a cluster node.
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         api: String,
-        /// Nom public (métadonnée EN CLAIR côté serveur — omis par défaut).
+        /// Public name (PLAINTEXT metadata server-side — omitted by default).
         #[arg(long)]
         name: Option<String>,
     },
-    /// Télécharge un lien de partage complet (avec #clé) et déchiffre.
+    /// Download a full share link (with #key) and decrypt it.
     Download {
         link: String,
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Génère la clé de cluster (CA Ed25519) à distribuer aux nœuds.
+    /// Generate the cluster key (Ed25519 CA) to distribute to the nodes.
     Keygen {
         #[arg(long, default_value = "./nauka-keys")]
         out: PathBuf,
     },
-    /// Affiche l'identité de ce nœud (node-id dérivé de sa clé publique).
+    /// Print this node's identity (node-id derived from its public key).
     NodeInfo,
-    /// Démarre le nœud en mode serveur QUIC (cluster si --peers est fourni).
-    /// En mode consensus (--node-id), le port+1 est réservé au plan Raft :
-    /// plusieurs nœuds sur un même hôte doivent espacer leurs ports de 2.
+    /// Start the node in QUIC server mode (cluster if --peers is given).
+    /// In consensus mode (--node-id), port+1 is reserved for the Raft
+    /// plane: several nodes on one host must space their ports by 2.
     Serve {
         #[arg(long, default_value = "0.0.0.0:7311")]
         listen: SocketAddr,
-        /// Adresse annoncée aux autres nœuds (défaut : adresse d'écoute).
+        /// Address advertised to the other nodes (default: listen address).
         #[arg(long)]
         advertise: Option<SocketAddr>,
-        /// Les autres nœuds du cluster. Active heartbeats + auto-healing.
+        /// The other cluster nodes. Enables heartbeats + auto-healing.
         #[arg(long, value_delimiter = ',')]
         peers: Vec<SocketAddr>,
-        /// Intervalle du scrub d'auto-healing, en secondes.
+        /// Auto-healing scrub interval, in seconds.
         #[arg(long, default_value_t = 30)]
         scrub_interval: u64,
-        /// Identifiant Raft de ce nœud. Active le mode consensus : le
-        /// membership et le registre des fichiers sont répliqués par Raft
-        /// (la liste --peers devient inutile pour le healing).
+        /// Raft identifier of this node. Enables consensus mode:
+        /// membership and the file registry are replicated by Raft
+        /// (the --peers list becomes useless for healing).
         #[arg(long)]
         node_id: Option<u64>,
-        /// Capacité de stockage de ce nœud en octets (poids du placement
-        /// pondéré). Défaut : taille du système de fichiers du data-dir.
+        /// Storage capacity of this node in bytes (weight in weighted
+        /// placement). Default: size of the data-dir filesystem.
         #[arg(long)]
         capacity: Option<u64>,
-        /// Adresse de l'API HTTP publique (upload/download).
+        /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
-        /// Répertoire de l'interface web à servir (dist de webui/).
-        /// Défaut : ./webui/dist s'il existe.
+        /// Directory of the web UI to serve (dist of webui/).
+        /// Default: ./webui/dist if it exists.
         #[arg(long)]
         webui: Option<PathBuf>,
-        /// Désactive l'API HTTP.
+        /// Disable the HTTP API.
         #[arg(long)]
         no_http: bool,
-        /// Désactive la découverte DHT (implicite dès que --keys est fourni
-        /// sans --peers) : cluster statique / air-gapped.
+        /// Disable DHT discovery (implied as soon as --keys is given
+        /// without --peers): static / air-gapped cluster.
         #[arg(long)]
         no_discover: bool,
-        /// Nœuds d'amorçage DHT alternatifs (tests sur DHT locale).
+        /// Alternate DHT bootstrap nodes (tests against a local DHT).
         #[arg(long, value_delimiter = ',', hide = true)]
         dht_bootstrap: Vec<String>,
     },
-    /// Initialise le cluster Raft (une seule fois, via n'importe quel nœud).
+    /// Initialize the Raft cluster (once only, from any node).
     ClusterInit {
-        /// Membres au format id@host:port, ex: 1@10.0.0.1:7311 2@10.0.0.2:7311
+        /// Members as id@host:port, e.g. 1@10.0.0.1:7311 2@10.0.0.2:7311
         #[arg(required = true)]
         members: Vec<String>,
     },
-    /// Bannit un fichier : retiré du registre, refusé au téléchargement
-    /// (410) et purgé par le GC. Pour honorer un signalement ou une
-    /// réquisition sans lire le contenu.
+    /// Ban a file: removed from the registry, refused on download (410)
+    /// and purged by the GC. To honor a report or a legal request
+    /// without reading the content.
     Ban {
         file_hash: String,
-        /// Motif consigné dans le registre (référence du signalement…).
-        #[arg(long, default_value = "signalement")]
+        /// Reason recorded in the registry (report reference…).
+        #[arg(long, default_value = "report")]
         reason: String,
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
-    /// Lève un bannissement.
+    /// Lift a ban.
     Unban {
         file_hash: String,
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
-    /// Affiche l'état du cluster Raft vu par un nœud.
+    /// Print the Raft cluster state as seen by a node.
     ClusterMetrics {
         #[arg(long, default_value = "127.0.0.1:7311")]
         peer: SocketAddr,
     },
-    /// Ajoute un nœud au cluster à chaud (learner → votant). Le nouveau
-    /// nœud doit déjà tourner (serve --node-id <id>). Le rebalancement des
-    /// shards suit automatiquement (scrub + GC).
+    /// Add a node to the cluster live (learner → voter). The new node
+    /// must already be running (serve --node-id <id>). Shard
+    /// rebalancing follows automatically (scrub + GC).
     ClusterAdd {
-        /// Le nœud à ajouter, format id@host:port.
+        /// The node to add, as id@host:port.
         member: String,
-        /// N'importe quels nœuds actuels du cluster.
+        /// Any current nodes of the cluster.
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
-    /// Retire un nœud du cluster à chaud. Ses shards sont re-répliqués par
-    /// les scrubbers des autres nœuds ; le retiré peut ensuite être éteint.
+    /// Remove a node from the cluster live. Its shards are re-replicated
+    /// by the other nodes' scrubbers; it can then be shut down.
     ClusterRemove {
         node_id: u64,
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
-    /// Encode un fichier et dispatche ses shards sur des peers (round-robin).
+    /// Encode a file and dispatch its shards across peers (round-robin).
     PutRemote {
         file: PathBuf,
-        /// Adresses des nœuds du cluster, ex: 10.0.0.1:7311,10.0.0.2:7311
+        /// Cluster node addresses, e.g. 10.0.0.1:7311,10.0.0.2:7311
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
         #[arg(long, default_value_t = 4)]
@@ -176,7 +176,7 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         parity_shards: usize,
     },
-    /// Reconstruit un fichier en lisant les shards depuis des peers.
+    /// Rebuild a file by reading its shards from peers.
     GetRemote {
         file_hash: String,
         #[arg(long, value_delimiter = ',', required = true)]
@@ -196,9 +196,9 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
 
-    // Identité cluster : à installer avant tout usage réseau. Un nœud
-    // (serve/node-info) utilise sa clé persistée ; les commandes clientes
-    // utilisent une identité éphémère signée par la même CA.
+    // Cluster identity: to be installed before any network use. A node
+    // (serve/node-info) uses its persisted key; client commands use an
+    // ephemeral identity signed by the same CA.
     let node_tls = if let Some(keys_dir) = &cli.keys {
         let identity = match &cli.cmd {
             Cmd::Serve { .. } | Cmd::NodeInfo => Some(cli.data_dir.join("node.key")),
@@ -223,18 +223,18 @@ async fn main() -> Result<()> {
         }
         Cmd::Keygen { out } => {
             nauka_transport::generate_cluster_ca(&out)?;
-            println!("clé de cluster générée dans {}", out.display());
-            println!("  à copier sur chaque nœud, puis: serve --keys {}", out.display());
+            println!("cluster key generated in {}", out.display());
+            println!("  copy it to every node, then: serve --keys {}", out.display());
         }
         Cmd::NodeInfo => {
             let (node_id, fingerprint) =
-                node_tls.context("node-info nécessite --keys <dir>")?;
+                node_tls.context("node-info requires --keys <dir>")?;
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
         Cmd::Put { file, data_shards, parity_shards } => {
             let data = std::fs::read(&file)
-                .with_context(|| format!("lecture de {}", file.display()))?;
+                .with_context(|| format!("reading {}", file.display()))?;
             let cfg = ErasureConfig {
                 data_shards,
                 parity_shards,
@@ -249,9 +249,9 @@ async fn main() -> Result<()> {
                 }
             }
             store.put_manifest(&manifest)?;
-            println!("stocké : {}", manifest.file_hash);
+            println!("stored: {}", manifest.file_hash);
             println!(
-                "  {} octets, {} stripes, {} shards ({}+{}), tolère la perte de {} shards/stripe",
+                "  {} bytes, {} stripes, {} shards ({}+{}), tolerates the loss of {} shards/stripe",
                 manifest.file_size,
                 manifest.stripes.len(),
                 shard_count,
@@ -263,7 +263,7 @@ async fn main() -> Result<()> {
         Cmd::Get { file_hash, output } => {
             let data = reconstruct(&store, &file_hash)?;
             std::fs::write(&output, &data)?;
-            println!("reconstruit : {} octets → {}", data.len(), output.display());
+            println!("reconstructed: {} bytes → {}", data.len(), output.display());
         }
         Cmd::Verify { file_hash } => {
             let manifest = store.get_manifest(&file_hash)?;
@@ -279,15 +279,15 @@ async fn main() -> Result<()> {
             }
             match reconstruct(&store, &file_hash) {
                 Ok(_) => println!(
-                    "OK : intègre et reconstructible ({missing}/{total} shards indisponibles)"
+                    "OK: intact and reconstructible ({missing}/{total} shards unavailable)"
                 ),
-                Err(e) => bail!("IRRÉCUPÉRABLE ({missing}/{total} shards indisponibles) : {e}"),
+                Err(e) => bail!("UNRECOVERABLE ({missing}/{total} shards unavailable): {e}"),
             }
         }
         Cmd::List => {
             for hash in store.list_manifests()? {
                 let m = store.get_manifest(&hash)?;
-                println!("{hash}  {} octets", m.file_size);
+                println!("{hash}  {} bytes", m.file_size);
             }
         }
         Cmd::Serve {
@@ -303,27 +303,27 @@ async fn main() -> Result<()> {
             no_discover,
             dht_bootstrap,
         } => {
-            // Découverte implicite : des clés de cluster, pas de liste
-            // statique, pas d'opt-out → le nœud se débrouille tout seul.
+            // Implicit discovery: cluster keys present, no static list, no
+            // opt-out → the node figures everything out on its own.
             let discover = cli.keys.is_some() && peers.is_empty() && !no_discover;
             let store = Arc::new(store);
             let interval = std::time::Duration::from_secs(scrub_interval);
             let mut raft_handler: Option<Arc<dyn nauka_transport::server::RaftHandler>> = None;
 
-            // Avec une identité crypto, le node-id se PROUVE (dérivé de la
-            // clé publique) au lieu de se décréter.
+            // With a crypto identity, the node-id is PROVEN (derived from
+            // the public key) instead of being self-declared.
             let node_id = match (&node_tls, node_id) {
                 (Some((derived, fp)), cli_id) => {
                     if let Some(cli_id) = cli_id {
                         if cli_id != *derived {
                             eprintln!(
-                                "--node-id {cli_id} ignoré: l'identité crypto impose {derived} \
+                                "--node-id {cli_id} ignored: the crypto identity imposes {derived} \
                                  (fingerprint {})",
                                 &fp[..16]
                             );
                         }
                     }
-                    println!("identité: node-id {derived} (fingerprint {})", &fp[..16]);
+                    println!("identity: node-id {derived} (fingerprint {})", &fp[..16]);
                     Some(*derived)
                 }
                 (None, id) => id,
@@ -332,9 +332,9 @@ async fn main() -> Result<()> {
             let boots: Option<Vec<String>> =
                 if dht_bootstrap.is_empty() { None } else { Some(dht_bootstrap.clone()) };
 
-            // Adresse annoncée aux autres nœuds : explicite (--advertise),
-            // sinon auto-détectée via la DHT en mode découverte, sinon
-            // l'adresse d'écoute.
+            // Address advertised to the other nodes: explicit
+            // (--advertise), otherwise auto-detected through the DHT in
+            // discovery mode, otherwise the listen address.
             let advertise_addr = match advertise {
                 Some(a) => a,
                 None if discover => {
@@ -342,8 +342,8 @@ async fn main() -> Result<()> {
                         Ok(Some(ip)) => {
                             let a = SocketAddr::new(ip, listen.port());
                             println!(
-                                "IP publique détectée via la DHT: {ip} — adresse annoncée {a} \
-                                 (le port {} et le port {} doivent être joignables en UDP)",
+                                "public IP detected through the DHT: {ip} — advertised address {a} \
+                                 (port {} and port {} must be reachable over UDP)",
                                 listen.port(),
                                 listen.port() + 1
                             );
@@ -351,14 +351,14 @@ async fn main() -> Result<()> {
                         }
                         Ok(None) => {
                             eprintln!(
-                                "IP publique indétectable via la DHT — repli sur l'adresse \
-                                 d'écoute {listen} (utiliser --advertise si elle n'est pas \
-                                 joignable par les autres nœuds)"
+                                "public IP undetectable through the DHT — falling back to the \
+                                 listen address {listen} (use --advertise if it is not reachable \
+                                 by the other nodes)"
                             );
                             listen
                         }
                         Err(e) => {
-                            eprintln!("détection d'IP publique en échec ({e:#}) — repli sur {listen}");
+                            eprintln!("public IP detection failed ({e:#}) — falling back to {listen}");
                             listen
                         }
                     }
@@ -367,7 +367,7 @@ async fn main() -> Result<()> {
             };
 
             if let Some(id) = node_id {
-                // Mode consensus : membership et registre viennent de Raft.
+                // Consensus mode: membership and registry come from Raft.
                 let app = nauka_raft::RaftApp::start(id, &cli.data_dir.join("raft")).await?;
                 raft_handler = Some(app.clone());
                 let self_id = advertise_addr.to_string();
@@ -376,7 +376,7 @@ async fn main() -> Result<()> {
                     let keys_dir = cli
                         .keys
                         .clone()
-                        .context("--discover nécessite --keys (identité du cluster)")?;
+                        .context("--discover requires --keys (cluster identity)")?;
                     let dht_kp = nauka_discovery::derive_dht_keypair(&keys_dir)?;
                     let client = nauka_discovery::make_client(boots.as_deref())?;
                     tokio::spawn(run_discovery(app.clone(), client, dht_kp, advertise_addr));
@@ -396,7 +396,7 @@ async fn main() -> Result<()> {
                     });
                     tokio::spawn(async move {
                         if let Err(e) = api::serve_http(http, api_state, webui_dir).await {
-                            eprintln!("API HTTP arrêtée: {e:#}");
+                            eprintln!("HTTP API stopped: {e:#}");
                         }
                     });
                 }
@@ -408,9 +408,9 @@ async fn main() -> Result<()> {
                     let mut my_coord = nauka_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
-                        // Déclare la capacité de ce nœud dans l'état répliqué
-                        // (poids du placement) — au premier tick puis quand
-                        // elle change de plus de 1 %.
+                        // Declare this node's capacity in the replicated
+                        // state (placement weight) — on the first tick,
+                        // then whenever it moves by more than 1%.
                         if app.members().contains_key(&app.id) {
                             let cap = capacity
                                 .unwrap_or_else(|| filesystem_capacity(&data_dir_bg));
@@ -431,18 +431,18 @@ async fn main() -> Result<()> {
                                 {
                                     Ok(_) => {
                                         eprintln!(
-                                            "capacité déclarée: {:.1} Go",
+                                            "capacity declared: {:.1} GB",
                                             cap as f64 / 1e9
                                         );
                                         declared_capacity = Some(cap);
                                     }
-                                    Err(e) => eprintln!("déclaration de capacité: {e:#}"),
+                                    Err(e) => eprintln!("capacity declaration failed: {e:#}"),
                                 }
                             }
                         }
-                        // Le registre répliqué est la source de vérité :
-                        // matérialise localement les manifests que ce nœud
-                        // ne connaît pas encore, puis scrub.
+                        // The replicated registry is the source of truth:
+                        // materialize locally the manifests this node does
+                        // not know yet, then scrub.
                         let state = app.app_state();
                         for manifest in state.manifests.values() {
                             if store_bg.get_manifest(&manifest.file_hash).is_err() {
@@ -450,9 +450,9 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        // Expiration : le leader retire du registre les
-                        // fichiers dont le TTL est échu (une seule fois pour
-                        // tout le cluster, la réplication fait le reste).
+                        // Expiration: the leader drops from the registry
+                        // the files whose TTL has elapsed (once for the
+                        // whole cluster, replication does the rest).
                         let is_leader =
                             app.raft.metrics().borrow().current_leader == Some(app.id);
                         if is_leader {
@@ -468,17 +468,17 @@ async fn main() -> Result<()> {
                                         })
                                         .await
                                     {
-                                        Ok(_) => eprintln!("expiré: {}", m.file_hash),
-                                        Err(e) => eprintln!("expiration en échec: {e:#}"),
+                                        Ok(_) => eprintln!("expired: {}", m.file_hash),
+                                        Err(e) => eprintln!("expiration failed: {e:#}"),
                                     }
                                 }
                             }
                         }
 
-                        // Purge locale : manifests absents du registre et
-                        // shards que plus aucun fichier vivant ne référence.
-                        // `registry_ready` évite qu'un nœud fraîchement
-                        // démarré, au registre encore vide, n'efface tout.
+                        // Local purge: manifests absent from the registry
+                        // and shards no live file references any more.
+                        // `registry_ready` keeps a freshly started node,
+                        // whose registry is still empty, from wiping all.
                         let live: std::collections::BTreeSet<String> =
                             app.app_state().manifests.keys().cloned().collect();
                         let registry_ready = app.members().contains_key(&app.id)
@@ -490,12 +490,12 @@ async fn main() -> Result<()> {
                         ) {
                             Ok(p) if p.manifests_purged > 0 || p.orphans_purged > 0 => {
                                 eprintln!(
-                                    "purge: {} manifest(s), {} shard(s) orphelin(s)",
+                                    "purge: {} manifest(s), {} orphan shard(s)",
                                     p.manifests_purged, p.orphans_purged
                                 );
                             }
                             Ok(_) => {}
-                            Err(e) => eprintln!("purge en échec: {e}"),
+                            Err(e) => eprintln!("purge failed: {e}"),
                         }
                         let members = app.members();
                         if members.len() < 2 || !members.values().any(|a| *a == self_id) {
@@ -504,10 +504,10 @@ async fn main() -> Result<()> {
                         let nodes =
                             app.weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY);
 
-                        // Coordonnées réseau : mesure les RTT vers les pairs,
-                        // ajuste notre position Vivaldi, et la publie si elle
-                        // a bougé sensiblement. Le placement s'en sert pour
-                        // écarter géographiquement les shards d'une stripe.
+                        // Network coordinates: measure the RTTs to the
+                        // peers, adjust our Vivaldi position, and publish
+                        // it if it moved noticeably. Placement uses it to
+                        // spread a stripe's shards geographically.
                         let known = app.coords();
                         for (peer, _) in nodes.iter().filter(|(n, _)| *n != self_id) {
                             let Ok(addr) = peer.parse::<SocketAddr>() else { continue };
@@ -543,45 +543,45 @@ async fn main() -> Result<()> {
                         {
                             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                                 eprintln!(
-                                    "scrub: {} vérifiés, {} régénérés, {} irréparables",
+                                    "scrub: {} checked, {} regenerated, {} unrecoverable",
                                     r.shards_checked, r.shards_healed, r.shards_unrecoverable
                                 );
                             }
                             Ok(_) => {}
-                            Err(e) => eprintln!("scrub en échec: {e}"),
+                            Err(e) => eprintln!("scrub failed: {e}"),
                         }
-                        // Rebalancement : libère ce qui ne nous appartient
-                        // plus (après confirmation chez le propriétaire).
+                        // Rebalancing: release what no longer belongs to
+                        // us (once the owner has confirmed it holds it).
                         match nauka_cluster::healer::gc_once_geo(
                             &store_bg, &self_id, &nodes, &coords,
                         )
                         .await
                         {
                             Ok(g) if g.shards_released > 0 => {
-                                eprintln!("gc: {} shards libérés", g.shards_released);
+                                eprintln!("gc: {} shards released", g.shards_released);
                             }
                             Ok(_) => {}
-                            Err(e) => eprintln!("gc en échec: {e}"),
+                            Err(e) => eprintln!("gc failed: {e}"),
                         }
-                        // Attestation : les pairs détiennent-ils vraiment ce
-                        // qu'ils déclarent ? (échantillonnage, coût minime)
+                        // Attestation: do the peers really hold what they
+                        // claim? (sampled, negligible cost)
                         match nauka_cluster::audit::audit_once_geo(
                             &store_bg, &self_id, &nodes, &coords,
                         )
                         .await
                         {
                             Ok(a) if a.failed > 0 => eprintln!(
-                                "AUDIT: {} preuve(s) invalide(s) sur {} challenges — \
-                                 un pair ne détient pas ce qu'il déclare",
+                                "AUDIT: {} invalid proof(s) out of {} challenges — \
+                                 a peer does not hold what it claims",
                                 a.failed, a.challenged
                             ),
                             Ok(_) => {}
-                            Err(e) => eprintln!("audit en échec: {e}"),
+                            Err(e) => eprintln!("audit failed: {e}"),
                         }
                     }
                 });
             } else if !peers.is_empty() {
-                // Mode statique (sans consensus) : vue du cluster en config.
+                // Static mode (no consensus): cluster view from config.
                 let view = nauka_cluster::ClusterView::new(advertise_addr, &peers);
                 tokio::spawn(nauka_cluster::run_background(store.clone(), view, interval));
             }
@@ -592,39 +592,39 @@ async fn main() -> Result<()> {
             for m in &members {
                 let (id, addr) = m
                     .split_once('@')
-                    .with_context(|| format!("format attendu id@host:port, reçu {m}"))?;
+                    .with_context(|| format!("expected format id@host:port, got {m}"))?;
                 map.insert(id.parse::<u64>()?, addr.to_string());
             }
-            // Pre-flight : chaque membre doit répondre sur ses DEUX plans,
-            // et le node-id qui répond au plan consensus doit être le bon —
-            // attrape les nœuds morts et les collisions de ports (nœuds
-            // co-hébergés dont les ports ne sont pas espacés d'au moins 2).
+            // Pre-flight: every member must answer on BOTH planes, and the
+            // node-id answering on the consensus plane must be the right
+            // one — this catches dead nodes and port collisions (co-hosted
+            // nodes whose ports are not spaced by at least 2).
             for (id, addr_str) in &map {
                 let addr: SocketAddr = addr_str.parse()?;
                 let data = PeerClient::connect(addr)
                     .await
-                    .with_context(|| format!("nœud {id}: plan data {addr} injoignable"))?;
+                    .with_context(|| format!("node {id}: data plane {addr} unreachable"))?;
                 data.ping()
                     .await
-                    .with_context(|| format!("nœud {id}: plan data {addr} ne répond pas"))?;
+                    .with_context(|| format!("node {id}: data plane {addr} does not answer"))?;
                 let cons_addr = nauka_transport::consensus_addr(addr);
                 let cons = PeerClient::connect_consensus(cons_addr).await.with_context(|| {
-                    format!("nœud {id}: plan consensus {cons_addr} injoignable")
+                    format!("node {id}: consensus plane {cons_addr} unreachable")
                 })?;
                 match nauka_raft::admin_call(&cons, &nauka_raft::types::AdminRequest::Metrics).await {
                     Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) if got == *id => {}
                     Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) => bail!(
-                        "collision de ports: {cons_addr} répond avec le node-id {got} au lieu \
-                         de {id} — espacez les ports d'au moins 2 sur un même hôte"
+                        "port collision: {cons_addr} answers with node-id {got} instead of \
+                         {id} — space the ports by at least 2 on the same host"
                     ),
-                    other => bail!("nœud {id}: réponse consensus inattendue: {other:?}"),
+                    other => bail!("node {id}: unexpected consensus response: {other:?}"),
                 }
             }
             let first: SocketAddr = map.values().next().unwrap().parse()?;
             let client = PeerClient::connect(first).await?;
             match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Init(map)).await? {
-                nauka_raft::types::AdminResponse::Ok(_) => println!("cluster initialisé"),
-                other => bail!("échec de l'init: {other:?}"),
+                nauka_raft::types::AdminResponse::Ok(_) => println!("cluster initialized"),
+                other => bail!("init failed: {other:?}"),
             }
         }
         Cmd::Ban { file_hash, reason, peers } => {
@@ -637,10 +637,10 @@ async fn main() -> Result<()> {
             )
             .await?;
             if resp.ok {
-                println!("banni : {file_hash} ({reason})");
-                println!("  retiré du registre, refusé en 410, shards purgés au prochain GC");
+                println!("banned: {file_hash} ({reason})");
+                println!("  removed from the registry, refused with 410, shards purged at the next GC");
             } else {
-                bail!("bannissement refusé");
+                bail!("ban refused");
             }
         }
         Cmd::Unban { file_hash, peers } => {
@@ -650,9 +650,9 @@ async fn main() -> Result<()> {
             )
             .await?;
             if resp.ok {
-                println!("bannissement levé : {file_hash}");
+                println!("ban lifted: {file_hash}");
             } else {
-                println!("ce hash n'était pas banni");
+                println!("this hash was not banned");
             }
         }
         Cmd::ClusterMetrics { peer } => {
@@ -665,37 +665,37 @@ async fn main() -> Result<()> {
                     last_applied,
                     capacities,
                 } => {
-                    println!("nœud {id} — leader: {leader:?}, log appliqué: {last_applied:?}");
+                    println!("node {id} — leader: {leader:?}, applied log: {last_applied:?}");
                     for (id, addr) in members {
                         match capacities.get(&addr) {
                             Some(cap) => println!(
-                                "  membre {id} @ {addr} — capacité {:.1} Go",
+                                "  member {id} @ {addr} — capacity {:.1} GB",
                                 *cap as f64 / 1e9
                             ),
-                            None => println!("  membre {id} @ {addr} — capacité non déclarée"),
+                            None => println!("  member {id} @ {addr} — capacity not declared"),
                         }
                     }
                 }
-                other => bail!("réponse inattendue: {other:?}"),
+                other => bail!("unexpected response: {other:?}"),
             }
         }
         Cmd::ClusterAdd { member, peers } => {
             use nauka_raft::types::{AdminRequest, AdminResponse};
             let (id, addr) = member
                 .split_once('@')
-                .with_context(|| format!("format attendu id@host:port, reçu {member}"))?;
+                .with_context(|| format!("expected format id@host:port, got {member}"))?;
             let id: u64 = id.parse()?;
-            // 1. Learner : le nœud rattrape le log/snapshot sans voter.
+            // 1. Learner: the node catches up on the log/snapshot without voting.
             match nauka_raft::admin_via_leader(
                 &peers,
                 &AdminRequest::AddLearner { id, addr: addr.to_string() },
             )
             .await?
             {
-                AdminResponse::Ok(_) => println!("nœud {id} ajouté comme learner"),
+                AdminResponse::Ok(_) => println!("node {id} added as a learner"),
                 other => bail!("add-learner: {other:?}"),
             }
-            // 2. Promotion en votant : membership = membres actuels + lui.
+            // 2. Promotion to voter: membership = current members + it.
             let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await? {
                 AdminResponse::Metrics { members, .. } => members,
                 other => bail!("metrics: {other:?}"),
@@ -706,7 +706,7 @@ async fn main() -> Result<()> {
             }
             match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
                 AdminResponse::Ok(_) => {
-                    println!("nœud {id} promu votant — le rebalancement suivra au fil des scrubs")
+                    println!("node {id} promoted to voter — rebalancing will follow across the scrubs")
                 }
                 other => bail!("change-membership: {other:?}"),
             }
@@ -719,12 +719,12 @@ async fn main() -> Result<()> {
             };
             let ids: Vec<u64> = current.keys().copied().filter(|i| *i != node_id).collect();
             if ids.len() == current.len() {
-                bail!("le nœud {node_id} n'est pas membre du cluster");
+                bail!("node {node_id} is not a member of the cluster");
             }
             match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
                 AdminResponse::Ok(_) => println!(
-                    "nœud {node_id} retiré — laisser tourner le temps que les scrubs \
-                     re-répliquent ses shards, puis l'éteindre"
+                    "node {node_id} removed — leave it running long enough for the scrubs \
+                     to re-replicate its shards, then shut it down"
                 ),
                 other => bail!("change-membership: {other:?}"),
             }
@@ -737,11 +737,11 @@ async fn main() -> Result<()> {
                 ..ErasureConfig::default()
             };
             let file_size = std::fs::metadata(&file)
-                .with_context(|| format!("lecture de {}", file.display()))?
+                .with_context(|| format!("reading {}", file.display()))?
                 .len();
 
-            // Passe 1 : hash du fichier en streaming (le placement et le
-            // manifest sont keyés sur ce hash).
+            // Pass 1: hash the file in streaming (placement and the
+            // manifest are keyed on this hash).
             let mut hasher = blake3::Hasher::new();
             {
                 let mut f = std::fs::File::open(&file)?;
@@ -757,8 +757,8 @@ async fn main() -> Result<()> {
             let file_hash = hasher.finalize().to_hex().to_string();
 
             let clients = connect_all(&peers).await?;
-            // Placement pondéré : les capacités viennent des Metrics du
-            // cluster (mode Raft) ; à défaut, poids par défaut uniformes.
+            // Weighted placement: capacities come from the cluster
+            // Metrics (Raft mode); failing that, uniform default weights.
             let capacities = match nauka_raft::admin_via_leader(
                 &peers,
                 &nauka_raft::types::AdminRequest::Metrics,
@@ -781,10 +781,10 @@ async fn main() -> Result<()> {
                 .collect();
             view.sort();
 
-            // Passe 2 : encode et dispatche stripe par stripe — la mémoire
-            // reste bornée à une stripe quel que soit la taille du fichier.
-            // 16 Mo en vol par upload : assez pour saturer un lien, sans
-            // écrouler le cluster quand plusieurs uploads tournent en rafale.
+            // Pass 2: encode and dispatch stripe by stripe — memory stays
+            // bounded to a single stripe whatever the file size.
+            // 16 MB in flight per upload: enough to saturate a link,
+            // without crushing the cluster when uploads come in bursts.
             const MAX_IN_FLIGHT: usize = 16;
             let mut in_flight: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
             let mut f = std::fs::File::open(&file)?;
@@ -805,24 +805,24 @@ async fn main() -> Result<()> {
                 }
                 let si = stripes_meta.len();
                 let shards = nauka_erasure::encode_stripe(&stripe_buf[..filled], &cfg)?;
-                // Envois pipelinés : on n'attend pas la fin d'une stripe pour
-                // encoder la suivante, seule la fenêtre borne la mémoire.
+                // Pipelined sends: we don't wait for one stripe to land
+                // before encoding the next, only the window bounds memory.
                 for shard in &shards {
                     let owner =
                         nauka_cluster::placement::shard_owner(&file_hash, si, shard.index, &view);
                     let client = clients
                         .iter()
                         .find(|c| c.addr.to_string() == owner)
-                        .expect("owner vient de la liste des clients")
+                        .expect("the owner comes from the client list")
                         .clone();
                     let data = shard.data.clone();
                     let addr = client.addr;
                     while in_flight.len() >= MAX_IN_FLIGHT {
                         in_flight.join_next().await.unwrap()??;
                     }
-                    // Une connexion tuée par la congestion ne condamne pas
-                    // l'upload : reconnexion + renvoi (idempotent, le shard
-                    // est content-addressed).
+                    // A connection killed by congestion does not doom the
+                    // upload: reconnect + resend (idempotent, the shard is
+                    // content-addressed).
                     in_flight.spawn(async move {
                         if client.put_shard(data.clone()).await.is_ok() {
                             return Ok(());
@@ -838,7 +838,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        bail!("shard non envoyé à {addr} après 5 tentatives")
+                        bail!("shard not sent to {addr} after 5 attempts")
                     });
                 }
                 stripes_meta.push(nauka_erasure::StripeMeta {
@@ -859,16 +859,16 @@ async fn main() -> Result<()> {
             };
             let secs = start.elapsed().as_secs_f64();
             println!(
-                "  débit: {:.0} Mo/s",
+                "  throughput: {:.0} MB/s",
                 file_size as f64 / 1_000_000.0 / secs.max(0.001)
             );
-            // Le manifest (métadonnées seulement) est répliqué sur tous les
-            // nœuds — en attendant Raft, chacun sait reconstruire.
+            // The manifest (metadata only) is replicated to every node —
+            // until Raft is in play, each of them can rebuild.
             for client in &clients {
                 client.put_manifest(&manifest).await?;
             }
-            // Si le cluster tourne en mode Raft, enregistre aussi le fichier
-            // dans le registre répliqué (best effort sinon).
+            // If the cluster runs in Raft mode, also record the file in
+            // the replicated registry (best effort otherwise).
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 nauka_raft::write_via_leader(
@@ -878,12 +878,12 @@ async fn main() -> Result<()> {
             )
             .await
             {
-                Ok(Ok(_)) => println!("enregistré dans le registre Raft"),
-                _ => println!("registre Raft indisponible (cluster en mode statique ?)"),
+                Ok(Ok(_)) => println!("recorded in the Raft registry"),
+                _ => println!("Raft registry unavailable (cluster in static mode?)"),
             }
-            println!("dispatché : {}", manifest.file_hash);
+            println!("dispatched: {}", manifest.file_hash);
             println!(
-                "  {} octets, {} stripes ({}+{}) sur {} nœuds",
+                "  {} bytes, {} stripes ({}+{}) across {} nodes",
                 manifest.file_size,
                 manifest.stripes.len(),
                 cfg.data_shards,
@@ -896,8 +896,8 @@ async fn main() -> Result<()> {
             let clients = connect_all(&peers).await?;
             let manifest = fetch_manifest(&clients, &file_hash).await?;
 
-            // Reconstruction en streaming : une stripe en mémoire à la fois,
-            // hash global vérifié au fil de l'eau.
+            // Streaming reconstruction: one stripe in memory at a time,
+            // global hash verified as we go.
             let mut out = std::io::BufWriter::new(std::fs::File::create(&output)?);
             let mut hasher = blake3::Hasher::new();
             for stripe in &manifest.stripes {
@@ -911,10 +911,10 @@ async fn main() -> Result<()> {
             }
             out.flush()?;
             if hasher.finalize().to_hex().to_string() != manifest.file_hash {
-                bail!("intégrité violée : hash du fichier reconstruit différent du manifest");
+                bail!("integrity violated: hash of the rebuilt file differs from the manifest");
             }
             println!(
-                "reconstruit : {} octets → {} (intégrité vérifiée)",
+                "reconstructed: {} bytes → {} (integrity verified)",
                 manifest.file_size,
                 output.display()
             );
@@ -923,10 +923,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Cycle de vie découverte d'un nœud, entièrement implicite : résoudre le
-/// cluster sur la DHT et le rejoindre ; si la DHT est vierge, élection de
-/// genèse (le plus petit node-id fonde le cluster — déterministe, sans
-/// nœud désigné) ; puis republier les seeds tant qu'on est leader.
+/// Discovery lifecycle of a node, entirely implicit: resolve the cluster on
+/// the DHT and join it; if the DHT is blank, run a genesis election (the
+/// smallest node-id founds the cluster — deterministic, no designated
+/// node); then republish the seeds for as long as we stay leader.
 async fn run_discovery(
     app: Arc<nauka_raft::RaftApp>,
     client: nauka_discovery::pkarr::Client,
@@ -936,24 +936,24 @@ async fn run_discovery(
     use std::time::{Duration, Instant};
     use nauka_raft::types::{AdminRequest, AdminResponse};
 
-    /// Cadence de scrutation de la DHT.
+    /// DHT polling cadence.
     const POLL: Duration = Duration::from_secs(5);
-    /// Notre candidature doit rester incontestée aussi longtemps avant de
-    /// fonder (laisse aux démarrages simultanés le temps de se voir).
+    /// Our candidacy must stay uncontested this long before founding
+    /// (gives simultaneous startups time to see each other).
     const GENESIS_CONFIRM: Duration = Duration::from_secs(12);
-    /// Un candidat étranger qui ne fonde jamais est déclaré mort après ça.
+    /// A foreign candidate that never founds is declared dead after this.
     const FOREIGN_STALE: Duration = Duration::from_secs(45);
 
     let mut our_candidacy_at: Option<Instant> = None;
     let mut foreign_since: Option<(u64, Instant)> = None;
 
-    // Phase 1 : entrer dans le cluster (sauté au redémarrage — l'état Raft
-    // durable connaît déjà le membership).
+    // Phase 1: enter the cluster (skipped on restart — the durable Raft
+    // state already knows the membership).
     while !app.members().contains_key(&app.id) {
-        // 1) Un cluster existe-t-il ?
+        // 1) Does a cluster already exist?
         match nauka_discovery::resolve_seeds(&client, &dht_kp.public_key()).await {
             Ok(seeds) if !seeds.is_empty() => {
-                eprintln!("cluster découvert sur la DHT: {seeds:?} — adhésion…");
+                eprintln!("cluster discovered on the DHT: {seeds:?} — joining…");
                 let join = async {
                     match nauka_raft::admin_via_leader(
                         &seeds,
@@ -983,26 +983,26 @@ async fn run_discovery(
                 };
                 match join.await {
                     Ok(()) => {
-                        eprintln!("adhésion réussie — membre votant du cluster");
+                        eprintln!("join succeeded — voting member of the cluster");
                         break;
                     }
-                    Err(e) => eprintln!("adhésion en échec ({e:#}), nouvel essai…"),
+                    Err(e) => eprintln!("join failed ({e:#}), retrying…"),
                 }
                 tokio::time::sleep(POLL).await;
                 continue;
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("résolution DHT en échec ({e:#}), nouvel essai…");
+                eprintln!("DHT resolution failed ({e:#}), retrying…");
                 tokio::time::sleep(POLL).await;
                 continue;
             }
         }
 
-        // 2) DHT vierge : élection de genèse par candidatures signées.
+        // 2) Blank DHT: genesis election through signed candidacies.
         match nauka_discovery::resolve_genesis_candidacy(&client, &dht_kp.public_key()).await {
             Ok(Some((cid, _))) if cid == app.id => {
-                // Notre candidature est la plus récente visible.
+                // Our candidacy is the most recent one visible.
                 if our_candidacy_at.is_some_and(|t| t.elapsed() >= GENESIS_CONFIRM) {
                     let mut members = std::collections::BTreeMap::new();
                     members.insert(
@@ -1011,7 +1011,7 @@ async fn run_discovery(
                     );
                     match app.raft.initialize(members).await {
                         Ok(()) => {
-                            eprintln!("genèse: candidature incontestée — cluster fondé");
+                            eprintln!("genesis: candidacy uncontested — cluster founded");
                             break;
                         }
                         Err(e) => eprintln!("initialize: {e}"),
@@ -1019,19 +1019,19 @@ async fn run_discovery(
                 }
             }
             Ok(Some((cid, _))) if cid < app.id => {
-                // Un candidat prioritaire (id plus petit) : on le laisse
-                // fonder — sauf s'il ne fonde jamais (crashé).
+                // A higher-priority candidate (smaller id): we let it
+                // found — unless it never does (crashed).
                 let since = match foreign_since {
                     Some((id, t)) if id == cid => t,
                     _ => {
                         let now = Instant::now();
                         foreign_since = Some((cid, now));
-                        eprintln!("genèse: candidat prioritaire {cid} vu — on attend");
+                        eprintln!("genesis: higher-priority candidate {cid} seen — waiting");
                         now
                     }
                 };
                 if since.elapsed() >= FOREIGN_STALE {
-                    eprintln!("genèse: candidat {cid} silencieux — on reprend la main");
+                    eprintln!("genesis: candidate {cid} silent — taking over");
                     if publish_candidacy(&client, &dht_kp, &app, advertise).await {
                         our_candidacy_at = Some(Instant::now());
                         foreign_since = None;
@@ -1039,25 +1039,25 @@ async fn run_discovery(
                 }
             }
             Ok(Some((cid, _))) => {
-                // Candidat moins prioritaire : notre id est plus petit, on
-                // (re)publie — il nous verra et s'inclinera.
-                eprintln!("genèse: candidat {cid} moins prioritaire — on publie notre candidature");
+                // Lower-priority candidate: our id is smaller, so we
+                // (re)publish — it will see us and stand down.
+                eprintln!("genesis: candidate {cid} lower priority — publishing our candidacy");
                 if publish_candidacy(&client, &dht_kp, &app, advertise).await {
                     our_candidacy_at = Some(Instant::now());
                 }
             }
             Ok(None) => {
-                eprintln!("aucun cluster sur la DHT — candidature de genèse");
+                eprintln!("no cluster on the DHT — standing as genesis candidate");
                 if publish_candidacy(&client, &dht_kp, &app, advertise).await {
                     our_candidacy_at = Some(Instant::now());
                 }
             }
-            Err(e) => eprintln!("lecture des candidatures en échec ({e:#})"),
+            Err(e) => eprintln!("reading the candidacies failed ({e:#})"),
         }
         tokio::time::sleep(POLL).await;
     }
 
-    // Phase 2 : battement de cœur DHT — le leader republie le membership.
+    // Phase 2: DHT heartbeat — the leader republishes the membership.
     let app_pub = app.clone();
     nauka_discovery::run_publisher(
         client,
@@ -1080,8 +1080,8 @@ async fn run_discovery(
     .await;
 }
 
-/// Capacité totale du système de fichiers hébergeant `path` (statvfs).
-/// Repli sur la capacité par défaut si la mesure échoue.
+/// Total capacity of the filesystem hosting `path` (statvfs).
+/// Falls back to the default capacity if the measurement fails.
 fn filesystem_capacity(path: &std::path::Path) -> u64 {
     #[cfg(unix)]
     {
@@ -1098,7 +1098,7 @@ fn filesystem_capacity(path: &std::path::Path) -> u64 {
     nauka_cluster::placement::DEFAULT_CAPACITY
 }
 
-/// Publie notre candidature de genèse ; false si la DHT n'a pas pris.
+/// Publishes our genesis candidacy; false if the DHT did not take it.
 async fn publish_candidacy(
     client: &nauka_discovery::pkarr::Client,
     dht_kp: &nauka_discovery::pkarr::Keypair,
@@ -1108,23 +1108,23 @@ async fn publish_candidacy(
     match nauka_discovery::publish_genesis_candidacy(client, dht_kp, app.id, advertise).await {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("publication de candidature en échec ({e:#})");
+            eprintln!("candidacy publication failed ({e:#})");
             false
         }
     }
 }
 
-/// Se connecte aux peers joignables ; échoue seulement si aucun ne répond.
+/// Connects to the reachable peers; fails only if none of them answers.
 async fn connect_all(peers: &[SocketAddr]) -> Result<Vec<PeerClient>> {
     let mut clients = Vec::new();
     for addr in peers {
         match PeerClient::connect(*addr).await {
             Ok(c) => clients.push(c),
-            Err(e) => eprintln!("peer {addr} injoignable ({e}), on continue sans lui"),
+            Err(e) => eprintln!("peer {addr} unreachable ({e}), carrying on without it"),
         }
     }
     if clients.is_empty() {
-        bail!("aucun peer joignable");
+        bail!("no reachable peer");
     }
     Ok(clients)
 }
@@ -1135,11 +1135,11 @@ async fn fetch_manifest(clients: &[PeerClient], file_hash: &str) -> Result<FileM
             return Ok(m);
         }
     }
-    bail!("manifest {file_hash} introuvable sur les peers");
+    bail!("manifest {file_hash} not found on any peer");
 }
 
-/// Premier peer qui possède le shard gagne ; introuvable → None, le
-/// Reed-Solomon compensera si assez de shards survivent.
+/// The first peer that holds the shard wins; not found → None, and
+/// Reed-Solomon will make up for it if enough shards survive.
 async fn fetch_shard(clients: &[PeerClient], hash: &str) -> Option<Vec<u8>> {
     for client in clients {
         if let Ok(Some(data)) = client.get_shard(hash).await {
@@ -1149,8 +1149,8 @@ async fn fetch_shard(clients: &[PeerClient], hash: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Charge les shards disponibles (les manquants/corrompus deviennent `None`)
-/// et laisse Reed-Solomon reconstruire.
+/// Loads the available shards (missing/corrupt ones become `None`) and
+/// lets Reed-Solomon rebuild.
 fn reconstruct(store: &ShardStore, file_hash: &str) -> Result<Vec<u8>> {
     let manifest = store.get_manifest(file_hash)?;
     let stripes = manifest

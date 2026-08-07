@@ -1,13 +1,13 @@
-//! Stockage openraft durable.
+//! Durable openraft storage.
 //!
-//! - Log + vote : redb, fsync AVANT d'acquitter (exigence de correction de
-//!   Raft — un vote ou une entrée acquittés doivent survivre au crash).
-//! - State machine : en mémoire, reconstruite au démarrage depuis le dernier
-//!   snapshot (fichier, écrit atomiquement) + replay du log par openraft.
-//!   Aucun fsync sur le chemin d'apply.
+//! - Log + vote: redb, fsync BEFORE acking (a Raft correctness requirement —
+//!   an acked vote or entry must survive a crash).
+//! - State machine: in memory, rebuilt at startup from the last snapshot
+//!   (a file, written atomically) and openraft's log replay. No fsync on the
+//!   apply path.
 //!
-//! Un arrêt total du cluster (les n nœuds éteints) redémarre donc sans perte :
-//! chaque nœud recharge vote + log + snapshot depuis son data-dir.
+//! A full cluster shutdown (all n nodes powered off) therefore restarts
+//! without loss: each node reloads vote + log + snapshot from its data-dir.
 
 use std::fmt::Debug;
 use std::fs;
@@ -29,7 +29,7 @@ use crate::types::{AppCommand, AppResponse, AppState, NodeId, TypeConfig};
 const LOG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_log");
 const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta");
 
-/// Log Raft durable (redb).
+/// Durable Raft log (redb).
 #[derive(Clone)]
 pub struct LogStore {
     db: Arc<Database>,
@@ -39,7 +39,7 @@ impl LogStore {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         fs::create_dir_all(dir)?;
         let db = Database::create(dir.join("raft-log.redb"))?;
-        // Crée les tables si absentes pour simplifier toutes les lectures.
+        // Create the tables if missing, to keep every read path simple.
         let tx = db.begin_write()?;
         {
             tx.open_table(LOG_TABLE)?;
@@ -134,8 +134,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Durable avant retour : un vote accordé puis oublié permettrait de
-        // voter deux fois dans le même terme.
+        // Durable before returning: a vote granted then forgotten would allow
+        // voting twice in the same term.
         self.write_meta("vote", vote)
     }
 
@@ -161,8 +161,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                     .map_err(write_err)?;
             }
         }
-        // commit() fsync (durabilité Immediate par défaut) — l'ack Raft ne
-        // part qu'après.
+        // commit() fsyncs (Immediate durability by default) — the Raft ack
+        // only goes out afterwards.
         tx.commit().map_err(write_err)?;
         callback.log_io_completed(Ok(()));
         Ok(())
@@ -187,8 +187,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Nu (pas d'Option) : get_log_state relit ce champ tel quel, la
-        // présence de la clé fait office de Some.
+        // Stored bare (not an Option): get_log_state reads the field back as
+        // is, the presence of the key stands in for Some.
         self.write_meta("last_purged", &log_id)?;
         let tx = self.db.begin_write().map_err(write_err)?;
         {
@@ -212,7 +212,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 }
 
-/// State machine : registre en mémoire + snapshot durable sur disque.
+/// State machine: in-memory registry + durable snapshot on disk.
 #[derive(Clone)]
 pub struct StateMachineStore {
     inner: Arc<Mutex<StateMachineInner>>,
@@ -235,8 +235,8 @@ struct StoredSnapshot {
 }
 
 impl StateMachineStore {
-    /// Ouvre la state machine ; recharge le dernier snapshot si présent.
-    /// openraft ré-appliquera ensuite les entrées du log postérieures.
+    /// Opens the state machine; reloads the last snapshot if present.
+    /// openraft then re-applies the log entries that come after it.
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         fs::create_dir_all(dir)?;
         let snapshot_path = dir.join("snapshot.bin");
@@ -251,12 +251,12 @@ impl StateMachineStore {
         Ok(Self { inner: Arc::new(Mutex::new(inner)), snapshot_path })
     }
 
-    /// Lecture locale de l'état répliqué (API du nœud, healer).
+    /// Local read of the replicated state (node API, healer).
     pub fn read_state(&self) -> AppState {
         self.inner.lock().unwrap().state.clone()
     }
 
-    /// Écrit le snapshot sur disque : fichier temporaire + fsync + rename.
+    /// Writes the snapshot to disk: temp file + fsync + rename.
     fn persist_snapshot(&self, stored: &StoredSnapshot) -> Result<(), StorageError<NodeId>> {
         let sig = stored.meta.signature();
         let bytes = bincode::serialize(stored)
@@ -336,8 +336,8 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                         AppCommand::RegisterManifest(manifest) => {
                             let hash = manifest.file_hash.clone();
                             if inner.state.banned.contains_key(&hash) {
-                                // Ré-upload d'un contenu banni : refusé net.
-                                AppResponse { ok: false, info: Some("banni".into()) }
+                                // Re-upload of banned content: flatly refused.
+                                AppResponse { ok: false, info: Some("banned".into()) }
                             } else {
                                 inner.state.manifests.insert(hash.clone(), manifest);
                                 AppResponse { ok: true, info: Some(hash) }
@@ -356,9 +356,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             AppResponse { ok: true, info: None }
                         }
                         AppCommand::BanHash { file_hash, reason } => {
-                            // Bannir retire aussi du registre : le fichier
-                            // devient introuvable ET ses shards deviennent
-                            // orphelins, donc purgeables par le GC.
+                            // Banning also removes from the registry: the file
+                            // becomes unreachable AND its shards become
+                            // orphans, hence purgeable by the GC.
                             inner.state.manifests.remove(&file_hash);
                             inner.state.banned.insert(file_hash.clone(), reason);
                             AppResponse { ok: true, info: Some(file_hash) }

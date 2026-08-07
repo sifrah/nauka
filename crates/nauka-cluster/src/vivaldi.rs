@@ -1,51 +1,51 @@
-//! Coordonnées réseau Vivaldi : une position par nœud dans un espace
-//! euclidien où **la distance prédit la latence**.
+//! Vivaldi network coordinates: one position per node in a Euclidean space
+//! where **distance predicts latency**.
 //!
-//! Chaque nœud mesure le RTT vers ses pairs (un ping QUIC suffit) et
-//! ajuste sa position : trop loin d'un pair rapide → il s'en rapproche ;
-//! trop près d'un pair lent → il s'en éloigne. Après quelques dizaines
-//! d'échanges, l'ensemble converge vers une carte cohérente — sans base
-//! GeoIP, sans configuration, auto-calibrée en continu.
+//! Every node measures the RTT to its peers (a QUIC ping is enough) and
+//! adjusts its position: too far from a fast peer → it moves closer; too
+//! close to a slow peer → it moves away. After a few dozen exchanges the
+//! whole set converges to a consistent map — no GeoIP database, no
+//! configuration, continuously self-calibrating.
 //!
-//! Deux usages :
-//! - **placement** : écarter les shards d'une même stripe (deux nœuds
-//!   proches sont probablement dans le même datacenter, donc corrélés en
-//!   panne — les séparer, c'est survivre à la perte d'une région) ;
-//! - **lecture** : préférer le pair le plus proche.
+//! Two uses:
+//! - **placement**: spread the shards of a single stripe (two close nodes
+//!   are probably in the same datacenter, hence a correlated failure —
+//!   separating them is how you survive the loss of a region);
+//! - **reads**: prefer the closest peer.
 //!
-//! Référence : Dabek et al., *Vivaldi: A Decentralized Network Coordinate
-//! System* (SIGCOMM'04), avec la hauteur (« height ») qui modélise le coût
-//! d'accès du dernier kilomètre.
+//! Reference: Dabek et al., *Vivaldi: A Decentralized Network Coordinate
+//! System* (SIGCOMM'04), with the height modelling the last-mile access
+//! cost.
 //!
-//! DÉTERMINISME : les coordonnées circulent dans l'état Raft, donc tous
-//! les nœuds placent à partir des mêmes valeurs. Seules des opérations
-//! IEEE de base sont utilisées ici (la racine carrée est calculée par
-//! Newton) — les libm diffèrent d'une plateforme à l'autre, et deux nœuds
-//! qui classeraient différemment se disputeraient les shards.
+//! DETERMINISM: coordinates travel in the Raft state, so every node places
+//! from the same values. Only basic IEEE operations are used here (the
+//! square root is computed with Newton's method) — libm implementations
+//! differ across platforms, and two nodes that ranked differently would
+//! fight over shards.
 
 use serde::{Deserialize, Serialize};
 
-/// Dimensions de l'espace euclidien (2 suffit pour la géographie
-/// terrestre ; la hauteur capture le reste).
+/// Dimensions of the Euclidean space (2 is enough for Earth geography;
+/// the height captures the rest).
 pub const DIMS: usize = 2;
 
-/// Sensibilité de l'ajustement : petite = stable mais lent à converger.
+/// Adjustment sensitivity: small = stable but slow to converge.
 const CC: f64 = 0.25;
-/// Sensibilité de l'erreur estimée.
+/// Sensitivity of the estimated error.
 const CE: f64 = 0.25;
-/// Hauteur minimale (ms) — évite l'effondrement en un point.
+/// Minimum height (ms) — prevents collapse into a single point.
 const MIN_HEIGHT: f64 = 1.0;
-/// Erreur initiale : « je ne sais rien de ma position ».
+/// Initial error: "I know nothing about my position".
 const MAX_ERROR: f64 = 1.5;
 
-/// Position d'un nœud dans l'espace latence.
+/// Position of a node in latency space.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Coord {
-    /// Composantes euclidiennes, en millisecondes.
+    /// Euclidean components, in milliseconds.
     pub vec: [f64; DIMS],
-    /// Hauteur : latence d'accès incompressible (dernier kilomètre).
+    /// Height: incompressible access latency (last mile).
     pub height: f64,
-    /// Confiance dans cette position (0 = sûre, 1.5 = inconnue).
+    /// Confidence in this position (0 = certain, 1.5 = unknown).
     pub error: f64,
 }
 
@@ -55,13 +55,13 @@ impl Default for Coord {
     }
 }
 
-/// Racine carrée déterministe (Newton) — voir la note en tête de module.
+/// Deterministic square root (Newton) — see the module-level note.
 fn det_sqrt(x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
     }
-    // Estimation initiale par manipulation d'exposant, puis 6 itérations
-    // (largement convergé en double précision pour nos plages).
+    // Initial guess by exponent manipulation, then 6 iterations (well
+    // converged in double precision over our ranges).
     let bits = x.to_bits();
     let mut guess = f64::from_bits((bits >> 1) + (0x1ff8_0000_0000_0000));
     for _ in 0..6 {
@@ -71,7 +71,7 @@ fn det_sqrt(x: f64) -> f64 {
 }
 
 impl Coord {
-    /// Distance estimée (ms) entre deux positions : euclidienne + hauteurs.
+    /// Estimated distance (ms) between two positions: Euclidean + heights.
     pub fn distance(&self, other: &Coord) -> f64 {
         let mut sum = 0.0;
         for i in 0..DIMS {
@@ -81,22 +81,22 @@ impl Coord {
         det_sqrt(sum) + self.height + other.height
     }
 
-    /// Ajuste cette position après avoir mesuré `rtt_ms` vers `peer`.
+    /// Adjusts this position after measuring `rtt_ms` towards `peer`.
     ///
-    /// L'algorithme traite le réseau comme un système de ressorts : chaque
-    /// mesure tire ou repousse le nœud, avec un pas proportionnel à la
-    /// confiance relative des deux positions.
+    /// The algorithm treats the network as a system of springs: every
+    /// measurement pulls or pushes the node, with a step proportional to
+    /// the relative confidence of the two positions.
     pub fn observe(&mut self, peer: &Coord, rtt_ms: f64) {
         if !(rtt_ms.is_finite()) || rtt_ms <= 0.0 {
             return;
         }
         let predicted = self.distance(peer);
-        // Poids : si le pair est bien plus sûr de lui que nous, on bouge
-        // beaucoup ; s'il est perdu, on l'ignore presque.
+        // Weight: if the peer is far more confident than we are, we move a
+        // lot; if it is lost, we almost ignore it.
         let total_error = self.error + peer.error;
         let weight = if total_error > 0.0 { self.error / total_error } else { 0.5 };
 
-        // Mise à jour de l'erreur estimée (moyenne mobile).
+        // Estimated error update (moving average).
         let relative_error = if rtt_ms > 0.0 {
             let e = predicted - rtt_ms;
             (if e < 0.0 { -e } else { e }) / rtt_ms
@@ -106,11 +106,11 @@ impl Coord {
         self.error = (relative_error * CE * weight + self.error * (1.0 - CE * weight))
             .clamp(0.0, MAX_ERROR);
 
-        // Force du ressort : écart entre mesure et prédiction.
+        // Spring force: gap between measurement and prediction.
         let delta = CC * weight;
         let force = delta * (rtt_ms - predicted);
 
-        // Direction unitaire de `peer` vers nous.
+        // Unit direction from `peer` towards us.
         let mut dir = [0.0; DIMS];
         let mut norm_sq = 0.0;
         for i in 0..DIMS {
@@ -123,16 +123,17 @@ impl Coord {
                 self.vec[i] += force * (dir[i] / norm);
             }
         } else {
-            // Positions confondues : pousse sur un axe pour les séparer.
+            // Coincident positions: push along one axis to separate them.
             self.vec[0] += force;
         }
 
-        // La hauteur absorbe la latence non explicable par la géométrie.
+        // The height absorbs the latency geometry cannot explain.
         let height_delta = force * (self.height / (self.height + peer.height).max(1e-9));
         self.height = (self.height + height_delta).max(MIN_HEIGHT);
     }
 
-    /// Position jugée fiable ? (sert à ignorer les nœuds non convergés)
+    /// Is the position considered reliable? (used to ignore nodes that
+    /// have not converged yet)
     pub fn is_settled(&self) -> bool {
         self.error < 0.5
     }
@@ -142,12 +143,12 @@ impl Coord {
 mod tests {
     use super::*;
 
-    /// Simule un réseau réel et vérifie que les coordonnées apprises
-    /// prédisent les latences.
+    /// Simulates a real network and checks that the learned coordinates
+    /// predict the latencies.
     fn converge(truth: &[(f64, f64)], rounds: usize) -> Vec<Coord> {
         let n = truth.len();
         let mut coords = vec![Coord::default(); n];
-        // RTT « réels » : distance euclidienne dans la vérité terrain.
+        // "Real" RTTs: Euclidean distance in the ground truth.
         let real_rtt = |a: usize, b: usize| -> f64 {
             let dx = truth[a].0 - truth[b].0;
             let dy = truth[a].1 - truth[b].1;
@@ -165,7 +166,7 @@ mod tests {
 
     #[test]
     fn coordinates_predict_latency() {
-        // Trois « villes » : Paris, Francfort (proche), Miami (loin).
+        // Three "cities": Paris, Frankfurt (close), Miami (far).
         let truth = [(0.0, 0.0), (10.0, 0.0), (90.0, 0.0)];
         let coords = converge(&truth, 400);
 
@@ -173,10 +174,10 @@ mod tests {
         let d_far = coords[0].distance(&coords[2]);
         assert!(
             d_far > d_close * 3.0,
-            "la distance apprise doit refléter la latence: proche={d_close:.1} loin={d_far:.1}"
+            "the learned distance must reflect latency: close={d_close:.1} far={d_far:.1}"
         );
-        // Les positions doivent être jugées fiables après convergence.
-        assert!(coords.iter().all(|c| c.is_settled()), "coordonnées non convergées");
+        // Positions must be deemed reliable after convergence.
+        assert!(coords.iter().all(|c| c.is_settled()), "coordinates did not converge");
     }
 
     #[test]
@@ -184,7 +185,7 @@ mod tests {
         let a = Coord { vec: [3.0, 4.0], height: 2.0, error: 0.1 };
         let b = Coord { vec: [0.0, 0.0], height: 1.0, error: 0.1 };
         assert_eq!(a.distance(&b), b.distance(&a));
-        // 5 (euclidien) + 2 + 1 = 8
+        // 5 (Euclidean) + 2 + 1 = 8
         assert!((a.distance(&b) - 8.0).abs() < 1e-9, "{}", a.distance(&b));
     }
 
@@ -203,6 +204,6 @@ mod tests {
         let before = c;
         c.observe(&Coord::default(), -5.0);
         c.observe(&Coord::default(), f64::NAN);
-        assert_eq!(c, before, "les RTT invalides ne doivent rien changer");
+        assert_eq!(c, before, "invalid RTTs must change nothing");
     }
 }

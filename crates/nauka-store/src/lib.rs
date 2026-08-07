@@ -1,6 +1,6 @@
-//! Stockage local d'un nœud Nauka : shards content-addressed sur disque
-//! + manifests JSON. Chaque lecture de shard revérifie son hash — un shard
-//! corrompu sur disque est signalé, jamais servi.
+//! Local storage for a Nauka node: content-addressed shards on disk, alongside
+//! JSON manifests. Every shard read re-checks its hash — a shard corrupted on
+//! disk is reported, never served.
 
 use std::fs;
 use std::io::Write;
@@ -14,20 +14,20 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("shard introuvable: {0}")]
+    #[error("shard not found: {0}")]
     ShardNotFound(ContentHash),
-    #[error("manifest introuvable: {0}")]
+    #[error("manifest not found: {0}")]
     ManifestNotFound(ContentHash),
-    #[error("shard corrompu sur disque: attendu {expected}, obtenu {actual}")]
+    #[error("corrupted shard on disk: expected {expected}, got {actual}")]
     CorruptShard { expected: ContentHash, actual: ContentHash },
 }
 
-/// Store on-disk d'un nœud.
+/// On-disk store of a node.
 ///
-/// Layout :
+/// Layout:
 /// ```text
 /// root/
-///   shards/ab/cdef... (préfixe 2 hex → fanout des répertoires)
+///   shards/ab/cdef... (2-hex prefix → directory fanout)
 ///   manifests/<file_hash>.json
 /// ```
 pub struct ShardStore {
@@ -50,8 +50,8 @@ impl ShardStore {
         self.root.join("manifests").join(format!("{file_hash}.json"))
     }
 
-    /// Écrit un shard (idempotent : même contenu → même hash → même chemin).
-    /// Retourne le hash du contenu. Écriture atomique via fichier temporaire.
+    /// Writes a shard (idempotent: same content → same hash → same path).
+    /// Returns the content hash. Atomic write through a temporary file.
     pub fn put_shard(&self, data: &[u8]) -> Result<ContentHash, StoreError> {
         let hash = hash_bytes(data);
         let path = self.shard_path(&hash);
@@ -59,14 +59,14 @@ impl ShardStore {
             return Ok(hash);
         }
         fs::create_dir_all(path.parent().unwrap())?;
-        // Pas de fsync par shard : un shard perdu sur crash machine est
-        // exactement ce que l'erasure coding + le scrubber savent réparer.
-        // Le fsync par écriture divise le débit d'ingestion par ~20.
+        // No per-shard fsync: a shard lost to a machine crash is exactly what
+        // erasure coding and the scrubber know how to repair. Fsyncing every
+        // write divides ingest throughput by ~20.
         write_atomic(&path, data, false)?;
         Ok(hash)
     }
 
-    /// Lit un shard et vérifie son intégrité avant de le retourner.
+    /// Reads a shard and verifies its integrity before handing it back.
     pub fn get_shard(&self, hash: &str) -> Result<Vec<u8>, StoreError> {
         let path = self.shard_path(hash);
         let data = fs::read(&path)
@@ -92,7 +92,7 @@ impl ShardStore {
 
     pub fn put_manifest(&self, manifest: &FileManifest) -> Result<(), StoreError> {
         let path = self.manifest_path(&manifest.file_hash);
-        // Les manifests sont rares et précieux : fsync conservé.
+        // Manifests are rare and precious: keep the fsync here.
         write_atomic(&path, serde_json::to_string_pretty(manifest)?.as_bytes(), true)?;
         Ok(())
     }
@@ -104,7 +104,7 @@ impl ShardStore {
         Ok(serde_json::from_slice(&data)?)
     }
 
-    /// Tous les hashes de shards stockés localement (parcours du fanout).
+    /// Every shard hash stored locally (walks the fanout).
     pub fn list_shards(&self) -> Result<Vec<ContentHash>, StoreError> {
         let mut out = Vec::new();
         for prefix in fs::read_dir(self.root.join("shards"))? {
@@ -124,7 +124,7 @@ impl ShardStore {
         Ok(out)
     }
 
-    /// Supprime un manifest local (idempotent).
+    /// Deletes a local manifest (idempotent).
     pub fn delete_manifest(&self, file_hash: &str) -> Result<(), StoreError> {
         match fs::remove_file(self.manifest_path(file_hash)) {
             Ok(()) => Ok(()),
@@ -173,7 +173,7 @@ mod tests {
         assert!(store.has_shard(&hash));
         assert_eq!(store.get_shard(&hash).unwrap(), b"hello shard");
 
-        // Corruption silencieuse sur disque → détectée à la lecture.
+        // Silent on-disk corruption → caught at read time.
         fs::write(store.shard_path(&hash), b"tampered!!").unwrap();
         assert!(matches!(store.get_shard(&hash), Err(StoreError::CorruptShard { .. })));
 

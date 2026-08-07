@@ -1,4 +1,4 @@
-//! Types du consensus : commandes appliquées à la state machine répliquée.
+//! Consensus types: commands applied to the replicated state machine.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -10,7 +10,7 @@ use nauka_erasure::FileManifest;
 pub type NodeId = u64;
 
 openraft::declare_raft_types!(
-    /// Configuration openraft de yogfile.
+    /// yogfile's openraft configuration.
     pub TypeConfig:
         D = AppCommand,
         R = AppResponse,
@@ -18,26 +18,26 @@ openraft::declare_raft_types!(
         Node = BasicNode,
 );
 
-/// Commandes répliquées par Raft. Les octets des shards ne passent JAMAIS
-/// par le log de consensus — seules les métadonnées y transitent ; les
-/// shards voyagent en direct par le transport QUIC.
+/// Commands replicated by Raft. Shard bytes NEVER go through the consensus
+/// log — only metadata does; shards travel directly over the QUIC transport.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AppCommand {
-    /// Enregistre un fichier dans le registre répliqué du cluster.
+    /// Registers a file in the cluster's replicated registry.
     RegisterManifest(FileManifest),
-    /// Retire un fichier du registre (les shards seront purgés par le GC).
+    /// Removes a file from the registry (the GC will purge its shards).
     UnregisterManifest { file_hash: String },
-    /// Déclare la capacité disque d'un nœud (poids du placement pondéré).
-    /// Keyé par adresse annoncée — la même identité que le placement.
+    /// Declares a node's disk capacity (the weight used by weighted
+    /// placement). Keyed by announced address — the same identity placement
+    /// uses.
     UpdateNodeStats { addr: String, capacity_bytes: u64 },
-    /// Publie les coordonnées réseau Vivaldi d'un nœud : le placement s'en
-    /// sert pour écarter géographiquement les shards d'une même stripe.
+    /// Publishes a node's Vivaldi network coordinates: placement uses them to
+    /// spread the shards of a single stripe geographically.
     UpdateNodeCoord { addr: String, coord: nauka_cluster::vivaldi::Coord },
-    /// Bannit un hash : le fichier sort du registre, l'API refuse de le
-    /// servir (410) et le GC purge ses shards. Permet d'honorer un
-    /// signalement ou une réquisition sans jamais lire le contenu.
+    /// Bans a hash: the file leaves the registry, the API refuses to serve it
+    /// (410) and the GC purges its shards. Lets us honor a takedown report or
+    /// a legal request without ever reading the content.
     BanHash { file_hash: String, reason: String },
-    /// Lève un bannissement (erreur d'appréciation, décision annulée).
+    /// Lifts a ban (misjudgment, decision overturned).
     UnbanHash { file_hash: String },
 }
 
@@ -47,52 +47,52 @@ pub struct AppResponse {
     pub info: Option<String>,
 }
 
-/// État matérialisé par la state machine : le registre des fichiers et
-/// les capacités déclarées des nœuds.
+/// State materialized by the state machine: the file registry and the
+/// capacities declared by the nodes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
     pub manifests: BTreeMap<String, FileManifest>,
-    /// Capacité disque déclarée par nœud (adresse → octets). Sert de poids
-    /// au placement pondéré ; absent = capacité par défaut.
+    /// Disk capacity declared per node (address → bytes). Used as the weight
+    /// for weighted placement; absent = default capacity.
     #[serde(default)]
     pub node_capacities: BTreeMap<String, u64>,
-    /// Coordonnées réseau déclarées par nœud (adresse → position Vivaldi).
+    /// Network coordinates declared per node (address → Vivaldi position).
     #[serde(default)]
     pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
-    /// Hashes bannis (hash → motif) : jamais servis, jamais ré-acceptés.
+    /// Banned hashes (hash → reason): never served, never re-accepted.
     #[serde(default)]
     pub banned: BTreeMap<String, String>,
 }
 
-/// Requêtes d'administration adressées à un nœud (hors log Raft).
+/// Admin requests addressed to a node (outside the Raft log).
 #[derive(Debug, Serialize, Deserialize)]
 pub enum AdminRequest {
-    /// Initialise le cluster avec ces membres (une seule fois, sur un nœud).
+    /// Initializes the cluster with these members (once, on a single node).
     Init(BTreeMap<NodeId, String>),
-    /// Ajoute un nœud comme learner (rattrape le log sans voter).
+    /// Adds a node as a learner (catches up on the log without voting).
     AddLearner { id: NodeId, addr: String },
-    /// Change l'ensemble des membres votants.
+    /// Changes the set of voting members.
     ChangeMembership(Vec<NodeId>),
-    /// Écrit une commande via le leader (redirigée si besoin).
+    /// Writes a command via the leader (redirected if needed).
     Write(AppCommand),
-    /// Vue du cluster : leader, membres, état du log.
+    /// Cluster view: leader, members, log state.
     Metrics,
-    /// Liste des manifests du registre répliqué.
+    /// List of the manifests in the replicated registry.
     ListManifests,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum AdminResponse {
     Ok(AppResponse),
-    /// Ce nœud n'est pas leader ; réessayer sur `leader`.
+    /// This node is not the leader; retry on `leader`.
     ForwardTo { leader: Option<(NodeId, String)> },
     Metrics {
         id: NodeId,
         leader: Option<NodeId>,
         members: BTreeMap<NodeId, String>,
         last_applied: Option<u64>,
-        /// Capacités déclarées (adresse → octets) — la vue pondérée du
-        /// placement, pour que les clients placent comme le cluster.
+        /// Declared capacities (address → bytes) — placement's weighted view,
+        /// so that clients place shards the same way the cluster does.
         #[serde(default)]
         capacities: BTreeMap<String, u64>,
     },

@@ -1,13 +1,13 @@
-//! Découverte de pairs via la DHT Mainline (BitTorrent) + pkarr.
+//! Peer discovery over the Mainline DHT (BitTorrent) + pkarr.
 //!
-//! Le cluster publie un enregistrement DNS signé (records TXT `_seeds`)
-//! sous une clé Ed25519 **dérivée de la clé de cluster** : posséder les
-//! clés du cluster suffit pour publier ET résoudre — rien d'autre à
-//! distribuer, aucune infrastructure à déployer. La DHT Mainline (~10 M de
-//! nœuds, 20 ans d'ancienneté) sert de tableau d'affichage public.
+//! The cluster publishes a signed DNS record (`_seeds` TXT records) under an
+//! Ed25519 key **derived from the cluster key**: holding the cluster keys is
+//! enough to publish AND resolve — nothing else to distribute, no
+//! infrastructure to deploy. The Mainline DHT (~10M nodes, 20 years old)
+//! acts as the public bulletin board.
 //!
-//! Découverte ≠ admission : la DHT donne les adresses ; le mTLS de cluster
-//! décide toujours qui entre.
+//! Discovery is not admission: the DHT hands out addresses; cluster mTLS
+//! still decides who gets in.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -18,18 +18,18 @@ use pkarr::{Client, Keypair, PublicKey, SignedPacket};
 pub use pkarr;
 use tracing::{debug, info};
 
-/// TTL des records DNS publiés (indicatif pour les caches).
+/// TTL of the published DNS records (a hint for caches).
 const RECORD_TTL_SECS: u32 = 300;
-/// Nombre max d'adresses publiées : un paquet pkarr est limité à ~1000
-/// octets, et n'importe quel seed joignable suffit (le membership complet
-/// vient ensuite du cluster lui-même).
+/// Max number of published addresses: a pkarr packet is capped at ~1000
+/// bytes, and any reachable seed is enough (full membership then comes from
+/// the cluster itself).
 pub const MAX_SEEDS: usize = 8;
 
-/// Dérive la keypair pkarr du cluster depuis sa clé CA (déterministe :
-/// tous les détenteurs des clés obtiennent la même identité DHT).
+/// Derives the cluster's pkarr keypair from its CA key (deterministic: every
+/// holder of the keys ends up with the same DHT identity).
 pub fn derive_dht_keypair(keys_dir: &std::path::Path) -> Result<Keypair> {
     let ca_pem = std::fs::read_to_string(keys_dir.join("cluster-ca.key"))
-        .with_context(|| format!("lecture de {}", keys_dir.join("cluster-ca.key").display()))?;
+        .with_context(|| format!("reading {}", keys_dir.join("cluster-ca.key").display()))?;
     let ca_key = rcgen::KeyPair::from_pem(&ca_pem)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"nauka-discovery-v1");
@@ -38,21 +38,21 @@ pub fn derive_dht_keypair(keys_dir: &std::path::Path) -> Result<Keypair> {
     Ok(Keypair::from_secret_key(&seed))
 }
 
-/// Client DHT. `bootstrap` : nœuds d'amorçage alternatifs (tests/démos sur
-/// DHT locale) ; None = la vraie Mainline.
+/// DHT client. `bootstrap`: alternative bootstrap nodes (tests/demos on a
+/// local DHT); None = the real Mainline.
 pub fn make_client(bootstrap: Option<&[String]>) -> Result<Client> {
     let mut builder = Client::builder();
     if let Some(nodes) = bootstrap {
         builder.bootstrap(nodes);
-        // DHT locale uniquement : pas de relays publics qui répondraient
-        // avec l'état de la vraie Mainline.
+        // Local DHT only: no public relays, which would answer with the state
+        // of the real Mainline.
         builder.no_relays();
     }
     Ok(builder.build()?)
 }
 
-/// Publie la liste des seeds du cluster (écrase la version précédente —
-/// pkarr horodate et les résolveurs prennent le plus récent).
+/// Publishes the cluster's seed list (overwrites the previous version —
+/// pkarr timestamps packets and resolvers keep the most recent one).
 pub async fn publish_seeds(
     client: &Client,
     keypair: &Keypair,
@@ -61,20 +61,20 @@ pub async fn publish_seeds(
     let mut builder = SignedPacket::builder();
     for addr in addrs.iter().take(MAX_SEEDS) {
         builder = builder.txt(
-            "_seeds".try_into().expect("nom DNS valide"),
-            addr.to_string().as_str().try_into().expect("valeur TXT valide"),
+            "_seeds".try_into().expect("valid DNS name"),
+            addr.to_string().as_str().try_into().expect("valid TXT value"),
             RECORD_TTL_SECS,
         );
     }
     let packet = builder.sign(keypair)?;
     client.publish(&packet, None).await?;
-    info!("seeds publiés sur la DHT: {} adresse(s)", addrs.len().min(MAX_SEEDS));
+    info!("seeds published on the DHT: {} address(es)", addrs.len().min(MAX_SEEDS));
     Ok(())
 }
 
-/// Publie une candidature de genèse : « aucun cluster n'existe, je propose
-/// de le fonder ». Le record vit sous la même clé que les seeds — dès que
-/// le cluster existe, la publication des seeds l'efface.
+/// Publishes a genesis candidacy: "no cluster exists yet, I offer to found
+/// it". The record lives under the same key as the seeds — as soon as the
+/// cluster exists, publishing the seeds wipes it out.
 pub async fn publish_genesis_candidacy(
     client: &Client,
     keypair: &Keypair,
@@ -84,8 +84,8 @@ pub async fn publish_genesis_candidacy(
     let value = format!("{node_id}|{addr}");
     let packet = SignedPacket::builder()
         .txt(
-            "_genesis".try_into().expect("nom DNS valide"),
-            value.as_str().try_into().expect("valeur TXT valide"),
+            "_genesis".try_into().expect("valid DNS name"),
+            value.as_str().try_into().expect("valid TXT value"),
             RECORD_TTL_SECS,
         )
         .sign(keypair)?;
@@ -93,7 +93,7 @@ pub async fn publish_genesis_candidacy(
     Ok(())
 }
 
-/// Candidature de genèse actuellement visible sur la DHT, s'il y en a une.
+/// Genesis candidacy currently visible on the DHT, if there is one.
 pub async fn resolve_genesis_candidacy(
     client: &Client,
     public_key: &PublicKey,
@@ -114,8 +114,8 @@ pub async fn resolve_genesis_candidacy(
     Ok(None)
 }
 
-/// Résout les seeds du cluster depuis la DHT. Vide si aucun enregistrement
-/// (cluster jamais amorcé, ou record expiré partout).
+/// Resolves the cluster's seeds from the DHT. Empty when there is no record
+/// (cluster never bootstrapped, or record expired everywhere).
 pub async fn resolve_seeds(client: &Client, public_key: &PublicKey) -> Result<Vec<SocketAddr>> {
     let Some(packet) = client.resolve_most_recent(public_key).await else {
         return Ok(Vec::new());
@@ -133,16 +133,16 @@ pub async fn resolve_seeds(client: &Client, public_key: &PublicKey) -> Result<Ve
     }
     addrs.sort();
     addrs.dedup();
-    debug!("seeds résolus depuis la DHT: {addrs:?}");
+    debug!("seeds resolved from the DHT: {addrs:?}");
     Ok(addrs)
 }
 
-/// Détecte l'IP publique de cette machine via la DHT elle-même : les nœuds
-/// Mainline renvoient l'adresse d'où ils nous voient (BEP42) et le client
-/// en fait un consensus. Aucun service tiers, aucune infra.
+/// Detects this machine's public IP through the DHT itself: Mainline nodes
+/// report the address they see us from (BEP42) and the client turns those
+/// into a consensus. No third-party service, no infrastructure.
 ///
-/// `None` si la DHT n'a pas (encore) convergé. L'adresse détectée est celle
-/// vue d'internet — elle n'est joignable que si le port est ouvert/forwardé.
+/// `None` if the DHT has not converged (yet). The detected address is the one
+/// seen from the internet — it is only reachable if the port is open/forwarded.
 pub async fn detect_public_ip(bootstrap: Option<&[String]>) -> Result<Option<std::net::IpAddr>> {
     let bootstrap: Option<Vec<String>> = bootstrap.map(|b| b.to_vec());
     tokio::task::spawn_blocking(move || -> Result<Option<std::net::IpAddr>> {
@@ -157,10 +157,10 @@ pub async fn detect_public_ip(bootstrap: Option<&[String]>) -> Result<Option<std
     .await?
 }
 
-/// Boucle de publication : tant que `is_leader` est vrai, republie
-/// périodiquement les adresses fournies par `current_seeds`. Les records
-/// DHT s'évaporent naturellement (caches ~heures) : la republication est
-/// le battement de cœur du cluster sur la DHT.
+/// Publishing loop: as long as `is_leader` holds, periodically republishes
+/// the addresses returned by `current_seeds`. DHT records evaporate on their
+/// own (caches last ~hours): republishing is the cluster's heartbeat on the
+/// DHT.
 pub async fn run_publisher(
     client: Client,
     keypair: Keypair,
@@ -171,13 +171,13 @@ pub async fn run_publisher(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        // None = pas leader en ce moment : silence (le leader publie).
+        // None = not the leader right now: stay silent (the leader publishes).
         let Some(addrs) = current_seeds() else { continue };
         if addrs.is_empty() {
             continue;
         }
         if let Err(e) = publish_seeds(&client, &keypair, &addrs).await {
-            tracing::warn!("publication DHT en échec (retentera): {e:#}");
+            tracing::warn!("DHT publishing failed (will retry): {e:#}");
         }
     }
 }

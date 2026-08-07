@@ -11,7 +11,7 @@ const DownloadPage = lazy(() =>
 );
 const WatchPage = lazy(() => import("./pages/watch").then((m) => ({ default: m.WatchPage })));
 
-const loading = <div className="p-6 text-muted">Chargement…</div>;
+const loading = <div className="p-6 text-muted">Loading…</div>;
 
 export default function App() {
   return (

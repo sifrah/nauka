@@ -29,7 +29,7 @@ interface UploadInFlight {
 }
 
 export function FilesPage() {
-  useTitle("Fichiers");
+  useTitle("Files");
   const [files, setFiles] = useState<ClusterFile[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [uploads, setUploads] = useState<Record<string, UploadInFlight>>({});
@@ -62,11 +62,11 @@ export function FilesPage() {
             setUploads((u) => ({ ...u, [id]: { name: file.name, fraction } })),
           );
           await navigator.clipboard.writeText(result.link).catch(() => {});
-          toast.success(`${file.name} chiffré et uploadé — lien copié`, {
-            description: "La clé est dans le lien (#…), le serveur ne l'a jamais vue.",
+          toast.success(`${file.name} encrypted and uploaded — link copied`, {
+            description: "The key is in the link (#…); the server has never seen it.",
           });
         } catch (e) {
-          toast.error(`Échec de l'upload de ${file.name}`, { description: formatError(e) });
+          toast.error(`Failed to upload ${file.name}`, { description: formatError(e) });
         } finally {
           setUploads((u) => {
             const next = { ...u };
@@ -84,21 +84,21 @@ export function FilesPage() {
     const entry = keyring()[hash];
     if (!entry) return;
     void navigator.clipboard.writeText(shareLink(hash, entry.key));
-    toast.success("Lien de partage copié", {
-      description: "Quiconque a ce lien peut déchiffrer — le serveur, non.",
+    toast.success("Share link copied", {
+      description: "Anyone with this link can decrypt — the server cannot.",
     });
   };
 
   const importKey = (hash: string) => {
-    const input = prompt("Coller le lien complet ou la clé (#…) de ce fichier :");
+    const input = prompt("Paste the full link or the key (#…) for this file:");
     if (!input) return;
     const key = input.includes("#") ? input.split("#").pop()! : input;
     try {
       keyringImport(hash, key.trim());
-      toast.success("Clé importée dans le trousseau local");
+      toast.success("Key imported into the local keyring");
       void refresh();
     } catch (e) {
-      toast.error("Clé invalide", { description: formatError(e) });
+      toast.error("Invalid key", { description: formatError(e) });
     }
   };
 
@@ -118,16 +118,16 @@ export function FilesPage() {
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold">Fichiers</h1>
+          <h1 className="text-lg font-semibold">Files</h1>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Lock size={12} /> chiffrés de bout en bout — le cluster ne peut pas les lire
+            <Lock size={12} /> end-to-end encrypted — the cluster cannot read them
           </span>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => void refresh()}
             className="flex items-center justify-center w-8 h-8 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-            title="Rafraîchir"
+            title="Refresh"
           >
             <RefreshCw size={15} strokeWidth={1.5} />
           </button>
@@ -135,7 +135,7 @@ export function FilesPage() {
             onClick={() => inputRef.current?.click()}
             className="flex items-center gap-2 text-sm bg-accent hover:bg-border-bright border border-border-bright rounded-lg px-3 py-1.5 transition-colors"
           >
-            <UploadIcon size={15} strokeWidth={1.5} /> Uploader
+            <UploadIcon size={15} strokeWidth={1.5} /> Upload
           </button>
           <input
             ref={inputRef}
@@ -151,7 +151,7 @@ export function FilesPage() {
         <div key={id} className="card-surface rounded-lg p-4">
           <div className="flex items-center justify-between text-sm mb-2">
             <span className="flex items-center gap-2">
-              <Loader2 size={14} className="animate-spin" /> Chiffrement + upload de {u.name}
+              <Loader2 size={14} className="animate-spin" /> Encrypting + uploading {u.name}
             </span>
             <span className="font-mono text-muted-foreground">{Math.round(u.fraction * 100)}%</span>
           </div>
@@ -181,9 +181,9 @@ export function FilesPage() {
           className={`card-surface rounded-lg p-16 text-center text-muted-foreground border-2 border-dashed ${dragOver ? "border-primary" : "border-transparent"}`}
         >
           <UploadIcon size={24} className="mx-auto mb-3 opacity-60" />
-          <p className="text-sm">Glisser un fichier ici, ou cliquer sur « Uploader ».</p>
+          <p className="text-sm">Drop a file here, or click Upload.</p>
           <p className="text-xs mt-2">
-            Chiffré dans le navigateur avant d'être envoyé — la clé reste chez toi.
+            Encrypted in the browser before being sent — the key never leaves your device.
           </p>
         </div>
       )}
@@ -193,8 +193,8 @@ export function FilesPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground border-b border-border">
-                <th className="px-4 py-3 font-medium">Fichier</th>
-                <th className="px-4 py-3 font-medium">Taille</th>
+                <th className="px-4 py-3 font-medium">File</th>
+                <th className="px-4 py-3 font-medium">Size</th>
                 <th className="px-4 py-3 font-medium">Hash</th>
                 <th className="px-4 py-3 font-medium text-right">Actions</th>
               </tr>
@@ -207,7 +207,7 @@ export function FilesPage() {
                     <td className="px-4 py-2.5">
                       {entry?.name || f.name || (
                         <span className="flex items-center gap-1.5 text-muted-foreground">
-                          <Lock size={12} /> (nom chiffré)
+                          <Lock size={12} /> (encrypted name)
                         </span>
                       )}
                     </td>
@@ -225,7 +225,7 @@ export function FilesPage() {
                               <a
                                 href={`/w/${f.hash}#${entry.key}`}
                                 className="flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-                                title="Lire (déchiffré dans le navigateur, seek compris)"
+                                title="Play (decrypted in the browser, seeking included)"
                               >
                                 <Play size={14} strokeWidth={1.5} />
                               </a>
@@ -233,14 +233,14 @@ export function FilesPage() {
                             <a
                               href={`/d/${f.hash}#${entry.key}`}
                               className="flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-                              title="Télécharger (déchiffré localement)"
+                              title="Download (decrypted locally)"
                             >
                               <Download size={14} strokeWidth={1.5} />
                             </a>
                             <button
                               onClick={() => copyLink(f.hash)}
                               className="flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
-                              title="Copier le lien de partage"
+                              title="Copy share link"
                             >
                               <Copy size={14} strokeWidth={1.5} />
                             </button>
@@ -249,9 +249,9 @@ export function FilesPage() {
                           <button
                             onClick={() => importKey(f.hash)}
                             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-accent"
-                            title="Ce navigateur n'a pas la clé — l'importer depuis un lien"
+                            title="This browser does not have the key — import it from a link"
                           >
-                            <KeyRound size={12} /> importer la clé
+                            <KeyRound size={12} /> import key
                           </button>
                         )}
                       </div>

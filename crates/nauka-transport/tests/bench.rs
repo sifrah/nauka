@@ -1,4 +1,4 @@
-//! Micro-bench du transport : débit brut de put_shard sur loopback.
+//! Transport micro-bench: raw put_shard throughput over loopback.
 //! `cargo test -p nauka-transport --release --test bench -- --ignored --nocapture`
 
 use std::sync::Arc;
@@ -11,13 +11,13 @@ use nauka_transport::PeerClient;
 #[tokio::test]
 #[ignore]
 async fn raw_quinn_single_stream() {
-    // Débit quinn brut, sans notre protocole : un stream, 256 Mo d'affilée.
+    // Raw quinn throughput, without our protocol: one stream, 256 MiB in a row.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
 
-    // Serveur : accepte une connexion, draine le stream.
+    // Server: accepts one connection, drains the stream.
     let server = endpoint.clone();
     tokio::spawn(async move {
         let _keep = store;
@@ -49,7 +49,7 @@ async fn raw_quinn_single_stream() {
     recv.read_exact(&mut ack).await.unwrap();
     let secs = start.elapsed().as_secs_f64();
     assert_eq!(u64::from_le_bytes(ack) as usize, TOTAL);
-    println!("quinn brut: {:.0} Mo/s", TOTAL as f64 / 1_000_000.0 / secs);
+    println!("raw quinn: {:.0} MB/s", TOTAL as f64 / 1_000_000.0 / secs);
     let stats = conn.stats();
     println!(
         "path: rtt={:?} cwnd={} mtu={} sent={} lost={} congestion_events={}",
@@ -82,7 +82,7 @@ async fn single_put_shard_latency() {
             data[..8].copy_from_slice(&i.to_le_bytes());
             client.put_shard(data.clone()).await.unwrap();
         }
-        println!("taille {size}: {:?}/op", start.elapsed() / 10);
+        println!("size {size}: {:?}/op", start.elapsed() / 10);
     }
 }
 
@@ -101,7 +101,7 @@ async fn raw_put_shard_throughput() {
     const COUNT: usize = 256; // 256 MiB
     const IN_FLIGHT: usize = 64;
 
-    // Shards uniques (pas de dédup possible côté store).
+    // Unique shards (no dedup possible on the store side).
     let mut base = vec![0u8; SHARD];
     for (i, b) in base.iter_mut().enumerate() {
         *b = (i % 251) as u8;
@@ -123,7 +123,7 @@ async fn raw_put_shard_throughput() {
     }
     let secs = start.elapsed().as_secs_f64();
     println!(
-        "{} MiB en {:.2}s → {:.0} Mo/s",
+        "{} MiB in {:.2}s → {:.0} MB/s",
         COUNT,
         secs,
         (COUNT * SHARD) as f64 / 1_000_000.0 / secs

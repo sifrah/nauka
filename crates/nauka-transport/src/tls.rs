@@ -1,18 +1,18 @@
-//! Identité cryptographique du cluster.
+//! Cluster cryptographic identity.
 //!
-//! - Une **clé de cluster** (CA Ed25519) générée une fois (`keygen`) et
-//!   distribuée aux nœuds : posséder le fichier = appartenir au cluster.
-//! - Une **keypair Ed25519 par nœud** (node.key, auto-générée), certificat
-//!   signé par la CA. Le node-id Raft est dérivé de la clé publique :
-//!   l'identité ne se décrète pas, elle se prouve.
-//! - **mTLS** : le serveur exige un certificat client signé par la CA, le
-//!   client vérifie le serveur contre la CA. Sans clés fournies, mode
-//!   insecure historique (chiffré mais non authentifié) avec warning.
+//! - A **cluster key** (Ed25519 CA) generated once (`keygen`) and handed out
+//!   to the nodes: holding the file = belonging to the cluster.
+//! - An **Ed25519 keypair per node** (node.key, auto-generated), with a
+//!   certificate signed by the CA. The Raft node-id is derived from the public
+//!   key: identity is not declared, it is proven.
+//! - **mTLS**: the server requires a client certificate signed by the CA, and
+//!   the client verifies the server against the CA. With no keys supplied,
+//!   falls back to the legacy insecure mode (encrypted but not authenticated)
+//!   with a warning.
 //!
-//! Limite v1 assumée : la CA est distribuée à tous les nœuds (n'importe
-//! quel détenteur peut émettre des certificats). Blast radius identique à
-//! un secret partagé, mais le lien est réellement authentifié et chiffré.
-//! L'émission hors-ligne par nœud viendra ensuite.
+//! Accepted v1 limitation: the CA is handed out to every node (any holder can
+//! issue certificates). Same blast radius as a shared secret, but the link is
+//! genuinely authenticated and encrypted. Per-node offline issuance comes next.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -24,8 +24,8 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::RootCertStore;
 
-/// SAN commun à tous les certificats de nœud : l'identité vérifiée est
-/// l'appartenance au cluster (signature CA), pas l'adresse.
+/// SAN shared by every node certificate: the identity being verified is
+/// cluster membership (CA signature), not the address.
 pub const NODE_SAN: &str = "node.nauka";
 
 const CA_KEY_FILE: &str = "cluster-ca.key";
@@ -38,16 +38,16 @@ fn ca_params() -> Result<CertificateParams> {
     Ok(params)
 }
 
-/// Matériel TLS d'un participant (nœud ou client CLI) : sa chaîne, sa clé,
-/// et la racine du cluster.
+/// TLS material of a participant (node or CLI client): its chain, its key,
+/// and the cluster root.
 #[derive(Debug)]
 pub struct ClusterTls {
     pub roots: RootCertStore,
     pub cert_chain: Vec<CertificateDer<'static>>,
     pub key: PrivateKeyDer<'static>,
-    /// Empreinte blake3 (hex) de la clé publique de CE participant.
+    /// blake3 fingerprint (hex) of THIS participant's public key.
     pub fingerprint: String,
-    /// Node-id Raft dérivé de l'empreinte (8 premiers octets, little-endian).
+    /// Raft node-id derived from the fingerprint (first 8 bytes, little-endian).
     pub node_id: u64,
 }
 
@@ -63,19 +63,19 @@ impl Clone for ClusterTls {
     }
 }
 
-/// Génère la clé de cluster dans `dir` (refuse d'écraser).
+/// Generates the cluster key in `dir` (refuses to overwrite).
 pub fn generate_cluster_ca(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let key_path = dir.join(CA_KEY_FILE);
     let cert_path = dir.join(CA_CERT_FILE);
     if key_path.exists() || cert_path.exists() {
-        anyhow::bail!("{} existe déjà — suppression manuelle requise", key_path.display());
+        anyhow::bail!("{} already exists — manual removal required", key_path.display());
     }
     let key = KeyPair::generate_for(&PKCS_ED25519)?;
     let cert = ca_params()?.self_signed(&key)?;
     std::fs::write(&key_path, key.serialize_pem())?;
     std::fs::write(&cert_path, cert.pem())?;
-    // La clé de cluster est un secret : lecture propriétaire uniquement.
+    // The cluster key is a secret: owner-only read permission.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -84,18 +84,18 @@ pub fn generate_cluster_ca(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Charge la clé de cluster et construit l'identité de ce participant.
+/// Loads the cluster key and builds this participant's identity.
 ///
-/// `identity_key_path` : la clé privée du participant, créée si absente
-/// (node.key d'un nœud, ou clé éphémère d'un client CLI si `None`).
+/// `identity_key_path`: the participant's private key, created if missing
+/// (a node's node.key, or an ephemeral CLI client key when `None`).
 pub fn load_cluster_tls(keys_dir: &Path, identity_key_path: Option<&Path>) -> Result<ClusterTls> {
     let ca_key_pem = std::fs::read_to_string(keys_dir.join(CA_KEY_FILE))
-        .with_context(|| format!("lecture de {}", keys_dir.join(CA_KEY_FILE).display()))?;
+        .with_context(|| format!("reading {}", keys_dir.join(CA_KEY_FILE).display()))?;
     let ca_cert_pem = std::fs::read_to_string(keys_dir.join(CA_CERT_FILE))
-        .with_context(|| format!("lecture de {}", keys_dir.join(CA_CERT_FILE).display()))?;
+        .with_context(|| format!("reading {}", keys_dir.join(CA_CERT_FILE).display()))?;
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
 
-    // Clé d'identité : persistée pour un nœud, éphémère pour un client.
+    // Identity key: persisted for a node, ephemeral for a client.
     let identity_key = match identity_key_path {
         Some(path) if path.exists() => KeyPair::from_pem(&std::fs::read_to_string(path)?)?,
         Some(path) => {
@@ -117,10 +117,10 @@ pub fn load_cluster_tls(keys_dir: &Path, identity_key_path: Option<&Path>) -> Re
         blake3::hash(&identity_key.public_key_der()).as_bytes()[..8].try_into().unwrap(),
     );
 
-    // Certificat du participant, signé par la CA du cluster. L'objet CA est
-    // reconstruit avec les MÊMES params que ceux de `generate_cluster_ca` :
-    // seul compte le couple (DN émetteur, signature) — la racine de
-    // confiance envoyée aux pairs reste le ca.pem stocké.
+    // Participant certificate, signed by the cluster CA. The CA object is
+    // rebuilt with the SAME params as in `generate_cluster_ca`: only the
+    // (issuer DN, signature) pair matters — the trust root shipped to peers
+    // is still the stored ca.pem.
     let mut params = CertificateParams::new(vec![NODE_SAN.to_string()])?;
     params.distinguished_name.push(DnType::CommonName, &fingerprint[..16]);
     let ca_cert = ca_params()?.self_signed(&ca_key)?;
@@ -142,11 +142,12 @@ pub fn load_cluster_tls(keys_dir: &Path, identity_key_path: Option<&Path>) -> Re
 
 static CLUSTER_TLS: OnceLock<Option<Arc<ClusterTls>>> = OnceLock::new();
 
-/// Installe l'identité cluster du process (à faire AVANT tout endpoint ou
-/// connexion). Sans appel, tout reste en mode insecure historique.
+/// Installs the process-wide cluster identity (must happen BEFORE any endpoint
+/// or connection). Without this call, everything stays in the legacy insecure
+/// mode.
 pub fn set_cluster_tls(tls: ClusterTls) {
     if CLUSTER_TLS.set(Some(Arc::new(tls))).is_err() {
-        panic!("set_cluster_tls doit être appelé une seule fois, avant tout usage réseau");
+        panic!("set_cluster_tls must be called exactly once, before any network use");
     }
 }
 

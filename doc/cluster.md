@@ -1,208 +1,206 @@
-# Couche cluster : placement, healing, rebalancement
+# Cluster layer: placement, healing, rebalancing
 
-## Placement par rendezvous hashing pondéré (WRH)
+## Placement by weighted rendezvous hashing (WRH)
 
-« Qui doit détenir le shard i de la stripe s du fichier f ? » est une
-**fonction pure** de `(file_hash, stripe_idx, shard_idx, vue pondérée)` :
+"Who should hold shard i of stripe s of file f?" is a **pure function** of
+`(file_hash, stripe_idx, shard_idx, weighted view)`:
 
-1. Pour la stripe s, chaque nœud reçoit un score
-   `-poids / ln(h)` où `h` est un uniforme (0,1) dérivé de
-   `blake3(node_id ‖ "\0" ‖ file_hash/s)` et `poids` = sa **capacité disque
-   déclarée** (dans l'état Raft, commande `UpdateNodeStats` ; défaut
-   100 Gio tant qu'un nœud n'a pas déclaré). Classement par score
-   décroissant.
-2. Le shard i va au nœud de rang `i mod n`.
+1. For stripe s, every node gets a score `-weight / ln(h)`, where `h` is a
+   uniform (0,1) derived from `blake3(node_id ‖ "\0" ‖ file_hash/s)` and
+   `weight` is its **declared disk capacity** (kept in the Raft state via
+   the `UpdateNodeStats` command; 100 GiB by default until a node declares
+   otherwise). Nodes are ranked by descending score.
+2. Shard i goes to the node at rank `i mod n`.
 
-Le `ln` est une implémentation maison en opérations IEEE de base
-uniquement (+,−,×,÷) : les `ln` de libm varient d'une plateforme à
-l'autre, et le placement doit être identique bit à bit sur tous les nœuds.
+The `ln` is a hand-rolled implementation using only basic IEEE operations
+(+, −, ×, ÷): libm's `ln` varies from platform to platform, and placement
+must be bit-for-bit identical on every node.
 
-### Capacité vs durabilité — la sémantique exacte
+### Capacity vs durability — the exact semantics
 
-La probabilité d'être **en tête** du classement est proportionnelle au
-poids. Ce que ça implique selon la taille du cluster :
+The probability of landing **at the top** of the ranking is proportional to
+weight. What that implies depends on cluster size:
 
-| Taille | Comportement |
+| Size | Behavior |
 |---|---|
-| `n > k+m` | chaque stripe choisit ses k+m hébergeurs parmi n : sélection **pleinement proportionnelle** aux capacités, 1 shard/nœud/stripe |
-| `k+m ≥ n` | tous les nœuds hébergent chaque stripe ; les poids décident qui prend les shards « supplémentaires » (entre ⌊(k+m)/n⌋ et ⌈(k+m)/n⌉) |
-| cas forcé (ex. n=3, 4+2) | anti-affinité stricte 2/2/2 **quels que soient les poids** — concentrer > m shards d'une stripe sur le gros nœud en ferait un point de défaillance unique. Durabilité d'abord, capacité ensuite (choix délibéré, testé) |
+| `n > k+m` | each stripe picks its k+m hosts out of n: selection **fully proportional** to capacity, 1 shard/node/stripe |
+| `k+m ≥ n` | every node hosts every stripe; weights decide who takes the "extra" shards (between ⌊(k+m)/n⌋ and ⌈(k+m)/n⌉) |
+| forced case (e.g. n=3, 4+2) | strict 2/2/2 anti-affinity **whatever the weights** — piling > m shards of one stripe onto the big node would turn it into a single point of failure. Durability first, capacity second (deliberate, tested choice) |
 
-Mesuré (4 nœuds, 3×50 Go + 1×350 Go, 288 shards) : 66/63/66/93 — le gros
-nœud sature le plafond d'anti-affinité (~33 %), les petits descendent à
-~22 %.
+Measured (4 nodes, 3×50 GB + 1×350 GB, 288 shards): 66/63/66/93 — the big
+node saturates the anti-affinity ceiling (~33%), the small ones drop to
+~22%.
 
-La capacité est **déclarée, quasi statique** (taille du filesystem du
-data-dir via statvfs, ou `--capacity` explicite), jamais l'espace *libre* :
-pondérer par le libre ferait osciller le placement à chaque écriture.
-L'équilibre visé est que tous les nœuds se remplissent au même
-**pourcentage**. Un changement de capacité (>1 %) est re-déclaré et le
-rebalancement suit par scrub+GC, comme tout changement de vue — le WRH
-garantit que seuls les shards migrant *vers* le nœud modifié bougent
-(testé : doubler un poids déplace ~1/6 des shards, zéro mouvement entre
-nœuds inchangés).
+Capacity is **declared and near-static** (the size of the data-dir's
+filesystem via statvfs, or an explicit `--capacity`), never *free* space:
+weighting by free space would make placement oscillate on every write. The
+target equilibrium is that every node fills to the same **percentage**. A
+capacity change (>1%) is re-declared and rebalancing follows via scrub+GC,
+like any other view change — WRH guarantees that only the shards migrating
+*towards* the modified node move at all (tested: doubling one weight
+relocates ~1/6 of the shards, with zero movement between unchanged nodes).
 
-Propriétés :
+Properties:
 
-- **Zéro coordination** : tous les nœuds calculent le même placement à
-  partir de la même vue (le membership Raft, trié).
-- **Anti-affinité** : les shards d'une même stripe tombent sur des nœuds
-  distincts dès que `n ≥ k+m` — la perte d'un nœud coûte au plus 1 shard
-  par stripe (avec 3 nœuds et 4+2 : 2 shards par stripe, toujours ≤ m).
-- **Étalement** : le classement change de stripe en stripe → charge
-  uniforme (mesuré : 16/16/16 sur 3 nœuds, 12/12/12/12 sur 4).
-- **Stabilité incrémentale** : ajouter/retirer un nœud ne déplace que les
-  shards strictement nécessaires (propriété du HRW), pas tout le cluster.
+- **Zero coordination**: every node computes the same placement from the
+  same view (the Raft membership, sorted).
+- **Anti-affinity**: shards of one stripe land on distinct nodes as soon as
+  `n ≥ k+m` — losing a node costs at most 1 shard per stripe (with 3 nodes
+  and 4+2: 2 shards per stripe, still ≤ m).
+- **Spread**: the ranking changes from stripe to stripe → uniform load
+  (measured: 16/16/16 on 3 nodes, 12/12/12/12 on 4).
+- **Incremental stability**: adding or removing a node relocates only the
+  strictly necessary shards (an HRW property), not the whole cluster.
 
-## Auto-healing (scrub)
+## Self-healing (scrub)
 
-Chaque nœud vérifie périodiquement les shards **dont il est propriétaire** :
-
-```
-pour chaque manifest connu localement :
-  pour chaque (stripe, shard) dont owner == moi :
-    get_shard local OK ?           → rien à faire
-    manquant OU corrompu (hash) ?  → réparation :
-      collecte des shards de la stripe (local puis pairs, propriétaire
-      théorique en premier) jusqu'à ≥ k valides
-      decode_stripe → ré-encode_stripe → le shard régénéré doit matcher
-      le hash du manifest → stocké
-```
-
-Rapport par passe : `shards_checked / healed / unrecoverable`. Un shard
-irréparable (moins de k survivants *pour l'instant*) sera retenté à la
-passe suivante — des nœuds peuvent revenir.
-
-## GC de rebalancement
-
-Le pendant « libération » du scrub, pour les changements de topologie :
+Every node periodically checks the shards **it owns**:
 
 ```
-pour chaque shard local :
-  référencé par aucun manifest      → ignoré (orphelin, hors périmètre v1)
-  dont je suis propriétaire         → gardé
-  sinon : TOUS ses propriétaires actuels (un shard peut être partagé par
-  plusieurs fichiers) en apportent la PREUVE — blake3(nonce ‖ octets),
-  vérifiée contre notre copie locale ?
-    oui → suppression locale
-    non (ou injoignable) → gardé, retenté plus tard
+for each manifest known locally:
+  for each (stripe, shard) whose owner == me:
+    local get_shard OK?             → nothing to do
+    missing OR corrupted (hash)?    → repair:
+      collect the stripe's shards (local first, then peers, nominal
+      owner first) until ≥ k are valid
+      decode_stripe → encode_stripe again → the regenerated shard must
+      match the manifest hash → stored
 ```
 
-La règle « tous prouvent, sinon on garde » garantit qu'on ne réduit jamais
-la redondance réelle du cluster en libérant trop tôt — et une preuve, à la
-différence d'un `has_shard` déclaratif, ne peut pas mentir (voir
-[Attestation de stockage](#attestation-de-stockage)).
+Per-pass report: `shards_checked / healed / unrecoverable`. An
+unrecoverable shard (fewer than k survivors *for now*) is retried on the
+next pass — nodes can come back.
 
-## Membership à chaud
+## Rebalancing GC
 
-- **`cluster-add id@addr`** : le nœud entre en **learner** (rattrape le log
-  et le snapshot sans droit de vote), puis est **promu votant**. Le
-  rebalancement suit automatiquement au fil des scrubs/GC.
-- **`cluster-remove id`** : le nœud sort du membership mais **reste allumé
-  pendant le drain** — il sert encore les lectures pendant que les autres
-  re-répliquent sa part. On l'éteint ensuite.
-- En mode découverte, `cluster-add` est automatique (auto-join, voir
-  [identite-et-decouverte.md](identite-et-decouverte.md)).
+The "release" counterpart of the scrub, for topology changes:
 
-Séquence mesurée en réel : 3 nœuds à 16/16/16 shards → `cluster-add` d'un
-4ᵉ → 12/12/12/12 en quelques cycles → `cluster-remove` du 3ᵉ → 16/16/16
-sur les survivants → extinction du retiré → fichier re-téléchargé intact.
+```
+for each local shard:
+  referenced by no manifest        → skipped (orphan, out of scope for v1)
+  owned by me                      → kept
+  otherwise: do ALL of its current owners (a shard can be shared by
+  several files) supply PROOF — blake3(nonce ‖ bytes), verified against
+  our own local copy?
+    yes → delete locally
+    no (or unreachable) → kept, retried later
+```
 
-## Mode statique (sans consensus)
+The "everyone proves, otherwise we keep it" rule guarantees that we never
+reduce the cluster's real redundancy by releasing too early — and a proof,
+unlike a declarative `has_shard`, cannot lie (see
+[Storage attestation](#storage-attestation)).
 
-`serve --peers a,b,c` sans `--node-id` : vue du cluster figée en config,
-heartbeats + scrub périodiques, pas de registre répliqué (les manifests
-sont répliqués sur tous les nœuds à l'upload par `put-remote`). Conservé
-pour les déploiements minimalistes et les tests ; le mode consensus est le
-mode nominal.
+## Live membership changes
 
-## Attestation de stockage
+- **`cluster-add id@addr`**: the node joins as a **learner** (catches up on
+  the log and the snapshot without voting rights), then is **promoted to
+  voter**. Rebalancing follows automatically over the next scrub/GC cycles.
+- **`cluster-remove id`**: the node leaves the membership but **stays up
+  during the drain** — it keeps serving reads while the others
+  re-replicate its share. You shut it down afterwards.
+- In discovery mode, `cluster-add` is automatic (auto-join, see
+  [identity-and-discovery.md](identity-and-discovery.md)).
 
-`has_shard` est déclaratif : un nœud peut répondre « oui » alors que son
-disque a été vidé ou silencieusement corrompu. Deux mécanismes de preuve,
-complémentaires, ferment cette faille — et bouclent la promesse du
-placement pondéré (capacité *déclarée* → capacité *honorée*).
+Sequence measured for real: 3 nodes at 16/16/16 shards → `cluster-add` of a
+4th → 12/12/12/12 within a few cycles → `cluster-remove` of the 3rd →
+16/16/16 on the survivors → the removed node shut down → file downloaded
+again, intact.
 
-### 1. Challenge par nonce — utilisé par le GC
+## Static mode (no consensus)
 
-`ProveShard { hash, nonce }` : le pair doit renvoyer
-`blake3(nonce ‖ octets)`. Le nonce est tiré au hasard à chaque fois :
-impossible à pré-calculer ou à rejouer, impossible à produire sans relire
-réellement les octets.
+`serve --peers a,b,c` without `--node-id`: cluster view frozen in the
+configuration, periodic heartbeats + scrub, no replicated registry
+(manifests are replicated to every node at upload time by `put-remote`).
+Kept for minimal deployments and tests; consensus mode is the nominal one.
 
-Vérifiable seulement par qui détient déjà les octets — c'est exactement la
-situation du **GC de rebalancement** : avant de libérer sa copie, un nœud
-exige désormais cette preuve de chaque propriétaire actuel (au lieu d'un
-simple `has_shard`). Sans preuve, il garde. La redondance ne peut plus
-baisser sur une déclaration mensongère.
+## Storage attestation
 
-### 2. Audit par échantillonnage — surveillance continue
+`has_shard` is declarative: a node can answer "yes" when its disk has been
+wiped or silently corrupted. Two complementary proof mechanisms close that
+hole — and complete the promise of weighted placement (*declared* capacity
+→ capacity *honored*).
 
-En régime permanent, chaque shard n'a qu'**un** détenteur : personne
-d'autre n'a les octets pour vérifier un challenge. L'auditeur échantillonne
-donc des shards que le pair **possède selon le placement**, les télécharge
-et vérifie leur hash contre le manifest. Le stockage étant
-content-addressed, tricher reviendrait à produire des octets ayant un
-BLAKE3 imposé — une préimage.
+### 1. Nonce challenge — used by the GC
 
-Coût borné : `SAMPLE_PER_PEER` (3) shards par pair et par passe de scrub.
+`ProveShard { hash, nonce }`: the peer must return
+`blake3(nonce ‖ bytes)`. The nonce is drawn at random every time:
+impossible to precompute or replay, impossible to produce without actually
+re-reading the bytes.
 
-Lecture des rapports :
+Only verifiable by someone who already holds the bytes — which is exactly
+the situation of the **rebalancing GC**: before releasing its copy, a node
+now demands this proof from every current owner (instead of a plain
+`has_shard`). No proof, no deletion. Redundancy can no longer drop on the
+strength of a false claim.
 
-| Champ | Sens |
+### 2. Sampled audit — continuous monitoring
+
+In steady state, each shard has exactly **one** holder: nobody else has the
+bytes to verify a challenge. So the auditor samples shards the peer
+**owns according to placement**, downloads them and checks their hash
+against the manifest. Since storage is content-addressed, cheating would
+mean producing bytes with a prescribed BLAKE3 — a preimage.
+
+Bounded cost: `SAMPLE_PER_PEER` (3) shards per peer per scrub pass.
+
+Reading the reports:
+
+| Field | Meaning |
 |---|---|
-| `proved` | détention prouvée (hash conforme au manifest) |
-| `missing` | le pair ne fournit pas un shard qui lui revient — transitoire si son scrubber est en retard, **alerte si ça persiste** |
-| `failed` | octets au mauvais hash : anomalie sérieuse, tracée en `warn` |
-| `unreachable` | pair injoignable — pas une faute |
+| `proved` | possession proven (hash matches the manifest) |
+| `missing` | the peer fails to supply a shard it owns — transient if its scrubber is lagging, **an alert if it persists** |
+| `failed` | bytes with the wrong hash: a serious anomaly, logged at `warn` |
+| `unreachable` | peer unreachable — not a fault |
 
-Observé en conditions réelles : cluster sain `6/6 détentions prouvées` →
-`rm -rf` des shards d'un nœud → `3/6 prouvées, 3 absentes` → retour à
-`6/6` une fois son scrubber ayant tout régénéré.
+Observed in the field: healthy cluster at `6/6 possessions proven` →
+`rm -rf` of one node's shards → `3/6 proven, 3 missing` → back to `6/6`
+once its scrubber had regenerated everything.
 
-## Géo-placement : coordonnées réseau Vivaldi
+## Topology-aware placement: Vivaldi network coordinates
 
-Le WRH pondéré répartit selon la capacité, mais il ignore **où** sont les
-nœuds : rien n'empêche les shards d'une stripe d'atterrir sur trois
-machines du même datacenter — corrélées en panne. Le géo-placement corrige
-ça sans base GeoIP ni configuration.
+Weighted WRH spreads by capacity, but it has no idea **where** the nodes
+are: nothing stops the shards of one stripe from landing on three machines
+in the same datacenter — correlated failures. Topology-aware placement
+fixes that with no GeoIP database and no configuration.
 
-### Comment les positions sont apprises
+### How positions are learned
 
-Chaque nœud mesure le RTT vers ses pairs (un ping QUIC, à chaque passe de
-fond) et ajuste sa position dans un espace euclidien où **la distance
-prédit la latence** (algorithme Vivaldi, SIGCOMM'04) : trop loin d'un pair
-rapide → il s'en rapproche ; trop près d'un pair lent → il s'en éloigne. Une
-« hauteur » modélise le coût d'accès incompressible du dernier kilomètre.
+Every node measures the round-trip time to its peers (a QUIC ping, on each
+background pass) and adjusts its position in a Euclidean space where
+**distance predicts latency** (the Vivaldi algorithm, SIGCOMM'04): too far
+from a fast peer → it moves closer; too close to a slow peer → it moves
+away. A "height" models the incompressible last-mile access cost.
 
-La position est publiée dans l'état Raft (`UpdateNodeCoord`) dès qu'elle
-bouge sensiblement — donc **tous les nœuds placent à partir des mêmes
-valeurs**, condition non négociable pour que scrub et GC ne se contredisent
-pas. Comme pour le `ln` du WRH, la racine carrée est calculée maison
-(Newton, opérations IEEE de base) : les libm diffèrent entre plateformes, et
-deux nœuds qui classeraient différemment se disputeraient les shards.
+The position is published into the Raft state (`UpdateNodeCoord`) as soon
+as it moves appreciably — so **every node computes placement from the same
+values**, a non-negotiable condition for scrub and GC not to contradict
+each other. As with WRH's `ln`, the square root is hand-rolled (Newton,
+basic IEEE operations): libm implementations differ across platforms, and
+two nodes that ranked differently would fight over shards.
 
-Chaque coordonnée porte une **erreur estimée** ; tant qu'elle n'est pas
-descendue sous 0,5 (`is_settled`), le nœud est ignoré du géo-placement.
+Each coordinate carries an **estimated error**; until that error drops
+below 0.5 (`is_settled`), the node is excluded from topology-aware
+placement.
 
-### Comment le placement s'en sert
+### How placement uses it
 
-`stripe_owners_geo` part du classement WRH (capacité, déterminisme,
-migration minimale) et n'applique qu'un **réordonnancement local** : pour
-chaque shard, si le titulaire nominal est à moins de `NEARBY_MS` (15 ms)
-d'un nœud déjà retenu dans la stripe, on lui préfère un candidat plus
-éloigné — à condition qu'il appartienne à la même « couche » du classement,
-ce qui préserve exactement l'équilibre de charge et l'anti-affinité.
+`stripe_owners_geo` starts from the WRH ranking (capacity, determinism,
+minimal migration) and applies nothing but a **local reordering**: for each
+shard, if the nominal holder sits within `NEARBY_MS` (15 ms) of a node
+already picked for this stripe, a more distant candidate is preferred — as
+long as it belongs to the same "band" of the ranking, which preserves load
+balance and anti-affinity exactly.
 
-Garanties (testées) :
+Guarantees (tested):
 
-- deux régions de 3 nœuds, 6 shards par stripe : **aucune stripe ne tient
-  dans une seule région**, répartition systématiquement 3/3 ;
-- la charge reste uniforme à ±2 % par nœud ;
-- **sans coordonnées fiables, le placement est identique au WRH nominal** —
-  le géo-placement ne peut pas dégrader un cluster non convergé ;
-- cluster mono-région : aucun effet, aucune instabilité.
+- two regions of 3 nodes, 6 shards per stripe: **no stripe fits inside a
+  single region**, the split is consistently 3/3;
+- load stays uniform to within ±2% per node;
+- **without reliable coordinates, placement is identical to nominal WRH** —
+  topology awareness cannot degrade a cluster that has not converged;
+- single-region cluster: no effect, no instability.
 
-Bénéfice : un fichier survit à la perte d'une **région entière**, pas
-seulement d'une machine. Bonus à venir : diriger les lectures vers le nœud
-le plus proche (les coordonnées sont déjà là).
+Payoff: a file survives the loss of an **entire region**, not merely of a
+machine. Bonus still to come: steering reads to the nearest node (the
+coordinates are already there).

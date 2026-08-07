@@ -3,7 +3,7 @@ import { FolderOpen, BarChart3 } from "lucide-react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 
 const navItems = [
-  { to: "/files", label: "Fichiers", icon: FolderOpen },
+  { to: "/files", label: "Files", icon: FolderOpen },
   { to: "/dashboard", label: "Cluster", icon: BarChart3 },
 ];
 
@@ -51,7 +51,7 @@ export function Layout() {
               target="_blank"
               rel="noreferrer"
               className="block text-[9px] leading-tight text-muted-foreground hover:text-foreground text-center px-1"
-              title="Interface dérivée de la webui de ZeroFS (AGPL-3.0)"
+              title="Interface derived from the ZeroFS webui (AGPL-3.0)"
             >
               UI :<br />
               ZeroFS

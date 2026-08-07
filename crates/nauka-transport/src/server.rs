@@ -1,4 +1,4 @@
-//! Côté serveur : un nœud qui écoute en QUIC et sert son [`ShardStore`].
+//! Server side: a node that listens over QUIC and serves its [`ShardStore`].
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,15 +11,15 @@ use nauka_store::ShardStore;
 
 use crate::protocol::{read_message, write_message, RaftRpc, Request, Response, ALPN};
 
-/// Point d'extension : la couche consensus (nauka-raft) s'enregistre ici pour
-/// recevoir les RPCs Raft qui arrivent par le transport.
+/// Extension point: the consensus layer (nauka-raft) registers here to receive
+/// the Raft RPCs coming in over the transport.
 #[async_trait::async_trait]
 pub trait RaftHandler: Send + Sync {
     async fn handle(&self, rpc: RaftRpc) -> Result<Vec<u8>, String>;
 }
 
-/// Démarre le serveur QUIC et sert les requêtes jusqu'à l'arrêt du process.
-/// Avec consensus actif, ouvre aussi le plan dédié sur port+1.
+/// Starts the QUIC server and serves requests until the process stops.
+/// With consensus enabled, also opens the dedicated plane on port+1.
 pub async fn serve(
     store: Arc<ShardStore>,
     listen: SocketAddr,
@@ -29,7 +29,7 @@ pub async fn serve(
         Some(handler) => {
             let (data, consensus) = make_endpoint_pair(listen)?;
             info!(
-                "nœud à l'écoute sur {} (consensus sur {})",
+                "node listening on {} (consensus on {})",
                 data.local_addr()?,
                 consensus.local_addr()?
             );
@@ -38,14 +38,14 @@ pub async fn serve(
         }
         None => {
             let endpoint = make_endpoint(listen)?;
-            info!("nœud à l'écoute sur {}", endpoint.local_addr()?);
+            info!("node listening on {}", endpoint.local_addr()?);
             serve_endpoint(store, endpoint, None).await
         }
     }
 }
 
-/// Boucle d'accept sur un endpoint déjà construit (permet aux tests de
-/// connaître l'adresse effective avant de bloquer).
+/// Accept loop over an already-built endpoint (lets tests learn the effective
+/// address before blocking).
 pub async fn serve_endpoint(
     store: Arc<ShardStore>,
     endpoint: quinn::Endpoint,
@@ -57,16 +57,16 @@ pub async fn serve_endpoint(
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => handle_connection(Some(store), raft, conn).await,
-                Err(e) => warn!("connexion refusée: {e}"),
+                Err(e) => warn!("connection rejected: {e}"),
             }
         });
     }
     Ok(())
 }
 
-/// Boucle d'accept du plan consensus : NE sert QUE les RPCs Raft. Aucun
-/// accès au store — une collision de ports ne peut pas transformer ce plan
-/// en faux plan de données.
+/// Accept loop for the consensus plane: serves ONLY Raft RPCs. No access to
+/// the store — a port collision cannot turn this plane into a rogue data
+/// plane.
 pub async fn serve_consensus_endpoint(
     endpoint: quinn::Endpoint,
     handler: Arc<dyn RaftHandler>,
@@ -76,23 +76,23 @@ pub async fn serve_consensus_endpoint(
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => handle_connection(None, Some(handler), conn).await,
-                Err(e) => warn!("connexion refusée: {e}"),
+                Err(e) => warn!("connection rejected: {e}"),
             }
         });
     }
     Ok(())
 }
 
-/// Construit l'endpoint serveur du plan de données (exposé pour les tests,
-/// qui ont besoin de l'adresse effective avant de bloquer sur accept).
+/// Builds the data-plane server endpoint (exposed for tests, which need the
+/// effective address before blocking on accept).
 pub fn make_endpoint(listen: SocketAddr) -> Result<quinn::Endpoint> {
     make_endpoint_buf(listen, crate::DATA_SOCKET_BUF)
 }
 
-/// Construit la paire d'endpoints d'un nœud : plan de données sur `listen`,
-/// plan consensus sur port+1 (socket UDP séparé — le trafic de shards ne
-/// peut plus faire la queue devant les heartbeats Raft). Avec un port 0,
-/// cherche une paire de ports contigus libre.
+/// Builds a node's endpoint pair: data plane on `listen`, consensus plane on
+/// port+1 (separate UDP socket — shard traffic can no longer queue up in front
+/// of the Raft heartbeats). With port 0, looks for a free pair of adjacent
+/// ports.
 pub fn make_endpoint_pair(listen: SocketAddr) -> Result<(quinn::Endpoint, quinn::Endpoint)> {
     if listen.port() != 0 {
         let data = make_endpoint_buf(listen, crate::DATA_SOCKET_BUF)?;
@@ -105,23 +105,23 @@ pub fn make_endpoint_pair(listen: SocketAddr) -> Result<(quinn::Endpoint, quinn:
         let bound = data.local_addr()?;
         match make_endpoint_buf(crate::consensus_addr(bound), crate::CONSENSUS_SOCKET_BUF) {
             Ok(consensus) => return Ok((data, consensus)),
-            Err(_) => continue, // port+1 occupé : on retire une autre paire
+            Err(_) => continue, // port+1 taken: draw another pair
         }
     }
-    anyhow::bail!("impossible de trouver deux ports contigus libres")
+    anyhow::bail!("could not find two free adjacent ports")
 }
 
 fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> {
     let mut crypto = match crate::tls::cluster_tls() {
         Some(tls) => {
-            // mTLS : seuls les porteurs d'un certificat signé par la clé de
-            // cluster peuvent se connecter.
+            // mTLS: only holders of a certificate signed by the cluster key
+            // can connect.
             let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
                 Arc::new(tls.roots.clone()),
                 crate::crypto_provider(),
             )
             .build()
-            .context("construction du vérifieur de certificats clients")?;
+            .context("building the client certificate verifier")?;
             rustls::ServerConfig::builder_with_provider(crate::crypto_provider())
                 .with_safe_default_protocol_versions()?
                 .with_client_cert_verifier(verifier)
@@ -129,11 +129,11 @@ fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> 
         }
         None => {
             warn!(
-                "mode INSECURE: aucune clé de cluster chargée — lien chiffré \
-                 mais pairs non authentifiés"
+                "INSECURE mode: no cluster key loaded — link is encrypted \
+                 but peers are not authenticated"
             );
             let cert = rcgen::generate_simple_self_signed(vec!["yogfile".into()])
-                .context("génération du certificat auto-signé")?;
+                .context("generating the self-signed certificate")?;
             let cert_der = CertificateDer::from(cert.cert);
             let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
             rustls::ServerConfig::builder_with_provider(crate::crypto_provider())
@@ -156,14 +156,14 @@ fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> 
     )?)
 }
 
-/// Sert toutes les requêtes d'une connexion entrante, un stream à la fois
-/// par tâche (les streams d'une même connexion tournent en parallèle).
+/// Serves every request of an incoming connection, one stream per task
+/// (the streams of a single connection run in parallel).
 pub async fn handle_connection(
     store: Option<Arc<ShardStore>>,
     raft: Option<Arc<dyn RaftHandler>>,
     conn: quinn::Connection,
 ) {
-    debug!("connexion de {}", conn.remote_address());
+    debug!("connection from {}", conn.remote_address());
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
             Ok(s) => s,
@@ -184,18 +184,18 @@ pub async fn handle_connection(
                         Ok(payload) => Response::Raft(payload),
                         Err(e) => Response::Error(e),
                     },
-                    None => Response::Error("consensus inactif sur ce nœud".into()),
+                    None => Response::Error("consensus is not enabled on this node".into()),
                 },
                 Ok(req) => match &store {
                     Some(s) => handle_request(s, req),
                     None => Response::Error(
-                        "plan consensus: seules les RPCs Raft sont acceptées ici".into(),
+                        "consensus plane: only Raft RPCs are accepted here".into(),
                     ),
                 },
-                Err(e) => Response::Error(format!("requête illisible: {e}")),
+                Err(e) => Response::Error(format!("unreadable request: {e}")),
             };
             if let Err(e) = write_message(&mut send, &response).await {
-                warn!("réponse non envoyée: {e}");
+                warn!("response not sent: {e}");
             }
             let _ = send.finish();
         });
@@ -204,18 +204,18 @@ pub async fn handle_connection(
 
 fn handle_request(store: &ShardStore, req: Request) -> Response {
     match req {
-        Request::Raft(_) => unreachable!("traité en amont"),
+        Request::Raft(_) => unreachable!("handled upstream"),
         Request::Ping => Response::Pong,
         Request::PutShard(data) => match store.put_shard(&data) {
             Ok(hash) => Response::PutShardOk(hash),
             Err(e) => Response::Error(e.to_string()),
         },
-        // Absent ou corrompu → None : côté client c'est pareil, le shard
-        // sera reconstruit par Reed-Solomon depuis les autres nœuds.
+        // Missing or corrupt → None: it makes no difference to the client, the
+        // shard will be rebuilt by Reed-Solomon from the other nodes.
         Request::GetShard(hash) => Response::Shard(store.get_shard(&hash).ok()),
         Request::HasShard(hash) => Response::Has(store.has_shard(&hash)),
-        // get_shard revérifie l'intégrité : un shard corrompu ne produit
-        // pas de preuve, il est donc traité comme absent.
+        // get_shard re-verifies integrity: a corrupt shard yields no proof, so
+        // it is treated as missing.
         Request::ProveShard { hash, nonce } => {
             Response::Proof(store.get_shard(&hash).ok().map(|data| {
                 let mut hasher = blake3::Hasher::new();

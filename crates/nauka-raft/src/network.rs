@@ -1,8 +1,8 @@
-//! Réseau openraft transporté par le QUIC de nauka-transport.
+//! openraft networking carried over nauka-transport's QUIC.
 //!
-//! Chaque RPC Raft est sérialisée en bincode et envoyée comme
-//! `Request::Raft(...)` ; le nœud distant la remet à son instance Raft via
-//! le [`RaftHandler`] enregistré sur son serveur.
+//! Every Raft RPC is serialized with bincode and sent as
+//! `Request::Raft(...)`; the remote node hands it to its Raft instance
+//! through the [`RaftHandler`] registered on its server.
 
 use std::net::SocketAddr;
 
@@ -18,7 +18,7 @@ use nauka_transport::PeerClient;
 
 use crate::types::{NodeId, TypeConfig};
 
-/// Fabrique une connexion réseau par nœud cible.
+/// Builds one network connection per target node.
 #[derive(Clone, Default)]
 pub struct QuicRaftNetworkFactory;
 
@@ -31,11 +31,10 @@ impl RaftNetworkFactory<TypeConfig> for QuicRaftNetworkFactory {
     type Network = QuicRaftClient;
 
     async fn new_client(&mut self, _target: NodeId, node: &BasicNode) -> Self::Network {
-        // Le membership stocke l'adresse data ; les RPCs Raft passent par le
-        // plan consensus dédié (port+1) — jamais dans la même file que les
-        // shards.
+        // Membership stores the data address; Raft RPCs go over the dedicated
+        // consensus plane (port+1) — never queued behind shards.
         let data: std::net::SocketAddr =
-            node.addr.parse().expect("adresse de nœud invalide dans le membership");
+            node.addr.parse().expect("invalid node address in membership");
         QuicRaftClient { addr: nauka_transport::consensus_addr(data), client: None }
     }
 }
@@ -62,8 +61,8 @@ impl QuicRaftClient {
         match client.raft(wrap(payload)).await {
             Ok(bytes) => bincode::deserialize(&bytes).map_err(|e| Unreachable::new(&e)),
             Err(e) => {
-                // Connexion morte : oublier le client pour reconnecter au
-                // prochain essai.
+                // Dead connection: drop the client so the next attempt
+                // reconnects.
                 self.client = None;
                 Err(Unreachable::new(&IoErr(e.to_string())))
             }
