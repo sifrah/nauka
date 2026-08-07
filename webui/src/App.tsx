@@ -9,6 +9,7 @@ const DashboardPage = lazy(() =>
 const DownloadPage = lazy(() =>
   import("./pages/download").then((m) => ({ default: m.DownloadPage })),
 );
+const WatchPage = lazy(() => import("./pages/watch").then((m) => ({ default: m.WatchPage })));
 
 const loading = <div className="p-6 text-muted">Chargement…</div>;
 
@@ -29,6 +30,14 @@ export default function App() {
           element={
             <Suspense fallback={loading}>
               <DownloadPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/w/:hash"
+          element={
+            <Suspense fallback={loading}>
+              <WatchPage />
             </Suspense>
           }
         />

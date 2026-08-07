@@ -93,3 +93,30 @@ avec `yog-crypto` : un fichier uploadé par la CLI se déchiffre dans le
 navigateur et réciproquement.
 
 Construire : `cd webui && npm install && npm run build`.
+
+### Requêtes partielles (Range)
+
+`GET /f/{hash}` accepte `Range: bytes=…` et répond `206 Partial Content`
+avec `Content-Range` (`416` si la plage est hors fichier ; `Accept-Ranges:
+bytes` annoncé partout, y compris en `HEAD`). Seules les stripes qui
+intersectent la plage sont récupérées du cluster et décodées — lire 64
+octets au milieu d'un fichier de 81 Mo ne coûte qu'un aller-retour
+(mesuré : ~400 ms sur un cluster local, plutôt que le fichier entier).
+
+Sert à la reprise de téléchargement et à la lecture média.
+
+### Lecteur média chiffré (`/w/{hash}#clé`)
+
+La webui déchiffre le fichier dans le navigateur (WebCrypto) puis le
+donne à `<video>` via un Blob URL : lecture et **seek natifs et
+instantanés**, alors que le serveur n'a servi que du ciphertext. Limite
+assumée : chargement en mémoire, donc lecture en ligne plafonnée à
+600 Mo (au-delà, l'UI propose le téléchargement).
+
+Le déchiffrement *à la volée* par plages (sans tout charger) a été
+implémenté puis retiré : le moteur média de Chrome n'accepte pas les
+réponses produites par un Service Worker pour un `<video>` (requête
+bloquée à zéro octet, alors que le même flux se lit parfaitement via
+`fetch()`). La voie propre pour lever la limite des 600 Mo est
+MediaSource Extensions avec du fMP4 — le support Range côté serveur, lui,
+est déjà en place et testé.

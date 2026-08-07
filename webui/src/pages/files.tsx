@@ -5,6 +5,7 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  Play,
   RefreshCw,
   Upload as UploadIcon,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import {
   uploadEncrypted,
   type ClusterFile,
 } from "../lib/yog/client";
+import { isStreamable } from "../lib/yog/stream";
 
 interface UploadInFlight {
   name: string;
@@ -219,6 +221,15 @@ export function FilesPage() {
                       <div className="flex items-center justify-end gap-1">
                         {entry ? (
                           <>
+                            {isStreamable(entry.name) && (
+                              <a
+                                href={`/w/${f.hash}#${entry.key}`}
+                                className="flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"
+                                title="Lire (déchiffré dans le navigateur, seek compris)"
+                              >
+                                <Play size={14} strokeWidth={1.5} />
+                              </a>
+                            )}
                             <a
                               href={`/d/${f.hash}#${entry.key}`}
                               className="flex items-center justify-center w-7 h-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent"

@@ -132,6 +132,7 @@ async fn download_head(
     };
     Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, manifest.file_size)
         .body(Body::empty())
         .unwrap()
@@ -304,9 +305,28 @@ async fn send_shard(
     bail!("shard non transmis à {owner}")
 }
 
+/// Plage d'octets demandée, résolue en (début, fin inclusive).
+fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
+    let spec = header?.strip_prefix("bytes=")?.trim();
+    // Une seule plage supportée (suffisant pour la lecture média).
+    let (start, end) = spec.split_once('-')?;
+    let (start, end) = match (start.trim(), end.trim()) {
+        ("", "") => return None,
+        // bytes=-N : les N derniers octets.
+        ("", n) => {
+            let n: u64 = n.parse().ok()?;
+            (size.saturating_sub(n.min(size)), size.saturating_sub(1))
+        }
+        (s, "") => (s.parse().ok()?, size.saturating_sub(1)),
+        (s, e) => (s.parse().ok()?, e.parse::<u64>().ok()?.min(size.saturating_sub(1))),
+    };
+    (start <= end && start < size).then_some((start, end))
+}
+
 async fn download(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     // Manifest : store local (matérialisé), sinon registre répliqué.
     let manifest = match state.store.get_manifest(&hash) {
@@ -316,6 +336,23 @@ async fn download(
             None => return Ok((StatusCode::NOT_FOUND, "fichier inconnu").into_response()),
         },
     };
+
+    // Requête partielle (lecture média, reprise de téléchargement) : seules
+    // les stripes couvrant la plage sont récupérées du cluster.
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        manifest.file_size,
+    );
+    if headers.contains_key(header::RANGE) && range.is_none() {
+        return Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{}", manifest.file_size))],
+        )
+            .into_response());
+    }
+    if let Some((start, end)) = range {
+        return serve_range(state, manifest, start, end).await;
+    }
 
     // Reconstruction en streaming : une stripe à la fois vers le client.
     // Par stripe : les k shards de DONNÉES sont récupérés en parallèle ;
@@ -367,6 +404,7 @@ async fn download(
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
     let mut response = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, manifest.file_size);
     if let Some(name) = &manifest.name {
         let safe = name.replace(['"', '\r', '\n'], "_");
@@ -376,6 +414,76 @@ async fn download(
         );
     }
     Ok(response.body(body).map_err(anyhow::Error::from)?)
+}
+
+/// Sert une plage d'octets : seules les stripes qui l'intersectent sont
+/// récupérées et décodées (le reste du fichier n'est jamais touché).
+async fn serve_range(
+    state: Arc<ApiState>,
+    manifest: FileManifest,
+    start: u64,
+    end: u64,
+) -> Result<Response, ApiError> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
+    let fetcher = Arc::new(Fetcher::new(state.clone()));
+    let m = manifest.clone();
+    tokio::spawn(async move {
+        let k = m.config.data_shards;
+        let mut offset: u64 = 0; // début de la stripe courante dans le fichier
+        for stripe in &m.stripes {
+            let stripe_len = stripe.data_len as u64;
+            let stripe_end = offset + stripe_len; // exclusif
+            // Stripe entièrement avant/après la plage : rien à faire.
+            if stripe_end <= start {
+                offset = stripe_end;
+                continue;
+            }
+            if offset > end {
+                break;
+            }
+            let data_fetches =
+                stripe.shard_hashes[..k].iter().map(|h| fetcher.clone().fetch(h.clone()));
+            let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
+            if slots.iter().any(|s| s.is_none()) {
+                let parity_fetches =
+                    stripe.shard_hashes[k..].iter().map(|h| fetcher.clone().fetch(h.clone()));
+                slots.extend(futures_join_all(parity_fetches).await);
+            } else {
+                slots.resize(stripe.shard_hashes.len(), None);
+            }
+            let data = match decode_stripe(slots, stripe, &m.config) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!("stripe irrécupérable: {e}"))))
+                        .await;
+                    return;
+                }
+            };
+            // Découpe la portion utile de cette stripe.
+            let from = start.saturating_sub(offset) as usize;
+            let to = ((end - offset + 1).min(stripe_len)) as usize;
+            if from < to && to <= data.len() {
+                if tx.send(Ok(bytes::Bytes::from(data[from..to].to_vec()))).await.is_err() {
+                    return; // client parti
+                }
+            }
+            offset = stripe_end;
+        }
+    });
+
+    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    Ok(Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, end - start + 1)
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{}", manifest.file_size),
+        )
+        .body(body)
+        .map_err(anyhow::Error::from)?)
 }
 
 /// `join_all` maison (ordre préservé) — évite une dépendance de plus.
@@ -484,6 +592,29 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
         })
         .collect();
     Json(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_range;
+
+    #[test]
+    fn ranges_are_parsed_and_clamped() {
+        let size = 1000;
+        assert_eq!(parse_range(Some("bytes=0-99"), size), Some((0, 99)));
+        assert_eq!(parse_range(Some("bytes=100-"), size), Some((100, 999)));
+        // Suffixe : les N derniers octets.
+        assert_eq!(parse_range(Some("bytes=-50"), size), Some((950, 999)));
+        // Fin au-delà du fichier : bornée.
+        assert_eq!(parse_range(Some("bytes=900-99999"), size), Some((900, 999)));
+        assert_eq!(parse_range(Some("bytes=0-0"), size), Some((0, 0)));
+        // Invalides.
+        assert_eq!(parse_range(Some("bytes=1000-1100"), size), None);
+        assert_eq!(parse_range(Some("bytes=500-100"), size), None);
+        assert_eq!(parse_range(Some("bytes=-"), size), None);
+        assert_eq!(parse_range(Some("octets=0-10"), size), None);
+        assert_eq!(parse_range(None, size), None);
+    }
 }
 
 /// Identifiant de fichier temporaire unique (pas besoin de vraie
