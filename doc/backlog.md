@@ -20,14 +20,41 @@ Les chantiers, classés. Trois sections : ce qui est **livré**, les
 
 ## Innovations
 
-### 1. Le cluster héberge sa propre UI — *prochain chantier recommandé (effort faible)*
+### 1. API S3-compatible — *le multiplicateur d'adoption*
+Exposer un sous-ensemble de l'API S3 fait entrer tout l'écosystème d'un
+coup : rclone, restic, Velero, Terraform, les SDK AWS, les registries
+Docker, Thanos/Loki. Un self-hoster pointe `restic` sur yogfile et obtient
+une sauvegarde **chiffrée, erasure-codée, géo-répartie et auto-réparée**
+en une commande. C'est la voie qu'a prise Garage — sauf que Garage
+réplique ×3 (+200 %) là où nous faisons du 4+2 (+50 %), avec géo-placement
+et attestation en plus.
+
+Pas de conflit avec le zéro-connaissance : restic et rclone chiffrent
+déjà côté client, la propriété « le serveur ne peut pas lire » est donc
+préservée. Les deux mondes coexistent — S3 pour l'infra et les outils,
+l'API native + webui pour le partage E2E grand public.
+
+À construire :
+1. **Indirection mutable** `(bucket, key) → file_hash` dans l'état Raft —
+   seul vrai ajout sémantique (S3 écrase des clés, notre store est
+   immuable et content-addressed).
+2. Sous-ensemble utile : PUT/GET/HEAD/DELETE object, ListObjectsV2,
+   CreateBucket, et **multipart upload** (les SDK en dépendent).
+3. **SigV4** : la signature AWS règle du même coup la consolidation B —
+   les access keys S3 *sont* le système d'authentification.
+
+**Effort : moyen-haut** (1–2 sessions). **Prérequis : la suppression
+(consolidation A)** — un `DELETE Object` qui ne supprime rien n'est pas
+acceptable.
+
+### 2. Le cluster héberge sa propre UI — *effort faible*
 L'interface est aujourd'hui servie depuis `webui/dist` sur le disque de
 chaque nœud. La stocker **comme un fichier dans le cluster** (upload signé
 par l'opérateur, servi par n'importe quel nœud) supprime tout déploiement
 frontend et rend la mise à jour atomique. **Effort : faible.**
 Conceptuellement pur — « le stockage distribué qui se sert lui-même ».
 
-### 2. Upload/download direct-aux-shards (façon torrent)
+### 3. Upload/download direct-aux-shards (façon torrent)
 Le client (CLI puis navigateur en wasm) fait l'encodage Reed-Solomon
 lui-même et pousse chaque shard directement à son propriétaire, en
 parallèle — le gateway n'enregistre que le manifest. Symétrique au
@@ -36,7 +63,7 @@ cluster, pas d'un serveur. Architecture Storj, inexistante en
 self-hosted. **Effort : moyen-haut** (protocole d'autorisation d'écriture
 directe, wasm RS pour le navigateur).
 
-### 3. Peering de clusters — le « BGP du stockage »
+### 4. Peering de clusters — le « BGP du stockage »
 Deux clusters indépendants signent un accord et hébergent mutuellement de
 la parité supplémentaire l'un de l'autre. Le E2E permet de confier des
 octets illisibles à un pair qu'on n'a pas besoin de croire ; en échange,
@@ -44,7 +71,7 @@ survie à un désastre total local. Reprise après sinistre mutualisée, sans
 contrat, sans blockchain. Catégorie inexistante. **Effort : haut**
 (fédération d'identités, placement inter-clusters, comptabilité). L'attestation, prérequis, est en place.
 
-### 4. Re-striping adaptatif
+### 5. Re-striping adaptatif
 Ré-encoder les fichiers existants vers un autre schéma k+m quand le
 cluster change d'échelle (ex. 4+2 → 8+3 à 11+ nœuds : plus de tolérance
 pour moins de surcoût). Relire → ré-encoder → nouvelle version au registre
@@ -52,7 +79,7 @@ pour moins de surcoût). Relire → ré-encoder → nouvelle version au registre
 pool). **Effort : moyen.** Manuel d'abord (`cluster-restripe`),
 automatisable ensuite.
 
-### 5. Transport Tor optionnel (arti)
+### 6. Transport Tor optionnel (arti)
 Accès .onion embarqué en pur Rust via arti, en transport enfichable
 (`--tor`) — jamais en dépendance obligatoire. Sert le créneau anti-censure
 sans pénaliser le produit principal. Yggdrasil : écarté (pas
