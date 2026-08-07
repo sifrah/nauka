@@ -94,12 +94,7 @@ réparer — et le fsync par shard divisait l'ingestion par ~20.
    partout : une connexion qui traîne vaut pire qu'une connexion morte,
    parce que les retries idempotents savent gérer la seconde.
 
-## Dettes assumées (par ordre de priorité suggéré)
+## Dettes assumées
 
-1. Suppression/expiration des fichiers + GC des shards orphelins.
-2. Authentification et quotas sur l'API HTTP (prérequis produit public).
-3. Émission de certificats hors-ligne (la CA quitte les nœuds).
-4. NAT traversal (hole punching, relais) pour les nœuds résidentiels.
-5. Placement géo-conscient (contraintes de diversité par région dans le
-   HRW — le reste de l'héritage ChainRage).
-6. Fair queuing entre uploads concurrents.
+Consolidées et priorisées dans [backlog.md](backlog.md), avec les pistes
+d'innovation.

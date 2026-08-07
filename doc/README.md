@@ -34,6 +34,7 @@ fichier de configuration.
 | [chiffrement.md](chiffrement.md) | Bout en bout : AES-GCM côté client, la clé dans le fragment du lien |
 | [operations.md](operations.md) | Déploiement, référence CLI, ports, dépannage, limites connues |
 | [decisions.md](decisions.md) | Choix structurants et leçons des stress tests |
+| [backlog.md](backlog.md) | Chantiers à venir : innovations et consolidations, priorisés |
 
 ## En un coup d'œil
 
