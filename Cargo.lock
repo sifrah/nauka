@@ -1495,6 +1495,142 @@ dependencies = [
 ]
 
 [[package]]
+name = "nauka-cluster"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "nauka-erasure",
+ "nauka-store",
+ "nauka-transport",
+ "rand 0.8.7",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nauka-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "data-encoding",
+ "rand 0.8.7",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nauka-discovery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "mainline",
+ "nauka-transport",
+ "pkarr",
+ "rcgen",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nauka-erasure"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rand 0.8.7",
+ "reed-solomon-erasure",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nauka-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "blake3",
+ "bytes",
+ "clap",
+ "libc",
+ "nauka-cluster",
+ "nauka-crypto",
+ "nauka-discovery",
+ "nauka-erasure",
+ "nauka-raft",
+ "nauka-store",
+ "nauka-transport",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "nauka-raft"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "nauka-cluster",
+ "nauka-erasure",
+ "nauka-store",
+ "nauka-transport",
+ "openraft",
+ "quinn",
+ "redb",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nauka-store"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "nauka-erasure",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nauka-transport"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "blake3",
+ "nauka-erasure",
+ "nauka-store",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "socket2 0.5.10",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ntimestamp"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3422,142 +3558,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
 dependencies = [
  "time",
-]
-
-[[package]]
-name = "yog-cluster"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "rand 0.8.7",
- "serde",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "yog-erasure",
- "yog-store",
- "yog-transport",
-]
-
-[[package]]
-name = "yog-crypto"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "data-encoding",
- "rand 0.8.7",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "yog-discovery"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "mainline",
- "pkarr",
- "rcgen",
- "tempfile",
- "tokio",
- "tracing",
- "yog-transport",
-]
-
-[[package]]
-name = "yog-erasure"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "rand 0.8.7",
- "reed-solomon-erasure",
- "serde",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "yog-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "blake3",
- "bytes",
- "clap",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "yog-cluster",
- "yog-crypto",
- "yog-discovery",
- "yog-erasure",
- "yog-raft",
- "yog-store",
- "yog-transport",
-]
-
-[[package]]
-name = "yog-raft"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bincode",
- "openraft",
- "quinn",
- "redb",
- "serde",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "yog-cluster",
- "yog-erasure",
- "yog-store",
- "yog-transport",
-]
-
-[[package]]
-name = "yog-store"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "yog-erasure",
-]
-
-[[package]]
-name = "yog-transport"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bincode",
- "blake3",
- "quinn",
- "rcgen",
- "rustls",
- "rustls-pemfile",
- "serde",
- "socket2 0.5.10",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "yog-erasure",
- "yog-store",
 ]
 
 [[package]]

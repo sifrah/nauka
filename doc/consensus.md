@@ -79,4 +79,4 @@ ListManifests                  clés du registre
   debug, avant persistance redb — la version durable paie un fsync par
   batch d'append, amorti par le batching d'openraft).
 - 500 écritures concurrentes convergées sur 3 nœuds : voir
-  `yog-raft/tests/stress.rs`.
+  `nauka-raft/tests/stress.rs`.

@@ -9,11 +9,11 @@ ni le contenu, ni la clé, ni (par défaut) le nom du fichier.
 
 ```
 # chiffre localement puis uploade — imprime le lien complet :
-yog-node upload plans.pdf --api http://node1:8080
+nauka-node upload plans.pdf --api http://node1:8080
 → http://node1:8080/f/4fae2bb2…#RO_5yMPbAwtIn0kl1UVHQeG…
 
 # télécharge + déchiffre + vérifie (le lien complet, avec le #…) :
-yog-node download "http://node3:8080/f/4fae2bb2…#RO_5yMPb…" -o plans.pdf
+nauka-node download "http://node3:8080/f/4fae2bb2…#RO_5yMPb…" -o plans.pdf
 ```
 
 Le lien fonctionne depuis **n'importe quel nœud** (changer l'hôte suffit,

@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/yog-erasure",
-    "crates/yog-store",
-    "crates/yog-node",
-    "crates/yog-transport",
-    "crates/yog-cluster",
-    "crates/yog-raft",
-    "crates/yog-discovery",
-    "crates/yog-crypto",
+    "crates/nauka-erasure",
+    "crates/nauka-store",
+    "crates/nauka-node",
+    "crates/nauka-transport",
+    "crates/nauka-cluster",
+    "crates/nauka-raft",
+    "crates/nauka-discovery",
+    "crates/nauka-crypto",
 ]
 
 [workspace.package]

@@ -44,7 +44,7 @@ collision de ports ne peut pas le transformer en faux plan de données.
 Conséquence opérationnelle : ouvrir **P et P+1 en UDP**, et espacer les
 ports d'au moins 2 si plusieurs nœuds cohabitent sur un hôte.
 
-Test de régression (`yog-raft/tests/priority.rs`) : 2,2 Go injectés en 12 s
+Test de régression (`nauka-raft/tests/priority.rs`) : 2,2 Go injectés en 12 s
 pendant des écritures registre — 0 changement de leader, 0 écriture échouée.
 
 ## Tuning débit (leçons du stress test 15 Go)
@@ -70,7 +70,7 @@ quatre goulots, dans l'ordre où ils ont été découverts :
 Micro-benchs reproductibles :
 
 ```
-cargo test -p yog-transport --release --test bench -- --ignored --nocapture
+cargo test -p nauka-transport --release --test bench -- --ignored --nocapture
 # raw_quinn_single_stream   : débit quinn brut + stats de chemin (rtt, cwnd, mtu, pertes)
 # raw_put_shard_throughput  : débit du protocole put_shard pipeliné
 # single_put_shard_latency  : latence par taille de payload
@@ -82,7 +82,7 @@ Deux modes, choisis au démarrage du process (voir
 [identite-et-decouverte.md](identite-et-decouverte.md)) :
 
 - **mTLS de cluster** (des clés sont fournies) : certificats Ed25519 signés
-  par la clé de cluster, vérification mutuelle, SNI `node.yog`.
+  par la clé de cluster, vérification mutuelle, SNI `node.nauka`.
 - **Insecure** (aucune clé) : certificat auto-signé, client sans
   vérification — lien chiffré mais pairs non authentifiés. Conservé pour le
   développement, avec warning au démarrage.

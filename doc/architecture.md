@@ -7,13 +7,13 @@ celles d'en dessous :
 
 | Crate | Rôle | Dépend de |
 |---|---|---|
-| `yog-erasure` | Cœur pur (zéro I/O) : encodage Reed-Solomon par stripes, reconstruction, intégrité BLAKE3 | — |
-| `yog-store` | Stockage disque d'un nœud : shards content-addressed, manifests JSON | yog-erasure |
-| `yog-transport` | QUIC inter-nœuds (quinn) : protocole shards/manifests/Raft, mTLS, tuning débit | yog-erasure, yog-store |
-| `yog-raft` | Consensus openraft : registre des fichiers + membership répliqués, stockage durable redb | yog-erasure, yog-transport |
-| `yog-cluster` | Logique de cluster : placement rendezvous-hash, auto-healing, GC de rebalancement | yog-erasure, yog-store, yog-transport |
-| `yog-discovery` | Rendez-vous DHT Mainline (pkarr) : publication/résolution des seeds, détection d'IP publique | — (pkarr, mainline) |
-| `yog-node` | Le binaire : CLI, serveur, API HTTP, orchestration de tout ce qui précède | toutes |
+| `nauka-erasure` | Cœur pur (zéro I/O) : encodage Reed-Solomon par stripes, reconstruction, intégrité BLAKE3 | — |
+| `nauka-store` | Stockage disque d'un nœud : shards content-addressed, manifests JSON | nauka-erasure |
+| `nauka-transport` | QUIC inter-nœuds (quinn) : protocole shards/manifests/Raft, mTLS, tuning débit | nauka-erasure, nauka-store |
+| `nauka-raft` | Consensus openraft : registre des fichiers + membership répliqués, stockage durable redb | nauka-erasure, nauka-transport |
+| `nauka-cluster` | Logique de cluster : placement rendezvous-hash, auto-healing, GC de rebalancement | nauka-erasure, nauka-store, nauka-transport |
+| `nauka-discovery` | Rendez-vous DHT Mainline (pkarr) : publication/résolution des seeds, détection d'IP publique | — (pkarr, mainline) |
+| `nauka-node` | Le binaire : CLI, serveur, API HTTP, orchestration de tout ce qui précède | toutes |
 
 ## Les invariants du système
 

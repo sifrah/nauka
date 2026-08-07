@@ -3,9 +3,9 @@
 ## La clé de cluster
 
 ```
-yog-node keygen --out ./yog-keys
-  → yog-keys/cluster-ca.key   (CA Ed25519, permissions 0600 — LE secret)
-  → yog-keys/cluster-ca.pem   (certificat racine)
+nauka keygen --out ./nauka-keys
+  → nauka-keys/cluster-ca.key   (CA Ed25519, permissions 0600 — LE secret)
+  → nauka-keys/cluster-ca.pem   (certificat racine)
 ```
 
 **Posséder ce dossier = appartenir au cluster.** C'est l'unique chose à
@@ -16,14 +16,14 @@ distribuer aux machines (scp). Tout le reste se dérive :
 | Identité du nœud | keypair Ed25519 auto-générée (`data-dir/node.key`, 0600), certificat signé par la CA au démarrage |
 | **node-id Raft** | `u64` = 8 premiers octets de `blake3(pubkey du nœud)` — l'identité se prouve, elle ne se décrète pas (`--node-id` est ignoré avec warning si contradictoire) |
 | Fingerprint | `blake3(pubkey)` hex complet (affiché par `node-info`) |
-| Identité DHT du cluster | keypair pkarr = `blake3("yog-discovery-v1" ‖ clé CA)` — déterministe : tous les détenteurs des clés publient/résolvent au même endroit |
+| Identité DHT du cluster | keypair pkarr = `blake3("nauka-discovery-v1" ‖ clé CA)` — déterministe : tous les détenteurs des clés publient/résolvent au même endroit |
 
 ## mTLS
 
 Sur les **deux plans QUIC** (data et consensus) :
 
 - le serveur exige un certificat client **signé par la clé de cluster** ;
-- le client vérifie le serveur contre la CA (SNI `node.yog`).
+- le client vérifie le serveur contre la CA (SNI `node.nauka`).
 
 Un client sans certificat, ou porteur d'un certificat d'un *autre*
 cluster, meurt au handshake (testé). Les commandes CLI (`put-remote`,

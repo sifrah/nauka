@@ -64,7 +64,7 @@ réparer — et le fsync par shard divisait l'ingestion par ~20.
 
 1. **`cargo test --release` ne rebuilde pas les binaires.** Une heure de
    perf-debugging sur un binaire stale. Toujours `cargo build --release
-   -p yog-node` avant une démo.
+   -p nauka-node` avant une démo.
 2. **Le MTU quinn est plafonné par `max_udp_payload_size`** (1472 o par
    défaut), pas seulement par `initial_mtu`/la découverte. C'était LE
    goulot : 6 → 83 Mo/s en le levant. Les stats de chemin

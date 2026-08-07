@@ -4,11 +4,11 @@
 
 ```bash
 # 1. Sur ton poste — générer la clé du cluster, UNE fois :
-yog-node keygen --out ./yog-keys
-scp -r yog-keys vps1:/etc/yog-keys   # idem vps2, vps3…
+nauka keygen --out ./nauka-keys
+scp -r nauka-keys vps1:/etc/nauka-keys   # idem vps2, vps3…
 
 # 2. Sur CHAQUE VPS — la même commande :
-yog-node --data-dir /var/lib/yog --keys /etc/yog-keys serve
+nauka --data-dir /var/lib/nauka --keys /etc/nauka-keys serve
 ```
 
 C'est tout. Chaque nœud dérive son identité, détecte son IP publique,
@@ -23,7 +23,7 @@ moins 2 (le pre-flight de `cluster-init` détecte les collisions).
 
 ## Référence CLI
 
-Options globales : `--data-dir <dir>` (défaut `./yog-data`),
+Options globales : `--data-dir <dir>` (défaut `./nauka-data`),
 `--keys <dir>` (active mTLS + identité dérivée).
 
 | Commande | Rôle |

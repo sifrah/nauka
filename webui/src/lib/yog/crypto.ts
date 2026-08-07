@@ -1,9 +1,9 @@
 // Chiffrement de bout en bout, côté navigateur — WebCrypto AES-256-GCM.
-// Format STRICTEMENT identique à la crate Rust `yog-crypto` :
+// Format STRICTEMENT identique à la crate Rust `nauka-crypto` :
 //   en-tête  : "YGE1" ‖ préfixe_nonce(8)
 //   par chunk: longueur_ct u32 LE ‖ flags u8 (1 = dernier) ‖ ct(+tag 16 o)
 //   nonce    : préfixe(8) ‖ compteur u32 BE ; AAD = [flags]
-// Un fichier chiffré ici se déchiffre avec `yog-node download`, et
+// Un fichier chiffré ici se déchiffre avec `nauka-node download`, et
 // réciproquement.
 
 export const CHUNK_SIZE = 1024 * 1024;

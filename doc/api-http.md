@@ -89,7 +89,7 @@ liens de partage), Cluster (statut live via `GET /api/status`), et
 L'interface est dérivée de la webui de **ZeroFS**
 (https://github.com/Barre/ZeroFS, AGPL-3.0) — voir `webui/ATTRIBUTION.md`.
 Le chiffrement navigateur (WebCrypto AES-256-GCM) est compatible bit à bit
-avec `yog-crypto` : un fichier uploadé par la CLI se déchiffre dans le
+avec `nauka-crypto` : un fichier uploadé par la CLI se déchiffre dans le
 navigateur et réciproquement.
 
 Construire : `cd webui && npm install && npm run build`.
@@ -143,12 +143,12 @@ Le manifest porte un `expires_at`. Le **leader** retire les fichiers échus
 du registre (une fois pour tout le cluster), la purge suit partout. Les
 fichiers expirés disparaissent du listing et ne sont plus servis.
 
-### Bannissement — `yog-node ban <hash> --reason "…"`
+### Bannissement — `nauka ban <hash> --reason "…"`
 Pour honorer un signalement ou une réquisition **sans jamais lire le
 contenu** : le hash est banni dans l'état Raft, le fichier sort du
 registre, `GET` répond **`410 Gone` avec le motif**, les shards sont purgés,
 et tout **ré-upload du même contenu est refusé** (le registre rejette le
-manifest). `yog-node unban <hash>` lève la mesure.
+manifest). `nauka-node unban <hash>` lève la mesure.
 
 Limite structurelle assumée : le bannissement ne vise que ce contenu à
 l'octet près — un ré-upload chiffré avec une autre clé produit un autre

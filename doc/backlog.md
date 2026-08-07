@@ -10,14 +10,14 @@ Les chantiers, classés. Trois sections : ce qui est **livré**, les
 |---|---|
 | Interface web (drag & drop, trousseau de clés, liens de partage) | `webui/`, dérivée de ZeroFS (AGPL-3.0) |
 | Streaming vidéo chiffré avec seek | Service Worker `/stream/{hash}` + Range serveur |
-| Chiffrement de bout en bout | `yog-crypto` (Rust) ↔ WebCrypto (navigateur), compat croisée prouvée |
-| Placement pondéré par capacité disque | `yog-cluster/placement` (WRH) |
-| Attestation de stockage (preuves de détention) | `yog-cluster/audit` + GC durci |
-| Géo-placement sans GeoIP (coordonnées Vivaldi) | `yog-cluster/vivaldi` + `stripe_owners_geo` |
-| Suppression, expiration (TTL) et blocage par hash | `DELETE /f/{hash}`, `ttl=`, `yog-node ban/unban` |
-| Découverte DHT zéro-config + élection de genèse | `yog-discovery` |
-| Identité crypto + mTLS de cluster | `yog-transport/tls` |
-| Consensus Raft durable + plan réseau dédié | `yog-raft` |
+| Chiffrement de bout en bout | `nauka-crypto` (Rust) ↔ WebCrypto (navigateur), compat croisée prouvée |
+| Placement pondéré par capacité disque | `nauka-cluster/placement` (WRH) |
+| Attestation de stockage (preuves de détention) | `nauka-cluster/audit` + GC durci |
+| Géo-placement sans GeoIP (coordonnées Vivaldi) | `nauka-cluster/vivaldi` + `stripe_owners_geo` |
+| Suppression, expiration (TTL) et blocage par hash | `DELETE /f/{hash}`, `ttl=`, `nauka ban/unban` |
+| Découverte DHT zéro-config + élection de genèse | `nauka-discovery` |
+| Identité crypto + mTLS de cluster | `nauka-transport/tls` |
+| Consensus Raft durable + plan réseau dédié | `nauka-raft` |
 
 ## Innovations
 

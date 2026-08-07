@@ -1,6 +1,6 @@
 # Cœur erasure coding et stockage
 
-## yog-erasure — le cœur pur (zéro I/O)
+## nauka-erasure — le cœur pur (zéro I/O)
 
 ### Découpage en stripes
 
@@ -57,7 +57,7 @@ Propriété prouvée par les tests : perte de n'importe quels m shards par
 stripe → reconstruction identique ; perte de m+1 → refus propre ;
 corruption silencieuse → détectée et réparée.
 
-## yog-store — stockage disque d'un nœud
+## nauka-store — stockage disque d'un nœud
 
 Layout du data-dir :
 
