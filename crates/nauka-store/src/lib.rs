@@ -99,6 +99,16 @@ impl ShardStore {
             .and_then(|t| t.elapsed().ok())
     }
 
+    /// Time elapsed since the manifest was written locally. Used to tell a
+    /// freshly uploaded file from a deleted one when the replicated
+    /// registry disagrees with the local store.
+    pub fn manifest_age(&self, file_hash: &str) -> Option<std::time::Duration> {
+        fs::metadata(self.manifest_path(file_hash))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+    }
+
     pub fn delete_shard(&self, hash: &str) -> Result<(), StoreError> {
         match fs::remove_file(self.shard_path(hash)) {
             Ok(()) => Ok(()),

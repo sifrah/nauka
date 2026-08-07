@@ -178,13 +178,29 @@ fn unavailable(state: &ApiState, hash: &str) -> Option<Response> {
         Some(m) if m.expires_at.is_some_and(|e| e <= now) => {
             Some((StatusCode::GONE, "file expired").into_response())
         }
-        // Absent from the registry: either never registered, or deleted.
-        None if state.store.get_manifest(hash).is_ok() => {
-            Some((StatusCode::GONE, "file deleted").into_response())
-        }
+        // Absent from the registry but present locally: normally a
+        // deletion (the registry drops the entry, the GC purges the shards
+        // later). But it is ALSO what an upload looks like on a follower
+        // whose state machine has not applied the registration yet: the
+        // manifest is written locally before the Raft entry comes back
+        // round. Reading a file one had just uploaded therefore answered
+        // "410 file deleted", reproducibly, for a few seconds.
+        //
+        // A manifest written moments ago is a fresh upload, not a
+        // deletion. The cost of the grace is that a file deleted within
+        // seconds of its upload may still be served by a lagging node
+        // until the window closes.
+        None if state.store.get_manifest(hash).is_ok() => match state.store.manifest_age(hash) {
+            Some(age) if age < REGISTRY_LAG_GRACE => None,
+            _ => Some((StatusCode::GONE, "file deleted").into_response()),
+        },
         _ => None,
     }
 }
+
+/// How long a locally known manifest missing from the replicated registry
+/// is read as "not replicated here yet" rather than "deleted".
+const REGISTRY_LAG_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// DELETE /f/{hash}: removes the file from the replicated registry. The
 /// shards are purged by each node's GC on the following pass.
