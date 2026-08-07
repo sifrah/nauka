@@ -463,6 +463,30 @@ fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
     (start <= end && start < size).then_some((start, end))
 }
 
+/// Rebuilds one stripe: the k data shards in parallel, parity only if one
+/// is missing — on a healthy cluster not a single parity byte crosses the
+/// wire.
+async fn reconstruct_stripe(
+    fetcher: &Arc<Fetcher>,
+    stripe: &StripeMeta,
+    m: &FileManifest,
+) -> Result<Vec<u8>> {
+    let k = m.config.data_shards;
+    let data_fetches = stripe.shard_hashes[..k]
+        .iter()
+        .map(|h| fetcher.clone().fetch(h.clone()));
+    let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
+    if slots.iter().any(|s| s.is_none()) {
+        let parity_fetches = stripe.shard_hashes[k..]
+            .iter()
+            .map(|h| fetcher.clone().fetch(h.clone()));
+        slots.extend(futures_join_all(parity_fetches).await);
+    } else {
+        slots.resize(stripe.shard_hashes.len(), None);
+    }
+    Ok(decode_stripe(slots, stripe, &m.config)?)
+}
+
 async fn download(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
@@ -508,10 +532,38 @@ async fn download(
     let fetcher = Arc::new(Fetcher::new(state.clone()));
     let expected_hash = manifest.file_hash.clone();
     let m = manifest.clone();
+
+    // Reconstruct the FIRST stripe before committing to a status. Once the
+    // 200 and its Content-Length are on the wire the only way to signal
+    // failure is to truncate the body — correct clients detect it (curl
+    // exits 18) but the status still says OK. Checking upfront turns the
+    // common "too many shards are gone" case into an honest 503. A stripe
+    // that fails later still truncates: nothing better exists mid-stream.
+    let first = match m.stripes.first() {
+        Some(stripe) => Some(reconstruct_stripe(&fetcher, stripe, &m).await),
+        None => None,
+    };
+    if let Some(Err(e)) = &first {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("file currently unrecoverable: {e:#}"),
+        )
+            .into_response());
+    }
+    let first = first.and_then(|r| r.ok());
+
     tokio::spawn(async move {
         let mut hasher = blake3::Hasher::new();
         let k = m.config.data_shards;
+        let mut prefetched = first;
         for stripe in &m.stripes {
+            if let Some(data) = prefetched.take() {
+                hasher.update(&data);
+                if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
+                    return;
+                }
+                continue;
+            }
             // 1) The data shards, in parallel.
             let data_fetches = stripe.shard_hashes[..k]
                 .iter()

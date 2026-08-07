@@ -77,9 +77,29 @@ impl RaftApp {
         self.state_machine.read_state()
     }
 
+    /// Upper bound on a registry write. Without quorum, `client_write`
+    /// waits for a commit that will never come — the HTTP client that
+    /// triggered the upload hangs with no status, forever (observed with
+    /// 2 nodes alive out of 5: the request sat at "100 Continue" until the
+    /// client's own timeout). A cluster that cannot commit must say so.
+    pub const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     /// Writes a command to the registry: locally if this node is the leader,
-    /// otherwise by forwarding it to the leader over the transport.
+    /// otherwise by forwarding it to the leader over the transport. Bounded
+    /// by [`Self::WRITE_TIMEOUT`]: a write that cannot reach quorum fails
+    /// instead of hanging.
     pub async fn write(&self, cmd: AppCommand) -> Result<AppResponse> {
+        tokio::time::timeout(Self::WRITE_TIMEOUT, self.write_inner(cmd))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the registry did not commit within {:?} — no quorum?",
+                    Self::WRITE_TIMEOUT
+                )
+            })?
+    }
+
+    async fn write_inner(&self, cmd: AppCommand) -> Result<AppResponse> {
         match self.raft.client_write(cmd.clone()).await {
             Ok(resp) => Ok(resp.data),
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {

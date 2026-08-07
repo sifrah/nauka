@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-cluster"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-crypto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes-gcm",
  "data-encoding",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-discovery"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-erasure"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "rand 0.8.7",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-node"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-raft"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "nauka-erasure",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "nauka-transport"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",

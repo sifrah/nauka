@@ -49,6 +49,35 @@ impl QuicRaftClient {
         &mut self,
         wrap: fn(Vec<u8>) -> RaftRpc,
         req: &Req,
+        option: RPCOption,
+    ) -> Result<Resp, Unreachable>
+    where
+        Req: serde::Serialize,
+        Resp: serde::de::DeserializeOwned,
+    {
+        // Enforce openraft's deadline OURSELVES, a hair early. openraft
+        // also wraps this call in a timeout, but that one cancels the
+        // future from the outside: our error path never runs, so a
+        // connection that went bad stays cached and every later RPC to
+        // that peer fails the same way. Owning the deadline lets us drop
+        // the dead client and reconnect on the next attempt.
+        let budget = option.hard_ttl().mul_f32(0.9);
+        match tokio::time::timeout(budget, self.call_inner(wrap, req)).await {
+            Ok(r) => r,
+            Err(_) => {
+                self.client = None;
+                Err(Unreachable::new(&IoErr(format!(
+                    "{} did not answer within {budget:?}",
+                    self.addr
+                ))))
+            }
+        }
+    }
+
+    async fn call_inner<Req, Resp>(
+        &mut self,
+        wrap: fn(Vec<u8>) -> RaftRpc,
+        req: &Req,
     ) -> Result<Resp, Unreachable>
     where
         Req: serde::Serialize,
@@ -79,9 +108,9 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        self.call(RaftRpc::AppendEntries, &rpc)
+        self.call(RaftRpc::AppendEntries, &rpc, option)
             .await
             .map_err(RPCError::Unreachable)
     }
@@ -89,12 +118,12 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
     async fn install_snapshot(
         &mut self,
         rpc: InstallSnapshotRequest<TypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        self.call(RaftRpc::InstallSnapshot, &rpc)
+        self.call(RaftRpc::InstallSnapshot, &rpc, option)
             .await
             .map_err(RPCError::Unreachable)
     }
@@ -102,9 +131,9 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
     async fn vote(
         &mut self,
         rpc: VoteRequest<NodeId>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        self.call(RaftRpc::Vote, &rpc)
+        self.call(RaftRpc::Vote, &rpc, option)
             .await
             .map_err(RPCError::Unreachable)
     }
