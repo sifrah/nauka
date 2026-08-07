@@ -47,7 +47,7 @@ BitTorrent DHT with no configuration."""
 section = "utils"
 priority = "optional"
 assets = [
-    ["../../target/release/nauka", "usr/bin/", "755"],
+    ["$auto", "usr/bin/", "755"],
     ["../../packaging/nauka.env.example", "usr/share/doc/nauka/", "644"],
     ["../../README.md", "usr/share/doc/nauka/", "644"],
 ]

@@ -29,14 +29,18 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             packages: true
+          # Cross-compiled from Apple Silicon: Xcode ships both SDKs, and the
+          # free Intel runners are being retired and queue for a long time.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
           - target: aarch64-apple-darwin
             runner: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: actions/setup-node@v4
         with:
@@ -51,7 +55,7 @@ jobs:
         working-directory: webui
 
       - name: Build
-        run: cargo build --release --locked -p nauka-node
+        run: cargo build --release --locked --target ${{ matrix.target }} -p nauka-node
 
       - name: Package tarball
         shell: bash
@@ -60,7 +64,7 @@ jobs:
           [ -n "${{ inputs.tag }}" ] && version="${{ inputs.tag }}"
           name="nauka-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp target/release/nauka "dist/$name/"
+          cp "target/${{ matrix.target }}/release/nauka" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
           cp packaging/nauka.service packaging/nauka.env.example "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "$name"
@@ -70,7 +74,11 @@ jobs:
         if: matrix.packages
         run: |
           cargo install cargo-deb cargo-generate-rpm --locked
-          cargo deb -p nauka-node --no-build --output dist/
+          cargo deb -p nauka-node --no-build --target ${{ matrix.target }} --output dist/
+          # generate-rpm reads the plain target/release path from the manifest,
+          # so point it at the cross-built binary.
+          mkdir -p target/release
+          cp "target/${{ matrix.target }}/release/nauka" target/release/nauka
           cargo generate-rpm -p crates/nauka-node --output dist/
 
       - name: Checksums
