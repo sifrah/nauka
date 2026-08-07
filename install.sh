@@ -1,7 +1,7 @@
 #!/bin/sh
 # Nauka installer.
 #
-#   curl -fsSL https://getnauka.com/install.sh | sh
+#   curl -sSfL https://sh.getnauka.com | sh
 #
 # Environment:
 #   VERSION       version to install (default: latest release)

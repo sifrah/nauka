@@ -1,0 +1,9 @@
+name = "nauka-install"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Binds sh.getnauka.com to this Worker and creates the DNS record for it.
+# The zone must already be on Cloudflare.
+[[routes]]
+pattern = "sh.getnauka.com"
+custom_domain = true
