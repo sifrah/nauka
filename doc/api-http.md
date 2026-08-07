@@ -107,16 +107,25 @@ Sert à la reprise de téléchargement et à la lecture média.
 
 ### Lecteur média chiffré (`/w/{hash}#clé`)
 
-La webui déchiffre le fichier dans le navigateur (WebCrypto) puis le
-donne à `<video>` via un Blob URL : lecture et **seek natifs et
-instantanés**, alors que le serveur n'a servi que du ciphertext. Limite
-assumée : chargement en mémoire, donc lecture en ligne plafonnée à
-600 Mo (au-delà, l'UI propose le téléchargement).
+**Mode nominal — streaming.** Un Service Worker sert `/stream/{hash}` en
+clair à partir du ciphertext : pour chaque plage demandée par `<video>`,
+seuls les chunks AES-GCM concernés sont tirés du cluster (Range sur le
+ciphertext), déchiffrés et rendus. **Rien n'est chargé d'avance** — la
+lecture démarre immédiatement et un seek ne coûte qu'un aller-retour,
+quelle que soit la taille du fichier. La clé est transmise au worker par
+IndexedDB, jamais par le réseau.
 
-Le déchiffrement *à la volée* par plages (sans tout charger) a été
-implémenté puis retiré : le moteur média de Chrome n'accepte pas les
-réponses produites par un Service Worker pour un `<video>` (requête
-bloquée à zéro octet, alors que le même flux se lit parfaitement via
-`fetch()`). La voie propre pour lever la limite des 600 Mo est
-MediaSource Extensions avec du fMP4 — le support Range côté serveur, lui,
-est déjà en place et testé.
+Deux pièges rencontrés et corrigés, utiles à connaître avant de toucher
+`webui/public/sw-stream.js` :
+
+- l'état mémoire d'un Service Worker est **volatile** (le navigateur
+  l'arrête entre deux événements) — d'où IndexedDB plutôt qu'une `Map` ;
+- un worker qui streame une réponse pendant des dizaines de secondes est
+  **tué** (le lecteur reçoit un 503) — d'où des réponses bornées à 4 Mio,
+  renvoyées en 206, que le lecteur enchaîne.
+
+**Repli.** Si la lecture n'a pas démarré au bout de 6 s (worker
+indisponible, navigateur restrictif), le lecteur bascule silencieusement
+sur un déchiffrement complet en mémoire + Blob URL : robuste, mais il
+faut attendre le fichier entier, donc plafonné à 600 Mo. Un badge
+« streaming » dans l'interface indique quel mode est actif.
