@@ -205,6 +205,7 @@ impl RaftApp {
                     capacities: self.app_state().node_capacities,
                 }
             }
+            AdminRequest::S3State => AdminResponse::S3State(Box::new(self.app_state().s3)),
             AdminRequest::ListManifests => {
                 AdminResponse::Manifests(self.app_state().manifests.keys().cloned().collect())
             }
@@ -307,6 +308,15 @@ pub async fn admin_via_leader(
 
 /// Writes a command to the registry, following the redirect to the leader
 /// if needed.
+/// Reads the replicated S3 view from a node (any node: the state is
+/// replicated, so this needs no leader).
+pub async fn fetch_s3_state(client: &nauka_transport::PeerClient) -> Result<nauka_s3::S3State> {
+    match admin_call(client, &AdminRequest::S3State).await? {
+        AdminResponse::S3State(state) => Ok(*state),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
 pub async fn write_via_leader(
     peers: &[std::net::SocketAddr],
     cmd: AppCommand,

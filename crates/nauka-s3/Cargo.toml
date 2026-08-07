@@ -1,0 +1,15 @@
+[package]
+name = "nauka-s3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "S3-compatible API for Nauka"
+
+[dependencies]
+nauka-erasure = { path = "../nauka-erasure" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+md-5 = "0.10"
+rand = "0.8"
+data-encoding = "2"

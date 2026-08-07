@@ -42,6 +42,46 @@ pub enum AppCommand {
     BanHash { file_hash: String, reason: String },
     /// Lifts a ban (misjudgment, decision overturned).
     UnbanHash { file_hash: String },
+
+    // ── S3 layer ──────────────────────────────────────────────────────
+    // The S3 view (buckets, keys, credentials) is replicated exactly like
+    // the manifest registry: every node answers S3 requests, and any of
+    // them can be the endpoint.
+    /// Creates a set of S3 credentials.
+    PutCredential(nauka_s3::Credential),
+    /// Revokes a set of credentials by access key id.
+    DeleteCredential { access_key_id: String },
+    /// Creates a bucket. Refused if the name is taken.
+    CreateBucket {
+        name: String,
+        bucket: Box<nauka_s3::Bucket>,
+    },
+    /// Replaces a bucket's configuration (policy, lifecycle, CORS…).
+    UpdateBucket {
+        name: String,
+        bucket: Box<nauka_s3::Bucket>,
+    },
+    /// Deletes a bucket. Refused unless it is empty, as S3 requires.
+    DeleteBucket { name: String },
+    /// Adds a version to a key (a plain PUT in an unversioned bucket
+    /// replaces the single "null" version).
+    PutObjectVersion {
+        bucket: String,
+        key: String,
+        version: Box<nauka_s3::ObjectVersion>,
+    },
+    /// Removes a specific version. In a versioned bucket a plain DELETE
+    /// adds a delete marker instead (a `PutObjectVersion` with no content).
+    DeleteObjectVersion {
+        bucket: String,
+        key: String,
+        version_id: String,
+    },
+    /// Registers or updates an in-flight multipart upload.
+    PutUpload(Box<nauka_s3::MultipartUpload>),
+    /// Forgets a multipart upload (completed or aborted); its parts lose
+    /// their references and the GC reclaims what nothing else holds.
+    DeleteUpload { upload_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -65,6 +105,9 @@ pub struct AppState {
     /// Banned hashes (hash → reason): never served, never re-accepted.
     #[serde(default)]
     pub banned: BTreeMap<String, String>,
+    /// The S3 view: buckets, keys, in-flight uploads, credentials.
+    #[serde(default)]
+    pub s3: nauka_s3::S3State,
 }
 
 /// Admin requests addressed to a node (outside the Raft log).
@@ -82,6 +125,10 @@ pub enum AdminRequest {
     Metrics,
     /// List of the manifests in the replicated registry.
     ListManifests,
+    /// The S3 view (buckets, credentials, uploads). Secrets included: the
+    /// channel is mTLS between cluster members, and the CLI needs them to
+    /// show what exists — never exposed over HTTP.
+    S3State,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -102,5 +149,6 @@ pub enum AdminResponse {
         capacities: BTreeMap<String, u64>,
     },
     Manifests(Vec<String>),
+    S3State(Box<nauka_s3::S3State>),
     Err(String),
 }

@@ -306,7 +306,7 @@ async fn upload(
 
 /// Encodes the temporary file stripe by stripe and pushes every shard to
 /// its owner (this node included), then records the manifest.
-async fn dispatch_file(
+pub(crate) async fn dispatch_file(
     state: &Arc<ApiState>,
     tmp_path: &std::path::Path,
     size: u64,
@@ -482,7 +482,7 @@ fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
 /// Rebuilds one stripe: the k data shards in parallel, parity only if one
 /// is missing — on a healthy cluster not a single parity byte crosses the
 /// wire.
-async fn reconstruct_stripe(
+pub(crate) async fn reconstruct_stripe(
     fetcher: &Arc<Fetcher>,
     stripe: &StripeMeta,
     m: &FileManifest,
@@ -728,14 +728,14 @@ where
 /// Shard fetcher shared across one download request: a connection cache
 /// (failures are memoized — a dead node is contacted only once per
 /// request) usable from parallel fetches.
-struct Fetcher {
+pub(crate) struct Fetcher {
     state: Arc<ApiState>,
     view: Vec<(String, u64)>,
     clients: tokio::sync::Mutex<HashMap<String, Option<PeerClient>>>,
 }
 
 impl Fetcher {
-    fn new(state: Arc<ApiState>) -> Self {
+    pub(crate) fn new(state: Arc<ApiState>) -> Self {
         let view = state.view();
         Self {
             state,
@@ -769,7 +769,7 @@ impl Fetcher {
     }
 
     /// Looks for a shard: locally first, then on every reachable member.
-    async fn fetch(self: Arc<Self>, hash: String) -> Option<Vec<u8>> {
+    pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<Vec<u8>> {
         if let Ok(data) = self.state.store.get_shard(&hash) {
             return Some(data);
         }

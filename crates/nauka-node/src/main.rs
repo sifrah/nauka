@@ -6,6 +6,7 @@
 
 mod api;
 mod e2e;
+mod s3;
 mod update;
 mod webui;
 
@@ -96,6 +97,25 @@ enum Cmd {
     NodeInfo,
     /// Generate a cluster token: the one string every machine needs.
     Token,
+    /// Create a set of S3 credentials (prints the secret once).
+    S3KeyCreate {
+        /// Label to recognize the key later.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "127.0.0.1:7311")]
+        peer: SocketAddr,
+    },
+    /// List the S3 access keys (never the secrets).
+    S3KeyList {
+        #[arg(long, default_value = "127.0.0.1:7311")]
+        peer: SocketAddr,
+    },
+    /// Revoke a set of S3 credentials.
+    S3KeyDelete {
+        access_key_id: String,
+        #[arg(long, default_value = "127.0.0.1:7311")]
+        peer: SocketAddr,
+    },
     /// Update this binary to the latest release (checksum verified).
     Update {
         /// Only report whether an update exists, without installing it.
@@ -133,6 +153,12 @@ enum Cmd {
         /// into the binary (front-end development).
         #[arg(long)]
         webui: Option<PathBuf>,
+        /// Address of the S3-compatible endpoint.
+        #[arg(long, default_value = "0.0.0.0:8333")]
+        s3: SocketAddr,
+        /// Disable the S3 endpoint.
+        #[arg(long)]
+        no_s3: bool,
         /// Disable the HTTP API.
         #[arg(long)]
         no_http: bool,
@@ -276,6 +302,65 @@ async fn main() -> Result<()> {
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
+        Cmd::S3KeyCreate { name, peer } => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cred = nauka_s3::generate_credential(name, now);
+            // The secret is printed once and never again: the cluster keeps
+            // it to verify signatures, but nothing else ever displays it.
+            let secret = cred.secret_access_key.clone();
+            let id = cred.access_key_id.clone();
+            let resp = nauka_raft::write_via_leader(
+                &[peer],
+                nauka_raft::types::AppCommand::PutCredential(cred),
+            )
+            .await?;
+            if !resp.ok {
+                bail!("the cluster refused the credential");
+            }
+            println!("access key id     : {id}");
+            println!("secret access key : {secret}");
+            eprintln!();
+            eprintln!("# the secret is shown once — store it now");
+            eprintln!("# aws --endpoint-url http://<node>:8333 s3 ls");
+        }
+        Cmd::S3KeyList { peer } => {
+            let client = PeerClient::connect(peer).await?;
+            let state = nauka_raft::fetch_s3_state(&client).await?;
+            if state.credentials.is_empty() {
+                println!("no S3 credentials — create one with `nauka s3-key-create`");
+            }
+            for c in state.credentials.values() {
+                println!(
+                    "{}  {}  {}",
+                    c.access_key_id,
+                    c.name.as_deref().unwrap_or("-"),
+                    match &c.buckets {
+                        None => "full access".to_string(),
+                        Some(g) => format!("{} bucket(s)", g.len()),
+                    }
+                );
+            }
+        }
+        Cmd::S3KeyDelete {
+            access_key_id,
+            peer,
+        } => {
+            let resp = nauka_raft::write_via_leader(
+                &[peer],
+                nauka_raft::types::AppCommand::DeleteCredential {
+                    access_key_id: access_key_id.clone(),
+                },
+            )
+            .await?;
+            if resp.ok {
+                println!("revoked {access_key_id}");
+            } else {
+                bail!("unknown access key {access_key_id}");
+            }
+        }
         Cmd::Update { check } => update::run(check).await?,
         // Handled before the match (needs no data dir, no keys).
         Cmd::Token => unreachable!("handled at startup"),
@@ -349,6 +434,8 @@ async fn main() -> Result<()> {
             node_id,
             capacity,
             http,
+            s3: s3_addr,
+            no_s3,
             webui,
             no_http,
             no_discover,
@@ -479,22 +566,35 @@ async fn main() -> Result<()> {
                     });
                 }
 
+                // Shared by the HTTP API and the S3 endpoint: same engine,
+                // two front doors.
+                let api_state = Arc::new(api::ApiState {
+                    store: store.clone(),
+                    app: app.clone(),
+                    self_id: self_id.clone(),
+                    config: ErasureConfig::default(),
+                    tmp_dir: cli.data_dir.join("tmp"),
+                    health: health.clone(),
+                });
+
                 if !no_http {
-                    let api_state = Arc::new(api::ApiState {
-                        store: store.clone(),
-                        app: app.clone(),
-                        self_id: self_id.clone(),
-                        config: ErasureConfig::default(),
-                        tmp_dir: cli.data_dir.join("tmp"),
-                        health: health.clone(),
-                    });
                     // No fallback to ./webui/dist: the binary carries its own
                     // UI, so behaviour no longer depends on the directory the
                     // node happens to be started from.
                     let webui_dir = webui;
+                    let state = api_state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = api::serve_http(http, api_state, webui_dir).await {
+                        if let Err(e) = api::serve_http(http, state, webui_dir).await {
                             eprintln!("HTTP API stopped: {e:#}");
+                        }
+                    });
+                }
+
+                if !no_s3 {
+                    let state = api_state.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = s3::serve(s3_addr, state).await {
+                            eprintln!("S3 endpoint stopped: {e:#}");
                         }
                     });
                 }

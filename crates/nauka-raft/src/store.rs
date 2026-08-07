@@ -400,6 +400,136 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 info: Some(file_hash),
                             }
                         }
+
+                        // ── S3 ────────────────────────────────────────
+                        AppCommand::PutCredential(cred) => {
+                            let id = cred.access_key_id.clone();
+                            inner.state.s3.credentials.insert(id.clone(), cred);
+                            AppResponse {
+                                ok: true,
+                                info: Some(id),
+                            }
+                        }
+                        AppCommand::DeleteCredential { access_key_id } => {
+                            let removed =
+                                inner.state.s3.credentials.remove(&access_key_id).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(access_key_id),
+                            }
+                        }
+                        AppCommand::CreateBucket { name, bucket } => {
+                            // S3 refuses to recreate an existing bucket
+                            // (BucketAlreadyOwnedByYou / AlreadyExists); the
+                            // check belongs here, where it is serialized by
+                            // the log, not in the HTTP layer where two
+                            // concurrent creates could both pass.
+                            if inner.state.s3.buckets.contains_key(&name) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some("bucket exists".into()),
+                                }
+                            } else {
+                                inner.state.s3.buckets.insert(name.clone(), *bucket);
+                                AppResponse {
+                                    ok: true,
+                                    info: Some(name),
+                                }
+                            }
+                        }
+                        AppCommand::UpdateBucket { name, bucket } => {
+                            let exists = inner.state.s3.buckets.contains_key(&name);
+                            if exists {
+                                inner.state.s3.buckets.insert(name.clone(), *bucket);
+                            }
+                            AppResponse {
+                                ok: exists,
+                                info: Some(name),
+                            }
+                        }
+                        AppCommand::DeleteBucket { name } => {
+                            // Only an empty bucket may go, as S3 requires.
+                            let has_objects =
+                                inner.state.s3.objects.keys().any(|(b, _)| *b == name);
+                            if has_objects {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some("bucket not empty".into()),
+                                }
+                            } else {
+                                let removed = inner.state.s3.buckets.remove(&name).is_some();
+                                AppResponse {
+                                    ok: removed,
+                                    info: Some(name),
+                                }
+                            }
+                        }
+                        AppCommand::PutObjectVersion {
+                            bucket,
+                            key,
+                            version,
+                        } => {
+                            let versioned = inner
+                                .state
+                                .s3
+                                .buckets
+                                .get(&bucket)
+                                .map(|b| b.versioning == nauka_s3::VersioningState::Enabled)
+                                .unwrap_or(false);
+                            let entry = inner.state.s3.objects.entry((bucket, key)).or_default();
+                            if versioned {
+                                // Newest first: history is preserved.
+                                entry.versions.insert(0, *version);
+                            } else {
+                                // Unversioned (or suspended): a single
+                                // "null" version, replaced in place.
+                                entry
+                                    .versions
+                                    .retain(|v| v.version_id != version.version_id);
+                                entry.versions.insert(0, *version);
+                            }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::DeleteObjectVersion {
+                            bucket,
+                            key,
+                            version_id,
+                        } => {
+                            let k = (bucket, key);
+                            let mut removed = false;
+                            if let Some(entry) = inner.state.s3.objects.get_mut(&k) {
+                                let before = entry.versions.len();
+                                entry.versions.retain(|v| v.version_id != version_id);
+                                removed = entry.versions.len() != before;
+                                // An entry with no versions left is gone:
+                                // `objects` never holds an empty history.
+                                if entry.versions.is_empty() {
+                                    inner.state.s3.objects.remove(&k);
+                                }
+                            }
+                            AppResponse {
+                                ok: removed,
+                                info: None,
+                            }
+                        }
+                        AppCommand::PutUpload(upload) => {
+                            let id = upload.upload_id.clone();
+                            inner.state.s3.uploads.insert(id.clone(), *upload);
+                            AppResponse {
+                                ok: true,
+                                info: Some(id),
+                            }
+                        }
+                        AppCommand::DeleteUpload { upload_id } => {
+                            let removed = inner.state.s3.uploads.remove(&upload_id).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(upload_id),
+                            }
+                        }
                     };
                     replies.push(reply);
                 }

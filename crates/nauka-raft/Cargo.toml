@@ -8,6 +8,7 @@ license.workspace = true
 nauka-erasure = { path = "../nauka-erasure" }
 nauka-transport = { path = "../nauka-transport" }
 nauka-cluster = { path = "../nauka-cluster" }
+nauka-s3 = { path = "../nauka-s3" }
 anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true
