@@ -1,4 +1,7 @@
-# Architecture
+---
+title: "Architecture"
+description: "The crate layering, the invariants that hold the system together, and the upload, download and self-healing flows end to end."
+---
 
 ## The crates
 

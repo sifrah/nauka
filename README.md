@@ -58,28 +58,41 @@ sampling.
 ## Getting started
 
 ```bash
+curl -sSfL https://sh.getnauka.com | sh     # or a .deb / .rpm from the releases
+```
+
+From source:
+
+```bash
 cargo build --release          # binary lands in target/release/nauka
 cargo test                     # 48 tests (unit + integration)
 ```
 
-Deployment, CLI reference and troubleshooting:
-[`doc/operations.md`](doc/operations.md).
+Installation, deployment, CLI reference and troubleshooting:
+[getnauka.com/install](https://getnauka.com/install/),
+[getnauka.com/deploy](https://getnauka.com/deploy/) and
+[getnauka.com/operations](https://getnauka.com/operations/).
 
 ## Documentation
 
+The full documentation lives at **[getnauka.com](https://getnauka.com)**; its
+sources are in [`site/src/content/docs/`](site/src/content/docs/).
+
 | Document | Contents |
 |---|---|
-| [architecture.md](doc/architecture.md) | Crates, invariants, upload/download flows |
-| [erasure-core.md](doc/erasure-core.md) | Reed-Solomon, stripes, integrity, storage |
-| [transport.md](doc/transport.md) | QUIC, inter-node protocol, throughput tuning |
-| [consensus.md](doc/consensus.md) | Durable Raft, dedicated network plane |
-| [cluster.md](doc/cluster.md) | Placement, healing, attestation, topology-aware placement |
-| [identity-and-discovery.md](doc/identity-and-discovery.md) | mTLS, DHT, genesis election |
-| [api-http.md](doc/api-http.md) | Public API, deletion, expiry |
-| [encryption.md](doc/encryption.md) | End-to-end, threat model |
-| [operations.md](doc/operations.md) | Deployment, CLI, known limitations |
-| [decisions.md](doc/decisions.md) | Structural choices and stress-test lessons |
-| [backlog.md](doc/backlog.md) | Upcoming work |
+| [Install](https://getnauka.com/install/) | Install script, packages, source build, provenance |
+| [Deploy a cluster](https://getnauka.com/deploy/) | Keys, ports, systemd, cluster sizing |
+| [Architecture](https://getnauka.com/architecture/) | Crates, invariants, upload/download flows |
+| [Erasure coding and storage](https://getnauka.com/erasure-core/) | Reed-Solomon, stripes, integrity, storage |
+| [Transport](https://getnauka.com/transport/) | QUIC, inter-node protocol, throughput tuning |
+| [Consensus](https://getnauka.com/consensus/) | Durable Raft, dedicated network plane |
+| [Cluster](https://getnauka.com/cluster/) | Placement, healing, attestation, topology-aware placement |
+| [Identity and discovery](https://getnauka.com/identity-and-discovery/) | mTLS, DHT, genesis election |
+| [HTTP API](https://getnauka.com/api-http/) | Public API, deletion, expiry |
+| [End-to-end encryption](https://getnauka.com/encryption/) | End-to-end, threat model |
+| [Operations](https://getnauka.com/operations/) | Deployment, CLI, known limitations |
+| [Design decisions](https://getnauka.com/decisions/) | Structural choices and stress-test lessons |
+| [Backlog](https://getnauka.com/backlog/) | Upcoming work |
 
 ## Yogfile
 
@@ -95,9 +108,9 @@ Young, but serious. The foundation is proven by integration tests that kill
 processes, cut power to the whole cluster, saturate the network and corrupt
 disks on purpose. What is still missing before production use is spelled
 out without hedging in
-[operations.md](doc/operations.md#known-limitations-v1) and
-[backlog.md](doc/backlog.md) — chiefly API authentication, NAT traversal
-and an S3 API.
+[Operations](https://getnauka.com/operations/#known-limitations-v1) and the
+[Backlog](https://getnauka.com/backlog/) — chiefly API authentication, NAT
+traversal and an S3 API.
 
 ## License
 

@@ -1,4 +1,7 @@
-# Public HTTP API
+---
+title: "HTTP API"
+description: "Upload, download, listing, deletion, expiry and banning over HTTP, plus range requests, the web interface and the encrypted media player."
+---
 
 Every node in consensus mode exposes the API (default `0.0.0.0:8080`,
 tunable with `--http <addr>`, disabled with `--no-http`). **Any node is a
@@ -88,7 +91,8 @@ share links), Cluster (live status via `GET /api/status`), and
 `/d/{hash}#key` (download + decryption in the browser).
 
 The interface derives from the **ZeroFS** webui
-(https://github.com/Barre/ZeroFS, AGPL-3.0) — see `webui/ATTRIBUTION.md`.
+([Barre/ZeroFS](https://github.com/Barre/ZeroFS), AGPL-3.0) — see
+[`webui/ATTRIBUTION.md`](https://github.com/sifrah/nauka/blob/main/webui/ATTRIBUTION.md).
 Browser-side encryption (WebCrypto AES-256-GCM) is bit-for-bit compatible
 with `nauka-crypto`: a file uploaded from the CLI decrypts in the browser
 and vice versa.
@@ -153,7 +157,7 @@ rejects the manifest). `nauka-node unban <hash>` lifts the measure.
 
 Accepted structural limitation: a ban targets that content byte for byte
 only — a re-upload encrypted under a different key yields a different hash.
-See [encryption.md](encryption.md#legal-requests-what-the-operator-can-hand-over).
+See [End-to-end encryption](/encryption/#legal-requests-what-the-operator-can-hand-over).
 
 ### Purge safety
 A node purges **only** if its registry is trustworthy (member of the

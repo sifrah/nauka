@@ -1,0 +1,182 @@
+---
+title: "Install"
+description: "Install Nauka with the one-line script, from a .deb or .rpm package, or from source — and verify that the binary you downloaded really came from this repository."
+---
+
+import { Aside, Tabs, TabItem, Steps } from "@astrojs/starlight/components";
+
+Nauka is a single binary called `nauka`. It has no runtime dependencies, no
+configuration file and no database to provision: everything a node needs
+lives in its data directory. The web interface is compiled into the binary,
+so installing the binary installs the UI too.
+
+## The install script
+
+```bash
+curl -sSfL https://sh.getnauka.com | sh
+```
+
+The script detects your platform, resolves the latest published release,
+downloads the matching tarball, verifies its SHA256 checksum against the
+`SHA256SUMS.txt` published with the release, and moves the binary into
+`/usr/local/bin` (escalating with `sudo` only if that directory is not
+already writable).
+
+Check that it worked:
+
+```bash
+nauka --help
+```
+
+### Environment variables
+
+The script reads three variables, all optional:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `VERSION` | latest release | Install a specific tag, e.g. `VERSION=v0.1.0`. Also the escape hatch when the GitHub API is unreachable. |
+| `INSTALL_DIR` | `/usr/local/bin` | Where the binary is placed. |
+| `NO_SUDO` | unset | Set to `1` to never escalate. If the target directory is not writable, the binary falls back to `~/.local/bin`. |
+
+```bash
+# Pin a version and install for the current user only
+curl -sSfL https://sh.getnauka.com | VERSION=v0.1.0 NO_SUDO=1 sh
+```
+
+<Aside type="tip" title="Reading the script before running it">
+  Piping a script into a shell is only as trustworthy as the host serving it.
+  `curl -sSfL https://sh.getnauka.com` prints the script instead of running
+  it — it is under 200 lines, and it is the same file as
+  [`install.sh`](https://github.com/sifrah/nauka/blob/main/install.sh) in the
+  repository.
+</Aside>
+
+## Packages
+
+Linux packages are attached to every GitHub release, for `x86_64` and
+`aarch64`. They install the binary in `/usr/bin/nauka`, add a systemd unit,
+create an unprivileged `nauka` system user, and prepare `/etc/nauka` for the
+cluster key and `/var/lib/nauka` for the data.
+
+<Tabs>
+  <TabItem label="Debian / Ubuntu">
+
+```bash
+# Download the .deb for your architecture from the releases page
+curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka_0.1.0-1_amd64.deb
+
+# apt resolves dependencies; dpkg -i also works
+sudo apt install ./nauka_0.1.0-1_amd64.deb
+```
+
+  </TabItem>
+  <TabItem label="Fedora / RHEL">
+
+```bash
+curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka-0.1.0-1.x86_64.rpm
+
+sudo dnf install ./nauka-0.1.0-1.x86_64.rpm
+```
+
+  </TabItem>
+</Tabs>
+
+The package does **not** start the service: a node with no cluster key would
+run unauthenticated. Install the key first, then enable the unit — see
+[Deploy a cluster](/deploy/).
+
+## From source
+
+Building from source additionally requires Node, because the web interface
+is compiled into the binary. Skip the `webui` step and you still get a
+working node, just without a UI.
+
+<Steps>
+
+1. Install [Rust](https://rustup.rs) (stable) and Node 22 or newer.
+
+2. Clone the repository:
+
+   ```bash
+   git clone https://github.com/sifrah/nauka
+   cd nauka
+   ```
+
+3. Build the web interface, so that `cargo` has something to embed:
+
+   ```bash
+   cd webui && npm ci && npm run build && cd ..
+   ```
+
+4. Build the binary:
+
+   ```bash
+   cargo build --release
+   ```
+
+   It lands in `target/release/nauka`. Copy it wherever you keep local
+   binaries.
+
+5. Optionally, run the test suite — it spins up real QUIC clusters on
+   loopback, kills nodes, corrupts shards and runs an in-process DHT
+   testnet:
+
+   ```bash
+   cargo test --workspace
+   ```
+
+</Steps>
+
+<Aside type="caution" title="Rebuild before you benchmark">
+  `cargo test --release` does not rebuild the binaries used by the
+  integration tests. Run `cargo build --release -p nauka-node` first, or you
+  will be measuring a stale binary — a mistake that cost us an hour, recorded
+  in [Design decisions](/decisions/).
+</Aside>
+
+## Verifying provenance
+
+Every release artifact carries a signed [build provenance
+attestation](https://github.com/sifrah/nauka/attestations) produced by the
+release workflow. It ties the file you hold to the exact workflow run and
+the exact commit that built it:
+
+```bash
+gh attestation verify nauka-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  --repo sifrah/nauka
+```
+
+A successful verification means the bytes on your disk were produced by
+`.github/workflows/release.yml` in `sifrah/nauka`, at a specific commit,
+signed by GitHub's transparency log at build time. Nobody — not even someone
+holding the repository's credentials — can retroactively forge that record
+for a file built elsewhere.
+
+<Aside type="caution" title="Checksums alone prove nothing">
+  `SHA256SUMS.txt` is served from the same release page as the binaries. An
+  attacker who can replace a binary can replace the checksum file next to it,
+  and both will agree. Checksums protect against a truncated download, not
+  against a compromised release. Attestations are the only check here that
+  survives the release page itself being tampered with — use them for
+  anything you are about to run as a service.
+</Aside>
+
+## Supported platforms
+
+| Platform | Target |
+| --- | --- |
+| Linux, x86_64 (glibc) | `x86_64-unknown-linux-gnu` |
+| Linux, aarch64 (glibc) | `aarch64-unknown-linux-gnu` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| macOS, Apple Silicon | `aarch64-apple-darwin` |
+
+Linux builds are produced on Ubuntu 22.04, which sets the oldest glibc
+supported. There is no musl build yet, so Alpine and other musl
+distributions need a source build. Windows is not supported; build from
+source under WSL if you need it.
+
+## Next
+
+Installing a binary is not deploying a cluster: the interesting part is the
+cluster key, the ports, and how many machines you need before losing one
+stops mattering. That is [Deploy a cluster](/deploy/).

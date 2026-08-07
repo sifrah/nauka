@@ -1,4 +1,7 @@
-# Backlog
+---
+title: "Backlog"
+description: "What is already shipped, the innovations that set the project apart, and the consolidation work still ahead — in priority order."
+---
 
 The work items, sorted. Three sections: what is **shipped**, the
 **innovations** (what differentiates the product) and the
@@ -122,8 +125,8 @@ harmless, just unfair). Per-connection scheduling on the server side.
 - **Final name**: `chainrage` (available on GitHub) vs `nauka` (existing
   namesakes, nothing blocking) vs something else.
 - **License**: settled — the entire repository under **AGPL-3.0**
-  (`LICENSE` at the root, `license = "AGPL-3.0-only"` in the Cargo
-  workspace).
+  ([`LICENSE`](https://github.com/sifrah/nauka/blob/main/LICENSE) at the
+  root, `license = "AGPL-3.0-only"` in the Cargo workspace).
 - Showcase README with the kill-demo as a GIF (`rm -rf` a node → automatic
   repair; two terminals → a self-formed cluster).
 - GitHub Actions CI (`cargo test`, `npm run build`), merge `empty` into

@@ -1,0 +1,51 @@
+/* Nauka — a restrained palette: deep slate, one accent, high contrast. */
+:root {
+  --sl-color-accent-low: #16302b;
+  --sl-color-accent: #2f9e79;
+  --sl-color-accent-high: #a8e6ce;
+  --sl-color-white: #f4f7f6;
+  --sl-color-gray-1: #e2e8e6;
+  --sl-color-gray-2: #b9c3c0;
+  --sl-color-gray-3: #7d8b88;
+  --sl-color-gray-4: #4a5654;
+  --sl-color-gray-5: #2d3634;
+  --sl-color-gray-6: #1d2422;
+  --sl-color-black: #131817;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #c3ecdf;
+  --sl-color-accent: #1c7d5e;
+  --sl-color-accent-high: #0d3b2c;
+}
+
+/* The install command on the landing page: the first thing to try. */
+.install-command {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 1.5rem 0 0;
+  font-family: var(--sl-font-mono);
+  font-size: clamp(0.85rem, 2.5vw, 1.05rem);
+}
+
+.install-command code {
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  padding: 0.7rem 1.1rem;
+  white-space: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Comparison table on the landing page. */
+.compare table {
+  width: 100%;
+}
+.compare td:not(:first-child),
+.compare th:not(:first-child) {
+  text-align: center;
+}

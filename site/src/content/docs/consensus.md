@@ -1,4 +1,7 @@
-# Raft consensus
+---
+title: "Consensus"
+description: "What the Raft log replicates and what it deliberately does not, how it is persisted, and how writes and administration flow through the leader."
+---
 
 ## What Raft replicates (and what it does not)
 
@@ -28,7 +31,7 @@ max_in_snapshot_log_to_keep  64
 
 Network: RPCs (`append_entries`, `vote`, `install_snapshot`) ride on our
 own QUIC, over the **dedicated consensus plane (port+1)** — see
-[transport.md](transport.md).
+[Transport](/transport/).
 
 ## Persistence (data-dir/raft/)
 

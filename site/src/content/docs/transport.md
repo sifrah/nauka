@@ -1,4 +1,7 @@
-# Inter-node QUIC transport
+---
+title: "Transport"
+description: "The QUIC protocol spoken between nodes: request types, the two separate network planes, throughput tuning and the TLS modes."
+---
 
 ## Protocol
 
@@ -81,7 +84,7 @@ cargo test -p nauka-transport --release --test bench -- --ignored --nocapture
 ## TLS
 
 Two modes, chosen when the process starts (see
-[identity-and-discovery.md](identity-and-discovery.md)):
+[Identity and discovery](/identity-and-discovery/)):
 
 - **Cluster mTLS** (keys provided): Ed25519 certificates signed by the
   cluster key, mutual verification, SNI `node.nauka`.

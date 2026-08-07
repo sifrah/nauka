@@ -1,4 +1,7 @@
-# End-to-end encryption
+---
+title: "End-to-end encryption"
+description: "Client-side AES-256-GCM, why the key belongs in the URL fragment, what a node can and cannot see, and what an operator is able to hand over."
+---
 
 **Nodes store and serve bytes they cannot read.** The file is encrypted on
 the client BEFORE Reed-Solomon splitting; the server shards, scatters,

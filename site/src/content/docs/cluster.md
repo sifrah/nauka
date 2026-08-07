@@ -1,4 +1,7 @@
-# Cluster layer: placement, healing, rebalancing
+---
+title: "Cluster"
+description: "Weighted rendezvous placement, self-healing scrubs, rebalancing GC, storage attestation and topology-aware placement from network coordinates."
+---
 
 ## Placement by weighted rendezvous hashing (WRH)
 
@@ -100,7 +103,7 @@ unlike a declarative `has_shard`, cannot lie (see
   during the drain** — it keeps serving reads while the others
   re-replicate its share. You shut it down afterwards.
 - In discovery mode, `cluster-add` is automatic (auto-join, see
-  [identity-and-discovery.md](identity-and-discovery.md)).
+  [Identity and discovery](/identity-and-discovery/)).
 
 Sequence measured for real: 3 nodes at 16/16/16 shards → `cluster-add` of a
 4th → 12/12/12/12 within a few cycles → `cluster-remove` of the 3rd →

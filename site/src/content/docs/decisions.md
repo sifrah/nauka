@@ -1,4 +1,7 @@
-# Structural decisions and lessons learned
+---
+title: "Design decisions"
+description: "The structural choices behind the system, why the alternatives were rejected, and the lessons paid for during stress testing."
+---
 
 A journal of the choices that shaped the system, with their reasoning — and
 the lessons paid for in debugging. Worth reading before proposing a change:
@@ -98,5 +101,5 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
 
 ## Accepted debt
 
-Consolidated and prioritized in [backlog.md](backlog.md), alongside the
+Consolidated and prioritized in the [Backlog](/backlog/), alongside the
 lines of innovation.

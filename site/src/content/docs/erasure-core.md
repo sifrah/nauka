@@ -1,4 +1,7 @@
-# Erasure coding core and storage
+---
+title: "Erasure coding and storage"
+description: "How a file is cut into Reed-Solomon stripes, what a manifest carries, and how content-addressed shards are written and verified on disk."
+---
 
 ## nauka-erasure — the pure core (zero I/O)
 
@@ -64,7 +67,7 @@ Data-dir layout:
 data-dir/
   shards/ab/cdef…      # content-addressed, 2 hex chars of the hash as fanout
   manifests/<hash>.json
-  raft/                # redb log + snapshot (see consensus.md)
+  raft/                # redb log + snapshot (see Consensus)
   tmp/                 # upload buffers from the HTTP API
   node.key             # the node's Ed25519 identity (--keys mode)
 ```

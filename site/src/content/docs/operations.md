@@ -1,4 +1,7 @@
-# Operations
+---
+title: "Operations"
+description: "Deploying a cluster, the CLI reference, the ports to open, health checks, backup and restore, and the known limitations of v1."
+---
 
 ## Typical deployment (N VPSes)
 
@@ -88,5 +91,5 @@ Global options: `--data-dir <dir>` (default `./nauka-data`),
 | Cluster key present on every node | offline certificate issuance to come |
 | Unfair bandwidth sharing between concurrent uploads (large streams dominate) | harmless — fair queuing is in the backlog |
 | Window of up to 2 min of DHT republication after a leader change | affects only newcomers during that window |
-| At n ≤ k+m nodes, capacity cannot override anti-affinity (see cluster.md) | add nodes, or accept that the smallest disk sets the limit |
+| At n ≤ k+m nodes, capacity cannot override anti-affinity (see [Cluster](/cluster/)) | add nodes, or accept that the smallest disk sets the limit |
 | No write refusal on a full disk (~95% safeguard) | watch disk usage; safeguard to come |

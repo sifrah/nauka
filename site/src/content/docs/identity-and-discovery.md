@@ -1,4 +1,7 @@
-# Cryptographic identity and discovery
+---
+title: "Identity and discovery"
+description: "The cluster key, mutual TLS between nodes, node identities derived from public keys, Mainline DHT rendezvous and the genesis election."
+---
 
 ## The cluster key
 
