@@ -11,6 +11,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write # provenance attestations
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -74,11 +76,11 @@ jobs:
         if: matrix.packages
         run: |
           cargo install cargo-deb cargo-generate-rpm --locked
-          cargo deb -p nauka-node --no-build --target ${{ matrix.target }} --output dist/
-          # generate-rpm reads the plain target/release path from the manifest,
-          # so point it at the cross-built binary.
+          # Both tools read target/release from the manifest; the Linux jobs
+          # build natively, so the target triple output is the same binary.
           mkdir -p target/release
           cp "target/${{ matrix.target }}/release/nauka" target/release/nauka
+          cargo deb -p nauka-node --no-build --output dist/
           cargo generate-rpm -p crates/nauka-node --output dist/
 
       - name: Checksums
@@ -89,6 +91,15 @@ jobs:
             [ -f "$f" ] && sha256sum "$f" >> "SHA256SUMS-${{ matrix.target }}.txt" 2>/dev/null \
               || shasum -a 256 "$f" >> "SHA256SUMS-${{ matrix.target }}.txt"
           done
+
+      # Cryptographic proof that these artifacts were produced by this
+      # workflow, from this commit — verifiable with
+      # `gh attestation verify <file> --repo sifrah/nauka`. Checksums alone
+      # live next to the binaries they describe and so prove nothing against
+      # a compromised release.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
 
       - uses: actions/upload-artifact@v4
         with:
