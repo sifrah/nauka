@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ struct Node {
     consensus_endpoint: quinn::Endpoint,
 }
 
-async fn spawn(id: u64, dir: &PathBuf, addr: SocketAddr) -> Node {
+async fn spawn(id: u64, dir: &Path, addr: SocketAddr) -> Node {
     let store = Arc::new(ShardStore::open(dir.join("store")).unwrap());
     // After a shutdown, the sockets can take a moment to be released.
     let mut pair = None;
@@ -43,9 +43,21 @@ async fn spawn(id: u64, dir: &PathBuf, addr: SocketAddr) -> Node {
     let addr = endpoint.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.join("raft")).await.unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint.clone(), Some(handler.clone())));
-    tokio::spawn(serve_consensus_endpoint(consensus_endpoint.clone(), handler));
-    Node { addr, app, endpoint, consensus_endpoint }
+    tokio::spawn(serve_endpoint(
+        store.clone(),
+        endpoint.clone(),
+        Some(handler.clone()),
+    ));
+    tokio::spawn(serve_consensus_endpoint(
+        consensus_endpoint.clone(),
+        handler,
+    ));
+    Node {
+        addr,
+        app,
+        endpoint,
+        consensus_endpoint,
+    }
 }
 
 async fn full_shutdown(nodes: Vec<Node>) {
@@ -90,8 +102,14 @@ async fn wait_registry(nodes: &[Node], expected: usize) {
 }
 
 fn manifest(i: usize) -> nauka_erasure::FileManifest {
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
-    encode_file(format!("persistence {i}").as_bytes(), &cfg).unwrap().0
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 64,
+    };
+    encode_file(format!("persistence {i}").as_bytes(), &cfg)
+        .unwrap()
+        .0
 }
 
 async fn write_batch(nodes: &[Node], range: std::ops::Range<usize>) {
@@ -101,7 +119,9 @@ async fn write_batch(nodes: &[Node], range: std::ops::Range<usize>) {
         let mut done = false;
         'attempts: for _ in 0..30 {
             for n in nodes {
-                let Ok(c) = PeerClient::connect(n.addr).await else { continue };
+                let Ok(c) = PeerClient::connect(n.addr).await else {
+                    continue;
+                };
                 if let Ok(AdminResponse::Ok(r)) =
                     admin_call(&c, &AdminRequest::Write(cmd.clone())).await
                 {

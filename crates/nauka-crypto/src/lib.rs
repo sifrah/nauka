@@ -90,20 +90,29 @@ pub fn encrypt(
     let mut current = read_chunk(input)?;
     let mut counter: u32 = 0;
     loop {
-        let next = if current.len() < CHUNK_SIZE { Vec::new() } else { read_chunk(input)? };
+        let next = if current.len() < CHUNK_SIZE {
+            Vec::new()
+        } else {
+            read_chunk(input)?
+        };
         let last = next.is_empty();
         let flags = if last { FLAG_LAST } else { 0 };
         let nonce = nonce_for(&prefix, counter);
         let ct = cipher
             .encrypt(
                 Nonce::from_slice(&nonce),
-                Payload { msg: &current, aad: &[flags] },
+                Payload {
+                    msg: &current,
+                    aad: &[flags],
+                },
             )
             .map_err(|_| CryptoError::AuthFailed)?;
         output.write_all(&(ct.len() as u32).to_le_bytes())?;
         output.write_all(&[flags])?;
         output.write_all(&ct)?;
-        counter = counter.checked_add(1).ok_or(CryptoError::BadStream("file too large"))?;
+        counter = counter
+            .checked_add(1)
+            .ok_or(CryptoError::BadStream("file too large"))?;
         if last {
             return Ok(());
         }
@@ -134,7 +143,9 @@ pub fn decrypt(
 ) -> Result<(), CryptoError> {
     let cipher = Aes256Gcm::new((&key.0).into());
     let mut header = [0u8; 12];
-    input.read_exact(&mut header).map_err(|_| CryptoError::BadStream("missing header"))?;
+    input
+        .read_exact(&mut header)
+        .map_err(|_| CryptoError::BadStream("missing header"))?;
     if &header[..4] != MAGIC {
         return Err(CryptoError::BadStream("bad magic (not a yogfile stream?)"));
     }
@@ -148,17 +159,27 @@ pub fn decrypt(
             .map_err(|_| CryptoError::BadStream("truncated stream (missing chunk)"))?;
         let len = u32::from_le_bytes(len_flags[..4].try_into().unwrap()) as usize;
         let flags = len_flags[4];
-        if len < TAG_SIZE || len > CHUNK_SIZE + TAG_SIZE {
+        if !(TAG_SIZE..=CHUNK_SIZE + TAG_SIZE).contains(&len) {
             return Err(CryptoError::BadStream("invalid chunk size"));
         }
         let mut ct = vec![0u8; len];
-        input.read_exact(&mut ct).map_err(|_| CryptoError::BadStream("incomplete chunk"))?;
+        input
+            .read_exact(&mut ct)
+            .map_err(|_| CryptoError::BadStream("incomplete chunk"))?;
         let nonce = nonce_for(&prefix, counter);
         let plain = cipher
-            .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &[flags] })
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ct,
+                    aad: &[flags],
+                },
+            )
             .map_err(|_| CryptoError::AuthFailed)?;
         output.write_all(&plain)?;
-        counter = counter.checked_add(1).ok_or(CryptoError::BadStream("counter exhausted"))?;
+        counter = counter
+            .checked_add(1)
+            .ok_or(CryptoError::BadStream("counter exhausted"))?;
         if flags & FLAG_LAST != 0 {
             // Nothing may follow the last chunk.
             let mut extra = [0u8; 1];

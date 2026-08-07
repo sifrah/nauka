@@ -6,6 +6,8 @@
 
 use std::net::SocketAddr;
 
+use nauka_transport::protocol::RaftRpc;
+use nauka_transport::PeerClient;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
@@ -13,8 +15,6 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use openraft::BasicNode;
-use nauka_transport::protocol::RaftRpc;
-use nauka_transport::PeerClient;
 
 use crate::types::{NodeId, TypeConfig};
 
@@ -33,9 +33,14 @@ impl RaftNetworkFactory<TypeConfig> for QuicRaftNetworkFactory {
     async fn new_client(&mut self, _target: NodeId, node: &BasicNode) -> Self::Network {
         // Membership stores the data address; Raft RPCs go over the dedicated
         // consensus plane (port+1) — never queued behind shards.
-        let data: std::net::SocketAddr =
-            node.addr.parse().expect("invalid node address in membership");
-        QuicRaftClient { addr: nauka_transport::consensus_addr(data), client: None }
+        let data: std::net::SocketAddr = node
+            .addr
+            .parse()
+            .expect("invalid node address in membership");
+        QuicRaftClient {
+            addr: nauka_transport::consensus_addr(data),
+            client: None,
+        }
     }
 }
 
@@ -75,9 +80,10 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>>
-    {
-        self.call(RaftRpc::AppendEntries, &rpc).await.map_err(RPCError::Unreachable)
+    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
+        self.call(RaftRpc::AppendEntries, &rpc)
+            .await
+            .map_err(RPCError::Unreachable)
     }
 
     async fn install_snapshot(
@@ -88,7 +94,9 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        self.call(RaftRpc::InstallSnapshot, &rpc).await.map_err(RPCError::Unreachable)
+        self.call(RaftRpc::InstallSnapshot, &rpc)
+            .await
+            .map_err(RPCError::Unreachable)
     }
 
     async fn vote(
@@ -96,7 +104,9 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         rpc: VoteRequest<NodeId>,
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        self.call(RaftRpc::Vote, &rpc).await.map_err(RPCError::Unreachable)
+        self.call(RaftRpc::Vote, &rpc)
+            .await
+            .map_err(RPCError::Unreachable)
     }
 }
 

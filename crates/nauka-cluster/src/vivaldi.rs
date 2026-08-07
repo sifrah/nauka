@@ -51,7 +51,11 @@ pub struct Coord {
 
 impl Default for Coord {
     fn default() -> Self {
-        Self { vec: [0.0; DIMS], height: MIN_HEIGHT, error: MAX_ERROR }
+        Self {
+            vec: [0.0; DIMS],
+            height: MIN_HEIGHT,
+            error: MAX_ERROR,
+        }
     }
 }
 
@@ -94,7 +98,11 @@ impl Coord {
         // Weight: if the peer is far more confident than we are, we move a
         // lot; if it is lost, we almost ignore it.
         let total_error = self.error + peer.error;
-        let weight = if total_error > 0.0 { self.error / total_error } else { 0.5 };
+        let weight = if total_error > 0.0 {
+            self.error / total_error
+        } else {
+            0.5
+        };
 
         // Estimated error update (moving average).
         let relative_error = if rtt_ms > 0.0 {
@@ -103,8 +111,8 @@ impl Coord {
         } else {
             0.0
         };
-        self.error = (relative_error * CE * weight + self.error * (1.0 - CE * weight))
-            .clamp(0.0, MAX_ERROR);
+        self.error =
+            (relative_error * CE * weight + self.error * (1.0 - CE * weight)).clamp(0.0, MAX_ERROR);
 
         // Spring force: gap between measurement and prediction.
         let delta = CC * weight;
@@ -113,14 +121,14 @@ impl Coord {
         // Unit direction from `peer` towards us.
         let mut dir = [0.0; DIMS];
         let mut norm_sq = 0.0;
-        for i in 0..DIMS {
-            dir[i] = self.vec[i] - peer.vec[i];
-            norm_sq += dir[i] * dir[i];
+        for ((d, mine), theirs) in dir.iter_mut().zip(&self.vec).zip(&peer.vec) {
+            *d = mine - theirs;
+            norm_sq += *d * *d;
         }
         let norm = det_sqrt(norm_sq);
         if norm > 1e-9 {
-            for i in 0..DIMS {
-                self.vec[i] += force * (dir[i] / norm);
+            for (mine, d) in self.vec.iter_mut().zip(&dir) {
+                *mine += force * (d / norm);
             }
         } else {
             // Coincident positions: push along one axis to separate them.
@@ -177,13 +185,24 @@ mod tests {
             "the learned distance must reflect latency: close={d_close:.1} far={d_far:.1}"
         );
         // Positions must be deemed reliable after convergence.
-        assert!(coords.iter().all(|c| c.is_settled()), "coordinates did not converge");
+        assert!(
+            coords.iter().all(|c| c.is_settled()),
+            "coordinates did not converge"
+        );
     }
 
     #[test]
     fn distance_is_symmetric_and_deterministic() {
-        let a = Coord { vec: [3.0, 4.0], height: 2.0, error: 0.1 };
-        let b = Coord { vec: [0.0, 0.0], height: 1.0, error: 0.1 };
+        let a = Coord {
+            vec: [3.0, 4.0],
+            height: 2.0,
+            error: 0.1,
+        };
+        let b = Coord {
+            vec: [0.0, 0.0],
+            height: 1.0,
+            error: 0.1,
+        };
         assert_eq!(a.distance(&b), b.distance(&a));
         // 5 (Euclidean) + 2 + 1 = 8
         assert!((a.distance(&b) - 8.0).abs() < 1e-9, "{}", a.distance(&b));
@@ -194,7 +213,10 @@ mod tests {
         for x in [0.0, 1e-9, 1.0, 2.0, 9.0, 1234.5678, 1e6, 1e12] {
             let got = det_sqrt(x);
             let want = x.sqrt();
-            assert!((got - want).abs() <= want.abs() * 1e-12 + 1e-12, "sqrt({x}): {got} vs {want}");
+            assert!(
+                (got - want).abs() <= want.abs() * 1e-12 + 1e-12,
+                "sqrt({x}): {got} vs {want}"
+            );
         }
     }
 

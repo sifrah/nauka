@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
+use nauka_erasure::FileManifest;
 use openraft::BasicNode;
 use serde::{Deserialize, Serialize};
-use nauka_erasure::FileManifest;
 
 pub type NodeId = u64;
 
@@ -32,7 +32,10 @@ pub enum AppCommand {
     UpdateNodeStats { addr: String, capacity_bytes: u64 },
     /// Publishes a node's Vivaldi network coordinates: placement uses them to
     /// spread the shards of a single stripe geographically.
-    UpdateNodeCoord { addr: String, coord: nauka_cluster::vivaldi::Coord },
+    UpdateNodeCoord {
+        addr: String,
+        coord: nauka_cluster::vivaldi::Coord,
+    },
     /// Bans a hash: the file leaves the registry, the API refuses to serve it
     /// (410) and the GC purges its shards. Lets us honor a takedown report or
     /// a legal request without ever reading the content.
@@ -85,7 +88,9 @@ pub enum AdminRequest {
 pub enum AdminResponse {
     Ok(AppResponse),
     /// This node is not the leader; retry on `leader`.
-    ForwardTo { leader: Option<(NodeId, String)> },
+    ForwardTo {
+        leader: Option<(NodeId, String)>,
+    },
     Metrics {
         id: NodeId,
         leader: Option<NodeId>,

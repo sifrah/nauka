@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use nauka_store::ShardStore;
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tracing::{debug, info, warn};
-use nauka_store::ShardStore;
 
 use crate::protocol::{read_message, write_message, RaftRpc, Request, Response, ALPN};
 
@@ -188,9 +188,9 @@ pub async fn handle_connection(
                 },
                 Ok(req) => match &store {
                     Some(s) => handle_request(s, req),
-                    None => Response::Error(
-                        "consensus plane: only Raft RPCs are accepted here".into(),
-                    ),
+                    None => {
+                        Response::Error("consensus plane: only Raft RPCs are accepted here".into())
+                    }
                 },
                 Err(e) => Response::Error(format!("unreadable request: {e}")),
             };

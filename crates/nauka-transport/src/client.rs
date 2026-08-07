@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
+use nauka_erasure::FileManifest;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use nauka_erasure::FileManifest;
 
 use crate::protocol::{read_message, write_message, Request, Response, ALPN};
 
@@ -96,7 +96,13 @@ impl PeerClient {
     /// Asks for a proof of possession of a shard: the peer must return
     /// `blake3(nonce ‖ bytes)`, which it can only do by re-reading them.
     pub async fn prove_shard(&self, hash: &str, nonce: [u8; 32]) -> Result<Option<[u8; 32]>> {
-        match self.call(Request::ProveShard { hash: hash.to_string(), nonce }).await? {
+        match self
+            .call(Request::ProveShard {
+                hash: hash.to_string(),
+                nonce,
+            })
+            .await?
+        {
             Response::Proof(p) => Ok(p),
             other => Err(unexpected(other)),
         }
@@ -110,7 +116,10 @@ impl PeerClient {
     }
 
     pub async fn get_manifest(&self, file_hash: &str) -> Result<Option<FileManifest>> {
-        match self.call(Request::GetManifest(file_hash.to_string())).await? {
+        match self
+            .call(Request::GetManifest(file_hash.to_string()))
+            .await?
+        {
             Response::Manifest(m) => Ok(m),
             other => Err(unexpected(other)),
         }

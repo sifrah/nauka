@@ -38,10 +38,18 @@ async fn shard_and_manifest_roundtrip_over_quic() {
     assert!(!client.has_shard(&missing).await.unwrap());
 
     // Manifests.
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 128 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 128,
+    };
     let (manifest, _) = encode_file(b"file contents", &cfg).unwrap();
     client.put_manifest(&manifest).await.unwrap();
-    let loaded = client.get_manifest(&manifest.file_hash).await.unwrap().unwrap();
+    let loaded = client
+        .get_manifest(&manifest.file_hash)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.file_hash, manifest.file_hash);
     assert!(client.get_manifest(&missing).await.unwrap().is_none());
 }
@@ -61,7 +69,11 @@ async fn full_file_dispatch_across_three_nodes() {
     }
 
     let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
-    let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 64 * 1024 };
+    let cfg = ErasureConfig {
+        data_shards: 4,
+        parity_shards: 2,
+        shard_size: 64 * 1024,
+    };
     let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
     // Round-robin dispatch + manifest replicated everywhere.

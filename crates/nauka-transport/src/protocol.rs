@@ -2,8 +2,8 @@
 //! little-endian u32 length, one request/response exchange per bidirectional
 //! QUIC stream.
 
-use serde::{Deserialize, Serialize};
 use nauka_erasure::FileManifest;
+use serde::{Deserialize, Serialize};
 
 /// Safety net: max size of a message (1 MiB shard + headroom, manifests).
 pub const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024;
@@ -23,7 +23,10 @@ pub enum Request {
     /// Proof of possession: `blake3(nonce ‖ shard bytes)`. Unlike `HasShard`,
     /// it cannot be answered without actually re-reading the bytes (the nonce
     /// is drawn at random by the challenger every time).
-    ProveShard { hash: String, nonce: [u8; 32] },
+    ProveShard {
+        hash: String,
+        nonce: [u8; 32],
+    },
     /// Replicates a manifest on the remote node.
     PutManifest(FileManifest),
     /// Fetches a manifest by file hash.

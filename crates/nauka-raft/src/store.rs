@@ -9,6 +9,10 @@
 //! A full cluster shutdown (all n nodes powered off) therefore restarts
 //! without loss: each node reloads vote + log + snapshot from its data-dir.
 
+// openraft's `StorageError` is large, but its size is imposed by the traits
+// implemented here — boxing it would not change the public signatures.
+#![allow(clippy::result_large_err)]
+
 use std::fmt::Debug;
 use std::fs;
 use std::io::Cursor;
@@ -110,8 +114,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         let table = tx.open_table(LOG_TABLE).map_err(read_err)?;
         let last = match table.last().map_err(read_err)? {
             Some((_, v)) => {
-                let entry: Entry<TypeConfig> =
-                    bincode::deserialize(v.value()).map_err(read_err)?;
+                let entry: Entry<TypeConfig> = bincode::deserialize(v.value()).map_err(read_err)?;
                 Some(entry.log_id)
             }
             None => None,
@@ -248,7 +251,10 @@ impl StateMachineStore {
             inner.membership = stored.meta.last_membership.clone();
             inner.snapshot = Some(stored);
         }
-        Ok(Self { inner: Arc::new(Mutex::new(inner)), snapshot_path })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+            snapshot_path,
+        })
     }
 
     /// Local read of the replicated state (node API, healer).
@@ -310,7 +316,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     async fn applied_state(
         &mut self,
     ) -> Result<
-        (Option<LogId<NodeId>>, StoredMembership<NodeId, openraft::BasicNode>),
+        (
+            Option<LogId<NodeId>>,
+            StoredMembership<NodeId, openraft::BasicNode>,
+        ),
         StorageError<NodeId>,
     > {
         let inner = self.inner.lock().unwrap();
@@ -337,23 +346,41 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             let hash = manifest.file_hash.clone();
                             if inner.state.banned.contains_key(&hash) {
                                 // Re-upload of banned content: flatly refused.
-                                AppResponse { ok: false, info: Some("banned".into()) }
+                                AppResponse {
+                                    ok: false,
+                                    info: Some("banned".into()),
+                                }
                             } else {
                                 inner.state.manifests.insert(hash.clone(), manifest);
-                                AppResponse { ok: true, info: Some(hash) }
+                                AppResponse {
+                                    ok: true,
+                                    info: Some(hash),
+                                }
                             }
                         }
                         AppCommand::UnregisterManifest { file_hash } => {
                             let removed = inner.state.manifests.remove(&file_hash).is_some();
-                            AppResponse { ok: removed, info: Some(file_hash) }
+                            AppResponse {
+                                ok: removed,
+                                info: Some(file_hash),
+                            }
                         }
-                        AppCommand::UpdateNodeStats { addr, capacity_bytes } => {
+                        AppCommand::UpdateNodeStats {
+                            addr,
+                            capacity_bytes,
+                        } => {
                             inner.state.node_capacities.insert(addr, capacity_bytes);
-                            AppResponse { ok: true, info: None }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
                         }
                         AppCommand::UpdateNodeCoord { addr, coord } => {
                             inner.state.node_coords.insert(addr, coord);
-                            AppResponse { ok: true, info: None }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
                         }
                         AppCommand::BanHash { file_hash, reason } => {
                             // Banning also removes from the registry: the file
@@ -361,11 +388,17 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             // orphans, hence purgeable by the GC.
                             inner.state.manifests.remove(&file_hash);
                             inner.state.banned.insert(file_hash.clone(), reason);
-                            AppResponse { ok: true, info: Some(file_hash) }
+                            AppResponse {
+                                ok: true,
+                                info: Some(file_hash),
+                            }
                         }
                         AppCommand::UnbanHash { file_hash } => {
                             let removed = inner.state.banned.remove(&file_hash).is_some();
-                            AppResponse { ok: removed, info: Some(file_hash) }
+                            AppResponse {
+                                ok: removed,
+                                info: Some(file_hash),
+                            }
                         }
                     };
                     replies.push(reply);
@@ -389,7 +422,10 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         let data = snapshot.into_inner();
         let state: AppState = bincode::deserialize(&data)
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), &e))?;
-        let stored = StoredSnapshot { meta: meta.clone(), data };
+        let stored = StoredSnapshot {
+            meta: meta.clone(),
+            data,
+        };
         {
             let mut inner = self.inner.lock().unwrap();
             inner.state = state;
@@ -415,4 +451,3 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         self.clone()
     }
 }
-

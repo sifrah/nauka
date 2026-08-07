@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use quinn::crypto::rustls::QuicClientConfig;
 use nauka_store::ShardStore;
 use nauka_transport::server::{make_endpoint, serve_endpoint};
 use nauka_transport::{load_cluster_tls, set_cluster_tls, PeerClient};
+use quinn::crypto::rustls::QuicClientConfig;
 
 fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
@@ -34,15 +34,13 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
     // Cluster key + process identity (both the node AND the test client).
     let keys_dir = tempfile::tempdir().unwrap();
     nauka_transport::generate_cluster_ca(keys_dir.path()).unwrap();
-    let tls =
-        load_cluster_tls(keys_dir.path(), Some(&keys_dir.path().join("node.key"))).unwrap();
+    let tls = load_cluster_tls(keys_dir.path(), Some(&keys_dir.path().join("node.key"))).unwrap();
     let fingerprint = tls.fingerprint.clone();
     let node_id = tls.node_id;
     set_cluster_tls(tls);
 
     // The identity is stable and key-derived: reloading yields the same id.
-    let again =
-        load_cluster_tls(keys_dir.path(), Some(&keys_dir.path().join("node.key"))).unwrap();
+    let again = load_cluster_tls(keys_dir.path(), Some(&keys_dir.path().join("node.key"))).unwrap();
     assert_eq!(again.fingerprint, fingerprint);
     assert_eq!(again.node_id, node_id);
 
@@ -57,7 +55,10 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
     let client = PeerClient::connect(addr).await.unwrap();
     client.ping().await.unwrap();
     let hash = client.put_shard(b"authenticated".to_vec()).await.unwrap();
-    assert_eq!(client.get_shard(&hash).await.unwrap().unwrap(), b"authenticated");
+    assert_eq!(
+        client.get_shard(&hash).await.unwrap().unwrap(),
+        b"authenticated"
+    );
 
     // 2. Client WITHOUT a certificate (still verifies the CA): rejected at
     //    handshake time by the server.
@@ -65,7 +66,10 @@ async fn cluster_mtls_accepts_members_rejects_strangers() {
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_root_certificates(
-            load_cluster_tls(keys_dir.path(), None).unwrap().roots.clone(),
+            load_cluster_tls(keys_dir.path(), None)
+                .unwrap()
+                .roots
+                .clone(),
         )
         .with_no_client_auth();
     assert_rejected(raw_connect(addr, ca_only, nauka_transport::tls::NODE_SAN).await).await;

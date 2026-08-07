@@ -20,10 +20,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use nauka_erasure::{decode_stripe, encode_stripe, ErasureConfig, FileManifest, StripeMeta};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct ApiState {
     pub store: Arc<ShardStore>,
@@ -43,7 +43,10 @@ impl ApiState {
             .app
             .weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY);
         if nodes.is_empty() {
-            nodes.push((self.self_id.clone(), nauka_cluster::placement::DEFAULT_CAPACITY));
+            nodes.push((
+                self.self_id.clone(),
+                nauka_cluster::placement::DEFAULT_CAPACITY,
+            ));
         }
         nodes
     }
@@ -59,7 +62,10 @@ pub async fn serve_http(
         .route("/api/upload", post(upload))
         .route("/api/files", get(files))
         .route("/api/status", get(status))
-        .route("/f/{hash}", get(download).head(download_head).delete(delete_file))
+        .route(
+            "/f/{hash}",
+            get(download).head(download_head).delete(delete_file),
+        )
         .with_state(state);
     // Web UI (SPA): static files, and index.html for the application
     // routes (/files, /dashboard, /d/<hash>).
@@ -97,7 +103,9 @@ struct ClusterStatusResponse {
 async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusResponse> {
     let members = state.app.members();
     let metrics = state.app.raft.metrics().borrow().clone();
-    let leader_addr = metrics.current_leader.and_then(|id| members.get(&id).cloned());
+    let leader_addr = metrics
+        .current_leader
+        .and_then(|id| members.get(&id).cloned());
     let app_state = state.app.app_state();
     let nodes = state
         .view()
@@ -119,10 +127,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
 }
 
 /// HEAD /f/{hash}: size without a body (the download page relies on it).
-async fn download_head(
-    State(state): State<Arc<ApiState>>,
-    Path(hash): Path<String>,
-) -> Response {
+async fn download_head(State(state): State<Arc<ApiState>>, Path(hash): Path<String>) -> Response {
     if let Some(resp) = unavailable(&state, &hash) {
         return resp;
     }
@@ -145,9 +150,7 @@ async fn download_head(
 fn unavailable(state: &ApiState, hash: &str) -> Option<Response> {
     let app_state = state.app.app_state();
     if let Some(reason) = app_state.banned.get(hash) {
-        return Some(
-            (StatusCode::GONE, format!("content removed: {reason}")).into_response(),
-        );
+        return Some((StatusCode::GONE, format!("content removed: {reason}")).into_response());
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -176,7 +179,9 @@ async fn delete_file(
     }
     let resp = state
         .app
-        .write(nauka_raft::types::AppCommand::UnregisterManifest { file_hash: hash.clone() })
+        .write(nauka_raft::types::AppCommand::UnregisterManifest {
+            file_hash: hash.clone(),
+        })
         .await
         .context("deleting from the registry")?;
     if !resp.ok {
@@ -246,8 +251,7 @@ async fn upload(
             .as_secs()
             + ttl
     });
-    let result =
-        dispatch_file(&state, &tmp_path, size, hasher, params.name, expires_at).await;
+    let result = dispatch_file(&state, &tmp_path, size, hasher, params.name, expires_at).await;
     let _ = tokio::fs::remove_file(&tmp_path).await;
     let manifest = result?;
 
@@ -332,7 +336,9 @@ async fn dispatch_file(
     state.store.put_manifest(&manifest)?;
     let resp = state
         .app
-        .write(nauka_raft::types::AppCommand::RegisterManifest(manifest.clone()))
+        .write(nauka_raft::types::AppCommand::RegisterManifest(
+            manifest.clone(),
+        ))
         .await
         .context("recording in the Raft registry")?;
     if !resp.ok {
@@ -384,7 +390,10 @@ fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
             (size.saturating_sub(n.min(size)), size.saturating_sub(1))
         }
         (s, "") => (s.parse().ok()?, size.saturating_sub(1)),
-        (s, e) => (s.parse().ok()?, e.parse::<u64>().ok()?.min(size.saturating_sub(1))),
+        (s, e) => (
+            s.parse().ok()?,
+            e.parse::<u64>().ok()?.min(size.saturating_sub(1)),
+        ),
     };
     (start <= end && start < size).then_some((start, end))
 }
@@ -415,7 +424,10 @@ async fn download(
     if headers.contains_key(header::RANGE) && range.is_none() {
         return Ok((
             StatusCode::RANGE_NOT_SATISFIABLE,
-            [(header::CONTENT_RANGE, format!("bytes */{}", manifest.file_size))],
+            [(
+                header::CONTENT_RANGE,
+                format!("bytes */{}", manifest.file_size),
+            )],
         )
             .into_response());
     }
@@ -439,8 +451,7 @@ async fn download(
             let data_fetches = stripe.shard_hashes[..k]
                 .iter()
                 .map(|h| fetcher.clone().fetch(h.clone()));
-            let mut slots: Vec<Option<Vec<u8>>> =
-                futures_join_all(data_fetches).await;
+            let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
             let missing = slots.iter().filter(|s| s.is_none()).count();
             // 2) The parity, only if needed (in parallel as well).
             if missing > 0 {
@@ -455,7 +466,9 @@ async fn download(
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::other(format!("unrecoverable stripe: {e}"))))
+                        .send(Err(std::io::Error::other(format!(
+                            "unrecoverable stripe: {e}"
+                        ))))
                         .await;
                     return;
                 }
@@ -466,7 +479,9 @@ async fn download(
             }
         }
         if hasher.finalize().to_hex().to_string() != expected_hash {
-            let _ = tx.send(Err(std::io::Error::other("integrity violated"))).await;
+            let _ = tx
+                .send(Err(std::io::Error::other("integrity violated")))
+                .await;
         }
     });
 
@@ -502,7 +517,7 @@ async fn serve_range(
         for stripe in &m.stripes {
             let stripe_len = stripe.data_len as u64;
             let stripe_end = offset + stripe_len; // exclusive
-            // Stripe entirely before/after the range: nothing to do.
+                                                  // Stripe entirely before/after the range: nothing to do.
             if stripe_end <= start {
                 offset = stripe_end;
                 continue;
@@ -510,12 +525,14 @@ async fn serve_range(
             if offset > end {
                 break;
             }
-            let data_fetches =
-                stripe.shard_hashes[..k].iter().map(|h| fetcher.clone().fetch(h.clone()));
+            let data_fetches = stripe.shard_hashes[..k]
+                .iter()
+                .map(|h| fetcher.clone().fetch(h.clone()));
             let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
             if slots.iter().any(|s| s.is_none()) {
-                let parity_fetches =
-                    stripe.shard_hashes[k..].iter().map(|h| fetcher.clone().fetch(h.clone()));
+                let parity_fetches = stripe.shard_hashes[k..]
+                    .iter()
+                    .map(|h| fetcher.clone().fetch(h.clone()));
                 slots.extend(futures_join_all(parity_fetches).await);
             } else {
                 slots.resize(stripe.shard_hashes.len(), None);
@@ -524,7 +541,9 @@ async fn serve_range(
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::other(format!("unrecoverable stripe: {e}"))))
+                        .send(Err(std::io::Error::other(format!(
+                            "unrecoverable stripe: {e}"
+                        ))))
                         .await;
                     return;
                 }
@@ -532,10 +551,14 @@ async fn serve_range(
             // Cut out the useful portion of this stripe.
             let from = start.saturating_sub(offset) as usize;
             let to = ((end - offset + 1).min(stripe_len)) as usize;
-            if from < to && to <= data.len() {
-                if tx.send(Ok(bytes::Bytes::from(data[from..to].to_vec()))).await.is_err() {
-                    return; // client gone
-                }
+            if from < to
+                && to <= data.len()
+                && tx
+                    .send(Ok(bytes::Bytes::from(data[from..to].to_vec())))
+                    .await
+                    .is_err()
+            {
+                return; // client gone
             }
             offset = stripe_end;
         }
@@ -581,7 +604,11 @@ struct Fetcher {
 impl Fetcher {
     fn new(state: Arc<ApiState>) -> Self {
         let view = state.view();
-        Self { state, view, clients: tokio::sync::Mutex::new(HashMap::new()) }
+        Self {
+            state,
+            view,
+            clients: tokio::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// A client towards `node`, created on first need. `None` = already
@@ -614,7 +641,9 @@ impl Fetcher {
             return Some(data);
         }
         for (node, _) in self.view.iter().filter(|(n, _)| *n != self.state.self_id) {
-            let Some(client) = self.client_for(node).await else { continue };
+            let Some(client) = self.client_for(node).await else {
+                continue;
+            };
             match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
                 Ok(Ok(Some(data))) => return Some(data),
                 Ok(Ok(None)) => {}
@@ -657,7 +686,7 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
         .app_state()
         .manifests
         .values()
-        .filter(|m| !m.expires_at.is_some_and(|e| e <= now))
+        .filter(|m| m.expires_at.is_none_or(|e| e > now))
         .map(|m| FileEntry {
             hash: m.file_hash.clone(),
             size: m.file_size,
@@ -666,6 +695,17 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
         })
         .collect();
     Json(entries)
+}
+
+/// Unique temporary file identifier (no need for real cryptography here,
+/// just to avoid collisions between uploads).
+fn uuid_ish() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{nanos:x}-{:x}", std::process::id())
 }
 
 #[cfg(test)]
@@ -689,12 +729,4 @@ mod tests {
         assert_eq!(parse_range(Some("bits=0-10"), size), None);
         assert_eq!(parse_range(None, size), None);
     }
-}
-
-/// Unique temporary file identifier (no need for real cryptography here,
-/// just to avoid collisions between uploads).
-fn uuid_ish() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    format!("{nanos:x}-{:x}", std::process::id())
 }

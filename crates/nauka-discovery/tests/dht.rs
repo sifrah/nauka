@@ -28,7 +28,10 @@ async fn derive_publish_resolve_roundtrip() {
 
     // The "leader" publishes the seeds; a newcomer (which only knows the
     // cluster keys) resolves them.
-    let seeds = vec!["10.0.0.1:7311".parse().unwrap(), "10.0.0.2:7311".parse().unwrap()];
+    let seeds = vec![
+        "10.0.0.1:7311".parse().unwrap(),
+        "10.0.0.2:7311".parse().unwrap(),
+    ];
     publish_seeds(&publisher, &kp1, &seeds).await.unwrap();
 
     let resolved = resolve_seeds(&resolver, &kp2.public_key()).await.unwrap();
@@ -46,11 +49,15 @@ async fn derive_publish_resolve_roundtrip() {
     assert_eq!(resolved2, seeds2);
 
     // A foreign cluster finds nothing under ITS key.
-    let nothing = resolve_seeds(&resolver, &kp_other.public_key()).await.unwrap();
+    let nothing = resolve_seeds(&resolver, &kp_other.public_key())
+        .await
+        .unwrap();
     assert!(nothing.is_empty());
 
     // IP auto-detection through the DHT (BEP42): on the local testnet, the
     // nodes see us from the loopback.
-    let detected = nauka_discovery::detect_public_ip(Some(&testnet.bootstrap)).await.unwrap();
+    let detected = nauka_discovery::detect_public_ip(Some(&testnet.bootstrap))
+        .await
+        .unwrap();
     assert_eq!(detected, Some("127.0.0.1".parse().unwrap()));
 }

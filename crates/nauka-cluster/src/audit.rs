@@ -27,10 +27,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use rand::{RngCore, SeedableRng};
-use tracing::{info, warn};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
+use rand::{RngCore, SeedableRng};
+use tracing::{info, warn};
 
 /// Shards downloaded and verified per peer per pass.
 pub const SAMPLE_PER_PEER: usize = 3;
@@ -110,7 +110,9 @@ pub async fn audit_once_geo(
         if owned.is_empty() {
             continue;
         }
-        let Ok(addr) = peer.parse::<SocketAddr>() else { continue };
+        let Ok(addr) = peer.parse::<SocketAddr>() else {
+            continue;
+        };
         let Ok(client) = PeerClient::connect(addr).await else {
             report.unreachable += 1;
             continue;

@@ -36,8 +36,14 @@ fn view(nodes: &[&Node]) -> Vec<(String, u64)> {
 
 /// Places a file on the cluster following the official placement.
 fn seed_cluster(nodes: &[&Node], seed: u8) -> nauka_erasure::FileManifest {
-    let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 4096 };
-    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3).map(|i| (i as u8) ^ seed).collect();
+    let cfg = ErasureConfig {
+        data_shards: 4,
+        parity_shards: 2,
+        shard_size: 4096,
+    };
+    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3)
+        .map(|i| (i as u8) ^ seed)
+        .collect();
     let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
     let v = view(nodes);
     let refs: Vec<(&str, u64)> = v.iter().map(|(n, w)| (n.as_str(), *w)).collect();
@@ -132,7 +138,9 @@ async fn gc_requires_proof_before_releasing() {
 
     // The peer really holds everything the solo view assigns to it.
     let cfg = manifest.config;
-    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3).map(|i| (i as u8) ^ 0x7f).collect();
+    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3)
+        .map(|i| (i as u8) ^ 0x7f)
+        .collect();
     let (_, stripes) = encode_file(&data, &cfg).unwrap();
     for (si, sj, _) in shards_owned_by(&manifest, &peer.id, &refs) {
         peer.store.put_shard(&stripes[si][sj].data).unwrap();
@@ -172,9 +180,17 @@ async fn proof_is_bound_to_nonce_and_bytes() {
     let p1 = client.prove_shard(&hash, [7u8; 32]).await.unwrap().unwrap();
     let p2 = client.prove_shard(&hash, [8u8; 32]).await.unwrap().unwrap();
     assert_ne!(p1, p2, "a different nonce must yield a different proof");
-    assert_eq!(p1, expected_proof(&[7u8; 32], &data), "proof verifiable locally");
+    assert_eq!(
+        p1,
+        expected_proof(&[7u8; 32], &data),
+        "proof verifiable locally"
+    );
 
     // Unknown shard: no proof possible.
     let unknown = nauka_erasure::hash_bytes(b"never stored");
-    assert!(client.prove_shard(&unknown, [1u8; 32]).await.unwrap().is_none());
+    assert!(client
+        .prove_shard(&unknown, [1u8; 32])
+        .await
+        .unwrap()
+        .is_none());
 }

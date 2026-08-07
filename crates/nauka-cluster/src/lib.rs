@@ -12,9 +12,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{info, warn};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
+use tracing::{info, warn};
 
 /// This node's view of the cluster.
 #[derive(Debug, Clone)]
@@ -41,11 +41,7 @@ impl ClusterView {
 
 /// Background loop of a cluster node: peer heartbeats + periodic scrub.
 /// Runs forever; spawn it with `tokio::spawn` alongside the QUIC server.
-pub async fn run_background(
-    store: Arc<ShardStore>,
-    view: ClusterView,
-    scrub_interval: Duration,
-) {
+pub async fn run_background(store: Arc<ShardStore>, view: ClusterView, scrub_interval: Duration) {
     let mut ticker = tokio::time::interval(scrub_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -63,8 +59,7 @@ pub async fn run_background(
         }
 
         // Static mode: no declared capacities, uniform weights.
-        let weighted: Vec<(String, u64)> =
-            view.nodes.iter().map(|n| (n.clone(), 1)).collect();
+        let weighted: Vec<(String, u64)> = view.nodes.iter().map(|n| (n.clone(), 1)).collect();
         match healer::scrub_once(&store, &view.self_id, &weighted).await {
             Ok(r) if r.shards_healed > 0 || r.shards_unrecoverable > 0 => {
                 info!(

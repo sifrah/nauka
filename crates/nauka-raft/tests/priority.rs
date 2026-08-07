@@ -33,7 +33,11 @@ async fn spawn(id: u64) -> Node {
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
     tokio::spawn(serve_endpoint(store.clone(), data, Some(handler.clone())));
     tokio::spawn(serve_consensus_endpoint(consensus, handler));
-    Node { addr, app, _dir: dir }
+    Node {
+        addr,
+        app,
+        _dir: dir,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -42,8 +46,10 @@ async fn leader_stable_under_data_flood() {
     const FLOODERS_PER_NODE: usize = 4;
 
     let nodes = [spawn(1).await, spawn(2).await, spawn(3).await];
-    let members: BTreeMap<u64, String> =
-        nodes.iter().map(|n| (n.app.id, n.addr.to_string())).collect();
+    let members: BTreeMap<u64, String> = nodes
+        .iter()
+        .map(|n| (n.app.id, n.addr.to_string()))
+        .collect();
     let c = PeerClient::connect(nodes[0].addr).await.unwrap();
     assert!(matches!(
         admin_call(&c, &AdminRequest::Init(members)).await.unwrap(),
@@ -71,7 +77,9 @@ async fn leader_stable_under_data_flood() {
             let addr = node.addr;
             let stop = stop.clone();
             flooders.push(tokio::spawn(async move {
-                let Ok(client) = PeerClient::connect(addr).await else { return 0usize };
+                let Ok(client) = PeerClient::connect(addr).await else {
+                    return 0usize;
+                };
                 let mut base = vec![0u8; 1024 * 1024];
                 base[..8].copy_from_slice(&(f as u64).to_le_bytes());
                 let mut sent = 0usize;
@@ -89,7 +97,11 @@ async fn leader_stable_under_data_flood() {
     }
 
     // During the flood: watch the leader and write to the registry.
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 64,
+    };
     let deadline = Instant::now() + Duration::from_secs(FLOOD_SECS);
     let mut leader_changes = 0;
     let mut last_leader = leader0;
@@ -107,8 +119,7 @@ async fn leader_stable_under_data_flood() {
             }
         }
         wi += 1;
-        let (manifest, _) =
-            encode_file(format!("flood-write-{wi}").as_bytes(), &cfg).unwrap();
+        let (manifest, _) = encode_file(format!("flood-write-{wi}").as_bytes(), &cfg).unwrap();
         let cmd = AppCommand::RegisterManifest(manifest);
         let mut ok = false;
         for n in &nodes {
@@ -142,7 +153,10 @@ async fn leader_stable_under_data_flood() {
          {leader_changes} leader change(s)",
         total_shards
     );
-    assert!(total_shards > 100, "the flood did not actually saturate ({total_shards} shards)");
+    assert!(
+        total_shards > 100,
+        "the flood did not actually saturate ({total_shards} shards)"
+    );
     assert_eq!(leader_changes, 0, "the leader flipped under data load");
     assert_eq!(writes_failed, 0, "registry writes failed under load");
 }

@@ -28,7 +28,7 @@ pub const DEFAULT_CAPACITY: u64 = 100 * 1024 * 1024 * 1024;
 /// Relative accuracy ~1e-7 — more than enough: only the CONSISTENCY of the
 /// ranking across nodes matters, not absolute precision.
 fn det_ln(x: f64) -> f64 {
-    const LN2: f64 = 0.693_147_180_559_945_3;
+    use std::f64::consts::LN_2;
     let bits = x.to_bits();
     let e = ((bits >> 52) & 0x7ff) as i64 - 1023;
     // Mantissa brought back into [1, 2).
@@ -36,9 +36,9 @@ fn det_ln(x: f64) -> f64 {
     // ln(m) via the artanh series, |z| ≤ 1/3.
     let z = (m - 1.0) / (m + 1.0);
     let z2 = z * z;
-    let ln_m = 2.0 * z
-        * (1.0 + z2 / 3.0 + z2 * z2 / 5.0 + z2 * z2 * z2 / 7.0 + z2 * z2 * z2 * z2 / 9.0);
-    ln_m + (e as f64) * LN2
+    let ln_m =
+        2.0 * z * (1.0 + z2 / 3.0 + z2 * z2 / 5.0 + z2 * z2 * z2 / 7.0 + z2 * z2 * z2 * z2 / 9.0);
+    ln_m + (e as f64) * LN_2
 }
 
 /// WRH score of a node for a key. Higher = ranked better.
@@ -56,9 +56,12 @@ fn score(node: &str, key: &str, weight: u64) -> f64 {
 /// Ranks the nodes for a given key (decreasing WRH score; ties broken by
 /// identity for a stable total order).
 pub fn rank_nodes<'a>(key: &str, nodes: &[WeightedNode<'a>]) -> Vec<&'a str> {
-    let mut scored: Vec<(f64, &str)> =
-        nodes.iter().map(|(n, w)| (score(n, key, *w), *n)).collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(b.1)));
+    let mut scored: Vec<(f64, &str)> = nodes.iter().map(|(n, w)| (score(n, key, *w), *n)).collect();
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(b.1))
+    });
     scored.into_iter().map(|(_, n)| n).collect()
 }
 
@@ -145,7 +148,9 @@ pub fn stripe_owners_geo<'a>(
         if let Some(best) = candidates.iter().copied().max_by(|a, b| {
             let sa = min_distance_to(a, &chosen, coords);
             let sb = min_distance_to(b, &chosen, coords);
-            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal).then(b.cmp(a))
+            sa.partial_cmp(&sb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.cmp(a))
         }) {
             // Deviate from the WRH holder only if it actually increases
             // the spread; otherwise keep the nominal placement (stability).
@@ -182,7 +187,6 @@ fn min_distance_to(
     }
     min
 }
-
 
 /// Type of the coordinates as replicated in the Raft state.
 pub type CoordMap = std::collections::BTreeMap<String, crate::vivaldi::Coord>;
@@ -242,7 +246,11 @@ mod tests {
     #[test]
     fn ownership_partitions_all_shards() {
         let nodes = uniform(&["a:1", "b:1", "c:1"]);
-        let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 256 };
+        let cfg = ErasureConfig {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 256,
+        };
         let data = vec![7u8; 3000];
         let (manifest, _) = encode_file(&data, &cfg).unwrap();
 
@@ -259,8 +267,7 @@ mod tests {
         // The probability of ranking FIRST is proportional to the weight —
         // this is what drives the selection of the hosting subset when
         // n > k+m, and the assignment of the "extra" shards otherwise.
-        let nodes: Vec<WeightedNode> =
-            vec![("a:1", 100), ("b:1", 100), ("c:1", 200), ("d:1", 400)];
+        let nodes: Vec<WeightedNode> = vec![("a:1", 100), ("b:1", 100), ("c:1", 200), ("d:1", 400)];
         let mut counts = std::collections::HashMap::new();
         for f in 0..4000 {
             let top = rank_nodes(&format!("file-{f}"), &nodes)[0];
@@ -314,7 +321,10 @@ mod tests {
         }
         // a's share goes 1/3 → 1/2, so ~1/6 of the total must migrate, and
         // exclusively towards a.
-        assert_eq!(moved_elsewhere, 0, "shards migrated between unchanged nodes");
+        assert_eq!(
+            moved_elsewhere, 0,
+            "shards migrated between unchanged nodes"
+        );
         let frac = moved as f64 / total as f64;
         assert!((frac - 1.0 / 6.0).abs() < 0.05, "migration: {frac}");
     }
@@ -332,8 +342,12 @@ mod geo_tests {
         let mut coords = BTreeMap::new();
         let mut nodes = Vec::new();
         for (i, (name, x)) in [
-            ("par-1", 0.0), ("par-2", 1.0), ("par-3", 2.0),
-            ("mia-1", 90.0), ("mia-2", 91.0), ("mia-3", 92.0),
+            ("par-1", 0.0),
+            ("par-2", 1.0),
+            ("par-3", 2.0),
+            ("mia-1", 90.0),
+            ("mia-2", 91.0),
+            ("mia-3", 92.0),
         ]
         .iter()
         .enumerate()
@@ -342,7 +356,11 @@ mod geo_tests {
             nodes.push((name.to_string(), 1u64));
             coords.insert(
                 name.to_string(),
-                Coord { vec: [*x, 0.0], height: 1.0, error: 0.05 },
+                Coord {
+                    vec: [*x, 0.0],
+                    height: 1.0,
+                    error: 0.05,
+                },
             );
         }
         (nodes, coords)
@@ -359,8 +377,7 @@ mod geo_tests {
         let mut plain_mono = 0;
         for s in 0..200 {
             let geo = stripe_owners_geo("file", s, 6, &refs, &coords);
-            let plain: Vec<&str> =
-                (0..6).map(|i| shard_owner("file", s, i, &refs)).collect();
+            let plain: Vec<&str> = (0..6).map(|i| shard_owner("file", s, i, &refs)).collect();
             let par = |v: &Vec<&str>| v.iter().filter(|n| n.starts_with("par")).count();
             if par(&geo) == 6 || par(&geo) == 0 {
                 geo_mono += 1;
@@ -412,7 +429,10 @@ mod geo_tests {
         for s in 0..20 {
             let geo = stripe_owners_geo("x", s, 6, &refs, &empty);
             let plain: Vec<&str> = (0..6).map(|i| shard_owner("x", s, i, &refs)).collect();
-            assert_eq!(geo, plain, "without coordinates, placement must be nominal WRH");
+            assert_eq!(
+                geo, plain,
+                "without coordinates, placement must be nominal WRH"
+            );
         }
     }
 
@@ -425,7 +445,11 @@ mod geo_tests {
         for (i, n) in names.iter().enumerate() {
             coords.insert(
                 n.to_string(),
-                Coord { vec: [i as f64, 0.0], height: 1.0, error: 0.05 },
+                Coord {
+                    vec: [i as f64, 0.0],
+                    height: 1.0,
+                    error: 0.05,
+                },
             );
         }
         let refs: Vec<WeightedNode> = names.iter().map(|n| (*n, 1u64)).collect();

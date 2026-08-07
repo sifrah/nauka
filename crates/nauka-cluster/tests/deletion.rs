@@ -8,11 +8,20 @@ use nauka_cluster::healer::purge_deleted;
 use nauka_erasure::{encode_file, ErasureConfig};
 use nauka_store::ShardStore;
 
-fn store_with_files(n: usize) -> (Arc<ShardStore>, Vec<nauka_erasure::FileManifest>, tempfile::TempDir)
-{
+fn store_with_files(
+    n: usize,
+) -> (
+    Arc<ShardStore>,
+    Vec<nauka_erasure::FileManifest>,
+    tempfile::TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 1024 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 1024,
+    };
     let mut manifests = Vec::new();
     for i in 0..n {
         // Genuinely distinct contents: a file of zeros would produce shards
@@ -40,12 +49,14 @@ fn purge_removes_deleted_files_and_their_shards() {
     assert_eq!(store.list_manifests().unwrap().len(), 3);
 
     // The registry no longer knows the first file (deleted).
-    let live: BTreeSet<String> =
-        manifests[1..].iter().map(|m| m.file_hash.clone()).collect();
+    let live: BTreeSet<String> = manifests[1..].iter().map(|m| m.file_hash.clone()).collect();
     let report = purge_deleted(&store, &live, true).unwrap();
 
     assert_eq!(report.manifests_purged, 1);
-    assert!(report.orphans_purged > 0, "the deleted file's shards must go");
+    assert!(
+        report.orphans_purged > 0,
+        "the deleted file's shards must go"
+    );
     assert_eq!(store.list_manifests().unwrap().len(), 2);
 
     // The remaining files are intact, shard by shard.
@@ -86,7 +97,11 @@ fn shards_shared_by_two_files_survive_one_deletion() {
     // one must not break the other.
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 1024 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 1024,
+    };
     let data = vec![42u8; 3000];
     let (m1, stripes) = encode_file(&data, &cfg).unwrap();
     // Same content, different name → same file hash and same shards.

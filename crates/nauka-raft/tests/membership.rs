@@ -31,7 +31,12 @@ async fn spawn(id: u64) -> Node {
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
     tokio::spawn(serve_endpoint(store.clone(), data, Some(handler.clone())));
     tokio::spawn(serve_consensus_endpoint(consensus, handler));
-    Node { addr, app, store, _dir: dir }
+    Node {
+        addr,
+        app,
+        store,
+        _dir: dir,
+    }
 }
 
 /// Sorted view of the member addresses, like the nodes' background loop.
@@ -94,11 +99,17 @@ async fn grow_to_four_then_remove_one_rebalances() {
     let peers: Vec<SocketAddr> = [&n1, &n2, &n3].iter().map(|n| n.addr).collect();
     let c = nauka_transport::PeerClient::connect(n1.addr).await.unwrap();
     assert!(matches!(
-        nauka_raft::admin_call(&c, &AdminRequest::Init(members)).await.unwrap(),
+        nauka_raft::admin_call(&c, &AdminRequest::Init(members))
+            .await
+            .unwrap(),
         AdminResponse::Ok(_)
     ));
 
-    let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 8 * 1024 };
+    let cfg = ErasureConfig {
+        data_shards: 4,
+        parity_shards: 2,
+        shard_size: 8 * 1024,
+    };
     let mut manifests = Vec::new();
     for i in 0..5 {
         let data: Vec<u8> = (0..cfg.stripe_data_len() * 2)
@@ -128,7 +139,10 @@ async fn grow_to_four_then_remove_one_rebalances() {
     let n4 = spawn(4).await;
     match admin_via_leader(
         &peers,
-        &AdminRequest::AddLearner { id: 4, addr: n4.addr.to_string() },
+        &AdminRequest::AddLearner {
+            id: 4,
+            addr: n4.addr.to_string(),
+        },
     )
     .await
     .unwrap()
@@ -151,7 +165,11 @@ async fn grow_to_four_then_remove_one_rebalances() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert_eq!(n4.app.members().len(), 4, "membership not propagated to node 4");
+    assert_eq!(
+        n4.app.members().len(),
+        4,
+        "membership not propagated to node 4"
+    );
 
     // Rebalance: scrub (n4 acquires) then gc (the old ones release).
     let all4 = [&n1, &n2, &n3, &n4];

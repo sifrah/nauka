@@ -19,12 +19,10 @@ use tracing::info;
 
 use network::QuicRaftNetworkFactory;
 use store::{LogStore, StateMachineStore};
-use types::{
-    AdminRequest, AdminResponse, AppCommand, AppState, NodeId, TypeConfig,
-};
+use types::{AdminRequest, AdminResponse, AppCommand, AppState, NodeId, TypeConfig};
 
-pub use types::AppResponse;
 pub use openraft;
+pub use types::AppResponse;
 
 /// A node's Raft instance, with access to the materialized state.
 pub struct RaftApp {
@@ -66,7 +64,11 @@ impl RaftApp {
         )
         .await?;
         info!("raft started, node_id={id}");
-        Ok(Arc::new(Self { id, raft, state_machine }))
+        Ok(Arc::new(Self {
+            id,
+            raft,
+            state_machine,
+        }))
     }
 
     /// Current replicated state (local read, possibly lagging behind the
@@ -135,20 +137,29 @@ impl RaftApp {
                     .map(|(id, addr)| (id, BasicNode { addr }))
                     .collect();
                 match self.raft.initialize(members).await {
-                    Ok(()) => AdminResponse::Ok(AppResponse { ok: true, info: None }),
+                    Ok(()) => AdminResponse::Ok(AppResponse {
+                        ok: true,
+                        info: None,
+                    }),
                     Err(e) => AdminResponse::Err(e.to_string()),
                 }
             }
             AdminRequest::AddLearner { id, addr } => {
                 match self.raft.add_learner(id, BasicNode { addr }, true).await {
-                    Ok(_) => AdminResponse::Ok(AppResponse { ok: true, info: None }),
+                    Ok(_) => AdminResponse::Ok(AppResponse {
+                        ok: true,
+                        info: None,
+                    }),
                     Err(e) => self.forward_or_err(e),
                 }
             }
             AdminRequest::ChangeMembership(ids) => {
                 let set: std::collections::BTreeSet<NodeId> = ids.into_iter().collect();
                 match self.raft.change_membership(set, false).await {
-                    Ok(_) => AdminResponse::Ok(AppResponse { ok: true, info: None }),
+                    Ok(_) => AdminResponse::Ok(AppResponse {
+                        ok: true,
+                        info: None,
+                    }),
                     Err(e) => self.forward_or_err(e),
                 }
             }
@@ -186,7 +197,10 @@ impl RaftApp {
     ) -> AdminResponse {
         match e {
             RaftError::APIError(ClientWriteError::ForwardToLeader(f)) => AdminResponse::ForwardTo {
-                leader: f.leader_id.zip(f.leader_node).map(|(id, node)| (id, node.addr)),
+                leader: f
+                    .leader_id
+                    .zip(f.leader_node)
+                    .map(|(id, node)| (id, node.addr)),
             },
             other => AdminResponse::Err(other.to_string()),
         }
@@ -197,10 +211,7 @@ impl RaftApp {
 /// them to the local openraft engine.
 #[async_trait::async_trait]
 impl nauka_transport::server::RaftHandler for RaftApp {
-    async fn handle(
-        &self,
-        rpc: nauka_transport::protocol::RaftRpc,
-    ) -> Result<Vec<u8>, String> {
+    async fn handle(&self, rpc: nauka_transport::protocol::RaftRpc) -> Result<Vec<u8>, String> {
         use nauka_transport::protocol::RaftRpc;
         let err = |e: &dyn std::fmt::Display| e.to_string();
         match rpc {
@@ -254,7 +265,9 @@ pub async fn admin_via_leader(
                 continue;
             };
             match admin_call(&client, req).await {
-                Ok(AdminResponse::ForwardTo { leader: Some((_, leader_addr)) }) => {
+                Ok(AdminResponse::ForwardTo {
+                    leader: Some((_, leader_addr)),
+                }) => {
                     if let Ok(a) = leader_addr.parse() {
                         targets = vec![a];
                     }

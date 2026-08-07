@@ -37,7 +37,11 @@ pub struct ErasureConfig {
 
 impl Default for ErasureConfig {
     fn default() -> Self {
-        Self { data_shards: 4, parity_shards: 2, shard_size: DEFAULT_SHARD_SIZE }
+        Self {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: DEFAULT_SHARD_SIZE,
+        }
     }
 }
 
@@ -143,7 +147,11 @@ pub fn encode_stripe(data: &[u8], cfg: &ErasureConfig) -> Result<Vec<Shard>, Era
     Ok(shards
         .into_iter()
         .enumerate()
-        .map(|(index, data)| Shard { index, hash: hash_bytes(&data), data })
+        .map(|(index, data)| Shard {
+            index,
+            hash: hash_bytes(&data),
+            data,
+        })
         .collect())
 }
 
@@ -188,7 +196,9 @@ pub fn decode_stripe(
 
     // Check the reconstructed shards really do match the manifest.
     for (i, slot) in shards.iter().enumerate().take(cfg.data_shards) {
-        let data = slot.as_ref().expect("reconstruct guarantees the data shards");
+        let data = slot
+            .as_ref()
+            .expect("reconstruct guarantees the data shards");
         if hash_bytes(data) != meta.shard_hashes[i] {
             return Err(ErasureError::IntegrityViolation(format!(
                 "reconstructed shard {i} does not match the manifest hash"
@@ -272,7 +282,11 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     fn cfg_small() -> ErasureConfig {
-        ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 1024 }
+        ErasureConfig {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 1024,
+        }
     }
 
     fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
@@ -316,8 +330,7 @@ mod tests {
                 let mut slots = to_slots(&stripes[0]);
                 slots[a] = None;
                 slots[b] = None;
-                let decoded =
-                    decode_stripe(slots, &manifest.stripes[0], &cfg).unwrap();
+                let decoded = decode_stripe(slots, &manifest.stripes[0], &cfg).unwrap();
                 assert_eq!(decoded, data, "failed with shards {a} and {b} lost");
             }
         }
@@ -333,7 +346,10 @@ mod tests {
         slots[1] = None;
         slots[2] = None;
         match decode_stripe(slots, &manifest.stripes[0], &cfg) {
-            Err(ErasureError::NotEnoughShards { available: 3, needed: 4 }) => {}
+            Err(ErasureError::NotEnoughShards {
+                available: 3,
+                needed: 4,
+            }) => {}
             other => panic!("expected NotEnoughShards, got {other:?}"),
         }
     }
@@ -370,9 +386,23 @@ mod tests {
 
     #[test]
     fn invalid_config_rejected() {
-        let bad = ErasureConfig { data_shards: 0, parity_shards: 2, shard_size: 1024 };
-        assert!(matches!(encode_stripe(b"x", &bad), Err(ErasureError::InvalidConfig(_))));
-        let too_many = ErasureConfig { data_shards: 200, parity_shards: 100, shard_size: 1024 };
-        assert!(matches!(encode_stripe(b"x", &too_many), Err(ErasureError::InvalidConfig(_))));
+        let bad = ErasureConfig {
+            data_shards: 0,
+            parity_shards: 2,
+            shard_size: 1024,
+        };
+        assert!(matches!(
+            encode_stripe(b"x", &bad),
+            Err(ErasureError::InvalidConfig(_))
+        ));
+        let too_many = ErasureConfig {
+            data_shards: 200,
+            parity_shards: 100,
+            shard_size: 1024,
+        };
+        assert!(matches!(
+            encode_stripe(b"x", &too_many),
+            Err(ErasureError::InvalidConfig(_))
+        ));
     }
 }

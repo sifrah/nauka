@@ -22,7 +22,11 @@ async fn spawn_node() -> Node {
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let id = endpoint.local_addr().unwrap().to_string();
     tokio::spawn(serve_endpoint(store.clone(), endpoint, None));
-    Node { id, store, _dir: dir }
+    Node {
+        id,
+        store,
+        _dir: dir,
+    }
 }
 
 #[tokio::test]
@@ -32,8 +36,14 @@ async fn node_heals_lost_and_corrupted_shards() {
     let id_refs: Vec<(&str, u64)> = ids.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
     // A 4+2 file of 3 stripes, laid out with the official placement.
-    let cfg = ErasureConfig { data_shards: 4, parity_shards: 2, shard_size: 32 * 1024 };
-    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3).map(|i| (i % 253) as u8).collect();
+    let cfg = ErasureConfig {
+        data_shards: 4,
+        parity_shards: 2,
+        shard_size: 32 * 1024,
+    };
+    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3)
+        .map(|i| (i % 253) as u8)
+        .collect();
     let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
 
     for node in &nodes {
@@ -44,7 +54,9 @@ async fn node_heals_lost_and_corrupted_shards() {
     }
 
     // Sanity: nothing to heal at first.
-    let r = scrub_once(&nodes[0].store, &nodes[0].id, &ids).await.unwrap();
+    let r = scrub_once(&nodes[0].store, &nodes[0].id, &ids)
+        .await
+        .unwrap();
     assert_eq!(r.shards_healed, 0);
     assert!(r.shards_checked > 0);
 
@@ -61,7 +73,10 @@ async fn node_heals_lost_and_corrupted_shards() {
     assert_eq!(r.shards_healed, owned.len());
     assert_eq!(r.shards_unrecoverable, 0);
     for (_, _, hash) in &owned {
-        assert!(victim.store.get_shard(hash).is_ok(), "shard {hash} not healed");
+        assert!(
+            victim.store.get_shard(hash).is_ok(),
+            "shard {hash} not healed"
+        );
     }
 
     // Second pass: nothing left to do.
@@ -69,5 +84,7 @@ async fn node_heals_lost_and_corrupted_shards() {
     assert_eq!(r.shards_healed, 0);
     assert_eq!(r.shards_unrecoverable, 0);
 
-    tokio::time::timeout(Duration::from_secs(1), async {}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {})
+        .await
+        .unwrap();
 }

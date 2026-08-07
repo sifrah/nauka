@@ -28,20 +28,39 @@ async fn spawn_raft_node(id: u64, bind: &str) -> Node {
     let addr = endpoint.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint.clone(), Some(handler.clone())));
-    tokio::spawn(serve_consensus_endpoint(consensus_endpoint.clone(), handler));
-    Node { addr, app, endpoint, consensus_endpoint, _dir: dir }
+    tokio::spawn(serve_endpoint(
+        store.clone(),
+        endpoint.clone(),
+        Some(handler.clone()),
+    ));
+    tokio::spawn(serve_consensus_endpoint(
+        consensus_endpoint.clone(),
+        handler,
+    ));
+    Node {
+        addr,
+        app,
+        endpoint,
+        consensus_endpoint,
+        _dir: dir,
+    }
 }
 
 fn test_manifest(i: usize) -> nauka_erasure::FileManifest {
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 64,
+    };
     let data = format!("stress manifest number {i}");
     encode_file(data.as_bytes(), &cfg).unwrap().0
 }
 
 async fn init_cluster(nodes: &[Node]) {
-    let members: BTreeMap<u64, String> =
-        nodes.iter().map(|n| (n.app.id, n.addr.to_string())).collect();
+    let members: BTreeMap<u64, String> = nodes
+        .iter()
+        .map(|n| (n.app.id, n.addr.to_string()))
+        .collect();
     let c = PeerClient::connect(nodes[0].addr).await.unwrap();
     match admin_call(&c, &AdminRequest::Init(members)).await.unwrap() {
         AdminResponse::Ok(_) => {}
@@ -154,7 +173,10 @@ async fn leader_crash_failover_and_catchup() {
     let client = PeerClient::connect(leader_addr).await.unwrap();
     for i in 0..BEFORE {
         let cmd = AppCommand::RegisterManifest(test_manifest(i));
-        match admin_call(&client, &AdminRequest::Write(cmd)).await.unwrap() {
+        match admin_call(&client, &AdminRequest::Write(cmd))
+            .await
+            .unwrap()
+        {
             AdminResponse::Ok(r) if r.ok => {}
             other => panic!("write {i}: {other:?}"),
         }
@@ -215,9 +237,15 @@ async fn leader_crash_failover_and_catchup() {
         }
     }
     let (endpoint, consensus_endpoint) = pair.expect("sockets never released");
-    let revived = RaftApp::start(leader_id, &dir.path().join("raft")).await.unwrap();
+    let revived = RaftApp::start(leader_id, &dir.path().join("raft"))
+        .await
+        .unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = revived.clone();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint, Some(handler.clone())));
+    tokio::spawn(serve_endpoint(
+        store.clone(),
+        endpoint,
+        Some(handler.clone()),
+    ));
     tokio::spawn(serve_consensus_endpoint(consensus_endpoint, handler));
 
     // It must catch up on the whole registry (snapshot or log replay).

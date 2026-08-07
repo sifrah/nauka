@@ -18,9 +18,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519,
-};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, PKCS_ED25519};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::RootCertStore;
 
@@ -34,7 +32,9 @@ const CA_CERT_FILE: &str = "cluster-ca.pem";
 fn ca_params() -> Result<CertificateParams> {
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.distinguished_name.push(DnType::CommonName, "yogfile-cluster-ca");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "yogfile-cluster-ca");
     Ok(params)
 }
 
@@ -69,7 +69,10 @@ pub fn generate_cluster_ca(dir: &Path) -> Result<()> {
     let key_path = dir.join(CA_KEY_FILE);
     let cert_path = dir.join(CA_CERT_FILE);
     if key_path.exists() || cert_path.exists() {
-        anyhow::bail!("{} already exists — manual removal required", key_path.display());
+        anyhow::bail!(
+            "{} already exists — manual removal required",
+            key_path.display()
+        );
     }
     let key = KeyPair::generate_for(&PKCS_ED25519)?;
     let cert = ca_params()?.self_signed(&key)?;
@@ -112,9 +115,13 @@ pub fn load_cluster_tls(keys_dir: &Path, identity_key_path: Option<&Path>) -> Re
         None => KeyPair::generate_for(&PKCS_ED25519)?,
     };
 
-    let fingerprint = blake3::hash(&identity_key.public_key_der()).to_hex().to_string();
+    let fingerprint = blake3::hash(&identity_key.public_key_der())
+        .to_hex()
+        .to_string();
     let node_id = u64::from_le_bytes(
-        blake3::hash(&identity_key.public_key_der()).as_bytes()[..8].try_into().unwrap(),
+        blake3::hash(&identity_key.public_key_der()).as_bytes()[..8]
+            .try_into()
+            .unwrap(),
     );
 
     // Participant certificate, signed by the cluster CA. The CA object is
@@ -122,7 +129,9 @@ pub fn load_cluster_tls(keys_dir: &Path, identity_key_path: Option<&Path>) -> Re
     // (issuer DN, signature) pair matters — the trust root shipped to peers
     // is still the stored ca.pem.
     let mut params = CertificateParams::new(vec![NODE_SAN.to_string()])?;
-    params.distinguished_name.push(DnType::CommonName, &fingerprint[..16]);
+    params
+        .distinguished_name
+        .push(DnType::CommonName, &fingerprint[..16]);
     let ca_cert = ca_params()?.self_signed(&ca_key)?;
     let cert = params.signed_by(&identity_key, &ca_cert, &ca_key)?;
 

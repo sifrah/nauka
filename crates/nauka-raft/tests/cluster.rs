@@ -27,7 +27,11 @@ async fn spawn_raft_node(id: u64) -> Node {
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
     tokio::spawn(serve_endpoint(store.clone(), data, Some(handler.clone())));
     tokio::spawn(serve_consensus_endpoint(consensus, handler));
-    Node { addr, app, _dir: dir }
+    Node {
+        addr,
+        app,
+        _dir: dir,
+    }
 }
 
 #[tokio::test]
@@ -53,8 +57,9 @@ async fn three_node_raft_replicates_manifest_registry() {
     // Wait for a leader to be elected.
     let mut leader = None;
     for _ in 0..50 {
-        if let AdminResponse::Metrics { leader: Some(l), .. } =
-            admin_call(&c1, &AdminRequest::Metrics).await.unwrap()
+        if let AdminResponse::Metrics {
+            leader: Some(l), ..
+        } = admin_call(&c1, &AdminRequest::Metrics).await.unwrap()
         {
             leader = Some(l);
             break;
@@ -65,7 +70,11 @@ async fn three_node_raft_replicates_manifest_registry() {
     assert!((1..=3).contains(&leader));
 
     // Write a manifest through write_via_leader (entry point does not matter).
-    let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
+    let cfg = ErasureConfig {
+        data_shards: 2,
+        parity_shards: 1,
+        shard_size: 64,
+    };
     let (manifest, _) = encode_file(b"file replicated by raft", &cfg).unwrap();
     let resp = write_via_leader(
         &nodes.iter().map(|n| n.addr).collect::<Vec<_>>(),
@@ -79,7 +88,12 @@ async fn three_node_raft_replicates_manifest_registry() {
     for node in &nodes {
         let mut found = false;
         for _ in 0..25 {
-            if node.app.app_state().manifests.contains_key(&manifest.file_hash) {
+            if node
+                .app
+                .app_state()
+                .manifests
+                .contains_key(&manifest.file_hash)
+            {
                 found = true;
                 break;
             }

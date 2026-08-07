@@ -53,22 +53,24 @@ pub fn make_client(bootstrap: Option<&[String]>) -> Result<Client> {
 
 /// Publishes the cluster's seed list (overwrites the previous version —
 /// pkarr timestamps packets and resolvers keep the most recent one).
-pub async fn publish_seeds(
-    client: &Client,
-    keypair: &Keypair,
-    addrs: &[SocketAddr],
-) -> Result<()> {
+pub async fn publish_seeds(client: &Client, keypair: &Keypair, addrs: &[SocketAddr]) -> Result<()> {
     let mut builder = SignedPacket::builder();
     for addr in addrs.iter().take(MAX_SEEDS) {
         builder = builder.txt(
             "_seeds".try_into().expect("valid DNS name"),
-            addr.to_string().as_str().try_into().expect("valid TXT value"),
+            addr.to_string()
+                .as_str()
+                .try_into()
+                .expect("valid TXT value"),
             RECORD_TTL_SECS,
         );
     }
     let packet = builder.sign(keypair)?;
     client.publish(&packet, None).await?;
-    info!("seeds published on the DHT: {} address(es)", addrs.len().min(MAX_SEEDS));
+    info!(
+        "seeds published on the DHT: {} address(es)",
+        addrs.len().min(MAX_SEEDS)
+    );
     Ok(())
 }
 
@@ -152,7 +154,10 @@ pub async fn detect_public_ip(bootstrap: Option<&[String]>) -> Result<Option<std
         }
         let dht = builder.build()?;
         dht.bootstrapped();
-        Ok(dht.info().public_address().map(|a| std::net::IpAddr::V4(*a.ip())))
+        Ok(dht
+            .info()
+            .public_address()
+            .map(|a| std::net::IpAddr::V4(*a.ip())))
     })
     .await?
 }
@@ -172,7 +177,9 @@ pub async fn run_publisher(
     loop {
         ticker.tick().await;
         // None = not the leader right now: stay silent (the leader publishes).
-        let Some(addrs) = current_seeds() else { continue };
+        let Some(addrs) = current_seeds() else {
+            continue;
+        };
         if addrs.is_empty() {
             continue;
         }

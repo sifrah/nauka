@@ -19,7 +19,10 @@ pub enum StoreError {
     #[error("manifest not found: {0}")]
     ManifestNotFound(ContentHash),
     #[error("corrupted shard on disk: expected {expected}, got {actual}")]
-    CorruptShard { expected: ContentHash, actual: ContentHash },
+    CorruptShard {
+        expected: ContentHash,
+        actual: ContentHash,
+    },
 }
 
 /// On-disk store of a node.
@@ -47,7 +50,9 @@ impl ShardStore {
     }
 
     fn manifest_path(&self, file_hash: &str) -> PathBuf {
-        self.root.join("manifests").join(format!("{file_hash}.json"))
+        self.root
+            .join("manifests")
+            .join(format!("{file_hash}.json"))
     }
 
     /// Writes a shard (idempotent: same content → same hash → same path).
@@ -69,11 +74,13 @@ impl ShardStore {
     /// Reads a shard and verifies its integrity before handing it back.
     pub fn get_shard(&self, hash: &str) -> Result<Vec<u8>, StoreError> {
         let path = self.shard_path(hash);
-        let data = fs::read(&path)
-            .map_err(|_| StoreError::ShardNotFound(hash.to_string()))?;
+        let data = fs::read(&path).map_err(|_| StoreError::ShardNotFound(hash.to_string()))?;
         let actual = hash_bytes(&data);
         if actual != hash {
-            return Err(StoreError::CorruptShard { expected: hash.to_string(), actual });
+            return Err(StoreError::CorruptShard {
+                expected: hash.to_string(),
+                actual,
+            });
         }
         Ok(data)
     }
@@ -93,14 +100,18 @@ impl ShardStore {
     pub fn put_manifest(&self, manifest: &FileManifest) -> Result<(), StoreError> {
         let path = self.manifest_path(&manifest.file_hash);
         // Manifests are rare and precious: keep the fsync here.
-        write_atomic(&path, serde_json::to_string_pretty(manifest)?.as_bytes(), true)?;
+        write_atomic(
+            &path,
+            serde_json::to_string_pretty(manifest)?.as_bytes(),
+            true,
+        )?;
         Ok(())
     }
 
     pub fn get_manifest(&self, file_hash: &str) -> Result<FileManifest, StoreError> {
         let path = self.manifest_path(file_hash);
-        let data = fs::read(&path)
-            .map_err(|_| StoreError::ManifestNotFound(file_hash.to_string()))?;
+        let data =
+            fs::read(&path).map_err(|_| StoreError::ManifestNotFound(file_hash.to_string()))?;
         Ok(serde_json::from_slice(&data)?)
     }
 
@@ -175,11 +186,17 @@ mod tests {
 
         // Silent on-disk corruption → caught at read time.
         fs::write(store.shard_path(&hash), b"tampered!!").unwrap();
-        assert!(matches!(store.get_shard(&hash), Err(StoreError::CorruptShard { .. })));
+        assert!(matches!(
+            store.get_shard(&hash),
+            Err(StoreError::CorruptShard { .. })
+        ));
 
         store.delete_shard(&hash).unwrap();
         assert!(!store.has_shard(&hash));
-        assert!(matches!(store.get_shard(&hash), Err(StoreError::ShardNotFound(_))));
+        assert!(matches!(
+            store.get_shard(&hash),
+            Err(StoreError::ShardNotFound(_))
+        ));
     }
 
     #[test]
@@ -187,7 +204,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ShardStore::open(dir.path()).unwrap();
 
-        let cfg = ErasureConfig { data_shards: 2, parity_shards: 1, shard_size: 64 };
+        let cfg = ErasureConfig {
+            data_shards: 2,
+            parity_shards: 1,
+            shard_size: 64,
+        };
         let (manifest, _) = encode_file(b"some file content", &cfg).unwrap();
         store.put_manifest(&manifest).unwrap();
 

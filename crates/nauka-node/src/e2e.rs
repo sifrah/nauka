@@ -6,8 +6,8 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use tokio_stream::StreamExt;
 use nauka_crypto::FileKey;
+use tokio_stream::StreamExt;
 
 #[derive(serde::Deserialize)]
 struct UploadResponse {
@@ -28,8 +28,8 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
         let src = file.to_path_buf();
         let dst = tmp.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut input = std::fs::File::open(&src)
-                .with_context(|| format!("reading {}", src.display()))?;
+            let mut input =
+                std::fs::File::open(&src).with_context(|| format!("reading {}", src.display()))?;
             let mut output = std::io::BufWriter::new(std::fs::File::create(&dst)?);
             nauka_crypto::encrypt(&key, &mut input, &mut output)?;
             use std::io::Write;
@@ -56,7 +56,11 @@ pub async fn upload(api: &str, file: &Path, public_name: Option<String>) -> Resu
             .await
             .with_context(|| format!("POST {url}"))?;
         if !resp.status().is_success() {
-            bail!("upload refused ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+            bail!(
+                "upload refused ({}): {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
         }
         let up: UploadResponse = resp.json().await?;
         Ok::<_, anyhow::Error>((up, ct_len))
@@ -84,9 +88,15 @@ pub async fn download(link: &str, output: &Path) -> Result<()> {
         ),
     };
 
-    let resp = reqwest::get(url).await.with_context(|| format!("GET {url}"))?;
+    let resp = reqwest::get(url)
+        .await
+        .with_context(|| format!("GET {url}"))?;
     if !resp.status().is_success() {
-        bail!("download refused ({}): {}", resp.status(), resp.text().await.unwrap_or_default());
+        bail!(
+            "download refused ({}): {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
     }
 
     // Streaming decryption: the network bytes feed a pipe read by the
@@ -120,7 +130,12 @@ pub async fn download(link: &str, output: &Path) -> Result<()> {
     }
     drop(writer); // EOF for the decoder
     decrypt_task.await?.map_err(|e| {
-        anyhow::anyhow!("{e:#}{}", net_err.map(|n| format!(" (network: {n})")).unwrap_or_default())
+        anyhow::anyhow!(
+            "{e:#}{}",
+            net_err
+                .map(|n| format!(" (network: {n})"))
+                .unwrap_or_default()
+        )
     })?;
 
     println!(
@@ -137,8 +152,14 @@ fn tempfile_path(source: &Path) -> Result<std::path::PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let base = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(dir.join(format!("yog-e2e-{stamp:x}-{}", base.chars().take(32).collect::<String>())))
+    let base = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(dir.join(format!(
+        "yog-e2e-{stamp:x}-{}",
+        base.chars().take(32).collect::<String>()
+    )))
 }
 
 fn urlencode(s: &str) -> String {

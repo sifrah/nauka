@@ -18,7 +18,10 @@ use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
 
 #[derive(Parser)]
-#[command(name = "nauka", about = "Nauka — distributed storage engine (erasure coding, self-healing, zero-config)")]
+#[command(
+    name = "nauka",
+    about = "Nauka — distributed storage engine (erasure coding, self-healing, zero-config)"
+)]
 struct Cli {
     /// Data directory of the node.
     #[arg(long, default_value = "./nauka-data")]
@@ -190,8 +193,7 @@ enum Cmd {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -224,17 +226,23 @@ async fn main() -> Result<()> {
         Cmd::Keygen { out } => {
             nauka_transport::generate_cluster_ca(&out)?;
             println!("cluster key generated in {}", out.display());
-            println!("  copy it to every node, then: serve --keys {}", out.display());
+            println!(
+                "  copy it to every node, then: serve --keys {}",
+                out.display()
+            );
         }
         Cmd::NodeInfo => {
-            let (node_id, fingerprint) =
-                node_tls.context("node-info requires --keys <dir>")?;
+            let (node_id, fingerprint) = node_tls.context("node-info requires --keys <dir>")?;
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
-        Cmd::Put { file, data_shards, parity_shards } => {
-            let data = std::fs::read(&file)
-                .with_context(|| format!("reading {}", file.display()))?;
+        Cmd::Put {
+            file,
+            data_shards,
+            parity_shards,
+        } => {
+            let data =
+                std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             let cfg = ErasureConfig {
                 data_shards,
                 parity_shards,
@@ -329,8 +337,11 @@ async fn main() -> Result<()> {
                 (None, id) => id,
             };
 
-            let boots: Option<Vec<String>> =
-                if dht_bootstrap.is_empty() { None } else { Some(dht_bootstrap.clone()) };
+            let boots: Option<Vec<String>> = if dht_bootstrap.is_empty() {
+                None
+            } else {
+                Some(dht_bootstrap.clone())
+            };
 
             // Address advertised to the other nodes: explicit
             // (--advertise), otherwise auto-detected through the DHT in
@@ -358,7 +369,9 @@ async fn main() -> Result<()> {
                             listen
                         }
                         Err(e) => {
-                            eprintln!("public IP detection failed ({e:#}) — falling back to {listen}");
+                            eprintln!(
+                                "public IP detection failed ({e:#}) — falling back to {listen}"
+                            );
                             listen
                         }
                     }
@@ -412,8 +425,7 @@ async fn main() -> Result<()> {
                         // state (placement weight) — on the first tick,
                         // then whenever it moves by more than 1%.
                         if app.members().contains_key(&app.id) {
-                            let cap = capacity
-                                .unwrap_or_else(|| filesystem_capacity(&data_dir_bg));
+                            let cap = capacity.unwrap_or_else(|| filesystem_capacity(&data_dir_bg));
                             let changed = match declared_capacity {
                                 None => true,
                                 Some(prev) => {
@@ -430,10 +442,7 @@ async fn main() -> Result<()> {
                                     .await
                                 {
                                     Ok(_) => {
-                                        eprintln!(
-                                            "capacity declared: {:.1} GB",
-                                            cap as f64 / 1e9
-                                        );
+                                        eprintln!("capacity declared: {:.1} GB", cap as f64 / 1e9);
                                         declared_capacity = Some(cap);
                                     }
                                     Err(e) => eprintln!("capacity declaration failed: {e:#}"),
@@ -453,8 +462,7 @@ async fn main() -> Result<()> {
                         // Expiration: the leader drops from the registry
                         // the files whose TTL has elapsed (once for the
                         // whole cluster, replication does the rest).
-                        let is_leader =
-                            app.raft.metrics().borrow().current_leader == Some(app.id);
+                        let is_leader = app.raft.metrics().borrow().current_leader == Some(app.id);
                         if is_leader {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -483,11 +491,8 @@ async fn main() -> Result<()> {
                             app.app_state().manifests.keys().cloned().collect();
                         let registry_ready = app.members().contains_key(&app.id)
                             && app.raft.metrics().borrow().current_leader.is_some();
-                        match nauka_cluster::healer::purge_deleted(
-                            &store_bg,
-                            &live,
-                            registry_ready,
-                        ) {
+                        match nauka_cluster::healer::purge_deleted(&store_bg, &live, registry_ready)
+                        {
                             Ok(p) if p.manifests_purged > 0 || p.orphans_purged > 0 => {
                                 eprintln!(
                                     "purge: {} manifest(s), {} orphan shard(s)",
@@ -501,8 +506,7 @@ async fn main() -> Result<()> {
                         if members.len() < 2 || !members.values().any(|a| *a == self_id) {
                             continue;
                         }
-                        let nodes =
-                            app.weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY);
+                        let nodes = app.weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY);
 
                         // Network coordinates: measure the RTTs to the
                         // peers, adjust our Vivaldi position, and publish
@@ -510,7 +514,9 @@ async fn main() -> Result<()> {
                         // spread a stripe's shards geographically.
                         let known = app.coords();
                         for (peer, _) in nodes.iter().filter(|(n, _)| *n != self_id) {
-                            let Ok(addr) = peer.parse::<SocketAddr>() else { continue };
+                            let Ok(addr) = peer.parse::<SocketAddr>() else {
+                                continue;
+                            };
                             let t0 = std::time::Instant::now();
                             let ok = match nauka_transport::PeerClient::connect(addr).await {
                                 Ok(c) => c.ping().await.is_ok(),
@@ -608,11 +614,15 @@ async fn main() -> Result<()> {
                     .await
                     .with_context(|| format!("node {id}: data plane {addr} does not answer"))?;
                 let cons_addr = nauka_transport::consensus_addr(addr);
-                let cons = PeerClient::connect_consensus(cons_addr).await.with_context(|| {
-                    format!("node {id}: consensus plane {cons_addr} unreachable")
-                })?;
-                match nauka_raft::admin_call(&cons, &nauka_raft::types::AdminRequest::Metrics).await {
-                    Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) if got == *id => {}
+                let cons = PeerClient::connect_consensus(cons_addr)
+                    .await
+                    .with_context(|| {
+                        format!("node {id}: consensus plane {cons_addr} unreachable")
+                    })?;
+                match nauka_raft::admin_call(&cons, &nauka_raft::types::AdminRequest::Metrics).await
+                {
+                    Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) if got == *id => {
+                    }
                     Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) => bail!(
                         "port collision: {cons_addr} answers with node-id {got} instead of \
                          {id} — space the ports by at least 2 on the same host"
@@ -622,12 +632,18 @@ async fn main() -> Result<()> {
             }
             let first: SocketAddr = map.values().next().unwrap().parse()?;
             let client = PeerClient::connect(first).await?;
-            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Init(map)).await? {
+            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Init(map))
+                .await?
+            {
                 nauka_raft::types::AdminResponse::Ok(_) => println!("cluster initialized"),
                 other => bail!("init failed: {other:?}"),
             }
         }
-        Cmd::Ban { file_hash, reason, peers } => {
+        Cmd::Ban {
+            file_hash,
+            reason,
+            peers,
+        } => {
             let resp = nauka_raft::write_via_leader(
                 &peers,
                 nauka_raft::types::AppCommand::BanHash {
@@ -638,7 +654,9 @@ async fn main() -> Result<()> {
             .await?;
             if resp.ok {
                 println!("banned: {file_hash} ({reason})");
-                println!("  removed from the registry, refused with 410, shards purged at the next GC");
+                println!(
+                    "  removed from the registry, refused with 410, shards purged at the next GC"
+                );
             } else {
                 bail!("ban refused");
             }
@@ -646,7 +664,9 @@ async fn main() -> Result<()> {
         Cmd::Unban { file_hash, peers } => {
             let resp = nauka_raft::write_via_leader(
                 &peers,
-                nauka_raft::types::AppCommand::UnbanHash { file_hash: file_hash.clone() },
+                nauka_raft::types::AppCommand::UnbanHash {
+                    file_hash: file_hash.clone(),
+                },
             )
             .await?;
             if resp.ok {
@@ -657,7 +677,8 @@ async fn main() -> Result<()> {
         }
         Cmd::ClusterMetrics { peer } => {
             let client = PeerClient::connect(peer).await?;
-            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Metrics).await? {
+            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Metrics).await?
+            {
                 nauka_raft::types::AdminResponse::Metrics {
                     id,
                     leader,
@@ -688,7 +709,10 @@ async fn main() -> Result<()> {
             // 1. Learner: the node catches up on the log/snapshot without voting.
             match nauka_raft::admin_via_leader(
                 &peers,
-                &AdminRequest::AddLearner { id, addr: addr.to_string() },
+                &AdminRequest::AddLearner {
+                    id,
+                    addr: addr.to_string(),
+                },
             )
             .await?
             {
@@ -696,7 +720,8 @@ async fn main() -> Result<()> {
                 other => bail!("add-learner: {other:?}"),
             }
             // 2. Promotion to voter: membership = current members + it.
-            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await? {
+            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await?
+            {
                 AdminResponse::Metrics { members, .. } => members,
                 other => bail!("metrics: {other:?}"),
             };
@@ -704,16 +729,20 @@ async fn main() -> Result<()> {
             if !ids.contains(&id) {
                 ids.push(id);
             }
-            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
+            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await?
+            {
                 AdminResponse::Ok(_) => {
-                    println!("node {id} promoted to voter — rebalancing will follow across the scrubs")
+                    println!(
+                        "node {id} promoted to voter — rebalancing will follow across the scrubs"
+                    )
                 }
                 other => bail!("change-membership: {other:?}"),
             }
         }
         Cmd::ClusterRemove { node_id, peers } => {
             use nauka_raft::types::{AdminRequest, AdminResponse};
-            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await? {
+            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await?
+            {
                 AdminResponse::Metrics { members, .. } => members,
                 other => bail!("metrics: {other:?}"),
             };
@@ -721,7 +750,8 @@ async fn main() -> Result<()> {
             if ids.len() == current.len() {
                 bail!("node {node_id} is not a member of the cluster");
             }
-            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await? {
+            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await?
+            {
                 AdminResponse::Ok(_) => println!(
                     "node {node_id} removed — leave it running long enough for the scrubs \
                      to re-replicate its shards, then shut it down"
@@ -729,7 +759,12 @@ async fn main() -> Result<()> {
                 other => bail!("change-membership: {other:?}"),
             }
         }
-        Cmd::PutRemote { file, peers, data_shards, parity_shards } => {
+        Cmd::PutRemote {
+            file,
+            peers,
+            data_shards,
+            parity_shards,
+        } => {
             use std::io::Read;
             let cfg = ErasureConfig {
                 data_shards,
@@ -891,7 +926,11 @@ async fn main() -> Result<()> {
                 clients.len(),
             );
         }
-        Cmd::GetRemote { file_hash, peers, output } => {
+        Cmd::GetRemote {
+            file_hash,
+            peers,
+            output,
+        } => {
             use std::io::Write;
             let clients = connect_all(&peers).await?;
             let manifest = fetch_manifest(&clients, &file_hash).await?;
@@ -933,8 +972,8 @@ async fn run_discovery(
     dht_kp: nauka_discovery::pkarr::Keypair,
     advertise: SocketAddr,
 ) {
-    use std::time::{Duration, Instant};
     use nauka_raft::types::{AdminRequest, AdminResponse};
+    use std::time::{Duration, Instant};
 
     /// DHT polling cadence.
     const POLL: Duration = Duration::from_secs(5);
@@ -957,19 +996,21 @@ async fn run_discovery(
                 let join = async {
                     match nauka_raft::admin_via_leader(
                         &seeds,
-                        &AdminRequest::AddLearner { id: app.id, addr: advertise.to_string() },
+                        &AdminRequest::AddLearner {
+                            id: app.id,
+                            addr: advertise.to_string(),
+                        },
                     )
                     .await?
                     {
                         AdminResponse::Ok(_) => {}
                         other => bail!("add-learner: {other:?}"),
                     }
-                    let members = match nauka_raft::admin_via_leader(&seeds, &AdminRequest::Metrics)
-                        .await?
-                    {
-                        AdminResponse::Metrics { members, .. } => members,
-                        other => bail!("metrics: {other:?}"),
-                    };
+                    let members =
+                        match nauka_raft::admin_via_leader(&seeds, &AdminRequest::Metrics).await? {
+                            AdminResponse::Metrics { members, .. } => members,
+                            other => bail!("metrics: {other:?}"),
+                        };
                     let mut ids: Vec<u64> = members.keys().copied().collect();
                     if !ids.contains(&app.id) {
                         ids.push(app.id);
@@ -1007,7 +1048,9 @@ async fn run_discovery(
                     let mut members = std::collections::BTreeMap::new();
                     members.insert(
                         app.id,
-                        nauka_raft::openraft::BasicNode { addr: advertise.to_string() },
+                        nauka_raft::openraft::BasicNode {
+                            addr: advertise.to_string(),
+                        },
                     );
                     match app.raft.initialize(members).await {
                         Ok(()) => {

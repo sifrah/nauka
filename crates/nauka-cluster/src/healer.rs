@@ -8,10 +8,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use tracing::{info, warn};
 use nauka_erasure::{decode_stripe, encode_stripe, FileManifest};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
+use tracing::{info, warn};
 
 #[derive(Debug, Default)]
 pub struct HealReport {
@@ -116,7 +116,10 @@ pub async fn gc_once_geo(
                 coords,
             );
             for (i, hash) in stripe.shard_hashes.iter().enumerate() {
-                owners.entry(hash.clone()).or_default().insert(stripe_owners[i].to_string());
+                owners
+                    .entry(hash.clone())
+                    .or_default()
+                    .insert(stripe_owners[i].to_string());
             }
         }
     }
@@ -133,7 +136,9 @@ pub async fn gc_once_geo(
         }
         // We still hold the bytes, so we can DEMAND a proof of possession
         // before releasing them.
-        let Ok(local_data) = store.get_shard(&shard) else { continue };
+        let Ok(local_data) = store.get_shard(&shard) else {
+            continue;
+        };
         let mut all_confirmed = true;
         for owner in shard_owners {
             let client = peers.entry(owner.clone()).or_insert_with(|| None);
@@ -203,8 +208,10 @@ pub async fn scrub_once_geo(
             if store.get_shard(shard_hash).is_ok() {
                 continue;
             }
-            match heal_shard(store, &manifest, stripe_idx, shard_idx, &node_refs, self_id, &mut peers)
-                .await
+            match heal_shard(
+                store, &manifest, stripe_idx, shard_idx, &node_refs, self_id, &mut peers,
+            )
+            .await
             {
                 Ok(()) => {
                     info!(
