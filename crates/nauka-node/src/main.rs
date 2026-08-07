@@ -102,6 +102,13 @@ enum Cmd {
         /// Label to recognize the key later.
         #[arg(long)]
         name: Option<String>,
+        /// Use these exact credentials instead of generating a pair.
+        /// For reproducible setups (conformance CI, fixed dev keys);
+        /// both must be given together.
+        #[arg(long, requires = "secret_key")]
+        access_key: Option<String>,
+        #[arg(long, requires = "access_key")]
+        secret_key: Option<String>,
         #[arg(long, default_value = "127.0.0.1:7311")]
         peer: SocketAddr,
     },
@@ -302,12 +309,26 @@ async fn main() -> Result<()> {
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
-        Cmd::S3KeyCreate { name, peer } => {
+        Cmd::S3KeyCreate {
+            name,
+            access_key,
+            secret_key,
+            peer,
+        } => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let cred = nauka_s3::generate_credential(name, now);
+            let cred = match (access_key, secret_key) {
+                (Some(ak), Some(sk)) => nauka_s3::Credential {
+                    access_key_id: ak,
+                    secret_access_key: sk,
+                    name,
+                    created_at: now,
+                    buckets: None,
+                },
+                _ => nauka_s3::generate_credential(name, now),
+            };
             // The secret is printed once and never again: the cluster keeps
             // it to verify signatures, but nothing else ever displays it.
             let secret = cred.secret_access_key.clone();

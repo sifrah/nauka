@@ -14,10 +14,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use s3s::auth::{S3Auth, SecretKey};
-use s3s::dto::*;
+use s3s::dto::{ObjectVersion as S3ObjectVersion, *};
 use s3s::{s3_error, Body, S3Request, S3Response, S3Result, S3};
 
 use crate::api::ApiState;
+
+/// Percent-encoding set for keys in ListObjectVersions responses (RFC 3986
+/// unreserved plus `/`, everything else encoded — matching what clients
+/// url-decode back).
+const VERSION_KEY_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'/');
 
 /// Bridges SigV4 to the replicated credential store. `s3s` verifies the
 /// signature itself; we only supply the secret for an access key, so the
@@ -79,6 +89,35 @@ impl NaukaS3 {
             .cloned()
             .ok_or_else(|| s3_error!(NoSuchBucket))
     }
+
+    /// URL-encodes a listing value when the client asked for
+    /// `encoding-type=url`. S3 percent-encodes Key, Prefix, Delimiter and
+    /// the markers (RFC 3986, space as %20 — never `+`), and the client
+    /// decodes them back; without it a key containing `+` or a control
+    /// character would be ambiguous in the XML.
+    fn enc(value: String, encoding: &Option<EncodingType>) -> String {
+        match encoding {
+            Some(e) if e.as_str() == EncodingType::URL => {
+                const SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+                    .remove(b'-')
+                    .remove(b'_')
+                    .remove(b'.')
+                    .remove(b'~')
+                    .remove(b'/');
+                percent_encoding::utf8_percent_encode(&value, SET).to_string()
+            }
+            _ => value,
+        }
+    }
+
+    /// The Owner block S3 attaches to a listed object. Single-tenant: the
+    /// object's owner is the credential that created it (or the cluster).
+    fn owner_of(&self, _v: &nauka_s3::ObjectVersion) -> Owner {
+        Owner {
+            display_name: Some("nauka".into()),
+            id: Some("nauka".into()),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -92,10 +131,14 @@ impl S3 for NaukaS3 {
             return Err(s3_error!(InvalidBucketName));
         }
         if self.state.app.app_state().s3.buckets.contains_key(&name) {
-            // AWS answers BucketAlreadyOwnedByYou to the owner, and
-            // BucketAlreadyExists to anyone else. Single-tenant clusters
-            // only ever hit the first.
-            return Err(s3_error!(BucketAlreadyOwnedByYou));
+            // In us-east-1 — the region every client defaults to against a
+            // custom endpoint — recreating a bucket you already own is a
+            // no-op success, not an error. (Other regions answer
+            // BucketAlreadyOwnedByYou; a single-tenant cluster is
+            // effectively us-east-1.)
+            return Ok(S3Response::new(CreateBucketOutput {
+                location: Some(format!("/{name}")),
+            }));
         }
         let bucket = nauka_s3::Bucket {
             created_at: Self::now(),
@@ -211,9 +254,28 @@ impl S3 for NaukaS3 {
         };
 
         let etag = nauka_s3::naming::etag_single(&md5);
+        // S3 stores these headers verbatim and replays them on GET/HEAD.
+        let mut system_metadata = BTreeMap::new();
+        if let Some(v) = &input.cache_control {
+            system_metadata.insert("cache-control".into(), v.clone());
+        }
+        if let Some(v) = &input.content_disposition {
+            system_metadata.insert("content-disposition".into(), v.clone());
+        }
+        if let Some(v) = &input.content_encoding {
+            system_metadata.insert("content-encoding".into(), v.clone());
+        }
+        if let Some(v) = &input.content_language {
+            system_metadata.insert("content-language".into(), v.clone());
+        }
+        if let Some(v) = &input.expires {
+            let odt: time::OffsetDateTime = v.clone().into();
+            system_metadata.insert("expires".into(), odt.unix_timestamp().to_string());
+        }
         let version = nauka_s3::ObjectVersion {
             version_id: "null".into(),
             content,
+            delete_marker: false,
             size,
             etag: etag.clone(),
             last_modified: Self::now(),
@@ -222,7 +284,7 @@ impl S3 for NaukaS3 {
                 .metadata
                 .map(|m| m.into_iter().collect())
                 .unwrap_or_default(),
-            system_metadata: BTreeMap::new(),
+            system_metadata,
             storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
             tags: BTreeMap::new(),
             checksums: BTreeMap::new(),
@@ -256,11 +318,19 @@ impl S3 for NaukaS3 {
         let v = entry
             .current_content()
             .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let sys = |k: &str| v.system_metadata.get(k).cloned();
         Ok(S3Response::new(HeadObjectOutput {
             content_length: Some(v.size as i64),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
             content_type: v.content_type.clone(),
+            cache_control: sys("cache-control"),
+            content_disposition: sys("content-disposition"),
+            content_encoding: sys("content-encoding"),
+            content_language: sys("content-language"),
+            expires: sys("expires")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Self::timestamp),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
             ..Default::default()
         }))
@@ -317,13 +387,33 @@ impl S3 for NaukaS3 {
             }
         };
 
+        // A response header override lets the client ask GET to echo a
+        // different value (?response-cache-control=…), which S3 supports.
+        let sys = |k: &str| v.system_metadata.get(k).cloned();
         Ok(S3Response::new(GetObjectOutput {
             body: Some(body),
             content_length: Some(length as i64),
             content_range: partial.then(|| format!("bytes {start}-{end}/{}", v.size)),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
-            content_type: v.content_type.clone(),
+            content_type: input
+                .response_content_type
+                .or_else(|| v.content_type.clone()),
+            cache_control: input
+                .response_cache_control
+                .or_else(|| sys("cache-control")),
+            content_disposition: input
+                .response_content_disposition
+                .or_else(|| sys("content-disposition")),
+            content_encoding: input
+                .response_content_encoding
+                .or_else(|| sys("content-encoding")),
+            content_language: input
+                .response_content_language
+                .or_else(|| sys("content-language")),
+            expires: sys("expires")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Self::timestamp),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
             ..Default::default()
         }))
@@ -343,6 +433,21 @@ impl S3 for NaukaS3 {
                 return Err(s3_error!(NotImplemented, "access point copy sources"))
             }
         };
+        // COPY (the default) keeps the source metadata; REPLACE takes it
+        // from the request.
+        let replace = input
+            .metadata_directive
+            .as_ref()
+            .is_some_and(|d| d.as_str() == MetadataDirective::REPLACE);
+        // Copying a key onto itself is only allowed when it changes the
+        // metadata; otherwise S3 rejects it as a pointless request.
+        if src_bucket == input.bucket && src_key == input.key && !replace {
+            return Err(s3_error!(
+                InvalidRequest,
+                "This copy request is illegal because it is trying to copy \
+                 an object to itself without changing the object's metadata"
+            ));
+        }
         let s3 = self.state.app.app_state().s3;
         let source = s3
             .objects
@@ -362,15 +467,10 @@ impl S3 for NaukaS3 {
         // The copy shares the source's shards: content addressing makes
         // this free, and the derived refcount keeps both alive until the
         // last key referencing them goes.
-        // COPY (the default) keeps the source metadata; REPLACE takes it
-        // from the request.
-        let replace = input
-            .metadata_directive
-            .as_ref()
-            .is_some_and(|d| d.as_str() == MetadataDirective::REPLACE);
         let now = Self::now();
         let copy = nauka_s3::ObjectVersion {
             version_id: "null".into(),
+            delete_marker: false,
             last_modified: now,
             content_type: if replace {
                 input.content_type.clone()
@@ -518,7 +618,7 @@ impl S3 for NaukaS3 {
         req: S3Request<CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
         let input = req.input;
-        let upload = self
+        let upload = match self
             .state
             .app
             .app_state()
@@ -526,7 +626,33 @@ impl S3 for NaukaS3 {
             .uploads
             .get(&input.upload_id)
             .cloned()
-            .ok_or_else(|| s3_error!(NoSuchUpload))?;
+        {
+            Some(u) => u,
+            // Completing an already-completed upload is idempotent in S3:
+            // the object exists from the first Complete, so a repeat call
+            // returns 200 with that object rather than NoSuchUpload. (The
+            // suite's test_multipart_upload calls Complete twice on
+            // purpose.)
+            None => {
+                let existing = self
+                    .state
+                    .app
+                    .app_state()
+                    .s3
+                    .objects
+                    .get(&(input.bucket.clone(), input.key.clone()))
+                    .and_then(|e| e.current_content().cloned());
+                return match existing {
+                    Some(v) => Ok(S3Response::new(CompleteMultipartUploadOutput {
+                        bucket: Some(input.bucket),
+                        key: Some(input.key),
+                        e_tag: v.etag.parse().ok(),
+                        ..Default::default()
+                    })),
+                    None => Err(s3_error!(NoSuchUpload)),
+                };
+            }
+        };
         let requested = input
             .multipart_upload
             .and_then(|m| m.parts)
@@ -621,6 +747,7 @@ impl S3 for NaukaS3 {
         let version = nauka_s3::ObjectVersion {
             version_id: "null".into(),
             content: Some(content_hash),
+            delete_marker: false,
             size: total,
             etag: etag.clone(),
             last_modified: Self::now(),
@@ -812,7 +939,10 @@ impl S3 for NaukaS3 {
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();
-        let delimiter = req.input.delimiter.clone();
+        // An empty delimiter means "no delimiter" and must not echo back.
+        let delimiter = req.input.delimiter.clone().filter(|d| !d.is_empty());
+        let encoding = req.input.encoding_type.clone();
+        let want_owner = req.input.fetch_owner.unwrap_or(false);
         let start_after = req
             .input
             .continuation_token
@@ -832,45 +962,248 @@ impl S3 for NaukaS3 {
             if !key.starts_with(&prefix) {
                 continue;
             }
+            // The continuation token and StartAfter both mean "resume
+            // strictly after this key", so a key <= it is skipped.
             if start_after.as_ref().is_some_and(|s| key <= s) {
+                continue;
+            }
+            if entry.current_content().is_none() {
+                continue;
+            }
+            // Emitted keys AND common prefixes both count toward MaxKeys.
+            let emitted = contents.len() + prefixes.len();
+            // A delimiter rolls everything below it into a common prefix,
+            // which is how S3 fakes directories.
+            let rolled_prefix = delimiter.as_ref().and_then(|d| {
+                key[prefix.len()..]
+                    .find(d.as_str())
+                    .map(|idx| key[..prefix.len() + idx + d.len()].to_string())
+            });
+            // A prefix already seen does not consume another slot.
+            if let Some(p) = &rolled_prefix {
+                if prefixes.contains(p) {
+                    continue;
+                }
+            }
+            if emitted >= max_keys {
+                // One more matching item exists but does not fit: stop and
+                // point the next page at the last item we DID return.
+                // MaxKeys=0 is the exception — AWS returns an empty,
+                // non-truncated listing for it.
+                truncated = max_keys > 0;
+                break;
+            }
+            match rolled_prefix {
+                Some(p) => {
+                    next_token = Some(p.clone());
+                    prefixes.insert(p);
+                }
+                None => {
+                    let v = entry.current_content().unwrap();
+                    next_token = Some(key.clone());
+                    contents.push(Object {
+                        key: Some(Self::enc(key.clone(), &encoding)),
+                        size: Some(v.size as i64),
+                        e_tag: v.etag.parse().ok(),
+                        last_modified: Some(Self::timestamp(v.last_modified)),
+                        owner: want_owner.then(|| self.owner_of(v)),
+                        storage_class: Some(ObjectStorageClass::from_static(
+                            ObjectStorageClass::STANDARD,
+                        )),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        // The token only matters when the listing is truncated.
+        if !truncated {
+            next_token = None;
+        }
+
+        // KeyCount counts BOTH the returned keys and the rolled-up common
+        // prefixes — S3 treats a common prefix as one "key" for the count.
+        let key_count = contents.len() + prefixes.len();
+        Ok(S3Response::new(ListObjectsV2Output {
+            key_count: Some(key_count as i32),
+            max_keys: Some(max_keys as i32),
+            contents: Some(contents),
+            common_prefixes: Some(
+                prefixes
+                    .into_iter()
+                    .map(|p| CommonPrefix {
+                        prefix: Some(Self::enc(p, &encoding)),
+                    })
+                    .collect(),
+            ),
+            name: Some(bucket),
+            prefix: Some(Self::enc(prefix, &encoding)),
+            delimiter: delimiter.map(|d| Self::enc(d, &encoding)),
+            encoding_type: encoding.clone(),
+            // Echoed back verbatim, as S3 does, so a client can correlate.
+            continuation_token: req.input.continuation_token.clone(),
+            start_after: req.input.start_after.clone(),
+            is_truncated: Some(truncated),
+            next_continuation_token: next_token,
+            ..Default::default()
+        }))
+    }
+
+    async fn list_objects(
+        &self,
+        req: S3Request<ListObjectsInput>,
+    ) -> S3Result<S3Response<ListObjectsOutput>> {
+        // The v1 listing, kept for older clients. Same walk as v2, with the
+        // v1 marker/next-marker shape.
+        let bucket = req.input.bucket;
+        self.require_bucket(&bucket)?;
+        let s3 = self.state.app.app_state().s3;
+        let prefix = req.input.prefix.clone().unwrap_or_default();
+        let delimiter = req.input.delimiter.clone().filter(|d| !d.is_empty());
+        let encoding = req.input.encoding_type.clone();
+        let marker = req.input.marker.clone().unwrap_or_default();
+        let max_keys = req.input.max_keys.unwrap_or(1000).clamp(0, 1000) as usize;
+
+        let mut contents: Vec<Object> = Vec::new();
+        let mut prefixes: std::collections::BTreeSet<String> = Default::default();
+        let mut truncated = false;
+        let mut next_marker = None;
+
+        for ((b, key), entry) in s3.objects.range((bucket.clone(), String::new())..) {
+            if *b != bucket {
+                break;
+            }
+            if !key.starts_with(&prefix) || (!marker.is_empty() && key <= &marker) {
                 continue;
             }
             let Some(v) = entry.current_content() else {
                 continue;
             };
-            // A delimiter rolls everything below it into a common prefix,
-            // which is how S3 fakes directories.
             if let Some(d) = &delimiter {
                 if let Some(idx) = key[prefix.len()..].find(d.as_str()) {
                     prefixes.insert(key[..prefix.len() + idx + d.len()].to_string());
                     continue;
                 }
             }
-            if contents.len() >= max_keys {
-                truncated = true;
-                next_token = Some(key.clone());
+            if contents.len() + prefixes.len() >= max_keys {
+                // MaxKeys=0 yields an empty, non-truncated listing.
+                truncated = max_keys > 0;
+                // With a delimiter, NextMarker is the last key returned.
+                next_marker = contents.last().and_then(|o| o.key.clone());
                 break;
             }
             contents.push(Object {
-                key: Some(key.clone()),
+                key: Some(Self::enc(key.clone(), &encoding)),
                 size: Some(v.size as i64),
                 e_tag: v.etag.parse().ok(),
                 last_modified: Some(Self::timestamp(v.last_modified)),
-                storage_class: v
-                    .storage_class
-                    .clone()
-                    .map(ObjectStorageClass::from)
-                    .or(Some(ObjectStorageClass::from_static(
-                        ObjectStorageClass::STANDARD,
-                    ))),
+                storage_class: Some(ObjectStorageClass::from_static(
+                    ObjectStorageClass::STANDARD,
+                )),
                 ..Default::default()
             });
         }
+        if !truncated {
+            next_marker = None;
+        }
 
-        Ok(S3Response::new(ListObjectsV2Output {
-            key_count: Some(contents.len() as i32),
-            max_keys: Some(max_keys as i32),
+        Ok(S3Response::new(ListObjectsOutput {
             contents: Some(contents),
+            common_prefixes: Some(
+                prefixes
+                    .into_iter()
+                    .map(|p| CommonPrefix {
+                        prefix: Some(Self::enc(p, &encoding)),
+                    })
+                    .collect(),
+            ),
+            name: Some(bucket),
+            prefix: Some(Self::enc(prefix, &encoding)),
+            delimiter: delimiter.map(|d| Self::enc(d, &encoding)),
+            marker: Some(marker),
+            max_keys: Some(max_keys as i32),
+            is_truncated: Some(truncated),
+            next_marker,
+            encoding_type: encoding.clone(),
+            ..Default::default()
+        }))
+    }
+
+    async fn list_object_versions(
+        &self,
+        req: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        // Every version of every key, delete markers included. In an
+        // unversioned bucket each key has a single "null" version — which
+        // is exactly what the test suite's cleanup relies on to enumerate
+        // and delete objects, so this one method unblocks the whole run.
+        let bucket = req.input.bucket;
+        self.require_bucket(&bucket)?;
+        let s3 = self.state.app.app_state().s3;
+        let prefix = req.input.prefix.clone().unwrap_or_default();
+        let delimiter = req.input.delimiter.clone().filter(|d| !d.is_empty());
+        let encoding = req.input.encoding_type.clone();
+        let max_keys = req.input.max_keys.unwrap_or(1000).clamp(0, 1000) as usize;
+
+        let mut versions: Vec<S3ObjectVersion> = Vec::new();
+        let mut markers: Vec<DeleteMarkerEntry> = Vec::new();
+        let mut prefixes: std::collections::BTreeSet<String> = Default::default();
+        let mut count = 0usize;
+        let mut truncated = false;
+
+        'outer: for ((b, key), entry) in s3.objects.range((bucket.clone(), String::new())..) {
+            if *b != bucket || !key.starts_with(&prefix) {
+                if *b != bucket {
+                    break;
+                }
+                continue;
+            }
+            if let Some(d) = &delimiter {
+                if let Some(idx) = key[prefix.len()..].find(d.as_str()) {
+                    prefixes.insert(key[..prefix.len() + idx + d.len()].to_string());
+                    continue;
+                }
+            }
+            for (i, v) in entry.versions.iter().enumerate() {
+                if count >= max_keys {
+                    truncated = true;
+                    break 'outer;
+                }
+                count += 1;
+                let is_latest = i == 0;
+                // ListObjectVersions returns URL-encoded keys per the S3
+                // spec (clients decode them), unlike ListObjectsV2. Encode
+                // so a key with `+` or a space round-trips instead of
+                // arriving back with the wrong bytes.
+                let out_key =
+                    percent_encoding::utf8_percent_encode(key, VERSION_KEY_SET).to_string();
+                if v.is_delete_marker() {
+                    markers.push(DeleteMarkerEntry {
+                        key: Some(out_key.clone()),
+                        version_id: Some(v.version_id.clone()),
+                        is_latest: Some(is_latest),
+                        last_modified: Some(Self::timestamp(v.last_modified)),
+                        ..Default::default()
+                    });
+                } else {
+                    versions.push(S3ObjectVersion {
+                        key: Some(out_key),
+                        version_id: Some(v.version_id.clone()),
+                        is_latest: Some(is_latest),
+                        size: Some(v.size as i64),
+                        e_tag: v.etag.parse().ok(),
+                        last_modified: Some(Self::timestamp(v.last_modified)),
+                        storage_class: Some(ObjectVersionStorageClass::from_static(
+                            ObjectVersionStorageClass::STANDARD,
+                        )),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+
+        Ok(S3Response::new(ListObjectVersionsOutput {
+            versions: Some(versions),
+            delete_markers: Some(markers),
             common_prefixes: Some(
                 prefixes
                     .into_iter()
@@ -880,8 +1213,9 @@ impl S3 for NaukaS3 {
             name: Some(bucket),
             prefix: Some(prefix),
             delimiter,
+            encoding_type: encoding,
+            max_keys: Some(max_keys as i32),
             is_truncated: Some(truncated),
-            next_continuation_token: next_token,
             ..Default::default()
         }))
     }

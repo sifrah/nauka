@@ -70,8 +70,15 @@ pub enum VersioningState {
 pub struct ObjectVersion {
     /// "null" in an unversioned bucket, otherwise a generated id.
     pub version_id: String,
-    /// Manifest hash holding the bytes. `None` for a delete marker.
+    /// Manifest hash holding the bytes. `None` for a delete marker OR for
+    /// a legitimately empty (zero-byte) object — the two are told apart by
+    /// `delete_marker`, never by `content`, because an empty object is a
+    /// real object that must appear in listings and HEAD.
     pub content: Option<String>,
+    /// True only for a delete marker (a versioned deletion). A zero-byte
+    /// object has `content: None` and `delete_marker: false`.
+    #[serde(default)]
+    pub delete_marker: bool,
     pub size: u64,
     /// S3 ETag *with* its quotes, as it goes on the wire. A single-part
     /// object uses the MD5 of the content; a multipart one uses
@@ -107,7 +114,7 @@ pub struct ObjectVersion {
 
 impl ObjectVersion {
     pub fn is_delete_marker(&self) -> bool {
-        self.content.is_none()
+        self.delete_marker
     }
 }
 
@@ -125,7 +132,8 @@ impl ObjectEntry {
         self.versions.first()
     }
 
-    /// The newest version that actually holds bytes.
+    /// The newest version that is not a delete marker — an empty object
+    /// counts, a deleted key does not.
     pub fn current_content(&self) -> Option<&ObjectVersion> {
         self.versions.first().filter(|v| !v.is_delete_marker())
     }
@@ -256,6 +264,7 @@ mod tests {
         ObjectVersion {
             version_id: id.into(),
             content: content.map(String::from),
+            delete_marker: content.is_none(),
             size: 3,
             etag: "\"abc\"".into(),
             last_modified: 0,

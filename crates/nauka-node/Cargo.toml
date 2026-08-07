@@ -29,6 +29,7 @@ s3s = "0.14"
 async-trait = "0.1"
 md-5 = "0.10"
 time = "0.3"
+percent-encoding = "2"
 futures = "0.3"
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }

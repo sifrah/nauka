@@ -1,0 +1,61 @@
+name: S3 conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  s3-tests:
+    name: ceph/s3-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Build web interface
+        run: npm ci && npm run build
+        working-directory: webui
+
+      - name: Build nauka
+        run: cargo build --release --locked -p nauka-node
+
+      - name: Start a single-node cluster
+        run: |
+          BIN=target/release/nauka
+          TOKEN=$("$BIN" token 2>/dev/null)
+          echo "NAUKA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          NAUKA_TOKEN="$TOKEN" "$BIN" --data-dir ./nd \
+            serve --listen 127.0.0.1:7311 --http 127.0.0.1:8080 \
+            --s3 127.0.0.1:8000 --no-discover > node.log 2>&1 &
+          # Wait for the S3 endpoint to accept connections.
+          for i in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000 && break || sleep 1
+          done
+          ID=$("$BIN" --data-dir ./nd --token "$TOKEN" node-info | head -1 | awk '{print $3}')
+          "$BIN" --data-dir ./nd --token "$TOKEN" cluster-init "$ID@127.0.0.1:7311"
+          sleep 4
+          # The fixed credentials the suite's config expects.
+          reg() { "$BIN" --data-dir ./nd --token "$TOKEN" s3-key-create \
+            --name "$1" --access-key "$2" --secret-key "$3" --peer 127.0.0.1:7311; }
+          reg main   0555b35654ad1656d804 'h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
+          reg alt    NOPQRSTUVWXYZABCDEFG 'nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1'
+          reg tenant HIJKLMNOPQRSTUVWXYZA 'opqrstuvwxyzabcdefghijklmnopqrstuvwxyzab'
+          reg iam    ABCDEFGHIJKLMNOPQRST 'abcdefghijklmnopqrstuvwxyzabcdefghijklmn'
+
+      - name: Run the conformance suite
+        run: ./conformance/run.sh
+
+      - name: Node log on failure
+        if: failure()
+        run: tail -100 node.log

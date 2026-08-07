@@ -1819,6 +1819,7 @@ dependencies = [
  "nauka-s3",
  "nauka-store",
  "nauka-transport",
+ "percent-encoding",
  "rand 0.8.7",
  "reqwest",
  "rust-embed",
