@@ -82,13 +82,16 @@ pour chaque shard local :
   référencé par aucun manifest      → ignoré (orphelin, hors périmètre v1)
   dont je suis propriétaire         → gardé
   sinon : TOUS ses propriétaires actuels (un shard peut être partagé par
-  plusieurs fichiers) confirment le détenir (has_shard) ?
+  plusieurs fichiers) en apportent la PREUVE — blake3(nonce ‖ octets),
+  vérifiée contre notre copie locale ?
     oui → suppression locale
     non (ou injoignable) → gardé, retenté plus tard
 ```
 
-La règle « tous confirment, sinon on garde » garantit qu'on ne réduit
-jamais la redondance réelle du cluster en libérant trop tôt.
+La règle « tous prouvent, sinon on garde » garantit qu'on ne réduit jamais
+la redondance réelle du cluster en libérant trop tôt — et une preuve, à la
+différence d'un `has_shard` déclaratif, ne peut pas mentir (voir
+[Attestation de stockage](#attestation-de-stockage)).
 
 ## Membership à chaud
 
