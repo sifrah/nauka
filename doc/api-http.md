@@ -78,4 +78,18 @@ quelques centaines de ms sur le leader) :
   Raft ; il manque le nettoyage des shards orphelins).
 - Authentification, quotas, rate-limiting.
 - Uploads multipart / reprise d'upload interrompu.
-- UI web.
+
+## Interface web
+
+Chaque nœud sert la webui (si `webui/dist` existe, ou `--webui <dir>`) :
+pages Fichiers (upload chiffré drag & drop, trousseau local de clés,
+liens de partage), Cluster (statut live via `GET /api/status`), et
+`/d/{hash}#clé` (téléchargement + déchiffrement dans le navigateur).
+
+L'interface est dérivée de la webui de **ZeroFS**
+(https://github.com/Barre/ZeroFS, AGPL-3.0) — voir `webui/ATTRIBUTION.md`.
+Le chiffrement navigateur (WebCrypto AES-256-GCM) est compatible bit à bit
+avec `yog-crypto` : un fichier uploadé par la CLI se déchiffre dans le
+navigateur et réciproquement.
+
+Construire : `cd webui && npm install && npm run build`.

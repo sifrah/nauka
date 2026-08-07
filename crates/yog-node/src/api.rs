@@ -49,17 +49,92 @@ impl ApiState {
     }
 }
 
-pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> {
+pub async fn serve_http(
+    listen: SocketAddr,
+    state: Arc<ApiState>,
+    webui_dir: Option<PathBuf>,
+) -> Result<()> {
     tokio::fs::create_dir_all(&state.tmp_dir).await?;
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/api/upload", post(upload))
         .route("/api/files", get(files))
-        .route("/f/{hash}", get(download))
+        .route("/api/status", get(status))
+        .route("/f/{hash}", get(download).head(download_head))
         .with_state(state);
+    // Interface web (SPA) : fichiers statiques, et index.html pour les
+    // routes applicatives (/files, /dashboard, /d/<hash>).
+    if let Some(dir) = webui_dir {
+        let index = dir.join("index.html");
+        router = router.fallback_service(
+            tower_http::services::ServeDir::new(&dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        );
+        tracing::info!("webui servie depuis {}", dir.display());
+    }
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("API HTTP sur http://{listen}");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct NodeStatus {
+    addr: String,
+    capacity_bytes: u64,
+    is_leader: bool,
+    is_self: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ClusterStatusResponse {
+    self_addr: String,
+    leader: Option<String>,
+    nodes: Vec<NodeStatus>,
+    files: usize,
+    total_bytes: u64,
+}
+
+async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusResponse> {
+    let members = state.app.members();
+    let metrics = state.app.raft.metrics().borrow().clone();
+    let leader_addr = metrics.current_leader.and_then(|id| members.get(&id).cloned());
+    let app_state = state.app.app_state();
+    let nodes = state
+        .view()
+        .into_iter()
+        .map(|(addr, capacity_bytes)| NodeStatus {
+            is_leader: leader_addr.as_deref() == Some(addr.as_str()),
+            is_self: addr == state.self_id,
+            addr,
+            capacity_bytes,
+        })
+        .collect();
+    Json(ClusterStatusResponse {
+        self_addr: state.self_id.clone(),
+        leader: leader_addr,
+        nodes,
+        files: app_state.manifests.len(),
+        total_bytes: app_state.manifests.values().map(|m| m.file_size).sum(),
+    })
+}
+
+/// HEAD /f/{hash} : taille sans corps (la page de téléchargement s'en sert).
+async fn download_head(
+    State(state): State<Arc<ApiState>>,
+    Path(hash): Path<String>,
+) -> Response {
+    let manifest = match state.store.get_manifest(&hash) {
+        Ok(m) => m,
+        Err(_) => match state.app.app_state().manifests.get(&hash) {
+            Some(m) => m.clone(),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
+    };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, manifest.file_size)
+        .body(Body::empty())
+        .unwrap()
 }
 
 /// Erreur HTTP uniforme.

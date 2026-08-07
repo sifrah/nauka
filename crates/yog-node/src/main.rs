@@ -104,6 +104,10 @@ enum Cmd {
         /// Adresse de l'API HTTP publique (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
+        /// Répertoire de l'interface web à servir (dist de webui/).
+        /// Défaut : ./webui/dist s'il existe.
+        #[arg(long)]
+        webui: Option<PathBuf>,
         /// Désactive l'API HTTP.
         #[arg(long)]
         no_http: bool,
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
             node_id,
             capacity,
             http,
+            webui,
             no_http,
             no_discover,
             dht_bootstrap,
@@ -367,8 +372,12 @@ async fn main() -> Result<()> {
                         config: ErasureConfig::default(),
                         tmp_dir: cli.data_dir.join("tmp"),
                     });
+                    let webui_dir = webui.or_else(|| {
+                        let default = PathBuf::from("webui/dist");
+                        default.join("index.html").exists().then_some(default)
+                    });
                     tokio::spawn(async move {
-                        if let Err(e) = api::serve_http(http, api_state).await {
+                        if let Err(e) = api::serve_http(http, api_state, webui_dir).await {
                             eprintln!("API HTTP arrêtée: {e:#}");
                         }
                     });
