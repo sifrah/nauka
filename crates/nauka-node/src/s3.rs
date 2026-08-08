@@ -3659,6 +3659,9 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
                 .find_map(|p| p.strip_prefix("X-Amz-Expires="))
                 .map(String::from)
         });
+        let raw_path = req.uri().path().to_string();
+        let raw_query = req.uri().query().map(String::from);
+        let host_header = header("host");
         Box::pin(async move {
             if is_options {
                 // The preflight never reaches an S3 operation: it is
@@ -3690,6 +3693,19 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
                             .to_vec(),
                     ));
                     *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
+                    return Ok(resp);
+                }
+            }
+            // CDN offload: past our egress budget, big presigned GETs are
+            // redirected to the member with the most headroom, on a URL
+            // we sign for it.
+            if method == "GET" {
+                if let Some(resp) = maybe_offload_redirect(
+                    &state,
+                    &raw_path,
+                    raw_query.as_deref(),
+                    host_header.as_deref(),
+                ) {
                     return Ok(resp);
                 }
             }
@@ -3760,6 +3776,207 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
 fn path_bucket(path: &str) -> Option<String> {
     let bucket = path.trim_start_matches('/').split('/').next()?;
     (!bucket.is_empty()).then(|| bucket.to_string())
+}
+
+/// The `bucket/key` of a path-style object URL (percent-decoded key).
+fn path_object(path: &str) -> Option<(String, String)> {
+    let rest = path.trim_start_matches('/');
+    let (bucket, key) = rest.split_once('/')?;
+    if bucket.is_empty() || key.is_empty() {
+        return None;
+    }
+    let key = percent_encoding::percent_decode_str(key)
+        .decode_utf8_lossy()
+        .into_owned();
+    Some((bucket.to_string(), key))
+}
+
+/// Mints a presigned GET URL (SigV4 query auth) for `host` — which need
+/// not be THIS node: the credential registry is replicated, so any node
+/// can sign a URL that any other node will honour. This is what turns a
+/// 302 into a first-class routing tool.
+fn presign_get_url(
+    host: &str,
+    bucket: &str,
+    key: &str,
+    access_key: &str,
+    secret: &str,
+    expires_secs: u32,
+    now_secs: u64,
+) -> String {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let hmac = |k: &[u8], data: &str| -> Vec<u8> {
+        let mut m = <HmacSha256 as Mac>::new_from_slice(k).expect("hmac accepts any key length");
+        m.update(data.as_bytes());
+        m.finalize().into_bytes().to_vec()
+    };
+    let sha_hex = |data: &str| -> String {
+        use sha2::Digest;
+        format!("{:x}", sha2::Sha256::digest(data.as_bytes()))
+    };
+    let odt = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(now_secs as i64);
+    let datestamp = format!(
+        "{:04}{:02}{:02}",
+        odt.year(),
+        u8::from(odt.month()),
+        odt.day()
+    );
+    let amz_date = format!(
+        "{datestamp}T{:02}{:02}{:02}Z",
+        odt.hour(),
+        odt.minute(),
+        odt.second()
+    );
+    let scope = format!("{datestamp}/us-east-1/s3/aws4_request");
+    // Query-string encoding: RFC 3986 unreserved only.
+    const QS: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+    let enc = |s: &str| percent_encoding::utf8_percent_encode(s, QS).to_string();
+    // Path encoding: same set, but `/` stays.
+    const PS: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~')
+        .remove(b'/');
+    let uri = format!(
+        "/{bucket}/{}",
+        percent_encoding::utf8_percent_encode(key, PS)
+    );
+    // Sorted by parameter name, as SigV4 canonicalization requires.
+    let query = format!(
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential={}&X-Amz-Date={amz_date}\
+         &X-Amz-Expires={expires_secs}&X-Amz-SignedHeaders=host",
+        enc(&format!("{access_key}/{scope}"))
+    );
+    let canonical = format!("GET\n{uri}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD");
+    let to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha_hex(&canonical)
+    );
+    let k_date = hmac(format!("AWS4{secret}").as_bytes(), &datestamp);
+    let k_region = hmac(&k_date, "us-east-1");
+    let k_service = hmac(&k_region, "s3");
+    let k_signing = hmac(&k_service, "aws4_request");
+    let signature: String = hmac(&k_signing, &to_sign)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("http://{host}{uri}?{query}&X-Amz-Signature={signature}")
+}
+
+/// Objects below this size are always served directly: a redirect costs
+/// a round-trip, which only pays for itself on large transfers.
+const REDIRECT_MIN_SIZE: u64 = 8 * 1024 * 1024;
+
+/// CDN offload: when THIS node has exhausted its monthly egress budget,
+/// a presigned GET of a large object is answered with a 302 towards a
+/// freshly signed URL on the member with the most budget headroom — the
+/// egress leaves the right machine, and the client follows without
+/// noticing. Serving directly stays the answer whenever no better-funded
+/// member exists (deprioritized, never refused), for small objects, and
+/// for header-signed SDK requests (they do not re-sign across hosts).
+fn maybe_offload_redirect(
+    state: &Arc<ApiState>,
+    path: &str,
+    query: Option<&str>,
+    host: Option<&str>,
+) -> Option<hyper::Response<s3s::Body>> {
+    let query = query?;
+    let param = |name: &str| {
+        query.split('&').find_map(|p| {
+            p.strip_prefix(name)
+                .and_then(|v| v.strip_prefix('='))
+                .map(|v| {
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned()
+                })
+        })
+    };
+    // Presigned auth in either flavour: SigV4 (X-Amz-Signature +
+    // X-Amz-Credential) or SigV2 (Signature + AWSAccessKeyId). Header-
+    // signed SDK requests carry neither and are served directly.
+    let access_key = match (param("X-Amz-Signature"), param("Signature")) {
+        (Some(_), _) => {
+            param("X-Amz-Credential").and_then(|c| c.split('/').next().map(str::to_string))
+        }
+        (None, Some(_)) => param("AWSAccessKeyId"),
+        _ => None,
+    }?;
+    // Only when our own budget is spent.
+    let quota = state.egress.quota()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (month, served) = state.egress.snapshot(now);
+    if served < quota {
+        return None;
+    }
+    let (bucket, key) = path_object(path)?;
+    let bucket = tenant_suffix(&bucket).to_string();
+    let s3 = state.app.app_state().s3;
+    let size = s3
+        .objects
+        .get(&(bucket.clone(), key.clone()))?
+        .current_content()?
+        .size;
+    if size < REDIRECT_MIN_SIZE {
+        return None;
+    }
+    // The member with the most remaining budget — a node without a
+    // ledger is unmetered (infinite headroom). Everyone eligible is
+    // strictly better-funded than us (we are at zero), so a redirect can
+    // never ping-pong.
+    let app_state = state.app.app_state();
+    let target = state
+        .app
+        .members()
+        .into_values()
+        .filter(|addr| *addr != state.self_id)
+        .map(|addr| {
+            let ratio = crate::egress::remaining_ratio(app_state.node_egress.get(&addr), &month);
+            (addr, ratio)
+        })
+        .filter(|(_, ratio)| *ratio > 0.0)
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.cmp(&a.0))
+        })
+        .map(|(addr, _)| addr)?;
+    // Peer identity is "ip:raft_port"; the S3 endpoint lives on the same
+    // ip at the port the CLIENT used to reach us (uniform across a
+    // deployment).
+    let target_ip = target.rsplit_once(':').map(|(ip, _)| ip)?.to_string();
+    let port = host
+        .and_then(|h| h.rsplit_once(':').map(|(_, p)| p.to_string()))
+        .unwrap_or_else(|| "80".into());
+    // Same identity, fresh SigV4 signature the target will honour; its
+    // secret comes from the replicated registry.
+    let secret = s3.credentials.get(&access_key)?.secret_access_key.clone();
+    let url = presign_get_url(
+        &format!("{target_ip}:{port}"),
+        &bucket,
+        &key,
+        &access_key,
+        &secret,
+        300,
+        now,
+    );
+    let mut resp = hyper::Response::new(s3s::Body::from(Vec::new()));
+    *resp.status_mut() = hyper::StatusCode::FOUND;
+    if let Ok(v) = url.parse() {
+        resp.headers_mut().insert(hyper::header::LOCATION, v);
+        Some(resp)
+    } else {
+        None
+    }
 }
 
 /// What a matched CORS rule grants a request.

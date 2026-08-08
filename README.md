@@ -101,6 +101,38 @@ file always wins over saving a node's bandwidth, so an exhausted budget
 shifts load while alternatives exist and yields when they don't. The
 `egress declared:` log line reports each node's month-to-date total.
 
+## CDN: stripe cache and offload redirects
+
+Two opt-in features turn the cluster into a content-delivery network,
+built on the same primitives as everything else.
+
+**Per-node stripe cache** — decoded stripes that crossed the cluster
+once are kept on local disk and served directly afterwards:
+
+```bash
+NAUKA_CACHE_SIZE=10GB nauka serve …        # or --cache-size 10GB
+```
+
+Because content is addressed by BLAKE3, a cache entry can never go
+stale: an overwritten S3 object is a new manifest hash, so the old
+entry simply stops being asked for and ages out by LRU. Stripes that
+decode from local shards are not cached — they are already free. The
+cache follows the registry: entries of deleted or banned content are
+swept alongside the shard GC. Reconstruct once per region, serve many
+times locally.
+
+**Budget-driven offload redirects** — when a node has spent its monthly
+egress budget, a presigned GET of a large object (≥ 8 MiB) is answered
+with a `302` to a freshly signed URL on the member with the most budget
+headroom. The credential registry is replicated, so any node can sign a
+URL any other node will honour; the egress leaves the right machine and
+the client follows without noticing. Small objects, requests where no
+better-funded member exists, and header-signed SDK requests (which do
+not re-sign across hosts) are served directly. Combined with the cache,
+this is the routing layer of a CDN: DNS/anycast brings the client to a
+nearby node, the 302 moves the egress to the node that should pay it,
+and the cache makes the second hit free.
+
 ## Documentation
 
 The full documentation lives at **[getnauka.com](https://getnauka.com)**; its

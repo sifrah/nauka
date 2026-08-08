@@ -39,6 +39,9 @@ pub struct ApiState {
     /// This node's monthly egress ledger (bytes served to clients),
     /// published into the replicated state by the maintenance ticker.
     pub egress: Arc<crate::egress::EgressMeter>,
+    /// Opt-in stripe cache (`NAUKA_CACHE_SIZE`): decoded stripes that
+    /// crossed the cluster once are served from local disk after.
+    pub cache: Option<Arc<crate::cache::StripeCache>>,
 }
 
 impl ApiState {
@@ -499,7 +502,7 @@ pub(crate) async fn fetch_stripe_slots(
     stripe: &StripeMeta,
     stripe_idx: usize,
     m: &FileManifest,
-) -> Vec<Option<Vec<u8>>> {
+) -> (Vec<Option<Vec<u8>>>, bool) {
     let k = m.config.data_shards;
     let total = stripe.shard_hashes.len();
     let view_refs: Vec<(&str, u64)> = fetcher.view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
@@ -532,6 +535,7 @@ pub(crate) async fn fetch_stripe_slots(
     let order = crate::egress::rank_slots(&ratios);
 
     let mut slots: Vec<Option<Vec<u8>>> = vec![None; total];
+    let mut remote_used = false;
     let cut = k.min(total);
     for round in [&order[..cut], &order[cut..]] {
         if slots.iter().filter(|s| s.is_some()).count() >= k {
@@ -542,11 +546,12 @@ pub(crate) async fn fetch_stripe_slots(
             let h = stripe.shard_hashes[i].clone();
             async move { f.fetch(h).await.map(|d| (i, d)) }
         });
-        for (i, d) in futures_join_all(fetches).await.into_iter().flatten() {
+        for (i, (d, remote)) in futures_join_all(fetches).await.into_iter().flatten() {
+            remote_used |= remote;
             slots[i] = Some(d);
         }
     }
-    slots
+    (slots, remote_used)
 }
 
 pub(crate) async fn reconstruct_stripe(
@@ -555,8 +560,23 @@ pub(crate) async fn reconstruct_stripe(
     stripe_idx: usize,
     m: &FileManifest,
 ) -> Result<Vec<u8>> {
-    let slots = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
-    Ok(decode_stripe(slots, stripe, &m.config)?)
+    // The cache first: a decoded stripe under a content-addressed key can
+    // never be stale, only absent.
+    if let Some(cache) = &fetcher.state.cache {
+        if let Some(data) = cache.get(&m.file_hash, stripe_idx) {
+            return Ok(data);
+        }
+    }
+    let (slots, remote_used) = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
+    let data = decode_stripe(slots, stripe, &m.config)?;
+    // Only worth keeping when the bytes crossed the cluster: stripes that
+    // decode from local shards are already free.
+    if remote_used {
+        if let Some(cache) = &fetcher.state.cache {
+            cache.put(&m.file_hash, stripe_idx, &data);
+        }
+    }
+    Ok(data)
 }
 
 async fn download(
@@ -635,9 +655,9 @@ async fn download(
                 }
                 continue;
             }
-            // Budget-aware slot selection: any k of the k+m decode.
-            let slots = fetch_stripe_slots(&fetcher, stripe, stripe_idx, &m).await;
-            let data = match decode_stripe(slots, stripe, &m.config) {
+            // Budget-aware slot selection + stripe cache, shared with
+            // every other read path.
+            let data = match reconstruct_stripe(&fetcher, stripe, stripe_idx, &m).await {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
@@ -702,8 +722,7 @@ async fn serve_range(
             if offset > end {
                 break;
             }
-            let slots = fetch_stripe_slots(&fetcher, stripe, stripe_idx, &m).await;
-            let data = match decode_stripe(slots, stripe, &m.config) {
+            let data = match reconstruct_stripe(&fetcher, stripe, stripe_idx, &m).await {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
@@ -803,16 +822,18 @@ impl Fetcher {
     }
 
     /// Looks for a shard: locally first, then on every reachable member.
-    pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<Vec<u8>> {
+    /// The flag says whether the bytes crossed the network — what decides
+    /// if the decoded stripe is worth caching.
+    pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<(Vec<u8>, bool)> {
         if let Ok(data) = self.state.store.get_shard(&hash) {
-            return Some(data);
+            return Some((data, false));
         }
         for (node, _) in self.view.iter().filter(|(n, _)| *n != self.state.self_id) {
             let Some(client) = self.client_for(node).await else {
                 continue;
             };
             match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
-                Ok(Ok(Some(data))) => return Some(data),
+                Ok(Ok(Some(data))) => return Some((data, true)),
                 Ok(Ok(None)) => {}
                 // Error or timeout: the connection is suspect, we write it
                 // off for the rest of the request.

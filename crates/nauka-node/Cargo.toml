@@ -38,6 +38,7 @@ rand = "0.8"
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
+hmac = "0.12"
 anyhow.workspace = true
 axum = "0.8"
 blake3.workspace = true

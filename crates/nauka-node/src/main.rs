@@ -5,6 +5,7 @@
 //! HTTP API and the web UI of the Yogfile service built on top of it.
 
 mod api;
+mod cache;
 mod e2e;
 mod egress;
 mod s3;
@@ -164,6 +165,12 @@ enum Cmd {
         /// deprioritized, never refused. Unset = unmetered.
         #[arg(long, env = "NAUKA_EGRESS_QUOTA")]
         egress_quota: Option<String>,
+        /// Disk budget for the stripe cache — decoded stripes that
+        /// crossed the cluster once are then served from local disk.
+        /// Content-addressed, so entries never go stale; LRU eviction.
+        /// Unset = cache disabled.
+        #[arg(long, env = "NAUKA_CACHE_SIZE")]
+        cache_size: Option<String>,
         /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
@@ -471,6 +478,7 @@ async fn main() -> Result<()> {
             node_id,
             capacity,
             egress_quota,
+            cache_size,
             http,
             s3: s3_addr,
             no_s3,
@@ -487,6 +495,12 @@ async fn main() -> Result<()> {
             let egress_quota = match &egress_quota {
                 Some(raw) => Some(egress::parse_size(raw).with_context(|| {
                     format!("unreadable egress quota {raw:?} (try \"500GB\", \"20TB\", \"1TiB\")")
+                })?),
+                None => None,
+            };
+            let cache_budget = match &cache_size {
+                Some(raw) => Some(egress::parse_size(raw).with_context(|| {
+                    format!("unreadable cache size {raw:?} (try \"10GB\", \"512MiB\")")
                 })?),
                 None => None,
             };
@@ -626,6 +640,13 @@ async fn main() -> Result<()> {
                     tmp_dir: cli.data_dir.join("tmp"),
                     health: health.clone(),
                     egress: Arc::new(egress::EgressMeter::new(egress_quota, now_secs)),
+                    cache: match cache_budget {
+                        Some(budget) => Some(Arc::new(
+                            cache::StripeCache::open(cli.data_dir.join("cache"), budget)
+                                .context("opening the stripe cache")?,
+                        )),
+                        None => None,
+                    },
                 });
 
                 if !no_http {
@@ -653,6 +674,7 @@ async fn main() -> Result<()> {
                 let data_dir_bg = cli.data_dir.clone();
                 let health_bg = health.clone();
                 let meter_bg = api_state.egress.clone();
+                let cache_bg = api_state.cache.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
@@ -745,6 +767,17 @@ async fn main() -> Result<()> {
                             if store_bg.get_manifest(&manifest.file_hash).is_err() {
                                 let _ = store_bg.put_manifest(manifest);
                             }
+                        }
+                        // The stripe cache follows the registry the same
+                        // way the shard GC does: entries of deleted or
+                        // banned content are purged.
+                        if let Some(cache) = &cache_bg {
+                            let live: std::collections::HashSet<String> = state
+                                .manifests
+                                .values()
+                                .flat_map(cache::StripeCache::keys_of)
+                                .collect();
+                            cache.sweep(&live);
                         }
 
                         // Expiration: the leader drops from the registry
