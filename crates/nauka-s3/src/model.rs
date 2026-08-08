@@ -115,6 +115,12 @@ pub struct ObjectVersion {
     /// SSE algorithm applied, if any.
     #[serde(default)]
     pub sse: Option<String>,
+    /// Canonical user id of the object's owner: the uploader, unless a
+    /// full-control grant handed it to someone else at PUT time. `None`
+    /// on versions written before ownership existed — read as the bucket
+    /// owner's.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl ObjectVersion {
@@ -202,11 +208,23 @@ pub struct Credential {
     pub secret_access_key: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// The canonical user id shown in ACLs and matched by policy
+    /// principals. Defaults to the access key id when unset.
+    #[serde(default)]
+    pub user_id: Option<String>,
     pub created_at: u64,
-    /// None = full access (the cluster owner). Otherwise the buckets this
-    /// key may touch, with per-bucket permissions.
+    /// Extra per-bucket grants beyond the buckets this key owns (a key
+    /// always has full access to buckets it created). `None` means no
+    /// extra grants — ownership is the only door.
     #[serde(default)]
     pub buckets: Option<BTreeMap<String, BucketPermission>>,
+}
+
+impl Credential {
+    /// The canonical user id ACLs display and policies match.
+    pub fn canonical_id(&self) -> &str {
+        self.user_id.as_deref().unwrap_or(&self.access_key_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -298,6 +316,7 @@ mod tests {
             retention: None,
             legal_hold: false,
             sse: None,
+            owner: None,
         }
     }
 

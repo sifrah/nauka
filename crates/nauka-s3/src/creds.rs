@@ -30,6 +30,7 @@ pub fn generate_credential(name: Option<String>, now: u64) -> Credential {
         // 30 bytes of base64 give exactly the 40 characters AWS uses.
         secret_access_key: data_encoding::BASE64.encode(&secret_bytes),
         name,
+        user_id: None,
         created_at: now,
         buckets: None,
     }
@@ -45,16 +46,13 @@ pub enum Action {
 }
 
 impl Credential {
-    /// Whether this credential may perform `action` on `bucket`.
-    ///
-    /// `buckets: None` is the cluster-owner key: everything, everywhere.
-    /// Otherwise the grant must exist and carry the right permission —
-    /// absence is denial, never a default-allow.
+    /// Whether an EXPLICIT grant lets this credential perform `action` on
+    /// `bucket`. Ownership is not consulted here — a key always has full
+    /// access to buckets it created, and the endpoint checks that (plus
+    /// the bucket policy) separately. Absence of a grant is denial, never
+    /// a default-allow: each key is its own account, like on AWS.
     pub fn allows(&self, bucket: &str, action: Action) -> bool {
-        let Some(grants) = &self.buckets else {
-            return true;
-        };
-        let Some(p) = grants.get(bucket) else {
+        let Some(p) = self.buckets.as_ref().and_then(|g| g.get(bucket)) else {
             return false;
         };
         match action {
@@ -64,18 +62,25 @@ impl Credential {
         }
     }
 
-    /// The buckets this credential can see in a ListBuckets response.
-    pub fn visible_buckets<'a>(&self, all: impl Iterator<Item = &'a String>) -> Vec<String> {
-        match &self.buckets {
-            None => all.cloned().collect(),
-            Some(grants) => all
-                .filter(|b| grants.get(*b).is_some_and(|p| p.read || p.write))
-                .cloned()
-                .collect(),
-        }
+    /// The buckets this credential can see in a ListBuckets response:
+    /// the ones it owns, plus any it holds an explicit grant on.
+    pub fn visible_buckets<'a>(
+        &self,
+        all: impl Iterator<Item = (&'a String, &'a str)>,
+    ) -> Vec<String> {
+        all.filter(|(name, owner)| {
+            *owner == self.access_key_id
+                || self
+                    .buckets
+                    .as_ref()
+                    .and_then(|g| g.get(*name))
+                    .is_some_and(|p| p.read || p.write)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
     }
 
-    /// Restricts this credential to a set of buckets.
+    /// Adds explicit per-bucket grants to this credential.
     pub fn with_grants(mut self, grants: BTreeMap<String, BucketPermission>) -> Self {
         self.buckets = Some(grants);
         self
@@ -109,11 +114,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unrestricted_credential_owns_everything() {
+    fn a_credential_without_grants_is_an_ordinary_account() {
+        // No grant map does NOT mean cluster-wide access: each key is its
+        // own account, and only ownership (checked by the endpoint) or an
+        // explicit grant opens a bucket.
         let c = generate_credential(None, 0);
-        assert!(c.allows("anything", Action::Read));
-        assert!(c.allows("anything", Action::Write));
-        assert!(c.allows("anything", Action::Own));
+        assert!(!c.allows("anything", Action::Read));
+        assert!(!c.allows("anything", Action::Write));
+        assert!(!c.allows("anything", Action::Own));
     }
 
     #[test]
@@ -150,25 +158,38 @@ mod tests {
     }
 
     #[test]
-    fn list_buckets_only_shows_what_the_key_can_touch() {
-        let all = [
+    fn list_buckets_shows_owned_and_granted_buckets_only() {
+        let me = generate_credential(None, 0);
+        let names = [
             "photos".to_string(),
             "archive".to_string(),
             "secrets".to_string(),
         ];
-        let owner = generate_credential(None, 0);
-        assert_eq!(owner.visible_buckets(all.iter()).len(), 3);
+        // (bucket, owner access key): I own photos, someone else the rest.
+        let my_key = me.access_key_id.clone();
+        let world = || {
+            vec![
+                (&names[0], my_key.as_str()),
+                (&names[1], "SOMEONE-ELSE"),
+                (&names[2], "SOMEONE-ELSE"),
+            ]
+        };
+        assert_eq!(me.visible_buckets(world().into_iter()), vec!["photos"]);
 
+        // An explicit read grant makes a foreign bucket visible too.
         let mut grants = BTreeMap::new();
         grants.insert(
-            "photos".to_string(),
+            "archive".to_string(),
             BucketPermission {
                 read: true,
                 write: false,
                 owner: false,
             },
         );
-        let limited = generate_credential(None, 0).with_grants(grants);
-        assert_eq!(limited.visible_buckets(all.iter()), vec!["photos"]);
+        let granted = me.clone().with_grants(grants);
+        assert_eq!(
+            granted.visible_buckets(world().into_iter()),
+            vec!["photos", "archive"]
+        );
     }
 }

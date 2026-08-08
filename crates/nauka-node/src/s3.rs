@@ -309,6 +309,7 @@ impl NaukaS3 {
                     retention: None,
                     legal_hold: false,
                     sse: None,
+                    owner: None,
                 };
                 self.write(nauka_raft::types::AppCommand::PutObjectVersion {
                     bucket: bucket.to_string(),
@@ -331,6 +332,41 @@ impl NaukaS3 {
             display_name: Some("nauka".into()),
             id: Some("nauka".into()),
         }
+    }
+
+    /// The canonical user id behind an access key: what ACLs display and
+    /// policy principals match. Falls back to the access key itself for
+    /// keys registered without one.
+    fn canonical_id_of(&self, access_key: &str) -> String {
+        self.state
+            .app
+            .app_state()
+            .s3
+            .credentials
+            .get(access_key)
+            .map(|c| c.canonical_id().to_owned())
+            .unwrap_or_else(|| access_key.to_owned())
+    }
+
+    /// The owner an object written by this request carries: the id in an
+    /// `x-amz-grant-full-control: id=…` header when the writer hands the
+    /// object over (the S3 way to give the bucket owner the objects), the
+    /// writer's own canonical id otherwise.
+    fn object_owner_for(
+        &self,
+        credentials: Option<&s3s::auth::Credentials>,
+        grant_full_control: Option<&str>,
+    ) -> Option<String> {
+        if let Some(g) = grant_full_control {
+            if let Some(id) = g
+                .split(',')
+                .filter_map(|part| part.trim().strip_prefix("id="))
+                .next()
+            {
+                return Some(id.trim_matches('"').to_owned());
+            }
+        }
+        credentials.map(|c| self.canonical_id_of(&c.access_key))
     }
 }
 
@@ -416,9 +452,11 @@ impl S3 for NaukaS3 {
     ) -> S3Result<S3Response<ListBucketsOutput>> {
         let s3 = self.state.app.app_state().s3;
         let access_key = req.credentials.map(|c| c.access_key).unwrap_or_default();
+        let owned_and_granted = s3.buckets.iter().map(|(name, b)| (name, b.owner.as_str()));
         let visible = match s3.credentials.get(&access_key) {
-            Some(c) => c.visible_buckets(s3.buckets.keys()),
-            None => s3.buckets.keys().cloned().collect(),
+            Some(c) => c.visible_buckets(owned_and_granted),
+            // An unknown key (should not get this far) sees nothing.
+            None => Vec::new(),
         };
         let buckets: Vec<Bucket> = visible
             .into_iter()
@@ -546,6 +584,10 @@ impl S3 for NaukaS3 {
             retention,
             legal_hold,
             sse: None,
+            owner: self.object_owner_for(
+                req.credentials.as_ref(),
+                input.grant_full_control.as_deref(),
+            ),
         };
         // Announced on the response: the lifecycle rule that will expire
         // this key, decided at write time.
@@ -938,6 +980,199 @@ impl S3 for NaukaS3 {
             .await?;
         }
         Ok(S3Response::new(DeleteBucketCorsOutput::default()))
+    }
+
+    async fn put_bucket_policy(
+        &self,
+        req: S3Request<PutBucketPolicyInput>,
+    ) -> S3Result<S3Response<PutBucketPolicyOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let raw = req.input.policy;
+        let policy = match nauka_s3::Policy::parse(&raw) {
+            Ok(p) => p,
+            Err(nauka_s3::PolicyError::Malformed(m)) => {
+                return Err(S3Error::with_message(s3s::S3ErrorCode::MalformedPolicy, m))
+            }
+            Err(nauka_s3::PolicyError::InvalidArgument(m)) => {
+                return Err(s3_error!(InvalidArgument, "{m}"))
+            }
+        };
+        // BlockPublicPolicy does what it says: once set, a policy that
+        // would open the bucket to everyone is refused outright.
+        if let Some(pab) = bucket.public_access_block.as_deref().and_then(pab_from_xml) {
+            if pab.block_public_policy.unwrap_or(false) && policy.is_public() {
+                return Err(s3_error!(AccessDenied, "public policies are blocked"));
+            }
+        }
+        // Stored as the raw string: GET must round-trip the exact document.
+        bucket.policy = Some(raw);
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutBucketPolicyOutput::default()))
+    }
+
+    async fn get_bucket_policy(
+        &self,
+        req: S3Request<GetBucketPolicyInput>,
+    ) -> S3Result<S3Response<GetBucketPolicyOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let policy = bucket.policy.ok_or_else(|| {
+            S3Error::with_message(
+                s3s::S3ErrorCode::NoSuchBucketPolicy,
+                "The bucket policy does not exist",
+            )
+        })?;
+        Ok(S3Response::new(GetBucketPolicyOutput {
+            policy: Some(policy),
+        }))
+    }
+
+    async fn delete_bucket_policy(
+        &self,
+        req: S3Request<DeleteBucketPolicyInput>,
+    ) -> S3Result<S3Response<DeleteBucketPolicyOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        // Deleting an absent policy is still a 204, like the other
+        // bucket subresources.
+        if bucket.policy.take().is_some() {
+            self.write(nauka_raft::types::AppCommand::UpdateBucket {
+                name: req.input.bucket,
+                bucket: Box::new(bucket),
+            })
+            .await?;
+        }
+        Ok(S3Response::new(DeleteBucketPolicyOutput::default()))
+    }
+
+    async fn get_bucket_policy_status(
+        &self,
+        req: S3Request<GetBucketPolicyStatusInput>,
+    ) -> S3Result<S3Response<GetBucketPolicyStatusOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        // Public = a public canned ACL, or a policy granting to everyone.
+        let public_acl = matches!(
+            bucket.acl.as_deref(),
+            Some("public-read") | Some("public-read-write") | Some("authenticated-read")
+        );
+        let public_policy = bucket
+            .policy
+            .as_deref()
+            .and_then(|p| nauka_s3::Policy::parse(p).ok())
+            .is_some_and(|p| p.is_public());
+        Ok(S3Response::new(GetBucketPolicyStatusOutput {
+            policy_status: Some(PolicyStatus {
+                is_public: Some(public_acl || public_policy),
+            }),
+        }))
+    }
+
+    async fn put_public_access_block(
+        &self,
+        req: S3Request<PutPublicAccessBlockInput>,
+    ) -> S3Result<S3Response<PutPublicAccessBlockOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let mut buf = Vec::new();
+        let mut ser = s3s::xml::Serializer::new(&mut buf);
+        s3s::xml::Serialize::serialize(&req.input.public_access_block_configuration, &mut ser)
+            .map_err(|e| s3_error!(InternalError, "serializing the configuration: {e}"))?;
+        bucket.public_access_block =
+            Some(String::from_utf8(buf).map_err(|e| s3_error!(InternalError, "{e}"))?);
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutPublicAccessBlockOutput::default()))
+    }
+
+    async fn get_public_access_block(
+        &self,
+        req: S3Request<GetPublicAccessBlockInput>,
+    ) -> S3Result<S3Response<GetPublicAccessBlockOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = bucket
+            .public_access_block
+            .as_deref()
+            .and_then(pab_from_xml)
+            .ok_or_else(|| {
+                custom_error(
+                    "NoSuchPublicAccessBlockConfiguration",
+                    hyper::StatusCode::NOT_FOUND,
+                    "The public access block configuration was not found",
+                )
+            })?;
+        Ok(S3Response::new(GetPublicAccessBlockOutput {
+            public_access_block_configuration: Some(cfg),
+        }))
+    }
+
+    async fn delete_public_access_block(
+        &self,
+        req: S3Request<DeletePublicAccessBlockInput>,
+    ) -> S3Result<S3Response<DeletePublicAccessBlockOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        if bucket.public_access_block.take().is_some() {
+            self.write(nauka_raft::types::AppCommand::UpdateBucket {
+                name: req.input.bucket,
+                bucket: Box::new(bucket),
+            })
+            .await?;
+        }
+        Ok(S3Response::new(DeletePublicAccessBlockOutput::default()))
+    }
+
+    async fn get_object_acl(
+        &self,
+        req: S3Request<GetObjectAclInput>,
+    ) -> S3Result<S3Response<GetObjectAclOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3
+            .objects
+            .get(&(req.input.bucket.clone(), req.input.key.clone()))
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let version = match req.input.version_id.as_deref() {
+            Some(id) => entry.version(id).ok_or_else(|| s3_error!(NoSuchVersion))?,
+            None => entry
+                .current_content()
+                .ok_or_else(|| s3_error!(NoSuchKey))?,
+        };
+        // The object's ACL belongs to the OBJECT owner — which is not
+        // necessarily the bucket owner: an object uploaded by another key
+        // stays theirs unless a full-control grant handed it over. Old
+        // versions without an owner read as the bucket owner's.
+        let owner_id = version
+            .owner
+            .clone()
+            .unwrap_or_else(|| self.canonical_id_of(&bucket.owner));
+        let requester = req
+            .credentials
+            .as_ref()
+            .map(|c| self.canonical_id_of(&c.access_key))
+            .ok_or_else(|| s3_error!(AccessDenied, "Signature is required"))?;
+        if requester != owner_id {
+            return Err(s3_error!(AccessDenied));
+        }
+        Ok(S3Response::new(GetObjectAclOutput {
+            owner: Some(Owner {
+                id: Some(owner_id.clone()),
+                display_name: None,
+            }),
+            grants: Some(vec![Grant {
+                grantee: Some(Grantee {
+                    id: Some(owner_id),
+                    type_: Type::from_static(Type::CANONICAL_USER),
+                    display_name: None,
+                    email_address: None,
+                    uri: None,
+                }),
+                permission: Some(Permission::from_static(Permission::FULL_CONTROL)),
+            }]),
+            ..Default::default()
+        }))
     }
 
     async fn put_object_lock_configuration(
@@ -1419,6 +1654,9 @@ impl S3 for NaukaS3 {
             } else {
                 source.user_metadata.clone()
             },
+            // The copy is a new object owned by whoever made it, not by
+            // the source's owner.
+            owner: self.object_owner_for(req.credentials.as_ref(), None),
             ..source.clone()
         };
         let etag = copy.etag.clone();
@@ -1712,6 +1950,7 @@ impl S3 for NaukaS3 {
             retention: upload.retention.clone(),
             legal_hold: upload.legal_hold,
             sse: upload.sse.clone(),
+            owner: Some(self.canonical_id_of(&upload.owner)),
         };
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
             bucket: upload.bucket.clone(),
@@ -1895,7 +2134,9 @@ impl S3 for NaukaS3 {
         &self,
         req: S3Request<ListObjectsV2Input>,
     ) -> S3Result<S3Response<ListObjectsV2Output>> {
-        let bucket = req.input.bucket;
+        // Accepts the `tenant:bucket` form; the flat namespace makes it
+        // the same bucket.
+        let bucket = tenant_suffix(&req.input.bucket).to_string();
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();
@@ -2014,7 +2255,7 @@ impl S3 for NaukaS3 {
     ) -> S3Result<S3Response<ListObjectsOutput>> {
         // The v1 listing, kept for older clients. Same walk as v2, with the
         // v1 marker/next-marker shape.
-        let bucket = req.input.bucket;
+        let bucket = tenant_suffix(&req.input.bucket).to_string();
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();
@@ -2275,46 +2516,242 @@ fn uuid_like() -> String {
 }
 
 /// The access decision for a request `s3s` has already authenticated (or
-/// found unsigned). Signed requests pass; an anonymous one is allowed only
-/// to READ a bucket whose canned ACL is `public-read` — the S3 meaning of
-/// that ACL — and is denied everything else, exactly as the default did.
+/// found unsigned). Authorization is AWS-shaped:
+///
+/// 1. the bucket owner (the key that created it) may do anything to it;
+/// 2. an explicit per-bucket credential grant opens what it names;
+/// 3. the bucket policy is evaluated IAM-style — an Allow admits any
+///    principal it names (including anonymous), an explicit Deny is final;
+/// 4. anonymously, a `public-read` canned ACL still allows plain reads;
+/// 5. everything else is AccessDenied.
+///
+/// A bucket that does not exist passes through: the operation answers
+/// NoSuchBucket, which reveals nothing the name didn't.
 struct NaukaAccess {
     state: Arc<ApiState>,
+}
+
+/// The IAM action an operation asks for. Bucket subresource ops follow
+/// the `s3:{OpName}` convention closely enough that the fallback covers
+/// them; the object and listing ops that differ are mapped explicitly.
+fn s3_action_of(op: &str) -> String {
+    match op {
+        "ListObjects" | "ListObjectsV2" | "HeadBucket" => "s3:ListBucket".into(),
+        "ListObjectVersions" => "s3:ListBucketVersions".into(),
+        "ListMultipartUploads" => "s3:ListBucketMultipartUploads".into(),
+        "GetObject" | "HeadObject" | "GetObjectAttributes" => "s3:GetObject".into(),
+        // Every stage of writing an object is the same permission — with
+        // one caveat the conformance suite checks: they all evaluate
+        // against the OBJECT resource, never the bucket.
+        "PutObject"
+        | "CopyObject"
+        | "CreateMultipartUpload"
+        | "UploadPart"
+        | "UploadPartCopy"
+        | "CompleteMultipartUpload" => "s3:PutObject".into(),
+        "DeleteObject" | "DeleteObjects" => "s3:DeleteObject".into(),
+        "AbortMultipartUpload" => "s3:AbortMultipartUpload".into(),
+        "ListParts" => "s3:ListMultipartUploadParts".into(),
+        _ => format!("s3:{op}"),
+    }
+}
+
+/// The coarse grant class an operation needs, for the explicit per-bucket
+/// credential grants (`BucketPermission`).
+fn grant_class_of(op: &str, is_object: bool) -> nauka_s3::Action {
+    if op.starts_with("Get") || op.starts_with("Head") || op.starts_with("List") {
+        nauka_s3::Action::Read
+    } else if is_object || op == "DeleteObjects" {
+        nauka_s3::Action::Write
+    } else {
+        // Everything else touches the bucket itself or its configuration.
+        nauka_s3::Action::Own
+    }
+}
+
+/// Strips an RGW-style tenant prefix: `tenant:bucket` and `:bucket` both
+/// address `bucket`. Nauka is single-tenant — the syntax is accepted so
+/// tenanted clients (and the conformance suite's) can name buckets, but
+/// it resolves to the same flat namespace.
+fn tenant_suffix(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, b)| b)
+}
+
+/// Bucket names as AWS validates them, plus the `tenant:bucket` form.
+struct NaukaNameValidation;
+
+impl s3s::validation::NameValidation for NaukaNameValidation {
+    fn validate_bucket_name(&self, name: &str) -> bool {
+        match name.rsplit_once(':') {
+            Some((_, suffix)) => s3s::path::check_bucket_name(suffix),
+            None => s3s::path::check_bucket_name(name),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl s3s::access::S3Access for NaukaAccess {
     async fn check(&self, cx: &mut s3s::access::S3AccessContext<'_>) -> S3Result<()> {
-        if cx.credentials().is_some() {
+        use nauka_s3::policy::{Decision, Requester};
+
+        let op = cx.s3_op().name();
+        // The object-ACL ops authorize in their handlers: their owner is
+        // the OBJECT's owner, which only the object itself knows.
+        if matches!(op, "GetObjectAcl" | "PutObjectAcl") {
             return Ok(());
         }
-        // READ, not "any GET": bucket subresources (?cors, ?policy…) stay
-        // private even on a public-read bucket.
-        let readable = matches!(
-            cx.s3_op().name(),
-            "GetObject" | "HeadObject" | "HeadBucket" | "ListObjects" | "ListObjectsV2"
-        );
-        let bucket = match cx.s3_path() {
-            s3s::path::S3Path::Bucket { bucket } => bucket.to_string(),
-            s3s::path::S3Path::Object { bucket, .. } => bucket.to_string(),
+        let (bucket_raw, key) = match cx.s3_path() {
+            s3s::path::S3Path::Bucket { bucket } => (bucket.to_string(), None),
+            s3s::path::S3Path::Object { bucket, key } => {
+                (bucket.to_string(), Some(key.to_string()))
+            }
+            // The service root (ListBuckets): any signed identity, no
+            // anonymous listing.
             s3s::path::S3Path::Root => {
-                return Err(s3_error!(AccessDenied, "Signature is required"))
+                return if cx.credentials().is_some() {
+                    Ok(())
+                } else {
+                    Err(s3_error!(AccessDenied, "Signature is required"))
+                }
             }
         };
-        let public = self
-            .state
-            .app
-            .app_state()
-            .s3
-            .buckets
-            .get(&bucket)
-            .is_some_and(|b| b.acl.as_deref() == Some("public-read"));
-        if readable && public {
-            Ok(())
+        let bucket_name = tenant_suffix(&bucket_raw).to_string();
+        if op == "CreateBucket" {
+            // Any authenticated key may create buckets (it becomes their
+            // owner); anonymous creation is never allowed.
+            return if cx.credentials().is_some() {
+                Ok(())
+            } else {
+                Err(s3_error!(AccessDenied, "Signature is required"))
+            };
+        }
+        let s3 = self.state.app.app_state().s3;
+        let Some(b) = s3.buckets.get(&bucket_name) else {
+            return Ok(());
+        };
+
+        // 1–2: ownership, then explicit credential grants.
+        if let Some(c) = cx.credentials() {
+            if b.owner == c.access_key {
+                return Ok(());
+            }
+            if let Some(cred) = s3.credentials.get(&c.access_key) {
+                if cred.allows(&bucket_name, grant_class_of(op, key.is_some())) {
+                    return Ok(());
+                }
+            }
         } else {
-            Err(s3_error!(AccessDenied, "Signature is required"))
+            // READ, not "any GET": bucket subresources (?cors, ?policy…)
+            // stay private even on a public-read bucket.
+            let readable = matches!(
+                op,
+                "GetObject" | "HeadObject" | "HeadBucket" | "ListObjects" | "ListObjectsV2"
+            );
+            if readable && b.acl.as_deref() == Some("public-read") {
+                return Ok(());
+            }
+        }
+
+        // 3: the bucket policy.
+        let requester_id = cx.credentials().map(|c| {
+            self.state
+                .app
+                .app_state()
+                .s3
+                .credentials
+                .get(&c.access_key)
+                .map(|cr| cr.canonical_id().to_owned())
+                .unwrap_or_else(|| c.access_key.clone())
+        });
+        let who = match (cx.credentials(), &requester_id) {
+            (Some(c), Some(id)) => Requester::Key {
+                access_key: &c.access_key,
+                user_id: id,
+            },
+            _ => Requester::Anonymous,
+        };
+        if let Some(pol) = b
+            .policy
+            .as_deref()
+            .and_then(|p| nauka_s3::Policy::parse(p).ok())
+        {
+            let bucket_arn = format!("arn:aws:s3:::{bucket_name}");
+            let resource = match &key {
+                Some(k) => format!("arn:aws:s3:::{bucket_name}/{k}"),
+                None => bucket_arn.clone(),
+            };
+            let action = s3_action_of(op);
+            let ctx = policy_context(cx);
+            match pol.evaluate(who, &action, &resource, &ctx) {
+                Decision::Allow => return Ok(()),
+                Decision::Deny => return Err(s3_error!(AccessDenied)),
+                Decision::NoMatch => {
+                    // The AWS 404-vs-403 rule: a denied read of a key that
+                    // does not exist answers NoSuchKey when the caller
+                    // holds ListBucket for that name's prefix — they could
+                    // learn its absence by listing anyway — and stays an
+                    // opaque 403 otherwise.
+                    if let (true, Some(k)) = (matches!(op, "GetObject" | "HeadObject"), &key) {
+                        let gone = !s3.objects.contains_key(&(bucket_name.clone(), k.clone()));
+                        let mut lctx = ctx.clone();
+                        lctx.insert("s3:prefix".into(), k.clone());
+                        if gone
+                            && pol.evaluate(who, "s3:ListBucket", &bucket_arn, &lctx)
+                                == Decision::Allow
+                        {
+                            return Err(s3_error!(NoSuchKey));
+                        }
+                    }
+                }
+            }
+        }
+        Err(s3_error!(AccessDenied))
+    }
+}
+
+/// The condition context of one request: only the keys this request
+/// actually carries. Values come from the query string (the listing
+/// parameters) and the handful of headers policies condition on.
+fn policy_context(cx: &s3s::access::S3AccessContext<'_>) -> BTreeMap<String, String> {
+    let mut ctx = BTreeMap::new();
+    if let Some(q) = cx.uri().query() {
+        for pair in q.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let decode = |s: &str| {
+                percent_encoding::percent_decode_str(&s.replace('+', " "))
+                    .decode_utf8_lossy()
+                    .into_owned()
+            };
+            match k {
+                "prefix" => {
+                    ctx.insert("s3:prefix".into(), decode(v));
+                }
+                "delimiter" => {
+                    ctx.insert("s3:delimiter".into(), decode(v));
+                }
+                "max-keys" => {
+                    ctx.insert("s3:max-keys".into(), decode(v));
+                }
+                _ => {}
+            }
         }
     }
+    let header = |name: &str| {
+        cx.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    };
+    if let Some(v) = header("referer") {
+        ctx.insert("aws:Referer".into(), v);
+    }
+    if let Some(v) = header("x-amz-grant-full-control") {
+        ctx.insert("s3:x-amz-grant-full-control".into(), v);
+    }
+    if let Some(v) = header("x-amz-acl") {
+        ctx.insert("s3:x-amz-acl".into(), v);
+    }
+    ctx
 }
 
 /// Builds the S3 HTTP service: SigV4 against the replicated credentials,
@@ -2325,6 +2762,8 @@ pub fn service(state: Arc<ApiState>) -> s3s::service::S3Service {
         state: state.clone(),
     });
     builder.set_access(NaukaAccess { state });
+    // AWS naming rules plus the `tenant:bucket` form RGW clients use.
+    builder.set_validation(NaukaNameValidation);
     builder.build()
 }
 
@@ -2554,6 +2993,11 @@ fn insert_header(headers: &mut hyper::HeaderMap, name: &'static str, value: &str
 }
 
 fn cors_from_xml(xml: &str) -> Option<CORSConfiguration> {
+    let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
+    s3s::xml::Deserialize::deserialize(&mut de).ok()
+}
+
+fn pab_from_xml(xml: &str) -> Option<PublicAccessBlockConfiguration> {
     let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
     s3s::xml::Deserialize::deserialize(&mut de).ok()
 }

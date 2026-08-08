@@ -45,13 +45,14 @@ jobs:
           ID=$("$BIN" --data-dir ./nd --token "$TOKEN" node-info | head -1 | awk '{print $3}')
           "$BIN" --data-dir ./nd --token "$TOKEN" cluster-init "$ID@127.0.0.1:7311"
           sleep 4
-          # The fixed credentials the suite's config expects.
+          # The fixed credentials the suite's config expects; the user id
+          # is the canonical id ACL grants display and policies match.
           reg() { "$BIN" --data-dir ./nd --token "$TOKEN" s3-key-create \
-            --name "$1" --access-key "$2" --secret-key "$3" --peer 127.0.0.1:7311; }
-          reg main   0555b35654ad1656d804 'h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
-          reg alt    NOPQRSTUVWXYZABCDEFG 'nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1'
-          reg tenant HIJKLMNOPQRSTUVWXYZA 'opqrstuvwxyzabcdefghijklmnopqrstuvwxyzab'
-          reg iam    ABCDEFGHIJKLMNOPQRST 'abcdefghijklmnopqrstuvwxyzabcdefghijklmn'
+            --name "$1" --user-id "$2" --access-key "$3" --secret-key "$4" --peer 127.0.0.1:7311; }
+          reg main   testid 0555b35654ad1656d804 'h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
+          reg alt    56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234 NOPQRSTUVWXYZABCDEFG 'nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1'
+          reg tenant 9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef HIJKLMNOPQRSTUVWXYZA 'opqrstuvwxyzabcdefghijklmnopqrstuvwxyzab'
+          reg iam    9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef ABCDEFGHIJKLMNOPQRST 'abcdefghijklmnopqrstuvwxyzabcdefghijklmn'
 
       - name: Run the conformance suite
         run: ./conformance/run.sh

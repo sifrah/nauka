@@ -30,7 +30,6 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
 | `s3website` | Static website hosting + routing — the pinned suite carries NO website tests (`test_s3_website.py` was removed upstream), so this marker currently deselects nothing; it stays as documentation until a suite bump restores coverage | 5 |
 | `bucket_logging` | Server access logging | 5 |
-| `bucket_policy` | Bucket policies (IAM-style evaluation) | 6 |
 | `object_ownership` | Object ownership / bucket & object ACLs | 6 |
 | `sse_s3`, `encryption` | Server-side encryption (SSE-S3/C/KMS) | 6 |
 | `iam_account`, `iam_role`, `iam_user`, `webidentity_test` | Full AWS IAM / STS | 6 (partial) |
@@ -62,6 +61,18 @@ storage and validation, plus the `x-amz-expiration` header. The
 timing-based expiration tests (`lifecycle_expiration` + `fails_on_aws` /
 `fails_on_dbstore`) exercise RGW's compressed debug clock and stay out via
 those permanent markers, as they do on AWS itself.
+
+The `bucket_policy` marker and the `policy` name filter came off when
+bucket policies landed: Put/Get/Delete BucketPolicy, GetBucketPolicyStatus,
+Put/Get/Delete PublicAccessBlock (BlockPublicPolicy enforced at PUT), and
+IAM-style evaluation on every request — principals (`*`, named), actions,
+resource ARNs with wildcards, String* conditions with `IfExists`, explicit
+Deny overriding Allow, and the AWS 404-vs-403 rule for denied reads of
+missing keys when the caller holds `s3:ListBucket` for the prefix. Landing
+it also wired real authorization: a key is its own account (owns what it
+creates), cross-key access needs a policy or an explicit grant, and the
+RGW `tenant:bucket` addressing form resolves into the flat namespace. The
+`*policy_acl*` variants stay out with the `acl` filter until ACLs land.
 
 ## Individually deselected edge cases
 

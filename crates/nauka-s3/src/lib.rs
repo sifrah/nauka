@@ -13,9 +13,11 @@
 pub mod creds;
 pub mod model;
 pub mod naming;
+pub mod policy;
 
 pub use creds::{generate_credential, Action};
 pub use model::{
     new_version_id, Bucket, BucketPermission, Credential, MultipartUpload, ObjectEntry,
     ObjectVersion, S3State, UploadedPart, VersioningState,
 };
+pub use policy::{Decision, Policy, PolicyError, Requester};

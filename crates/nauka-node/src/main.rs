@@ -102,6 +102,10 @@ enum Cmd {
         /// Label to recognize the key later.
         #[arg(long)]
         name: Option<String>,
+        /// Canonical user id shown in ACLs and matched by bucket-policy
+        /// principals. Defaults to the access key id.
+        #[arg(long)]
+        user_id: Option<String>,
         /// Use these exact credentials instead of generating a pair.
         /// For reproducible setups (conformance CI, fixed dev keys);
         /// both must be given together.
@@ -311,6 +315,7 @@ async fn main() -> Result<()> {
         }
         Cmd::S3KeyCreate {
             name,
+            user_id,
             access_key,
             secret_key,
             peer,
@@ -324,10 +329,14 @@ async fn main() -> Result<()> {
                     access_key_id: ak,
                     secret_access_key: sk,
                     name,
+                    user_id,
                     created_at: now,
                     buckets: None,
                 },
-                _ => nauka_s3::generate_credential(name, now),
+                _ => nauka_s3::Credential {
+                    user_id,
+                    ..nauka_s3::generate_credential(name, now)
+                },
             };
             // The secret is printed once and never again: the cluster keeps
             // it to verify signatures, but nothing else ever displays it.
