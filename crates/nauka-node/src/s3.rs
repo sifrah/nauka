@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use s3s::auth::{S3Auth, SecretKey};
 use s3s::dto::{ObjectVersion as S3ObjectVersion, *};
-use s3s::{s3_error, Body, S3Request, S3Response, S3Result, S3};
+use s3s::{s3_error, Body, S3Error, S3Request, S3Response, S3Result, S3};
 
 use crate::api::ApiState;
 
@@ -1334,7 +1334,7 @@ fn check_preconditions(
     }
     if let Some(reject) = if_none_match {
         if matches(reject) {
-            return Err(s3_error!(NotModified));
+            return Err(not_modified(v));
         }
     }
     if let Some(since) = if_unmodified_since {
@@ -1344,10 +1344,33 @@ fn check_preconditions(
     }
     if let Some(since) = if_modified_since {
         if timestamp_secs(since).is_some_and(|s| v.last_modified <= s) {
-            return Err(s3_error!(NotModified));
+            return Err(not_modified(v));
         }
     }
     Ok(())
+}
+
+/// A 304 Not Modified that still carries the object's `ETag` and
+/// `Last-Modified` — S3 attaches both, and clients read them off the 304 to
+/// keep their cache in sync. A bare 304 (no headers) is what a naive error
+/// path produces, and it fails `test_get_object_ifnonematch_good`.
+fn not_modified(v: &nauka_s3::ObjectVersion) -> S3Error {
+    let mut err = s3_error!(NotModified);
+    let mut headers = hyper::HeaderMap::new();
+    if let Ok(etag) = v.etag.parse::<hyper::header::HeaderValue>() {
+        headers.insert(hyper::header::ETAG, etag);
+    }
+    let http_date = {
+        let odt: time::OffsetDateTime = NaukaS3::timestamp(v.last_modified).clone().into();
+        odt.format(&time::format_description::well_known::Rfc2822)
+            .ok()
+            .and_then(|s| s.parse::<hyper::header::HeaderValue>().ok())
+    };
+    if let Some(date) = http_date {
+        headers.insert(hyper::header::LAST_MODIFIED, date);
+    }
+    err.set_headers(headers);
+    err
 }
 
 fn timestamp_secs(t: &Timestamp) -> Option<u64> {

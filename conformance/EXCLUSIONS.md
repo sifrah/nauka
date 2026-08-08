@@ -58,9 +58,12 @@ are the only per-test exclusions; everything else in scope must pass.
 | --- | --- |
 | `test_object_delete_key_bucket_gone` | Uses an unauthenticated client — anonymous access (phase 6). |
 | `test_bucket_list_prefix_unreadable` | A raw control character (`\n`) in a prefix; the XML serializer percent-encodes it. Cosmetic, harmless. |
-| `test_get_object_ifnonematch_good` | Expects the `ETag` header on a `304 Not Modified`. Needs headers on an error response — a small gap in the error path. |
 | `test_multi_object_delete_key_limit`, `test_multi_objectv2_delete_key_limit` | Create 1000 objects then delete; a timing test, slow under a debug build. |
 | `test_multipart_resend_first_finishes_last` | Re-reads the part body multiple times via a fake file; an upload pattern no real client uses. |
+
+`test_get_object_ifnonematch_good` used to be here (the `304 Not Modified`
+was missing its `ETag`/`Last-Modified` headers) and is now in scope — the
+first exclusion paid back.
 
 ## In scope — must pass
 

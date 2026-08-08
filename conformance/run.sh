@@ -35,11 +35,10 @@ KEYWORDS='not acl and not access_bucket and not post_object and not anon and not
 
 # A handful of individual edge-case tests, deselected by full node id with
 # a reason each (see EXCLUSIONS.md): anonymous access, a control character
-# in a prefix, the ETag header on a 304, and a 1000-object timing test.
+# in a prefix, and a 1000-object timing test.
 DESELECT="
   --deselect s3tests/functional/test_s3.py::test_object_delete_key_bucket_gone
   --deselect s3tests/functional/test_s3.py::test_bucket_list_prefix_unreadable
-  --deselect s3tests/functional/test_s3.py::test_get_object_ifnonematch_good
   --deselect s3tests/functional/test_s3.py::test_multi_object_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multi_objectv2_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multipart_resend_first_finishes_last
