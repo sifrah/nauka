@@ -30,7 +30,7 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
 | `s3website` | Static website hosting + routing — the pinned suite carries NO website tests (`test_s3_website.py` was removed upstream), so this marker currently deselects nothing; it stays as documentation until a suite bump restores coverage | 5 |
 | `bucket_logging` | Server access logging | 5 |
-| `object_ownership` | Object ownership / bucket & object ACLs | 6 |
+| `object_ownership` | The ObjectOwnership setting (BucketOwnerEnforced &c.) — plain ACLs landed in phase 6, this marker's tests exercise the ownership-transfer knob | 6 |
 | `sse_s3`, `encryption` | Server-side encryption (SSE-S3/C/KMS) | 6 |
 | `iam_account`, `iam_role`, `iam_user`, `webidentity_test` | Full AWS IAM / STS | 6 (partial) |
 | `group`, `user_policy`, `role_policy`, `session_policy` | IAM policy attachment | 6 |
@@ -39,9 +39,9 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 ## Deferred, but unmarked by the suite
 
 Some phase-5/6 tests carry no pytest marker, so `run.sh` excludes them by
-name substring (`-k`): `website`, plus the ACL / POST / anonymous /
-presigned families. Same status as the marked ones above — they come off
-when the feature lands.
+name substring (`-k`): `website`, plus the POST / anonymous / presigned
+families. Same status as the marked ones above — they come off when the
+feature lands.
 
 The `cors` name filter came off when CORS landed: configuration storage,
 OPTIONS preflight and Access-Control-* response headers, plus just enough
@@ -71,8 +71,19 @@ Deny overriding Allow, and the AWS 404-vs-403 rule for denied reads of
 missing keys when the caller holds `s3:ListBucket` for the prefix. Landing
 it also wired real authorization: a key is its own account (owns what it
 creates), cross-key access needs a policy or an explicit grant, and the
-RGW `tenant:bucket` addressing form resolves into the flat namespace. The
-`*policy_acl*` variants stay out with the `acl` filter until ACLs land.
+RGW `tenant:bucket` addressing form resolves into the flat namespace.
+
+The `acl` and `access_bucket` name filters came off when full ACLs
+landed: grant lists on buckets and objects (canned ACLs expanded, group
+grants listed before canonical users), Get/Put Bucket/Object ACL with
+grantee validation (unknown user → InvalidArgument, email grantee →
+UnresolvableGrantByEmailAddress), display names resolved from the
+credential registry, and enforcement — bucket ACL governs listing (READ),
+key writes (WRITE) and the ACL subresource (READ_ACP/WRITE_ACP); the
+OBJECT ACL alone governs object reads; an explicit policy Deny beats any
+ACL; BlockPublicAcls refuses public ACLs at PUT and IgnorePublicAcls
+silences group grants at evaluation. Objects default to
+`binary/octet-stream` when the client sent no Content-Type, as AWS does.
 
 ## Individually deselected edge cases
 

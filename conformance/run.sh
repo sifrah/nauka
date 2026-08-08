@@ -31,7 +31,7 @@ EXCLUDE='not fails_on_rgw and not fails_on_aws and not fails_on_dbstore and not 
 # UploadPartCopy, cross-owner ops, and the versioning / object-lock / CORS /
 # checksum families whose tests the suite left unmarked. Documented in
 # EXCLUSIONS.md. Single logical line, same reason as above.
-KEYWORDS='not acl and not access_bucket and not post_object and not anon and not _raw_ and not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website'
+KEYWORDS='not post_object and not anon and not _raw_ and not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website'
 
 # A handful of individual edge-case tests, deselected by full node id with
 # a reason each (see EXCLUSIONS.md): anonymous access, a control character

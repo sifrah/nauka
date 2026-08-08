@@ -26,11 +26,16 @@ pub struct Bucket {
     pub created_at: u64,
     /// The access key that created it (its owner).
     pub owner: String,
-    /// The canned ACL set at creation (`public-read`, …). `None` means
-    /// `private`. Full ACL grants are phase-6; the canned value is what
-    /// anonymous-access decisions read.
+    /// The canned ACL last set (`public-read`, …). `None` means `private`
+    /// unless `acl_grants` holds an explicit list. Kept alongside the
+    /// expanded form because policy-status asks "was a public canned ACL
+    /// set" and older state carries only this field.
     #[serde(default)]
     pub acl: Option<String>,
+    /// Explicit grants set through PutBucketAcl with a grant list
+    /// (`acl::to_json`). Takes precedence over `acl` when present.
+    #[serde(default)]
+    pub acl_grants: Option<String>,
     pub versioning: VersioningState,
     /// Raw JSON of the bucket policy, evaluated at request time.
     #[serde(default)]
@@ -121,6 +126,10 @@ pub struct ObjectVersion {
     /// owner's.
     #[serde(default)]
     pub owner: Option<String>,
+    /// The object's ACL as serialized grants (`acl::to_json`). `None` is
+    /// the private default: owner FULL_CONTROL, nothing else.
+    #[serde(default)]
+    pub acl: Option<String>,
 }
 
 impl ObjectVersion {
@@ -317,6 +326,7 @@ mod tests {
             legal_hold: false,
             sse: None,
             owner: None,
+            acl: None,
         }
     }
 

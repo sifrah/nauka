@@ -10,6 +10,7 @@
 //! Raft ([`model`]) and the naming rules S3 imposes ([`naming`]). The HTTP
 //! half plugs it into the `s3s` service trait.
 
+pub mod acl;
 pub mod creds;
 pub mod model;
 pub mod naming;

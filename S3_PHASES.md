@@ -18,7 +18,8 @@ commit on `main`, each CI-green on a release build):
 | + Lifecycle | 178 | ✅ CI |
 | + CORS | 186 | ✅ CI |
 | + Checksums | 188 | ✅ CI |
-| + Bucket policies (phase 6 start) | 204 | local ✅, CI pending |
+| + Bucket policies (phase 6 start) | 204 | ✅ CI |
+| + Full ACLs (buckets + objects) | 250 | local ✅, CI pending |
 
 The suite has ~838 collectable tests; the rest are **excluded on purpose**
 and tracked in `conformance/EXCLUSIONS.md` (each exclusion is debt meant to
@@ -96,14 +97,30 @@ cases deselected by name with a reason.
     policy principals match it — CI + local registration now pass the
     suite's `user_id` values.
   - **Minimal object ownership**: `ObjectVersion.owner` = uploader's
-    canonical id, or the `id=` of `x-amz-grant-full-control` at PUT;
-    GetObjectAcl answers owner-only FULL_CONTROL grants (the
-    put_obj_grant test's semantics). Full ACLs remain TODO below.
-  - TODO next: object ownership / full ACLs (the `acl` + `access_bucket`
-    name families), then SSE-S3/C/KMS, POST-object (browser uploads),
-    presigned URLs (`anon` / `_raw_` families), bucket_logging (needs
-    policy-evaluation extras: service principals, SourceArn conditions),
-    event notifications.
+    canonical id, or the `id=` of `x-amz-grant-full-control` at PUT.
+  - **Full ACLs — DONE (250).** `nauka-s3::acl`: grant lists stored as
+    JSON on `Bucket.acl_grants` / `ObjectVersion.acl` (None = private:
+    owner FULL_CONTROL), canned ACLs expanded (groups before the owner —
+    the suite's comparison depends on that order), display names looked
+    up from credential `name` at read time (registration now uses the
+    conf display names: 'M. Tester', 'john.doe', …). Ops: Get/Put
+    Bucket/Object ACL (canned + AccessControlPolicy, grantee validation:
+    unknown canonical id → InvalidArgument, email →
+    UnresolvableGrantByEmailAddress), object ACL versioned via the
+    SetObjectAcl Raft command. Enforcement in the authorizer ladder:
+    owner → policy (explicit Deny is FINAL, before ACLs — the
+    policy_acl tests check this) → credential grants → ACLs (bucket ACL
+    = listing/writes/ACL subresource, OBJECT ACL alone = object reads)
+    → policy allow → the 404-vs-403 rule (now also satisfied by bucket
+    ACL READ, which keeps the anonymous CORS 404s working).
+    BlockPublicAcls refuses public ACLs at PUT (bucket + object canned),
+    IgnorePublicAcls mutes group grants at evaluation. PUTs without a
+    Content-Type now store `binary/octet-stream`, as AWS does.
+  - TODO next: SSE-S3/C/KMS (`sse_s3` + `encryption` markers),
+    POST-object (browser uploads), presigned URLs (`anon` / `_raw_`
+    families), object_ownership (the BucketOwnerEnforced knob),
+    bucket_logging (needs policy-evaluation extras: service principals,
+    SourceArn conditions), event notifications.
 
 ## How to run the gate locally
 
@@ -120,16 +137,17 @@ ID=$("$BIN" --data-dir ./nd --token "$TOKEN" node-info | head -1 | awk '{print $
 "$BIN" --data-dir ./nd --token "$TOKEN" cluster-init "$ID@127.0.0.1:7311"
 
 # 3. register the four fixed credentials the suite config expects
-#    (--user-id = the conf's user_id: ACL grantee ids must match it)
+#    (--user-id = the conf's user_id: ACL grantee ids must match it;
+#     --name = the conf's display_name: ACL responses show it)
 reg() { "$BIN" --data-dir ./nd --token "$TOKEN" s3-key-create --name "$1" --user-id "$2" --access-key "$3" --secret-key "$4" --peer 127.0.0.1:7311; }
-reg main   testid 0555b35654ad1656d804 'h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
-reg alt    56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234 NOPQRSTUVWXYZABCDEFG 'nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1'
-reg tenant 9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef HIJKLMNOPQRSTUVWXYZA 'opqrstuvwxyzabcdefghijklmnopqrstuvwxyzab'
-reg iam    9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef ABCDEFGHIJKLMNOPQRST 'abcdefghijklmnopqrstuvwxyzabcdefghijklmn'
+reg 'M. Tester'          testid 0555b35654ad1656d804 'h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
+reg 'john.doe'           56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234 NOPQRSTUVWXYZABCDEFG 'nopqrstuvwxyzabcdefghijklmnopqrstuvwxyz1'
+reg 'testx$tenanteduser' 9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef HIJKLMNOPQRSTUVWXYZA 'opqrstuvwxyzabcdefghijklmnopqrstuvwxyzab'
+reg 'youruseridhere'     9876543210abcdef0123456789abcdef0123456789abcdef0123456789abcdef ABCDEFGHIJKLMNOPQRST 'abcdefghijklmnopqrstuvwxyzabcdefghijklmn'
 
 # 4. run the gate (clones/pins ceph/s3-tests, applies the exclusion filters)
 ./conformance/run.sh
-# expect: 204 passed, 0 failed
+# expect: 250 passed, 0 failed
 ```
 
 To iterate on ONE feature's family fast, run pytest with `-k "<marker or

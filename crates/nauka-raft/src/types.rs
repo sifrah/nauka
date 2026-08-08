@@ -101,6 +101,15 @@ pub enum AppCommand {
         version_id: Option<String>,
         on: bool,
     },
+    /// Replaces the ACL on one object version (the current version when
+    /// `version_id` is None). `acl` is the serialized grant list; `None`
+    /// restores the private default.
+    SetObjectAcl {
+        bucket: String,
+        key: String,
+        version_id: Option<String>,
+        acl: Option<String>,
+    },
     /// Registers an in-flight multipart upload.
     PutUpload(Box<nauka_s3::MultipartUpload>),
     /// Adds ONE part to an existing upload.

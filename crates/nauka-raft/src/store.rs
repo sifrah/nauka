@@ -547,6 +547,36 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                     },
                                 }
                             }
+                            AppCommand::SetObjectAcl {
+                                bucket,
+                                key,
+                                version_id,
+                                acl,
+                            } => {
+                                let found =
+                                    inner.state.s3.objects.get_mut(&(bucket, key)).and_then(
+                                        |entry| match &version_id {
+                                            Some(id) => entry
+                                                .versions
+                                                .iter_mut()
+                                                .find(|v| v.version_id == *id),
+                                            None => entry.versions.first_mut(),
+                                        },
+                                    );
+                                match found {
+                                    Some(v) => {
+                                        v.acl = acl;
+                                        AppResponse {
+                                            ok: true,
+                                            info: None,
+                                        }
+                                    }
+                                    None => AppResponse {
+                                        ok: false,
+                                        info: Some("no such object".into()),
+                                    },
+                                }
+                            }
                             AppCommand::SetObjectRetention {
                                 bucket,
                                 key,
