@@ -22,7 +22,7 @@ commit on `main`, each CI-green on a release build):
 | + Full ACLs (buckets + objects) | 250 | ✅ CI |
 | + SSE (SSE-C real crypto, S3/KMS surface) | 273 | ✅ CI |
 | + dbstore triage: 94 upstream-excluded tests measured green and pinned | 367 | ✅ CI |
-| + POST-object + presigned/anonymous | 422 | local ✅, CI pending |
+| + POST-object + presigned/anonymous | 422 | ✅ CI |
 
 The suite has ~838 collectable tests; the rest are **excluded on purpose**
 and tracked in `conformance/EXCLUSIONS.md` (each exclusion is debt meant to
@@ -151,7 +151,7 @@ cases deselected by name with a reason.
     ObjectOwnership ops, GetBucketLocation, range-read trailing
     checksum handling. Each future feature moves its wins into the
     pinned list.
-  - **POST-object + presigned/anonymous — DONE (421).** `s3s` owns the
+  - **POST-object + presigned/anonymous — DONE (422).** `s3s` owns the
     POST protocol (form parsing, policy document expiration+conditions,
     the form signature — V2 and V4); the `post_object` handler is a
     simplified PutObject fed from form fields (canned ACL, XML tagging
