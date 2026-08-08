@@ -198,9 +198,13 @@ pub struct MultipartUpload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UploadedPart {
-    /// Manifest hash of the part's bytes.
+    /// Manifest hash of the part's bytes (ciphertext for an SSE-C part).
     pub content: String,
+    /// Stored size — the ciphertext length when the part is encrypted.
     pub size: u64,
+    /// Plaintext length when it differs from `size` (SSE-C parts).
+    #[serde(default)]
+    pub plain_size: Option<u64>,
     /// Quoted MD5 of this part — Complete concatenates these to build the
     /// final ETag, and the client sends them back for verification.
     pub etag: String,
@@ -369,6 +373,7 @@ mod tests {
             UploadedPart {
                 content: "PART".into(),
                 size: 5,
+                plain_size: None,
                 etag: "\"x\"".into(),
                 last_modified: 0,
                 checksums: Default::default(),

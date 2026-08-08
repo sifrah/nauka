@@ -31,7 +31,6 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | `s3website` | Static website hosting + routing — the pinned suite carries NO website tests (`test_s3_website.py` was removed upstream), so this marker currently deselects nothing; it stays as documentation until a suite bump restores coverage | 5 |
 | `bucket_logging` | Server access logging | 5 |
 | `object_ownership` | The ObjectOwnership setting (BucketOwnerEnforced &c.) — plain ACLs landed in phase 6, this marker's tests exercise the ownership-transfer knob | 6 |
-| `sse_s3`, `encryption` | Server-side encryption (SSE-S3/C/KMS) | 6 |
 | `iam_account`, `iam_role`, `iam_user`, `webidentity_test` | Full AWS IAM / STS | 6 (partial) |
 | `group`, `user_policy`, `role_policy`, `session_policy` | IAM policy attachment | 6 |
 | `conditional_write` | If-Match/If-None-Match on writes | 5 |
@@ -72,6 +71,22 @@ missing keys when the caller holds `s3:ListBucket` for the prefix. Landing
 it also wired real authorization: a key is its own account (owns what it
 creates), cross-key access needs a policy or an explicit grant, and the
 RGW `tenant:bucket` addressing form resolves into the flat namespace.
+
+The `sse_s3` and `encryption` markers came off when server-side
+encryption landed. SSE-C is REAL encryption: the body is encrypted with
+the customer's key (AES-256-GCM, the same engine as the native
+end-to-end flow) before erasure coding, the key is never stored — only
+its MD5 fingerprint — and reads require presenting the same key (wrong
+or missing key → 400). SSE-S3/KMS record and echo the mode and validate
+the AWS error surface (conflicting headers, kms without key id, SSE
+headers on a read → 400 InvalidArgument); their at-rest encryption is
+not implemented. Bucket default-encryption config round-trips
+(Put/Get/Delete BucketEncryption, ServerSideEncryptionConfigurationNotFoundError
+when unset) but is not yet APPLIED to plain PUTs. Policies gained the
+`Null` condition operator and the `s3:x-amz-server-side-encryption`
+condition key — and an explicit Deny now binds the bucket owner too
+(except on the policy subresource itself, so a lockout is always
+repairable).
 
 The `acl` and `access_bucket` name filters came off when full ACLs
 landed: grant lists on buckets and objects (canned ACLs expanded, group

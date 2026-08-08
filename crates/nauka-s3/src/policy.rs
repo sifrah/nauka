@@ -263,6 +263,12 @@ impl Statement {
         };
         cond.iter().all(|(op, keys)| {
             keys.iter().all(|(key, values)| {
+                // Null is its own operator: "true" asserts the key is
+                // ABSENT from the request, "false" that it is present.
+                if op == "Null" {
+                    let want_absent = values.iter().any(|v| v == "true");
+                    return ctx.contains_key(key) != want_absent;
+                }
                 let (op, if_exists) = match op.strip_suffix("IfExists") {
                     Some(op) => (op, true),
                     None => (op.as_str(), false),
@@ -485,6 +491,39 @@ mod tests {
                 &ctx(&[("aws:Referer", "http://evil.example.org/")])
             ),
             Decision::NoMatch
+        );
+    }
+
+    #[test]
+    fn null_condition_tests_key_absence() {
+        // The suite's "deny unencrypted uploads" pattern: Deny when the
+        // sse header is absent (Null: true), Deny when it is not AES256.
+        let p = Policy::parse(
+            r#"{"Statement":[
+                {"Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::b/*",
+                 "Condition":{"Null":{"s3:x-amz-server-side-encryption":"true"}}},
+                {"Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::b/*",
+                 "Condition":{"StringNotEquals":{"s3:x-amz-server-side-encryption":"AES256"}}}
+            ]}"#,
+        )
+        .unwrap();
+        let none = ctx(&[]);
+        let aes = ctx(&[("s3:x-amz-server-side-encryption", "AES256")]);
+        let kms = ctx(&[("s3:x-amz-server-side-encryption", "aws:kms")]);
+        assert_eq!(
+            p.evaluate(anon(), "s3:PutObject", "arn:aws:s3:::b/k", &none),
+            Decision::Deny,
+            "unencrypted: denied by the Null condition"
+        );
+        assert_eq!(
+            p.evaluate(anon(), "s3:PutObject", "arn:aws:s3:::b/k", &kms),
+            Decision::Deny,
+            "wrong algorithm: denied by StringNotEquals"
+        );
+        assert_eq!(
+            p.evaluate(anon(), "s3:PutObject", "arn:aws:s3:::b/k", &aes),
+            Decision::NoMatch,
+            "AES256 satisfies neither Deny"
         );
     }
 

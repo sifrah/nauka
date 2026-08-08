@@ -19,7 +19,8 @@ commit on `main`, each CI-green on a release build):
 | + CORS | 186 | ✅ CI |
 | + Checksums | 188 | ✅ CI |
 | + Bucket policies (phase 6 start) | 204 | ✅ CI |
-| + Full ACLs (buckets + objects) | 250 | local ✅, CI pending |
+| + Full ACLs (buckets + objects) | 250 | ✅ CI |
+| + SSE (SSE-C real crypto, S3/KMS surface) | 273 | local ✅, CI pending |
 
 The suite has ~838 collectable tests; the rest are **excluded on purpose**
 and tracked in `conformance/EXCLUSIONS.md` (each exclusion is debt meant to
@@ -116,11 +117,32 @@ cases deselected by name with a reason.
     BlockPublicAcls refuses public ACLs at PUT (bucket + object canned),
     IgnorePublicAcls mutes group grants at evaluation. PUTs without a
     Content-Type now store `binary/octet-stream`, as AWS does.
-  - TODO next: SSE-S3/C/KMS (`sse_s3` + `encryption` markers),
-    POST-object (browser uploads), presigned URLs (`anon` / `_raw_`
-    families), object_ownership (the BucketOwnerEnforced knob),
+  - **SSE — DONE (273).** SSE-C is REAL encryption: the body is
+    encrypted with the customer's 32-byte key via `nauka-crypto`
+    (AES-256-GCM, same engine as the native E2E flow) BEFORE erasure
+    coding — the cluster stores and content-addresses ciphertext, the
+    key is never kept (only its MD5 fingerprint on `ObjectVersion.sse`
+    as JSON `SseInfo`), and reads must present the same key (missing /
+    wrong / mismatched-MD5 → 400 InvalidArgument). Multipart: each part
+    is an independent cipher stream (`UploadedPart.plain_size` vs
+    stored size; segment lengths on the completed version let GET
+    decrypt in order). `version.size` is ALWAYS plaintext size;
+    manifest sizes are ciphertext. Copying an SSE-C source → 501.
+    SSE-S3/aws:kms record+echo the mode and validate the error surface
+    (conflicts, kms-without-key-id, `aes:kms`, SSE headers on read →
+    400); at-rest crypto for those is NOT implemented, and bucket
+    default encryption (Put/Get/Delete BucketEncryption round-trip,
+    ServerSideEncryptionConfigurationNotFoundError) is stored but not
+    yet applied to plain PUTs. Policy engine gained `Null` conditions
+    and `s3:x-amz-server-side-encryption`; explicit Deny now binds the
+    OWNER too (except the policy subresource — lockout stays
+    repairable).
+  - TODO next: POST-object (browser uploads), presigned URLs (`anon` /
+    `_raw_` families), object_ownership (the BucketOwnerEnforced knob),
     bucket_logging (needs policy-evaluation extras: service principals,
-    SourceArn conditions), event notifications.
+    SourceArn conditions), event notifications. Then the
+    `fails_on_dbstore` triage (223 tests excluded on Ceph-dbstore's
+    behalf, not ours — measure what already passes, keep it in scope).
 
 ## How to run the gate locally
 
@@ -147,7 +169,7 @@ reg 'youruseridhere'     9876543210abcdef0123456789abcdef0123456789abcdef0123456
 
 # 4. run the gate (clones/pins ceph/s3-tests, applies the exclusion filters)
 ./conformance/run.sh
-# expect: 250 passed, 0 failed
+# expect: 273 passed, 0 failed
 ```
 
 To iterate on ONE feature's family fast, run pytest with `-k "<marker or

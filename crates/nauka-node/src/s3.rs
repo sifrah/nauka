@@ -637,6 +637,16 @@ impl S3 for NaukaS3 {
             None => None,
         };
 
+        // Server-side encryption, validated before the body is read so a
+        // malformed request costs nothing.
+        let sse_req = validate_sse_request(
+            input.server_side_encryption.as_ref().map(|s| s.as_str()),
+            input.ssekms_key_id.as_deref(),
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+
         // Buffer to disk while hashing twice: BLAKE3 addresses the content
         // for the engine, MD5 becomes the ETag the client expects. The
         // additional checksums the client requested are computed in the
@@ -659,21 +669,46 @@ impl S3 for NaukaS3 {
             }
         };
 
+        // SSE-C: the plaintext never reaches the cluster. It is encrypted
+        // here with the customer's key (which is NOT kept), and what gets
+        // erasure-coded, placed and content-addressed is the ciphertext —
+        // the same guarantee as the native end-to-end flow.
+        let mut sse_info = sse_req.info;
+        let (store_path, store_size, store_hasher) = match (&sse_req.customer_key, size) {
+            (Some(key), n) if n > 0 => {
+                let ct_tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+                let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let (ct_len, ct_hasher) = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&ct_tmp).await;
+                        return Err(e);
+                    }
+                };
+                if let Some(i) = &mut sse_info {
+                    i.segments = vec![ct_len];
+                }
+                (ct_tmp, ct_len, ct_hasher)
+            }
+            _ => (tmp, size, blake),
+        };
+
         // An empty object has no shards to place — it is pure metadata.
-        let content = if size == 0 {
-            let _ = tokio::fs::remove_file(&tmp).await;
+        let content = if store_size == 0 {
+            let _ = tokio::fs::remove_file(&store_path).await;
             None
         } else {
             let result = crate::api::dispatch_file(
                 &self.state,
-                &tmp,
-                size,
-                blake,
+                &store_path,
+                store_size,
+                store_hasher,
                 Some(input.key.clone()),
                 None,
             )
             .await;
-            let _ = tokio::fs::remove_file(&tmp).await;
+            let _ = tokio::fs::remove_file(&store_path).await;
             let (manifest, _degraded) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
             Some(manifest.file_hash)
         };
@@ -738,7 +773,7 @@ impl S3 for NaukaS3 {
             checksums,
             retention,
             legal_hold,
-            sse: None,
+            sse: sse_info.as_ref().and_then(SseInfo::to_json),
             owner,
             acl,
         };
@@ -762,6 +797,19 @@ impl S3 for NaukaS3 {
             checksum_sha256: cks("SHA256"),
             // Only an Enabled bucket surfaces a version id on the write.
             version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
+            server_side_encryption: sse_info
+                .as_ref()
+                .filter(|i| !i.is_customer())
+                .map(|i| i.mode.clone().into()),
+            ssekms_key_id: sse_info.as_ref().and_then(|i| i.kms_key_id.clone()),
+            sse_customer_algorithm: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .map(|_| "AES256".into()),
+            sse_customer_key_md5: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
             ..Default::default()
         };
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
@@ -844,6 +892,29 @@ impl S3 for NaukaS3 {
             .get(&(req.input.bucket.clone(), req.input.key.clone()))
             .ok_or_else(|| s3_error!(NoSuchKey))?;
         let v = resolve_version(entry, req.input.version_id.as_deref())?;
+        // A HEAD of an SSE-C object without (or with the wrong) customer
+        // key is a 400, exactly like the GET.
+        let sse_info = SseInfo::parse(&v.sse);
+        match &sse_info {
+            Some(i) if i.is_customer() => {
+                require_customer_key(
+                    i,
+                    req.input.sse_customer_algorithm.as_deref(),
+                    req.input.sse_customer_key.as_deref(),
+                    req.input.sse_customer_key_md5.as_deref(),
+                )?;
+            }
+            _ => {
+                if req.input.sse_customer_key.is_some()
+                    || req.input.sse_customer_algorithm.is_some()
+                {
+                    return Err(s3_error!(
+                        InvalidArgument,
+                        "the object was not stored with a customer-provided key"
+                    ));
+                }
+            }
+        }
         let sys = |k: &str| v.system_metadata.get(k).cloned();
         // Stored checksums come back only when the client opts in.
         let cks = |name: &str| {
@@ -878,6 +949,19 @@ impl S3 for NaukaS3 {
                 .map(Self::timestamp),
             version_id: versioned_id(v),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
+            server_side_encryption: sse_info
+                .as_ref()
+                .filter(|i| !i.is_customer())
+                .map(|i| i.mode.clone().into()),
+            ssekms_key_id: sse_info.as_ref().and_then(|i| i.kms_key_id.clone()),
+            sse_customer_algorithm: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .map(|_| "AES256".into()),
+            sse_customer_key_md5: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
             ..Default::default()
         });
         // HeadObjectOutput has no tag-count field, so set the header
@@ -1275,6 +1359,74 @@ impl S3 for NaukaS3 {
             .await?;
         }
         Ok(S3Response::new(DeletePublicAccessBlockOutput::default()))
+    }
+
+    async fn put_bucket_encryption(
+        &self,
+        req: S3Request<PutBucketEncryptionInput>,
+    ) -> S3Result<S3Response<PutBucketEncryptionOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = &req.input.server_side_encryption_configuration;
+        for rule in &cfg.rules {
+            let Some(default) = &rule.apply_server_side_encryption_by_default else {
+                return Err(s3_error!(InvalidArgument, "a rule needs a default"));
+            };
+            if !matches!(default.sse_algorithm.as_str(), "AES256" | "aws:kms") {
+                return Err(s3_error!(InvalidArgument, "unknown SSE algorithm"));
+            }
+        }
+        let mut buf = Vec::new();
+        let mut ser = s3s::xml::Serializer::new(&mut buf);
+        s3s::xml::Serialize::serialize(cfg, &mut ser)
+            .map_err(|e| s3_error!(InternalError, "serializing the configuration: {e}"))?;
+        bucket.encryption =
+            Some(String::from_utf8(buf).map_err(|e| s3_error!(InternalError, "{e}"))?);
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutBucketEncryptionOutput::default()))
+    }
+
+    async fn get_bucket_encryption(
+        &self,
+        req: S3Request<GetBucketEncryptionInput>,
+    ) -> S3Result<S3Response<GetBucketEncryptionOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = bucket
+            .encryption
+            .as_deref()
+            .and_then(|xml| {
+                let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
+                s3s::xml::Deserialize::deserialize(&mut de).ok()
+            })
+            .ok_or_else(|| {
+                custom_error(
+                    "ServerSideEncryptionConfigurationNotFoundError",
+                    hyper::StatusCode::NOT_FOUND,
+                    "The server side encryption configuration was not found",
+                )
+            })?;
+        Ok(S3Response::new(GetBucketEncryptionOutput {
+            server_side_encryption_configuration: Some(cfg),
+        }))
+    }
+
+    async fn delete_bucket_encryption(
+        &self,
+        req: S3Request<DeleteBucketEncryptionInput>,
+    ) -> S3Result<S3Response<DeleteBucketEncryptionOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        // Deleting an absent configuration is still a 204.
+        if bucket.encryption.take().is_some() {
+            self.write(nauka_raft::types::AppCommand::UpdateBucket {
+                name: req.input.bucket,
+                bucket: Box::new(bucket),
+            })
+            .await?;
+        }
+        Ok(S3Response::new(DeleteBucketEncryptionOutput::default()))
     }
 
     async fn get_object_acl(
@@ -1765,6 +1917,28 @@ impl S3 for NaukaS3 {
         let length = if v.size == 0 { 0 } else { end - start + 1 };
         let partial = input.range.is_some();
 
+        // An SSE-C object only opens with the key it was written under;
+        // whatever else happens, the cluster alone cannot produce the
+        // plaintext.
+        let sse_info = SseInfo::parse(&v.sse);
+        let customer_key = match &sse_info {
+            Some(i) if i.is_customer() => Some(require_customer_key(
+                i,
+                input.sse_customer_algorithm.as_deref(),
+                input.sse_customer_key.as_deref(),
+                input.sse_customer_key_md5.as_deref(),
+            )?),
+            _ => {
+                if input.sse_customer_key.is_some() || input.sse_customer_algorithm.is_some() {
+                    return Err(s3_error!(
+                        InvalidArgument,
+                        "the object was not stored with a customer-provided key"
+                    ));
+                }
+                None
+            }
+        };
+
         let body = match &v.content {
             None => StreamingBlob::from(Body::from(Vec::<u8>::new())),
             Some(hash) => {
@@ -1776,10 +1950,33 @@ impl S3 for NaukaS3 {
                     .get(hash)
                     .cloned()
                     .ok_or_else(|| s3_error!(NoSuchKey))?;
-                let bytes = reconstruct_range(&self.state, &manifest, start, end)
-                    .await
-                    .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
-                StreamingBlob::from(Body::from(bytes))
+                match (&customer_key, &sse_info) {
+                    (Some(key), Some(info)) => {
+                        // The stored bytes are ciphertext: reconstruct all
+                        // of it, decrypt stream by stream, then serve the
+                        // requested window of the plaintext.
+                        let ct = reconstruct_range(
+                            &self.state,
+                            &manifest,
+                            0,
+                            manifest.file_size.saturating_sub(1),
+                        )
+                        .await
+                        .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+                        let plain = decrypt_segments(key, &ct, &info.segments)?;
+                        let window = plain
+                            .get(start as usize..=(end as usize).min(plain.len().saturating_sub(1)))
+                            .unwrap_or(&[])
+                            .to_vec();
+                        StreamingBlob::from(Body::from(window))
+                    }
+                    _ => {
+                        let bytes = reconstruct_range(&self.state, &manifest, start, end)
+                            .await
+                            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+                        StreamingBlob::from(Body::from(bytes))
+                    }
+                }
             }
         };
 
@@ -1827,6 +2024,19 @@ impl S3 for NaukaS3 {
             version_id: versioned_id(&v),
             tag_count: (!v.tags.is_empty()).then_some(v.tags.len() as i32),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
+            server_side_encryption: sse_info
+                .as_ref()
+                .filter(|i| !i.is_customer())
+                .map(|i| i.mode.clone().into()),
+            ssekms_key_id: sse_info.as_ref().and_then(|i| i.kms_key_id.clone()),
+            sse_customer_algorithm: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .map(|_| "AES256".into()),
+            sse_customer_key_md5: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
             ..Default::default()
         });
         set_object_lock_headers(&mut resp.headers, &v);
@@ -1878,6 +2088,14 @@ impl S3 for NaukaS3 {
         // Honour the source version: copy the exact version asked for, not
         // whatever is current.
         let source = resolve_version(entry, src_version.as_deref())?.clone();
+        // An SSE-C source is ciphertext this cluster cannot read: copying
+        // it needs the customer key on both sides, which is not built.
+        if SseInfo::parse(&source.sse).is_some_and(|i| i.is_customer()) {
+            return Err(s3_error!(
+                NotImplemented,
+                "copying an object stored with a customer-provided key"
+            ));
+        }
 
         check_preconditions(
             &source,
@@ -1956,6 +2174,15 @@ impl S3 for NaukaS3 {
         if !nauka_s3::naming::valid_key(&input.key) {
             return Err(s3_error!(InvalidArgument, "invalid key"));
         }
+        // SSE is declared at initiation; parts must then present the same
+        // customer key, and the completed object records the mode.
+        let sse_req = validate_sse_request(
+            input.server_side_encryption.as_ref().map(|s| s.as_str()),
+            input.ssekms_key_id.as_deref(),
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
         let upload_id = uuid_like();
         let upload = nauka_s3::MultipartUpload {
             upload_id: upload_id.clone(),
@@ -1980,7 +2207,7 @@ impl S3 for NaukaS3 {
                 Some(h) => parse_tagging_header(h)?,
                 None => BTreeMap::new(),
             },
-            sse: None,
+            sse: sse_req.info.as_ref().and_then(SseInfo::to_json),
             retention: retention_from_headers(
                 input.object_lock_mode.as_ref().map(|m| m.as_str()),
                 input.object_lock_retain_until_date.as_ref(),
@@ -1997,6 +2224,22 @@ impl S3 for NaukaS3 {
             bucket: Some(input.bucket),
             key: Some(input.key),
             upload_id: Some(upload_id),
+            server_side_encryption: sse_req
+                .info
+                .as_ref()
+                .filter(|i| !i.is_customer())
+                .map(|i| i.mode.clone().into()),
+            ssekms_key_id: sse_req.info.as_ref().and_then(|i| i.kms_key_id.clone()),
+            sse_customer_algorithm: sse_req
+                .info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .map(|_| "AES256".into()),
+            sse_customer_key_md5: sse_req
+                .info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
             ..Default::default()
         }))
     }
@@ -2006,16 +2249,21 @@ impl S3 for NaukaS3 {
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
         let input = req.input;
-        if !self
-            .state
-            .app
-            .app_state()
-            .s3
-            .uploads
-            .contains_key(&input.upload_id)
-        {
-            return Err(s3_error!(NoSuchUpload));
-        }
+        let upload_sse = match self.state.app.app_state().s3.uploads.get(&input.upload_id) {
+            Some(u) => SseInfo::parse(&u.sse),
+            None => return Err(s3_error!(NoSuchUpload)),
+        };
+        // An SSE-C upload requires every part to arrive with the SAME
+        // customer key it was initiated under.
+        let customer_key = match &upload_sse {
+            Some(i) if i.is_customer() => Some(require_customer_key(
+                i,
+                input.sse_customer_algorithm.as_deref(),
+                input.sse_customer_key.as_deref(),
+                input.sse_customer_key_md5.as_deref(),
+            )?),
+            _ => None,
+        };
         let part_number = u32::try_from(input.part_number)
             .ok()
             .filter(|n| (1..=10_000).contains(n))
@@ -2033,16 +2281,35 @@ impl S3 for NaukaS3 {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(s3_error!(InvalidArgument, "an empty part is not allowed"));
         }
+        // SSE-C: what the cluster stores for this part is ciphertext,
+        // encrypted with the customer's key. The ETag stays the MD5 of
+        // the plaintext, which is what the client compares.
+        let (store_path, store_size, store_hasher, plain_size) = match &customer_key {
+            Some(key) => {
+                let ct_tmp = self.state.tmp_dir.join(format!("s3p-{}", uuid_like()));
+                let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let (ct_len, ct_hasher) = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&ct_tmp).await;
+                        return Err(e);
+                    }
+                };
+                (ct_tmp, ct_len, ct_hasher, Some(size))
+            }
+            None => (tmp, size, blake, None),
+        };
         let result = crate::api::dispatch_file(
             &self.state,
-            &tmp,
-            size,
-            blake,
+            &store_path,
+            store_size,
+            store_hasher,
             Some(format!("{}#part{}", input.key, part_number)),
             None,
         )
         .await;
-        let _ = tokio::fs::remove_file(&tmp).await;
+        let _ = tokio::fs::remove_file(&store_path).await;
         let (manifest, _) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
 
         let etag = nauka_s3::naming::etag_single(&md5);
@@ -2054,7 +2321,8 @@ impl S3 for NaukaS3 {
             part_number,
             part: Box::new(nauka_s3::UploadedPart {
                 content: manifest.file_hash,
-                size,
+                size: store_size,
+                plain_size,
                 etag: etag.clone(),
                 last_modified: Self::now(),
                 checksums: BTreeMap::new(),
@@ -2063,6 +2331,11 @@ impl S3 for NaukaS3 {
         .await?;
         Ok(S3Response::new(UploadPartOutput {
             e_tag: etag.parse().ok(),
+            sse_customer_algorithm: customer_key.as_ref().map(|_| "AES256".into()),
+            sse_customer_key_md5: upload_sse
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
             ..Default::default()
         }))
     }
@@ -2149,7 +2422,7 @@ impl S3 for NaukaS3 {
         if chosen
             .iter()
             .take(chosen.len().saturating_sub(1))
-            .any(|p| p.size < MIN_PART)
+            .any(|p| p.plain_size.unwrap_or(p.size) < MIN_PART)
         {
             return Err(s3_error!(EntityTooSmall));
         }
@@ -2164,7 +2437,19 @@ impl S3 for NaukaS3 {
             return Err(s3_error!(InternalError, "unreadable part etag"));
         }
         let etag = nauka_s3::naming::etag_multipart(&digests);
+        // Stored total (ciphertext for SSE-C) sizes the manifest; the
+        // plaintext total is what listings and Content-Length announce.
         let total: u64 = chosen.iter().map(|p| p.size).sum();
+        let total_plain: u64 = chosen.iter().map(|p| p.plain_size.unwrap_or(p.size)).sum();
+        // Each part is an independent encryption stream; the segment
+        // lengths let a GET decrypt them back in order.
+        let sse = match SseInfo::parse(&upload.sse) {
+            Some(mut i) if i.is_customer() => {
+                i.segments = chosen.iter().map(|p| p.size).collect();
+                i.to_json()
+            }
+            _ => upload.sse.clone(),
+        };
 
         // Stitching the parts into one manifest is metadata only: the
         // shards are already placed, so completing a huge upload costs a
@@ -2204,7 +2489,7 @@ impl S3 for NaukaS3 {
             version_id: new_version_id.clone(),
             content: Some(content_hash),
             delete_marker: false,
-            size: total,
+            size: total_plain,
             etag: etag.clone(),
             last_modified: Self::now(),
             content_type: upload.content_type.clone(),
@@ -2215,7 +2500,7 @@ impl S3 for NaukaS3 {
             checksums: BTreeMap::new(),
             retention: upload.retention.clone(),
             legal_hold: upload.legal_hold,
-            sse: upload.sse.clone(),
+            sse,
             owner: Some(self.canonical_id_of(&upload.owner)),
             acl: None,
         };
@@ -2284,7 +2569,9 @@ impl S3 for NaukaS3 {
             }
             parts.push(Part {
                 part_number: Some(*n as i32),
-                size: Some(p.size as i64),
+                // The size a client sees is the bytes it sent — the
+                // plaintext, when the part is stored encrypted.
+                size: Some(p.plain_size.unwrap_or(p.size) as i64),
                 e_tag: p.etag.parse().ok(),
                 last_modified: Some(Self::timestamp(p.last_modified)),
                 ..Default::default()
@@ -2932,16 +3219,25 @@ impl s3s::access::S3Access for NaukaAccess {
             return Ok(());
         };
 
-        // 1. The bucket owner: everything on their bucket is theirs.
-        if let Some(c) = cx.credentials() {
-            if b.owner == c.access_key {
-                return Ok(());
-            }
+        // SSE headers are write-side only: declaring an encryption on a
+        // read is a client error, and `s3s` has no input field to carry
+        // it, so it is refused here.
+        if matches!(op, "GetObject" | "HeadObject")
+            && cx.headers().contains_key("x-amz-server-side-encryption")
+        {
+            return Err(s3_error!(
+                InvalidArgument,
+                "x-amz-server-side-encryption is not valid on a read"
+            ));
         }
 
-        // 2. The bucket policy — first, because an explicit Deny beats
-        // every ACL and grant (the suite checks exactly this: an
-        // authenticated-read ACL does not survive a Deny on ListBucket).
+        let is_owner = cx.credentials().is_some_and(|c| b.owner == c.access_key);
+
+        // 1. The bucket policy first: an explicit Deny beats every ACL,
+        // grant — and the owner (the suite denies the owner's own
+        // unencrypted uploads this way). The one exemption is the policy
+        // subresource itself for the owner, so a bad policy can always
+        // be repaired, as on AWS.
         let requester_id = cx.credentials().map(|c| {
             s3.credentials
                 .get(&c.access_key)
@@ -2967,11 +3263,22 @@ impl s3s::access::S3Access for NaukaAccess {
                 Some(k) => format!("arn:aws:s3:::{bucket_name}/{k}"),
                 None => bucket_arn.clone(),
             };
+            let lockout_proof = is_owner
+                && matches!(
+                    op,
+                    "PutBucketPolicy" | "GetBucketPolicy" | "DeleteBucketPolicy"
+                );
             match pol.evaluate(who, &s3_action_of(op), &resource, &ctx) {
-                Decision::Deny => return Err(s3_error!(AccessDenied)),
+                Decision::Deny if !lockout_proof => return Err(s3_error!(AccessDenied)),
+                Decision::Deny => {}
                 Decision::Allow => allowed_by_policy = true,
                 Decision::NoMatch => {}
             }
+        }
+
+        // 2. The bucket owner: everything else on their bucket is theirs.
+        if is_owner {
+            return Ok(());
         }
 
         // 3. Explicit per-bucket credential grants.
@@ -3111,6 +3418,9 @@ fn policy_context(cx: &s3s::access::S3AccessContext<'_>) -> BTreeMap<String, Str
     }
     if let Some(v) = header("x-amz-acl") {
         ctx.insert("s3:x-amz-acl".into(), v);
+    }
+    if let Some(v) = header("x-amz-server-side-encryption") {
+        ctx.insert("s3:x-amz-server-side-encryption".into(), v);
     }
     ctx
 }
@@ -3361,6 +3671,250 @@ fn cors_from_xml(xml: &str) -> Option<CORSConfiguration> {
 fn pab_from_xml(xml: &str) -> Option<PublicAccessBlockConfiguration> {
     let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
     s3s::xml::Deserialize::deserialize(&mut de).ok()
+}
+
+/// SSE metadata stored on a version or an in-flight upload (JSON in the
+/// `sse` field). For SSE-C the customer key is NEVER stored — only its
+/// MD5 fingerprint, to recognize the right key when it is presented
+/// again. The stored bytes are ciphertext the cluster cannot read.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SseInfo {
+    /// "AES256" (SSE-S3), "aws:kms", or "SSE-C".
+    mode: String,
+    #[serde(default)]
+    key_md5: Option<String>,
+    #[serde(default)]
+    kms_key_id: Option<String>,
+    /// Ciphertext segment lengths, one per encryption stream — a single
+    /// PUT has one, a multipart object one per part. Decryption walks
+    /// them in order.
+    #[serde(default)]
+    segments: Vec<u64>,
+}
+
+impl SseInfo {
+    fn parse(raw: &Option<String>) -> Option<Self> {
+        raw.as_deref().and_then(|s| serde_json::from_str(s).ok())
+    }
+
+    fn to_json(&self) -> Option<String> {
+        serde_json::to_string(self).ok()
+    }
+
+    fn is_customer(&self) -> bool {
+        self.mode == "SSE-C"
+    }
+}
+
+/// What a write-side request asked for, validated: the SSE mode to
+/// record, and the customer key to encrypt with (SSE-C only).
+struct SseRequest {
+    info: Option<SseInfo>,
+    customer_key: Option<nauka_crypto::FileKey>,
+}
+
+/// Validates the SSE headers of a PUT/CreateMultipartUpload, with the
+/// AWS error surface the suite checks: every malformed or conflicting
+/// combination is a 400 InvalidArgument.
+fn validate_sse_request(
+    sse: Option<&str>,
+    kms_key_id: Option<&str>,
+    c_alg: Option<&str>,
+    c_key: Option<&str>,
+    c_md5: Option<&str>,
+) -> S3Result<SseRequest> {
+    let none = SseRequest {
+        info: None,
+        customer_key: None,
+    };
+    if c_alg.is_some() || c_key.is_some() || c_md5.is_some() {
+        // SSE-C: exclusive with the server-managed modes.
+        if sse.is_some() {
+            return Err(s3_error!(
+                InvalidArgument,
+                "customer-provided keys conflict with x-amz-server-side-encryption"
+            ));
+        }
+        if c_alg != Some("AES256") {
+            return Err(s3_error!(
+                InvalidArgument,
+                "the customer algorithm must be AES256"
+            ));
+        }
+        let Some(key_b64) = c_key else {
+            return Err(s3_error!(InvalidArgument, "missing customer key"));
+        };
+        let key_bytes = data_encoding::BASE64
+            .decode(key_b64.as_bytes())
+            .map_err(|_| s3_error!(InvalidArgument, "the customer key is not valid base64"))?;
+        if key_bytes.len() != 32 {
+            return Err(s3_error!(
+                InvalidArgument,
+                "the customer key must be 256 bits"
+            ));
+        }
+        let Some(md5_b64) = c_md5 else {
+            return Err(s3_error!(InvalidArgument, "missing customer key MD5"));
+        };
+        let digest = {
+            use md5::Digest;
+            md5::Md5::digest(&key_bytes)
+        };
+        if data_encoding::BASE64.encode(&digest) != md5_b64 {
+            return Err(s3_error!(
+                InvalidArgument,
+                "the customer key does not match its MD5"
+            ));
+        }
+        let key = nauka_crypto::FileKey::decode(&data_encoding::BASE64URL_NOPAD.encode(&key_bytes))
+            .map_err(|_| s3_error!(InvalidArgument, "unusable customer key"))?;
+        return Ok(SseRequest {
+            info: Some(SseInfo {
+                mode: "SSE-C".into(),
+                key_md5: Some(md5_b64.to_owned()),
+                kms_key_id: None,
+                segments: Vec::new(),
+            }),
+            customer_key: Some(key),
+        });
+    }
+    match sse {
+        Some("AES256") => {
+            if kms_key_id.is_some() {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "a KMS key id conflicts with SSE-S3"
+                ));
+            }
+            Ok(SseRequest {
+                info: Some(SseInfo {
+                    mode: "AES256".into(),
+                    key_md5: None,
+                    kms_key_id: None,
+                    segments: Vec::new(),
+                }),
+                customer_key: None,
+            })
+        }
+        Some("aws:kms") => {
+            let Some(id) = kms_key_id else {
+                return Err(s3_error!(InvalidArgument, "aws:kms requires a key id"));
+            };
+            Ok(SseRequest {
+                info: Some(SseInfo {
+                    mode: "aws:kms".into(),
+                    key_md5: None,
+                    kms_key_id: Some(id.to_owned()),
+                    segments: Vec::new(),
+                }),
+                customer_key: None,
+            })
+        }
+        Some(_) => Err(s3_error!(InvalidArgument, "unknown server-side encryption")),
+        None => {
+            if kms_key_id.is_some() {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "a KMS key id without x-amz-server-side-encryption"
+                ));
+            }
+            Ok(none)
+        }
+    }
+}
+
+/// Validates the customer-key headers of a read against a stored SSE-C
+/// object and returns the key. Everything wrong — missing headers, bad
+/// key, a DIFFERENT key than the one the object was written with — is
+/// the 400 the suite expects.
+fn require_customer_key(
+    stored: &SseInfo,
+    c_alg: Option<&str>,
+    c_key: Option<&str>,
+    c_md5: Option<&str>,
+) -> S3Result<nauka_crypto::FileKey> {
+    let asked = validate_sse_request(None, None, c_alg, c_key, c_md5)?;
+    let (Some(info), Some(key)) = (asked.info, asked.customer_key) else {
+        return Err(s3_error!(
+            InvalidArgument,
+            "the object was stored with a customer-provided key; the same key is required"
+        ));
+    };
+    if info.key_md5 != stored.key_md5 {
+        return Err(s3_error!(InvalidArgument, "wrong customer key"));
+    }
+    Ok(key)
+}
+
+/// A Write sink that hashes and counts what passes through, so encrypting
+/// into a file yields the ciphertext's BLAKE3 and length in one pass.
+struct HashingFile {
+    file: std::io::BufWriter<std::fs::File>,
+    hasher: blake3::Hasher,
+    len: u64,
+}
+
+impl std::io::Write for HashingFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// Encrypts `src` into `dst` with the customer key. Returns the
+/// ciphertext length and its BLAKE3 hasher (the content address of what
+/// the cluster actually stores).
+async fn encrypt_to_tmp(
+    key: nauka_crypto::FileKey,
+    src: std::path::PathBuf,
+    dst: std::path::PathBuf,
+) -> S3Result<(u64, blake3::Hasher)> {
+    tokio::task::spawn_blocking(move || -> Result<(u64, blake3::Hasher), std::io::Error> {
+        let mut input = std::io::BufReader::new(std::fs::File::open(&src)?);
+        let mut sink = HashingFile {
+            file: std::io::BufWriter::new(std::fs::File::create(&dst)?),
+            hasher: blake3::Hasher::new(),
+            len: 0,
+        };
+        nauka_crypto::encrypt(&key, &mut input, &mut sink)
+            .map_err(|e| std::io::Error::other(format!("{e}")))?;
+        use std::io::Write;
+        sink.flush()?;
+        Ok((sink.len, sink.hasher))
+    })
+    .await
+    .map_err(|e| s3_error!(InternalError, "{e}"))?
+    .map_err(|e| s3_error!(InternalError, "encrypting: {e}"))
+}
+
+/// Decrypts a whole ciphertext made of consecutive independent streams
+/// (`segments` lengths; a single segment when the list is empty). A
+/// failure means the wrong key — surfaced as the 400 the suite expects.
+fn decrypt_segments(key: &nauka_crypto::FileKey, ct: &[u8], segments: &[u64]) -> S3Result<Vec<u8>> {
+    let one;
+    let segs: &[u64] = if segments.is_empty() {
+        one = [ct.len() as u64];
+        &one
+    } else {
+        segments
+    };
+    let mut out = Vec::with_capacity(ct.len());
+    let mut off: usize = 0;
+    for len in segs {
+        let end = off
+            .checked_add(*len as usize)
+            .filter(|e| *e <= ct.len())
+            .ok_or_else(|| s3_error!(InternalError, "corrupt encrypted segments"))?;
+        nauka_crypto::decrypt(key, &mut &ct[off..end], &mut out)
+            .map_err(|_| s3_error!(InvalidArgument, "wrong customer key"))?;
+        off = end;
+    }
+    Ok(out)
 }
 
 /// Applies the conditional headers S3 defines on reads and copies.
