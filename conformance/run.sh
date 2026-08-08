@@ -31,19 +31,22 @@ EXCLUDE='not fails_on_rgw and not fails_on_aws and not fails_on_dbstore and not 
 # UploadPartCopy, cross-owner ops, and the versioning / object-lock / CORS /
 # checksum families whose tests the suite left unmarked. Documented in
 # EXCLUSIONS.md. Single logical line, same reason as above.
-KEYWORDS='not post_object and not anon and not _raw_ and not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website'
+KEYWORDS='not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website'
 
 # A handful of individual edge-case tests, deselected by full node id with
-# a reason each (see EXCLUSIONS.md): anonymous access, a control character
-# in a prefix, and a 1000-object timing test.
+# a reason each (see EXCLUSIONS.md): a control character in a prefix, a
+# 1000-object timing test, s3s quirks (unquoted ETags, POST form handling).
 DESELECT="
-  --deselect s3tests/functional/test_s3.py::test_object_delete_key_bucket_gone
   --deselect s3tests/functional/test_s3.py::test_bucket_list_prefix_unreadable
   --deselect s3tests/functional/test_s3.py::test_multi_object_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multi_objectv2_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multipart_resend_first_finishes_last
   --deselect s3tests/functional/test_s3.py::test_get_versioned_object_attributes
   --deselect s3tests/functional/test_s3.py::test_get_checksum_object_attributes
+  --deselect s3tests/functional/test_s3.py::test_post_object_set_key_from_filename
+  --deselect s3tests/functional/test_s3.py::test_post_object_invalid_date_format
+  --deselect s3tests/functional/test_s3.py::test_post_object_upload_checksum
+  --deselect s3tests/functional/test_s3.py::test_post_object_missing_signature
 "
 
 if [ ! -d "$WORK" ]; then

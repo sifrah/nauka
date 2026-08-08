@@ -859,6 +859,163 @@ impl S3 for NaukaS3 {
         Ok(S3Response::new(PutBucketVersioningOutput::default()))
     }
 
+    async fn post_object(
+        &self,
+        req: S3Request<PostObjectInput>,
+    ) -> S3Result<S3Response<PostObjectOutput>> {
+        // The browser-upload path. `s3s` has already done the protocol
+        // work — multipart/form-data parsing, POST policy expiration and
+        // condition checks, the form signature — so what is left is a
+        // simplified PutObject fed from form fields.
+        let mut input = req.input;
+        let bucket_meta = self.require_bucket(&input.bucket)?;
+        if !nauka_s3::naming::valid_key(&input.key) {
+            return Err(s3_error!(InvalidArgument, "invalid key"));
+        }
+        let owner = self.object_owner_for(req.credentials.as_ref(), None);
+        let acl = match &input.acl {
+            Some(canned) => {
+                let canned = canned.as_str();
+                let block_public = bucket_meta
+                    .public_access_block
+                    .as_deref()
+                    .and_then(pab_from_xml)
+                    .is_some_and(|p| p.block_public_acls.unwrap_or(false));
+                if block_public && nauka_s3::acl::canned_is_public(canned) {
+                    return Err(s3_error!(AccessDenied, "public ACLs are blocked"));
+                }
+                let owner_id = owner.clone().unwrap_or_default();
+                let bucket_owner = self.canonical_id_of(&bucket_meta.owner);
+                nauka_s3::acl::canned_grants(canned, &owner_id, Some(&bucket_owner))
+                    .map(|g| nauka_s3::acl::to_json(&g))
+            }
+            None => None,
+        };
+
+        // A browser POST can carry the same SSE fields a PUT sends as
+        // headers — same validation, same real SSE-C encryption.
+        let sse_req = validate_sse_request(
+            input.server_side_encryption.as_ref().map(|s| s.as_str()),
+            input.ssekms_key_id.as_deref(),
+            input.sse_customer_algorithm.as_deref(),
+            input.sse_customer_key.as_deref(),
+            input.sse_customer_key_md5.as_deref(),
+        )?;
+
+        let mut hasher = s3s::checksum::ChecksumHasher::default();
+        let tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+        let (size, blake, md5) = write_body(input.body.take(), &tmp, &mut hasher)
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                s3_error!(InternalError, "{e:#}")
+            })?;
+        let mut sse_info = sse_req.info;
+        let (store_path, store_size, store_hasher) = match (&sse_req.customer_key, size) {
+            (Some(key), n) if n > 0 => {
+                let ct_tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+                let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let (ct_len, ct_hasher) = match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&ct_tmp).await;
+                        return Err(e);
+                    }
+                };
+                if let Some(i) = &mut sse_info {
+                    i.segments = vec![ct_len];
+                }
+                (ct_tmp, ct_len, ct_hasher)
+            }
+            _ => (tmp, size, blake),
+        };
+        let content = if store_size == 0 {
+            let _ = tokio::fs::remove_file(&store_path).await;
+            None
+        } else {
+            let result = crate::api::dispatch_file(
+                &self.state,
+                &store_path,
+                store_size,
+                store_hasher,
+                Some(input.key.clone()),
+                None,
+            )
+            .await;
+            let _ = tokio::fs::remove_file(&store_path).await;
+            let (manifest, _degraded) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+            Some(manifest.file_hash)
+        };
+
+        let etag = nauka_s3::naming::etag_single(&md5);
+        let versioning = self.versioning_of(&input.bucket);
+        let version_id = Self::version_id_for(versioning);
+        // The POST form's tagging field is the XML document, not the
+        // URL-encoded header PUT uses.
+        let tags = match input.tagging.as_deref() {
+            Some(xml) => {
+                let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
+                let tagging: Tagging = s3s::xml::Deserialize::deserialize(&mut de)
+                    .map_err(|_| s3_error!(MalformedXML, "invalid tagging document"))?;
+                tag_set_to_map(&tagging.tag_set, 10)?
+            }
+            None => BTreeMap::new(),
+        };
+        let version = nauka_s3::ObjectVersion {
+            version_id: version_id.clone(),
+            content,
+            delete_marker: false,
+            size,
+            etag: etag.clone(),
+            last_modified: Self::now(),
+            content_type: Some(
+                input
+                    .content_type
+                    .clone()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "binary/octet-stream".into()),
+            ),
+            user_metadata: input
+                .metadata
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default(),
+            system_metadata: BTreeMap::new(),
+            storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
+            tags,
+            checksums: BTreeMap::new(),
+            retention: None,
+            legal_hold: false,
+            sse: sse_info.as_ref().and_then(SseInfo::to_json),
+            owner,
+            acl,
+        };
+        self.write(nauka_raft::types::AppCommand::PutObjectVersion {
+            bucket: input.bucket,
+            key: input.key,
+            version: Box::new(version),
+        })
+        .await?;
+        Ok(S3Response::new(PostObjectOutput {
+            e_tag: etag.parse().ok(),
+            version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
+            server_side_encryption: sse_info
+                .as_ref()
+                .filter(|i| !i.is_customer())
+                .map(|i| i.mode.clone().into()),
+            ssekms_key_id: sse_info.as_ref().and_then(|i| i.kms_key_id.clone()),
+            sse_customer_algorithm: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .map(|_| "AES256".into()),
+            sse_customer_key_md5: sse_info
+                .as_ref()
+                .filter(|i| i.is_customer())
+                .and_then(|i| i.key_md5.clone()),
+            ..Default::default()
+        }))
+    }
+
     async fn get_bucket_versioning(
         &self,
         req: S3Request<GetBucketVersioningInput>,
@@ -3336,7 +3493,9 @@ impl s3s::access::S3Access for NaukaAccess {
                         )
                     })
             }
-            "DeleteObjects" => acl_allows("WRITE"),
+            // A browser POST addresses the bucket, not a key — same WRITE
+            // permission as any other way of creating an object.
+            "DeleteObjects" | "PostObject" | "PutObject" => acl_allows("WRITE"),
             // Writing any key — PUT, DELETE, copy destination, all the
             // multipart stages — is the bucket's WRITE permission. Reads
             // of object subresources (tagging, retention…) are not
@@ -3493,6 +3652,11 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
         let acr_headers = header("access-control-request-headers");
         let is_options = req.method() == hyper::Method::OPTIONS;
         let method = req.method().as_str().to_string();
+        let expires_param = req.uri().query().and_then(|q| {
+            q.split('&')
+                .find_map(|p| p.strip_prefix("X-Amz-Expires="))
+                .map(String::from)
+        });
         Box::pin(async move {
             if is_options {
                 // The preflight never reaches an S3 operation: it is
@@ -3506,7 +3670,69 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
                     acr_headers.as_deref(),
                 ));
             }
+            // A presigned URL with an out-of-range lifetime is refused as
+            // FORBIDDEN, not as a parse error: negative or beyond the
+            // 7-day AWS maximum, it never reaches signature verification
+            // (`s3s` would answer 400 on the negative case; AWS and the
+            // suite say 403).
+            if let Some(raw) = &expires_param {
+                const MAX_PRESIGN_SECS: i64 = 604_800;
+                let ok = raw
+                    .parse::<i64>()
+                    .is_ok_and(|v| v > 0 && v <= MAX_PRESIGN_SECS);
+                if !ok {
+                    let mut resp = hyper::Response::new(s3s::Body::from(
+                        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                          <Error><Code>AccessDenied</Code>\
+                          <Message>invalid X-Amz-Expires</Message></Error>"
+                            .to_vec(),
+                    ));
+                    *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
+                    return Ok(resp);
+                }
+            }
             let mut resp = hyper::service::Service::call(svc.as_ref(), req).await?;
+            // POST-object polish over `s3s`'s protocol handling:
+            // - an UNMET policy condition is 403 AccessDenied on AWS, but
+            //   `s3s` answers 400 InvalidPolicyDocument (same code it uses
+            //   for a structurally bad policy, which IS a 400 — the
+            //   "Policy condition" message tells the two apart);
+            // - the success_action_redirect Location must carry the ETag
+            //   WITH its quotes, which `s3s` strips.
+            if method == "POST" {
+                if resp.status() == hyper::StatusCode::BAD_REQUEST {
+                    let body_bytes = resp.body().bytes();
+                    if let Some(b) = body_bytes {
+                        let text = String::from_utf8_lossy(&b);
+                        if text.contains("<Code>InvalidPolicyDocument</Code>")
+                            && (text.contains("Policy condition")
+                                || text.contains("does not match bucket in URL"))
+                        {
+                            let fixed = text.replace(
+                                "<Code>InvalidPolicyDocument</Code>",
+                                "<Code>AccessDenied</Code>",
+                            );
+                            *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
+                            *resp.body_mut() = s3s::Body::from(fixed.into_bytes());
+                        }
+                    }
+                }
+                if resp.status() == hyper::StatusCode::SEE_OTHER {
+                    let requoted = resp
+                        .headers()
+                        .get(hyper::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|loc| {
+                            let (head, etag) = loc.split_once("etag=")?;
+                            (!etag.starts_with("%22")).then(|| format!("{head}etag=%22{etag}%22"))
+                        });
+                    if let Some(loc) = requoted {
+                        if let Ok(v) = loc.parse() {
+                            resp.headers_mut().insert(hyper::header::LOCATION, v);
+                        }
+                    }
+                }
+            }
             // A cross-origin actual request gets the Access-Control-*
             // headers on WHATEVER response the operation produced — a 403
             // from auth still carries them, as AWS does. The method under

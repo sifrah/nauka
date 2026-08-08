@@ -21,7 +21,8 @@ commit on `main`, each CI-green on a release build):
 | + Bucket policies (phase 6 start) | 204 | ✅ CI |
 | + Full ACLs (buckets + objects) | 250 | ✅ CI |
 | + SSE (SSE-C real crypto, S3/KMS surface) | 273 | ✅ CI |
-| + dbstore triage: 94 upstream-excluded tests measured green and pinned | 367 | local ✅, CI pending |
+| + dbstore triage: 94 upstream-excluded tests measured green and pinned | 367 | ✅ CI |
+| + POST-object + presigned/anonymous | 422 | local ✅, CI pending |
 
 The suite has ~838 collectable tests; the rest are **excluded on purpose**
 and tracked in `conformance/EXCLUSIONS.md` (each exclusion is debt meant to
@@ -150,8 +151,21 @@ cases deselected by name with a reason.
     ObjectOwnership ops, GetBucketLocation, range-read trailing
     checksum handling. Each future feature moves its wins into the
     pinned list.
-  - TODO next: POST-object (browser uploads), presigned URLs (`anon` /
-    `_raw_` families), object_ownership (the BucketOwnerEnforced knob),
+  - **POST-object + presigned/anonymous — DONE (421).** `s3s` owns the
+    POST protocol (form parsing, policy document expiration+conditions,
+    the form signature — V2 and V4); the `post_object` handler is a
+    simplified PutObject fed from form fields (canned ACL, XML tagging
+    field, metadata, default content-type, owner). Anonymous requests
+    ride the phase-6 ACL layer (`PostObject`/`PutObject` on a bucket
+    path = bucket WRITE). The HTTP wrapper (ServiceRef) patches three
+    AWS-vs-s3s gaps: out-of-range/negative `X-Amz-Expires` → 403 before
+    signature checking; unmet post-policy condition → 403 AccessDenied
+    (bad policy structure stays 400 — told apart by the s3s message);
+    quoted ETag restored in the success_action_redirect Location. Four
+    POST tests deselected with reasons (s3s drops `${filename}`,
+    accepts lenient expiration dates, refuses out-of-policy
+    `x-amz-checksum-*` fields, treats unsigned POST as anonymous).
+  - TODO next: object_ownership (the BucketOwnerEnforced knob),
     bucket_logging (needs policy-evaluation extras: service principals,
     SourceArn conditions), event notifications, real at-rest SSE-S3/KMS
     (~60 more pool tests), conditional writes, GetBucketLocation.
@@ -181,7 +195,7 @@ reg 'youruseridhere'     9876543210abcdef0123456789abcdef0123456789abcdef0123456
 
 # 4. run the gate (clones/pins ceph/s3-tests, applies the exclusion filters)
 ./conformance/run.sh
-# expect: 273 passed on pass 1, then 94 passed on the dbstore pass (367 total)
+# expect: 328 passed on pass 1, then 94 passed on the dbstore pass (422 total)
 ```
 
 To iterate on ONE feature's family fast, run pytest with `-k "<marker or

@@ -39,9 +39,19 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 ## Deferred, but unmarked by the suite
 
 Some phase-5/6 tests carry no pytest marker, so `run.sh` excludes them by
-name substring (`-k`): `website`, plus the POST / anonymous / presigned
-families. Same status as the marked ones above — they come off when the
-feature lands.
+name substring (`-k`): `website` and a few request-shape families
+(`aws_chunked`, `torrent`, …). Same status as the marked ones above —
+they come off when the feature lands.
+
+The `post_object`, `anon` and `_raw_` name filters came off when browser
+POST uploads and presigned/anonymous access landed. `s3s` owns the POST
+protocol (multipart/form-data, policy document, form signature) and the
+`post_object` handler feeds the engine; anonymous requests ride the ACL
+layer that came with phase 6. Our HTTP wrapper adds what AWS answers and
+`s3s` does not: 403 (not 400) for an out-of-range or negative
+`X-Amz-Expires` on a presigned URL, 403 AccessDenied (not 400) for an
+UNMET post-policy condition — a structurally invalid policy stays 400 —
+and the quoted ETag in the success_action_redirect Location.
 
 The `cors` name filter came off when CORS landed: configuration storage,
 OPTIONS preflight and Access-Control-* response headers, plus just enough
@@ -108,8 +118,11 @@ are the only per-test exclusions; everything else in scope must pass.
 
 | Test | Reason |
 | --- | --- |
-| `test_object_delete_key_bucket_gone` | Uses an unauthenticated client — anonymous access (phase 6). |
 | `test_bucket_list_prefix_unreadable` | A raw control character (`\n`) in a prefix; the XML serializer percent-encodes it. Cosmetic, harmless. |
+| `test_post_object_set_key_from_filename` | `${filename}` substitution: `s3s` consumes the form and drops the file's filename before the handler can substitute it. |
+| `test_post_object_invalid_date_format` | `s3s` accepts the lenient `str(datetime)` expiration format the test wants rejected. |
+| `test_post_object_upload_checksum` | `s3s` refuses `x-amz-checksum-*` form fields that are not in the policy; AWS exempts them. |
+| `test_post_object_missing_signature` | An unsigned POST is treated as anonymous by `s3s` and denied 403; the suite wants 400. Status-code cosmetics on a malformed request. |
 | `test_multi_object_delete_key_limit`, `test_multi_objectv2_delete_key_limit` | Create 1000 objects then delete; a timing test, slow under a debug build. |
 | `test_multipart_resend_first_finishes_last` | Re-reads the part body multiple times via a fake file; an upload pattern no real client uses. |
 | `test_get_versioned_object_attributes`, `test_get_checksum_object_attributes` | `GetObjectAttributes` is the one operation AWS returns the ETag *unquoted*; the `s3s` XML serializer always quotes it. An `s3s` limitation, not a Nauka behaviour. (The checksum variant's `Checksum` block itself is served correctly.) |
