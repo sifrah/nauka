@@ -1804,6 +1804,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "data-encoding",
  "flate2",
  "futures",
  "hyper",
