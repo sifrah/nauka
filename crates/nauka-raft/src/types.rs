@@ -86,6 +86,21 @@ pub enum AppCommand {
         version_id: Option<String>,
         tags: BTreeMap<String, String>,
     },
+    /// Sets (or clears) the Object Lock retention on one object version.
+    /// `retention` is the serialized mode+until; `None` clears it.
+    SetObjectRetention {
+        bucket: String,
+        key: String,
+        version_id: Option<String>,
+        retention: Option<String>,
+    },
+    /// Sets the Object Lock legal hold on one object version.
+    SetObjectLegalHold {
+        bucket: String,
+        key: String,
+        version_id: Option<String>,
+        on: bool,
+    },
     /// Registers an in-flight multipart upload.
     PutUpload(Box<nauka_s3::MultipartUpload>),
     /// Adds ONE part to an existing upload.

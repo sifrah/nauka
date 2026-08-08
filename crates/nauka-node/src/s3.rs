@@ -122,6 +122,47 @@ impl NaukaS3 {
             .unwrap_or_default()
     }
 
+    /// The (mode, retain-until-secs) of an object version's Object Lock
+    /// retention, if any.
+    fn retention_of(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Option<(String, u64)> {
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3.objects.get(&(bucket.to_string(), key.to_string()))?;
+        let v = match version_id {
+            Some(id) => entry.version(id)?,
+            None => entry.current()?,
+        };
+        let info: RetentionInfo = serde_json::from_str(v.retention.as_deref()?).ok()?;
+        Some((info.mode, info.until))
+    }
+
+    /// Whether a version is protected from deletion by Object Lock — a
+    /// retention still in force, or a legal hold. GOVERNANCE yields to the
+    /// bypass header; COMPLIANCE and legal holds never do.
+    fn is_locked(&self, bucket: &str, key: &str, version_id: &str, bypass: bool) -> bool {
+        let s3 = self.state.app.app_state().s3;
+        let Some(entry) = s3.objects.get(&(bucket.to_string(), key.to_string())) else {
+            return false;
+        };
+        let Some(v) = entry.version(version_id) else {
+            return false;
+        };
+        if v.legal_hold {
+            return true;
+        }
+        if let Some((mode, until)) = self.retention_of(bucket, key, Some(version_id)) {
+            if until > Self::now() {
+                // GOVERNANCE can be bypassed; COMPLIANCE cannot.
+                return !(mode == ObjectLockRetentionMode::GOVERNANCE && bypass);
+            }
+        }
+        false
+    }
+
     /// The version id a write should carry: a fresh one in an
     /// Enabled bucket, the literal "null" otherwise (Unversioned or
     /// Suspended both write to the single null version).
@@ -147,8 +188,17 @@ impl NaukaS3 {
         bucket: &str,
         key: &str,
         version_id: Option<&str>,
+        bypass_governance: bool,
     ) -> S3Result<DeleteOutcome> {
         if let Some(id) = version_id {
+            // Object Lock: a retained or legally-held version cannot be
+            // permanently removed.
+            if self.is_locked(bucket, key, id, bypass_governance) {
+                return Err(s3_error!(
+                    AccessDenied,
+                    "the object version is protected by Object Lock"
+                ));
+            }
             // Permanent removal of one version. Report whether it was a
             // delete marker (S3 sets x-amz-delete-marker on the response).
             let was_marker = self
@@ -255,10 +305,18 @@ impl S3 for NaukaS3 {
                 location: Some(format!("/{name}")),
             }));
         }
+        let object_lock = req.input.object_lock_enabled_for_bucket.unwrap_or(false);
         let bucket = nauka_s3::Bucket {
             created_at: Self::now(),
             owner: req.credentials.map(|c| c.access_key).unwrap_or_default(),
-            object_lock_enabled: req.input.object_lock_enabled_for_bucket.unwrap_or(false),
+            object_lock_enabled: object_lock,
+            // Object Lock requires versioning, so enabling it at creation
+            // turns versioning on too, as S3 does.
+            versioning: if object_lock {
+                nauka_s3::VersioningState::Enabled
+            } else {
+                nauka_s3::VersioningState::Unversioned
+            },
             ..Default::default()
         };
         self.write(nauka_raft::types::AppCommand::CreateBucket {
@@ -394,6 +452,15 @@ impl S3 for NaukaS3 {
             Some(header) => parse_tagging_header(header)?,
             None => BTreeMap::new(),
         };
+        // Object Lock can also be set at PUT time via headers.
+        let retention = retention_from_headers(
+            input.object_lock_mode.as_ref().map(|m| m.as_str()),
+            input.object_lock_retain_until_date.as_ref(),
+        );
+        let legal_hold = input
+            .object_lock_legal_hold_status
+            .as_ref()
+            .is_some_and(|s| s.as_str() == ObjectLockLegalHoldStatus::ON);
         let version = nauka_s3::ObjectVersion {
             version_id: version_id.clone(),
             content,
@@ -410,8 +477,8 @@ impl S3 for NaukaS3 {
             storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
             tags,
             checksums: BTreeMap::new(),
-            retention: None,
-            legal_hold: false,
+            retention,
+            legal_hold,
             sse: None,
         };
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
@@ -443,6 +510,14 @@ impl S3 for NaukaS3 {
         bucket.versioning = match status {
             Some(s) if s == BucketVersioningStatus::ENABLED => nauka_s3::VersioningState::Enabled,
             Some(s) if s == BucketVersioningStatus::SUSPENDED => {
+                // An Object-Lock bucket requires versioning; it cannot be
+                // suspended.
+                if bucket.object_lock_enabled {
+                    return Err(s3_error!(
+                        InvalidBucketState,
+                        "Versioning cannot be suspended on a bucket with Object Lock"
+                    ));
+                }
                 // Suspending keeps existing versions; only new writes go
                 // back to the null version. Versioning cannot be turned
                 // fully off once enabled, so we never return to Unversioned.
@@ -515,6 +590,7 @@ impl S3 for NaukaS3 {
                 resp.headers.insert("x-amz-tagging-count", val);
             }
         }
+        set_object_lock_headers(&mut resp.headers, v);
         Ok(resp)
     }
 
@@ -622,6 +698,270 @@ impl S3 for NaukaS3 {
         Ok(S3Response::new(DeleteBucketTaggingOutput::default()))
     }
 
+    async fn put_object_lock_configuration(
+        &self,
+        req: S3Request<PutObjectLockConfigurationInput>,
+    ) -> S3Result<S3Response<PutObjectLockConfigurationOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        // Object Lock requires versioning: the configuration can be set on
+        // any versioning-enabled bucket (and enables Object Lock on it),
+        // but never on an unversioned or suspended one.
+        if bucket.versioning != nauka_s3::VersioningState::Enabled {
+            return Err(s3_error!(
+                InvalidBucketState,
+                "Object Lock requires a versioning-enabled bucket"
+            ));
+        }
+        bucket.object_lock_enabled = true;
+        // The configuration's ObjectLockEnabled must literally be "Enabled".
+        if let Some(cfg) = &req.input.object_lock_configuration {
+            if cfg.object_lock_enabled.as_ref().map(|e| e.as_str())
+                != Some(ObjectLockEnabled::ENABLED)
+            {
+                return Err(s3_error!(MalformedXML, "ObjectLockEnabled must be Enabled"));
+            }
+        }
+        // Validate the default rule: mode must be a known value, and days
+        // and years are mutually exclusive and positive.
+        if let Some(cfg) = &req.input.object_lock_configuration {
+            if let Some(dr) = cfg.rule.as_ref().and_then(|r| r.default_retention.as_ref()) {
+                match dr.mode.as_ref().map(|m| m.as_str()) {
+                    Some(m)
+                        if m == ObjectLockRetentionMode::GOVERNANCE
+                            || m == ObjectLockRetentionMode::COMPLIANCE => {}
+                    _ => return Err(s3_error!(MalformedXML, "invalid Object Lock mode")),
+                }
+                if dr.days.is_some() && dr.years.is_some() {
+                    return Err(s3_error!(
+                        MalformedXML,
+                        "days and years are mutually exclusive"
+                    ));
+                }
+                if dr.days.is_some_and(|d| d <= 0) || dr.years.is_some_and(|y| y <= 0) {
+                    return Err(custom_error(
+                        "InvalidRetentionPeriod",
+                        hyper::StatusCode::BAD_REQUEST,
+                        "the retention period must be a positive integer",
+                    ));
+                }
+            }
+        }
+        bucket.object_lock_default = req
+            .input
+            .object_lock_configuration
+            .as_ref()
+            .and_then(|c| serde_json::to_string(&RetentionConfig::from_dto(c)).ok());
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutObjectLockConfigurationOutput::default()))
+    }
+
+    async fn get_object_lock_configuration(
+        &self,
+        req: S3Request<GetObjectLockConfigurationInput>,
+    ) -> S3Result<S3Response<GetObjectLockConfigurationOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        if !bucket.object_lock_enabled {
+            return Err(s3_error!(
+                ObjectLockConfigurationNotFoundError,
+                "Object Lock is not enabled for this bucket"
+            ));
+        }
+        let cfg: Option<RetentionConfig> = bucket
+            .object_lock_default
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        Ok(S3Response::new(GetObjectLockConfigurationOutput {
+            object_lock_configuration: Some(RetentionConfig::to_dto(cfg.as_ref())),
+        }))
+    }
+
+    async fn put_object_retention(
+        &self,
+        req: S3Request<PutObjectRetentionInput>,
+    ) -> S3Result<S3Response<PutObjectRetentionOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        // Retention only exists on an Object-Lock bucket.
+        if !bucket.object_lock_enabled {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Bucket is missing Object Lock Configuration"
+            ));
+        }
+        let (mode, until) = match &req.input.retention {
+            Some(r) => {
+                let m = r.mode.as_ref().map(|m| m.as_str().to_string());
+                // The mode must be a known value.
+                if !matches!(
+                    m.as_deref(),
+                    Some(ObjectLockRetentionMode::GOVERNANCE)
+                        | Some(ObjectLockRetentionMode::COMPLIANCE)
+                ) {
+                    return Err(s3_error!(MalformedXML, "invalid retention mode"));
+                }
+                (m, r.retain_until_date.as_ref().and_then(timestamp_secs))
+            }
+            None => (None, None),
+        };
+        // Shortening or removing a COMPLIANCE retention is never allowed;
+        // a GOVERNANCE one only with the bypass header. Look at what is
+        // there already.
+        let current = self.retention_of(
+            &req.input.bucket,
+            &req.input.key,
+            req.input.version_id.as_deref(),
+        );
+        if let Some((cur_mode, cur_until)) = &current {
+            let reducing = until.unwrap_or(0) < *cur_until;
+            let changing_mode = mode.as_deref() != Some(cur_mode.as_str());
+            // A COMPLIANCE retention can neither be shortened nor have its
+            // mode changed, ever.
+            if cur_mode == ObjectLockRetentionMode::COMPLIANCE && (reducing || changing_mode) {
+                return Err(s3_error!(
+                    AccessDenied,
+                    "a COMPLIANCE retention cannot be shortened or changed"
+                ));
+            }
+            if cur_mode == ObjectLockRetentionMode::GOVERNANCE
+                && (reducing || changing_mode)
+                && !req.input.bypass_governance_retention.unwrap_or(false)
+            {
+                return Err(s3_error!(
+                    AccessDenied,
+                    "shortening or changing a GOVERNANCE retention needs bypass"
+                ));
+            }
+        }
+        let serialized = mode.as_ref().map(|m| {
+            serde_json::to_string(&RetentionInfo {
+                mode: m.clone(),
+                until: until.unwrap_or(0),
+            })
+            .unwrap_or_default()
+        });
+        let resp = self
+            .state
+            .app
+            .write(nauka_raft::types::AppCommand::SetObjectRetention {
+                bucket: req.input.bucket,
+                key: req.input.key,
+                version_id: req.input.version_id,
+                retention: serialized,
+            })
+            .await
+            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+        if !resp.ok {
+            return Err(s3_error!(NoSuchKey));
+        }
+        Ok(S3Response::new(PutObjectRetentionOutput::default()))
+    }
+
+    async fn get_object_retention(
+        &self,
+        req: S3Request<GetObjectRetentionInput>,
+    ) -> S3Result<S3Response<GetObjectRetentionOutput>> {
+        let b = self.require_bucket(&req.input.bucket)?;
+        if !b.object_lock_enabled {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Bucket is missing Object Lock Configuration"
+            ));
+        }
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3
+            .objects
+            .get(&(req.input.bucket, req.input.key))
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, req.input.version_id.as_deref())?;
+        let info: Option<RetentionInfo> = v
+            .retention
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        match info {
+            Some(i) => Ok(S3Response::new(GetObjectRetentionOutput {
+                retention: Some(ObjectLockRetention {
+                    mode: i.mode.parse().ok(),
+                    retain_until_date: Some(Self::timestamp(i.until)),
+                }),
+            })),
+            None => Err(s3_error!(
+                NoSuchObjectLockConfiguration,
+                "the object has no retention"
+            )),
+        }
+    }
+
+    async fn put_object_legal_hold(
+        &self,
+        req: S3Request<PutObjectLegalHoldInput>,
+    ) -> S3Result<S3Response<PutObjectLegalHoldOutput>> {
+        let b = self.require_bucket(&req.input.bucket)?;
+        if !b.object_lock_enabled {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Bucket is missing Object Lock Configuration"
+            ));
+        }
+        // The status must be ON or OFF.
+        let status = req
+            .input
+            .legal_hold
+            .as_ref()
+            .and_then(|h| h.status.as_ref());
+        match status.map(|s| s.as_str()) {
+            Some(ObjectLockLegalHoldStatus::ON) | Some(ObjectLockLegalHoldStatus::OFF) => {}
+            _ => return Err(s3_error!(MalformedXML, "invalid legal hold status")),
+        }
+        let on = status.is_some_and(|s| s.as_str() == ObjectLockLegalHoldStatus::ON);
+        let resp = self
+            .state
+            .app
+            .write(nauka_raft::types::AppCommand::SetObjectLegalHold {
+                bucket: req.input.bucket,
+                key: req.input.key,
+                version_id: req.input.version_id,
+                on,
+            })
+            .await
+            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+        if !resp.ok {
+            return Err(s3_error!(NoSuchKey));
+        }
+        Ok(S3Response::new(PutObjectLegalHoldOutput::default()))
+    }
+
+    async fn get_object_legal_hold(
+        &self,
+        req: S3Request<GetObjectLegalHoldInput>,
+    ) -> S3Result<S3Response<GetObjectLegalHoldOutput>> {
+        let b = self.require_bucket(&req.input.bucket)?;
+        if !b.object_lock_enabled {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Bucket is missing Object Lock Configuration"
+            ));
+        }
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3
+            .objects
+            .get(&(req.input.bucket, req.input.key))
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, req.input.version_id.as_deref())?;
+        let status = if v.legal_hold {
+            ObjectLockLegalHoldStatus::ON
+        } else {
+            ObjectLockLegalHoldStatus::OFF
+        };
+        Ok(S3Response::new(GetObjectLegalHoldOutput {
+            legal_hold: Some(ObjectLockLegalHold {
+                status: ObjectLockLegalHoldStatus::from_static(status).into(),
+            }),
+        }))
+    }
+
     async fn get_object_attributes(
         &self,
         req: S3Request<GetObjectAttributesInput>,
@@ -697,7 +1037,7 @@ impl S3 for NaukaS3 {
         // A response header override lets the client ask GET to echo a
         // different value (?response-cache-control=…), which S3 supports.
         let sys = |k: &str| v.system_metadata.get(k).cloned();
-        Ok(S3Response::new(GetObjectOutput {
+        let mut resp = S3Response::new(GetObjectOutput {
             body: Some(body),
             content_length: Some(length as i64),
             content_range: partial.then(|| format!("bytes {start}-{end}/{}", v.size)),
@@ -725,7 +1065,9 @@ impl S3 for NaukaS3 {
             tag_count: (!v.tags.is_empty()).then_some(v.tags.len() as i32),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
             ..Default::default()
-        }))
+        });
+        set_object_lock_headers(&mut resp.headers, &v);
+        Ok(resp)
     }
 
     async fn copy_object(
@@ -864,6 +1206,14 @@ impl S3 for NaukaS3 {
                 None => BTreeMap::new(),
             },
             sse: None,
+            retention: retention_from_headers(
+                input.object_lock_mode.as_ref().map(|m| m.as_str()),
+                input.object_lock_retain_until_date.as_ref(),
+            ),
+            legal_hold: input
+                .object_lock_legal_hold_status
+                .as_ref()
+                .is_some_and(|s| s.as_str() == ObjectLockLegalHoldStatus::ON),
             parts: BTreeMap::new(),
         };
         self.write(nauka_raft::types::AppCommand::PutUpload(Box::new(upload)))
@@ -1085,8 +1435,8 @@ impl S3 for NaukaS3 {
             storage_class: upload.storage_class.clone(),
             tags: upload.tags.clone(),
             checksums: BTreeMap::new(),
-            retention: None,
-            legal_hold: false,
+            retention: upload.retention.clone(),
+            legal_hold: upload.legal_hold,
             sse: upload.sse.clone(),
         };
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
@@ -1214,7 +1564,12 @@ impl S3 for NaukaS3 {
             // Per-object outcomes, versioning-aware, exactly like the
             // single-object DeleteObject.
             match self
-                .delete_one(&bucket, &obj.key, obj.version_id.as_deref())
+                .delete_one(
+                    &bucket,
+                    &obj.key,
+                    obj.version_id.as_deref(),
+                    req.input.bypass_governance_retention.unwrap_or(false),
+                )
                 .await
             {
                 Ok(out) => deleted.push(DeletedObject {
@@ -1227,8 +1582,10 @@ impl S3 for NaukaS3 {
                 }),
                 Err(e) => errors.push(s3s::dto::Error {
                     key: Some(obj.key),
-                    code: Some("InternalError".into()),
-                    message: Some(format!("{e:#}")),
+                    // Surface the real code (AccessDenied on a locked
+                    // version), not a blanket InternalError.
+                    code: Some(e.code().as_str().to_string()),
+                    message: e.message().map(|m| m.to_string()),
                     version_id: obj.version_id,
                 }),
             }
@@ -1250,6 +1607,7 @@ impl S3 for NaukaS3 {
                 &req.input.bucket,
                 &req.input.key,
                 req.input.version_id.as_deref(),
+                req.input.bypass_governance_retention.unwrap_or(false),
             )
             .await?;
         Ok(S3Response::new(DeleteObjectOutput {
@@ -1687,6 +2045,93 @@ fn map_to_tag_set(tags: &BTreeMap<String, String>) -> Vec<Tag> {
             value: Some(v.clone()),
         })
         .collect()
+}
+
+/// Adds the `x-amz-object-lock-*` headers S3 puts on GET/HEAD of an object
+/// carrying a retention or a legal hold. The DTOs lack these fields, so the
+/// headers are set directly on the response.
+fn set_object_lock_headers(headers: &mut hyper::HeaderMap, v: &nauka_s3::ObjectVersion) {
+    if let Some(info) = v
+        .retention
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<RetentionInfo>(s).ok())
+    {
+        if let Ok(mode) = info.mode.parse() {
+            headers.insert("x-amz-object-lock-mode", mode);
+        }
+        // Retain-until as an RFC 3339 / ISO 8601 timestamp.
+        let odt = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(info.until as i64);
+        if let Ok(date) = odt
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default()
+            .parse()
+        {
+            headers.insert("x-amz-object-lock-retain-until-date", date);
+        }
+    }
+    let hold = if v.legal_hold { "ON" } else { "OFF" };
+    if let Ok(val) = hold.parse() {
+        headers.insert("x-amz-object-lock-legal-hold", val);
+    }
+}
+
+/// Builds an S3 error with a code s3s does not model as a variant (so it
+/// has no default status), giving it an explicit status.
+fn custom_error(code: &str, status: hyper::StatusCode, msg: &'static str) -> S3Error {
+    use s3s::S3ErrorCode;
+    let mut err = S3Error::with_message(S3ErrorCode::Custom(code.into()), msg);
+    err.set_status_code(status);
+    err
+}
+
+/// Builds the serialized retention from the `x-amz-object-lock-mode` and
+/// `-retain-until-date` PUT/multipart headers, if both are present.
+fn retention_from_headers(mode: Option<&str>, until: Option<&Timestamp>) -> Option<String> {
+    let mode = mode?.to_string();
+    let until = until.and_then(timestamp_secs)?;
+    serde_json::to_string(&RetentionInfo { mode, until }).ok()
+}
+
+/// Object Lock retention stored on one object version.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetentionInfo {
+    mode: String,
+    /// Retain-until, epoch seconds.
+    until: u64,
+}
+
+/// A bucket's default Object Lock rule, stored serialized.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct RetentionConfig {
+    mode: Option<String>,
+    days: Option<i32>,
+    years: Option<i32>,
+}
+
+impl RetentionConfig {
+    fn from_dto(c: &ObjectLockConfiguration) -> Self {
+        let dr = c.rule.as_ref().and_then(|r| r.default_retention.as_ref());
+        Self {
+            mode: dr.and_then(|d| d.mode.as_ref().map(|m| m.as_str().to_string())),
+            days: dr.and_then(|d| d.days),
+            years: dr.and_then(|d| d.years),
+        }
+    }
+
+    fn to_dto(cfg: Option<&Self>) -> ObjectLockConfiguration {
+        ObjectLockConfiguration {
+            object_lock_enabled: ObjectLockEnabled::from_static(ObjectLockEnabled::ENABLED).into(),
+            rule: cfg.and_then(|c| {
+                c.mode.as_ref().map(|m| ObjectLockRule {
+                    default_retention: Some(DefaultRetention {
+                        mode: m.parse().ok(),
+                        days: c.days,
+                        years: c.years,
+                    }),
+                })
+            }),
+        }
+    }
 }
 
 /// The outcome of deleting one object, shaping the DeleteObject /

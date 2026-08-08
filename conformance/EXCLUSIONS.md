@@ -28,7 +28,6 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | Marker | Feature | Phase |
 | --- | --- | --- |
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
-| `object_lock` | Object Lock (retention, legal hold) | 5 |
 | `lifecycle`, `lifecycle_expiration` | Lifecycle expiration rules | 5 |
 | `cors` | CORS configuration | 5 |
 | `s3website` | Static website hosting + routing | 5 |

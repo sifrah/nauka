@@ -165,6 +165,12 @@ pub struct MultipartUpload {
     pub tags: BTreeMap<String, String>,
     #[serde(default)]
     pub sse: Option<String>,
+    /// Object Lock retention set at initiation, applied to the completed
+    /// object.
+    #[serde(default)]
+    pub retention: Option<String>,
+    #[serde(default)]
+    pub legal_hold: bool,
     /// part number → part, ordered.
     #[serde(default)]
     pub parts: BTreeMap<u32, UploadedPart>,
@@ -256,6 +262,16 @@ impl S3State {
     }
 }
 
+/// Generates an object version id: 32 URL-safe characters, the shape AWS
+/// uses. Only meaningful in a versioning-enabled bucket; an unversioned
+/// bucket uses the literal "null".
+pub fn new_version_id() -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    data_encoding::BASE64URL_NOPAD.encode(&b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +354,8 @@ mod tests {
                 storage_class: None,
                 tags: Default::default(),
                 sse: None,
+                retention: None,
+                legal_hold: false,
                 parts,
             },
         );
@@ -365,14 +383,4 @@ mod tests {
         s.objects.insert(("b".into(), "k".into()), entry);
         assert_eq!(s.refcount("HASH"), 1, "the old version still holds it");
     }
-}
-
-/// Generates an object version id: 32 URL-safe characters, the shape AWS
-/// uses. Only meaningful in a versioning-enabled bucket; an unversioned
-/// bucket uses the literal "null".
-pub fn new_version_id() -> String {
-    use rand::RngCore;
-    let mut b = [0u8; 24];
-    rand::rngs::OsRng.fill_bytes(&mut b);
-    data_encoding::BASE64URL_NOPAD.encode(&b)
 }
