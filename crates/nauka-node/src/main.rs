@@ -726,7 +726,7 @@ async fn main() -> Result<()> {
                                     Ok(_) => {
                                         if let Some(q) = meter_bg.quota() {
                                             eprintln!(
-                                                "egress declared: {:.2} GB / {:.0} GB for {month}",
+                                                "egress declared: {:.2} GB / {:.2} GB for {month}",
                                                 served as f64 / 1e9,
                                                 q as f64 / 1e9
                                             );
