@@ -383,6 +383,13 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                     info: None,
                                 }
                             }
+                            AppCommand::UpdateNodeEgress { addr, egress } => {
+                                inner.state.node_egress.insert(addr, egress);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
                             AppCommand::BanHash { file_hash, reason } => {
                                 // Banning also removes from the registry: the file
                                 // becomes unreachable AND its shards become

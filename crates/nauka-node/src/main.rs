@@ -6,6 +6,7 @@
 
 mod api;
 mod e2e;
+mod egress;
 mod s3;
 mod update;
 mod webui;
@@ -157,6 +158,12 @@ enum Cmd {
         /// placement). Default: size of the data-dir filesystem.
         #[arg(long)]
         capacity: Option<u64>,
+        /// Monthly egress budget of this node — plain bytes or a human
+        /// size ("500GB", "20TB", "1TiB"). Reads prefer pulling shards
+        /// from nodes with budget to spare; a node past its budget is
+        /// deprioritized, never refused. Unset = unmetered.
+        #[arg(long, env = "NAUKA_EGRESS_QUOTA")]
+        egress_quota: Option<String>,
         /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
@@ -463,6 +470,7 @@ async fn main() -> Result<()> {
             scrub_interval,
             node_id,
             capacity,
+            egress_quota,
             http,
             s3: s3_addr,
             no_s3,
@@ -474,6 +482,14 @@ async fn main() -> Result<()> {
             // Implicit discovery: cluster keys present, no static list, no
             // opt-out → the node figures everything out on its own.
             let discover = cli.keys.is_some() && peers.is_empty() && !no_discover;
+            // The monthly egress budget: refuse to start on a value we
+            // cannot read rather than silently serving unmetered.
+            let egress_quota = match &egress_quota {
+                Some(raw) => Some(egress::parse_size(raw).with_context(|| {
+                    format!("unreadable egress quota {raw:?} (try \"500GB\", \"20TB\", \"1TiB\")")
+                })?),
+                None => None,
+            };
             let store = Arc::new(store);
             let interval = std::time::Duration::from_secs(scrub_interval);
             let mut raft_handler: Option<Arc<dyn nauka_transport::server::RaftHandler>> = None;
@@ -598,6 +614,10 @@ async fn main() -> Result<()> {
 
                 // Shared by the HTTP API and the S3 endpoint: same engine,
                 // two front doors.
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
                 let api_state = Arc::new(api::ApiState {
                     store: store.clone(),
                     app: app.clone(),
@@ -605,6 +625,7 @@ async fn main() -> Result<()> {
                     config: ErasureConfig::default(),
                     tmp_dir: cli.data_dir.join("tmp"),
                     health: health.clone(),
+                    egress: Arc::new(egress::EgressMeter::new(egress_quota, now_secs)),
                 });
 
                 if !no_http {
@@ -631,9 +652,11 @@ async fn main() -> Result<()> {
                 let store_bg = store.clone();
                 let data_dir_bg = cli.data_dir.clone();
                 let health_bg = health.clone();
+                let meter_bg = api_state.egress.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
+                    let mut published_egress: Option<(String, u64)> = None;
                     let mut my_coord = nauka_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
@@ -662,6 +685,55 @@ async fn main() -> Result<()> {
                                         declared_capacity = Some(cap);
                                     }
                                     Err(e) => eprintln!("capacity declaration failed: {e:#}"),
+                                }
+                            }
+                        }
+                        // Publish the monthly egress ledger. On the first
+                        // tick, adopt what the replicated state remembers
+                        // of this node — a mid-month restart must not zero
+                        // the ledger. Then re-publish when the counter has
+                        // moved enough, or the month rolled over.
+                        if app.members().contains_key(&app.id) {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            if published_egress.is_none() {
+                                if let Some(rec) = app.app_state().node_egress.get(&self_id) {
+                                    meter_bg.seed(rec, now);
+                                }
+                            }
+                            let (month, served) = meter_bg.snapshot(now);
+                            const REPUBLISH_DELTA: u64 = 256 * 1024 * 1024;
+                            let due = match &published_egress {
+                                None => true,
+                                Some((m, b)) => {
+                                    *m != month || served.saturating_sub(*b) >= REPUBLISH_DELTA
+                                }
+                            };
+                            if due {
+                                match app
+                                    .write(nauka_raft::types::AppCommand::UpdateNodeEgress {
+                                        addr: self_id.clone(),
+                                        egress: nauka_raft::types::NodeEgress {
+                                            month: month.clone(),
+                                            served_bytes: served,
+                                            quota_bytes: meter_bg.quota(),
+                                        },
+                                    })
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        if let Some(q) = meter_bg.quota() {
+                                            eprintln!(
+                                                "egress declared: {:.2} GB / {:.0} GB for {month}",
+                                                served as f64 / 1e9,
+                                                q as f64 / 1e9
+                                            );
+                                        }
+                                        published_egress = Some((month, served));
+                                    }
+                                    Err(e) => eprintln!("egress declaration failed: {e:#}"),
                                 }
                             }
                         }

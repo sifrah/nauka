@@ -2148,6 +2148,8 @@ impl S3 for NaukaS3 {
                 .filter(|m| m.as_str() == ChecksumMode::ENABLED)
                 .and_then(|_| v.checksums.get(name).cloned())
         };
+        // Client egress, counted when the response is committed to.
+        self.state.egress.add(length);
         let mut resp = S3Response::new(GetObjectOutput {
             expiration: self.expiration_of(&input.bucket, &input.key, &v.tags, v.last_modified),
             checksum_crc32: cks("CRC32"),
@@ -4591,7 +4593,7 @@ async fn reconstruct_range(
     let fetcher = Arc::new(crate::api::Fetcher::new(state.clone()));
     let mut out = Vec::with_capacity((end - start + 1) as usize);
     let mut offset = 0u64;
-    for stripe in &manifest.stripes {
+    for (stripe_idx, stripe) in manifest.stripes.iter().enumerate() {
         let len = stripe.data_len as u64;
         let stripe_end = offset + len - 1;
         if stripe_end < start {
@@ -4601,7 +4603,7 @@ async fn reconstruct_range(
         if offset > end {
             break;
         }
-        let data = crate::api::reconstruct_stripe(&fetcher, stripe, manifest).await?;
+        let data = crate::api::reconstruct_stripe(&fetcher, stripe, stripe_idx, manifest).await?;
         let from = start.saturating_sub(offset) as usize;
         let to = (end.min(stripe_end) - offset) as usize;
         out.extend_from_slice(&data[from..=to]);

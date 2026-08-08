@@ -36,6 +36,12 @@ pub enum AppCommand {
         addr: String,
         coord: nauka_cluster::vivaldi::Coord,
     },
+    /// Publishes a node's egress usage for the current calendar month,
+    /// with its declared monthly budget. The read path prefers pulling
+    /// shards from nodes with budget to spare — the flow-side twin of the
+    /// capacity weight on the storage side. Self-declared: only the node
+    /// itself writes its record.
+    UpdateNodeEgress { addr: String, egress: NodeEgress },
     /// Bans a hash: the file leaves the registry, the API refuses to serve it
     /// (410) and the GC purges its shards. Lets us honor a takedown report or
     /// a legal request without ever reading the content.
@@ -130,6 +136,19 @@ pub enum AppCommand {
     DeleteUpload { upload_id: String },
 }
 
+/// One node's egress ledger for one calendar month, self-declared and
+/// replicated so every node can weigh its read routing the same way.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct NodeEgress {
+    /// Calendar month the counter belongs to, as `"YYYY-MM"` (UTC). A
+    /// record from a previous month reads as "fresh budget".
+    pub month: String,
+    /// Bytes served to clients (S3 + native HTTP) during `month`.
+    pub served_bytes: u64,
+    /// Declared monthly budget; `None` = unmetered (never deprioritized).
+    pub quota_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppResponse {
     pub ok: bool,
@@ -148,6 +167,9 @@ pub struct AppState {
     /// Network coordinates declared per node (address → Vivaldi position).
     #[serde(default)]
     pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+    /// Monthly egress ledger per node (address → month, served, budget).
+    #[serde(default)]
+    pub node_egress: BTreeMap<String, NodeEgress>,
     /// Banned hashes (hash → reason): never served, never re-accepted.
     #[serde(default)]
     pub banned: BTreeMap<String, String>,

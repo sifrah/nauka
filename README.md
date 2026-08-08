@@ -73,6 +73,34 @@ Installation, deployment, CLI reference and troubleshooting:
 [getnauka.com/deploy](https://getnauka.com/deploy/) and
 [getnauka.com/operations](https://getnauka.com/operations/).
 
+## Egress budgets
+
+Storage placement balances a stock — bytes on disk against declared
+capacity. Egress budgets balance the matching flow: bytes served to
+clients against a declared monthly allowance, for nodes on metered links
+(a 20 TB/month dedicated server, a capped home connection).
+
+```bash
+NAUKA_EGRESS_QUOTA=20TB nauka serve …      # or --egress-quota 20TB
+```
+
+Plain bytes and human sizes are accepted (`500GB`, `1.5TB`, `512MiB`).
+Unset means unmetered. How it works:
+
+- every node counts the bytes it serves (S3 GETs and `/f/…` downloads)
+  and publishes the counter into the replicated state alongside its
+  budget, the same way capacities are declared;
+- when a node reconstructs a file, any k of the k+m shards of a stripe
+  decode identically — it asks first for the shards held by the nodes
+  with the most budget headroom (its own shards first: those are free);
+- counters reset at each calendar-month boundary (UTC), matching how
+  providers bill, and survive node restarts through the replicated state.
+
+A node past its budget is **deprioritized, never refused**: serving the
+file always wins over saving a node's bandwidth, so an exhausted budget
+shifts load while alternatives exist and yields when they don't. The
+`egress declared:` log line reports each node's month-to-date total.
+
 ## Documentation
 
 The full documentation lives at **[getnauka.com](https://getnauka.com)**; its

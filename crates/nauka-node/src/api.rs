@@ -36,6 +36,9 @@ pub struct ApiState {
     /// Liveness map fed by the background pinger: uploads only route
     /// shards at members currently answering.
     pub health: Arc<nauka_cluster::health::PeerHealth>,
+    /// This node's monthly egress ledger (bytes served to clients),
+    /// published into the replicated state by the maintenance ticker.
+    pub egress: Arc<crate::egress::EgressMeter>,
 }
 
 impl ApiState {
@@ -482,24 +485,77 @@ fn parse_range(header: Option<&str>, size: u64) -> Option<(u64, u64)> {
 /// Rebuilds one stripe: the k data shards in parallel, parity only if one
 /// is missing — on a healthy cluster not a single parity byte crosses the
 /// wire.
+/// Fetches enough shards of one stripe to decode it, choosing WHICH k of
+/// the k+m to ask for by egress budget: shards this node holds first
+/// (free), then the ones whose predicted holder has the most monthly
+/// budget left. Any k slots decode identically — this is the flow-side
+/// twin of the capacity weight in placement. The prediction reuses the
+/// exact placement function writes used; when it is wrong (membership
+/// drifted), `fetch` scans every member anyway, so a miss costs a probe,
+/// never correctness. Slots still missing after the preferred round are
+/// completed from the rest.
+pub(crate) async fn fetch_stripe_slots(
+    fetcher: &Arc<Fetcher>,
+    stripe: &StripeMeta,
+    stripe_idx: usize,
+    m: &FileManifest,
+) -> Vec<Option<Vec<u8>>> {
+    let k = m.config.data_shards;
+    let total = stripe.shard_hashes.len();
+    let view_refs: Vec<(&str, u64)> = fetcher.view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+    let state = fetcher.state.app.app_state();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let month = crate::egress::month_key(now);
+    let holders = nauka_cluster::placement::stripe_owners_geo(
+        &m.file_hash,
+        stripe_idx,
+        total,
+        &view_refs,
+        &state.node_coords,
+    );
+    let ratios: Vec<(bool, f64)> = holders
+        .iter()
+        .map(|holder| {
+            if *holder == fetcher.state.self_id {
+                (true, f64::INFINITY)
+            } else {
+                (
+                    false,
+                    crate::egress::remaining_ratio(state.node_egress.get(*holder), &month),
+                )
+            }
+        })
+        .collect();
+    let order = crate::egress::rank_slots(&ratios);
+
+    let mut slots: Vec<Option<Vec<u8>>> = vec![None; total];
+    let cut = k.min(total);
+    for round in [&order[..cut], &order[cut..]] {
+        if slots.iter().filter(|s| s.is_some()).count() >= k {
+            break;
+        }
+        let fetches = round.iter().map(|&i| {
+            let f = fetcher.clone();
+            let h = stripe.shard_hashes[i].clone();
+            async move { f.fetch(h).await.map(|d| (i, d)) }
+        });
+        for (i, d) in futures_join_all(fetches).await.into_iter().flatten() {
+            slots[i] = Some(d);
+        }
+    }
+    slots
+}
+
 pub(crate) async fn reconstruct_stripe(
     fetcher: &Arc<Fetcher>,
     stripe: &StripeMeta,
+    stripe_idx: usize,
     m: &FileManifest,
 ) -> Result<Vec<u8>> {
-    let k = m.config.data_shards;
-    let data_fetches = stripe.shard_hashes[..k]
-        .iter()
-        .map(|h| fetcher.clone().fetch(h.clone()));
-    let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
-    if slots.iter().any(|s| s.is_none()) {
-        let parity_fetches = stripe.shard_hashes[k..]
-            .iter()
-            .map(|h| fetcher.clone().fetch(h.clone()));
-        slots.extend(futures_join_all(parity_fetches).await);
-    } else {
-        slots.resize(stripe.shard_hashes.len(), None);
-    }
+    let slots = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
     Ok(decode_stripe(slots, stripe, &m.config)?)
 }
 
@@ -556,7 +612,7 @@ async fn download(
     // common "too many shards are gone" case into an honest 503. A stripe
     // that fails later still truncates: nothing better exists mid-stream.
     let first = match m.stripes.first() {
-        Some(stripe) => Some(reconstruct_stripe(&fetcher, stripe, &m).await),
+        Some(stripe) => Some(reconstruct_stripe(&fetcher, stripe, 0, &m).await),
         None => None,
     };
     if let Some(Err(e)) = &first {
@@ -570,9 +626,8 @@ async fn download(
 
     tokio::spawn(async move {
         let mut hasher = blake3::Hasher::new();
-        let k = m.config.data_shards;
         let mut prefetched = first;
-        for stripe in &m.stripes {
+        for (stripe_idx, stripe) in m.stripes.iter().enumerate() {
             if let Some(data) = prefetched.take() {
                 hasher.update(&data);
                 if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
@@ -580,21 +635,8 @@ async fn download(
                 }
                 continue;
             }
-            // 1) The data shards, in parallel.
-            let data_fetches = stripe.shard_hashes[..k]
-                .iter()
-                .map(|h| fetcher.clone().fetch(h.clone()));
-            let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
-            let missing = slots.iter().filter(|s| s.is_none()).count();
-            // 2) The parity, only if needed (in parallel as well).
-            if missing > 0 {
-                let parity_fetches = stripe.shard_hashes[k..]
-                    .iter()
-                    .map(|h| fetcher.clone().fetch(h.clone()));
-                slots.extend(futures_join_all(parity_fetches).await);
-            } else {
-                slots.resize(stripe.shard_hashes.len(), None);
-            }
+            // Budget-aware slot selection: any k of the k+m decode.
+            let slots = fetch_stripe_slots(&fetcher, stripe, stripe_idx, &m).await;
             let data = match decode_stripe(slots, stripe, &m.config) {
                 Ok(d) => d,
                 Err(e) => {
@@ -619,6 +661,9 @@ async fn download(
     });
 
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    // Egress is counted when the response is committed to — a client that
+    // disconnects mid-download still spent its slice of budget.
+    state.egress.add(manifest.file_size);
     let mut response = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
@@ -645,9 +690,8 @@ async fn serve_range(
     let fetcher = Arc::new(Fetcher::new(state.clone()));
     let m = manifest.clone();
     tokio::spawn(async move {
-        let k = m.config.data_shards;
         let mut offset: u64 = 0; // start of the current stripe in the file
-        for stripe in &m.stripes {
+        for (stripe_idx, stripe) in m.stripes.iter().enumerate() {
             let stripe_len = stripe.data_len as u64;
             let stripe_end = offset + stripe_len; // exclusive
                                                   // Stripe entirely before/after the range: nothing to do.
@@ -658,18 +702,7 @@ async fn serve_range(
             if offset > end {
                 break;
             }
-            let data_fetches = stripe.shard_hashes[..k]
-                .iter()
-                .map(|h| fetcher.clone().fetch(h.clone()));
-            let mut slots: Vec<Option<Vec<u8>>> = futures_join_all(data_fetches).await;
-            if slots.iter().any(|s| s.is_none()) {
-                let parity_fetches = stripe.shard_hashes[k..]
-                    .iter()
-                    .map(|h| fetcher.clone().fetch(h.clone()));
-                slots.extend(futures_join_all(parity_fetches).await);
-            } else {
-                slots.resize(stripe.shard_hashes.len(), None);
-            }
+            let slots = fetch_stripe_slots(&fetcher, stripe, stripe_idx, &m).await;
             let data = match decode_stripe(slots, stripe, &m.config) {
                 Ok(d) => d,
                 Err(e) => {
@@ -698,6 +731,7 @@ async fn serve_range(
     });
 
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    state.egress.add(end - start + 1);
     Ok(Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, "application/octet-stream")
