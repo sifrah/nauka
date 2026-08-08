@@ -358,6 +358,9 @@ impl S3 for NaukaS3 {
         let bucket = nauka_s3::Bucket {
             created_at: Self::now(),
             owner: req.credentials.map(|c| c.access_key).unwrap_or_default(),
+            // The canned ACL, kept for the anonymous-access decision
+            // (`public-read` lets unauthenticated reads through).
+            acl: req.input.acl.map(|a| a.as_str().to_owned()),
             object_lock_enabled: object_lock,
             // Object Lock requires versioning, so enabling it at creation
             // turns versioning on too, as S3 does.
@@ -818,6 +821,88 @@ impl S3 for NaukaS3 {
             .await?;
         }
         Ok(S3Response::new(DeleteBucketLifecycleOutput::default()))
+    }
+
+    async fn put_bucket_cors(
+        &self,
+        req: S3Request<PutBucketCorsInput>,
+    ) -> S3Result<S3Response<PutBucketCorsOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = req.input.cors_configuration;
+        for rule in &cfg.cors_rules {
+            for method in &rule.allowed_methods {
+                if !matches!(method.as_str(), "GET" | "PUT" | "POST" | "DELETE" | "HEAD") {
+                    return Err(s3_error!(
+                        InvalidRequest,
+                        "AllowedMethod must be GET, PUT, POST, DELETE or HEAD"
+                    ));
+                }
+            }
+            // At most one wildcard per origin or header pattern, as AWS
+            // enforces.
+            let one_star = |s: &str| s.matches('*').count() <= 1;
+            if !rule.allowed_origins.iter().all(|o| one_star(o)) {
+                return Err(s3_error!(
+                    InvalidRequest,
+                    "an AllowedOrigin can have at most one wildcard"
+                ));
+            }
+            if let Some(headers) = &rule.allowed_headers {
+                if !headers.iter().all(|h| one_star(h)) {
+                    return Err(s3_error!(
+                        InvalidRequest,
+                        "an AllowedHeader can have at most one wildcard"
+                    ));
+                }
+            }
+        }
+        let mut buf = Vec::new();
+        let mut ser = s3s::xml::Serializer::new(&mut buf);
+        s3s::xml::Serialize::serialize(&cfg, &mut ser)
+            .map_err(|e| s3_error!(InternalError, "serializing the CORS rules: {e}"))?;
+        bucket.cors = Some(String::from_utf8(buf).map_err(|e| s3_error!(InternalError, "{e}"))?);
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutBucketCorsOutput::default()))
+    }
+
+    async fn get_bucket_cors(
+        &self,
+        req: S3Request<GetBucketCorsInput>,
+    ) -> S3Result<S3Response<GetBucketCorsOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = bucket
+            .cors
+            .as_deref()
+            .and_then(cors_from_xml)
+            .ok_or_else(|| {
+                s3_error!(
+                    NoSuchCORSConfiguration,
+                    "The CORS configuration does not exist"
+                )
+            })?;
+        Ok(S3Response::new(GetBucketCorsOutput {
+            cors_rules: Some(cfg.cors_rules),
+        }))
+    }
+
+    async fn delete_bucket_cors(
+        &self,
+        req: S3Request<DeleteBucketCorsInput>,
+    ) -> S3Result<S3Response<DeleteBucketCorsOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        // Deleting an absent configuration is still a 204, per S3.
+        if bucket.cors.take().is_some() {
+            self.write(nauka_raft::types::AppCommand::UpdateBucket {
+                name: req.input.bucket,
+                bucket: Box::new(bucket),
+            })
+            .await?;
+        }
+        Ok(S3Response::new(DeleteBucketCorsOutput::default()))
     }
 
     async fn put_object_lock_configuration(
@@ -2065,28 +2150,75 @@ fn uuid_like() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The access decision for a request `s3s` has already authenticated (or
+/// found unsigned). Signed requests pass; an anonymous one is allowed only
+/// to READ a bucket whose canned ACL is `public-read` — the S3 meaning of
+/// that ACL — and is denied everything else, exactly as the default did.
+struct NaukaAccess {
+    state: Arc<ApiState>,
+}
+
+#[async_trait::async_trait]
+impl s3s::access::S3Access for NaukaAccess {
+    async fn check(&self, cx: &mut s3s::access::S3AccessContext<'_>) -> S3Result<()> {
+        if cx.credentials().is_some() {
+            return Ok(());
+        }
+        // READ, not "any GET": bucket subresources (?cors, ?policy…) stay
+        // private even on a public-read bucket.
+        let readable = matches!(
+            cx.s3_op().name(),
+            "GetObject" | "HeadObject" | "HeadBucket" | "ListObjects" | "ListObjectsV2"
+        );
+        let bucket = match cx.s3_path() {
+            s3s::path::S3Path::Bucket { bucket } => bucket.to_string(),
+            s3s::path::S3Path::Object { bucket, .. } => bucket.to_string(),
+            s3s::path::S3Path::Root => {
+                return Err(s3_error!(AccessDenied, "Signature is required"))
+            }
+        };
+        let public = self
+            .state
+            .app
+            .app_state()
+            .s3
+            .buckets
+            .get(&bucket)
+            .is_some_and(|b| b.acl.as_deref() == Some("public-read"));
+        if readable && public {
+            Ok(())
+        } else {
+            Err(s3_error!(AccessDenied, "Signature is required"))
+        }
+    }
+}
+
 /// Builds the S3 HTTP service: SigV4 against the replicated credentials,
 /// operations against the Nauka engine.
 pub fn service(state: Arc<ApiState>) -> s3s::service::S3Service {
     let mut builder = s3s::service::S3ServiceBuilder::new(NaukaS3::new(state.clone()));
-    builder.set_auth(NaukaAuth { state });
+    builder.set_auth(NaukaAuth {
+        state: state.clone(),
+    });
+    builder.set_access(NaukaAccess { state });
     builder.build()
 }
 
 /// Serves the S3 endpoint until the process stops.
 pub async fn serve(listen: std::net::SocketAddr, state: Arc<ApiState>) -> anyhow::Result<()> {
-    let service = service(state);
+    let service = Arc::new(service(state.clone()));
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("S3 endpoint on http://{listen}");
-    // S3Service implements hyper's Service directly, so it is shared as-is.
-    let service = Arc::new(service);
     loop {
         let (stream, _) = listener.accept().await?;
-        let svc = service.clone();
+        let svc = ServiceRef {
+            inner: service.clone(),
+            state: state.clone(),
+        };
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);
             if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(io, ServiceRef(svc))
+                .serve_connection(io, svc)
                 .await
             {
                 tracing::debug!("S3 connection ended: {e}");
@@ -2095,10 +2227,14 @@ pub async fn serve(listen: std::net::SocketAddr, state: Arc<ApiState>) -> anyhow
     }
 }
 
-/// `hyper` wants a `Service` by value; the S3 service is shared behind an
-/// `Arc`, so this hands out a cheap per-connection handle.
+/// The HTTP layer above `s3s`: CORS lives here because it is decided per
+/// HTTP request, before (OPTIONS preflight) or after (response headers)
+/// the S3 operation — `s3s` never routes either to the service trait.
 #[derive(Clone)]
-struct ServiceRef(Arc<s3s::service::S3Service>);
+struct ServiceRef {
+    inner: Arc<s3s::service::S3Service>,
+    state: Arc<ApiState>,
+}
 
 impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceRef {
     type Response = hyper::Response<s3s::Body>;
@@ -2108,9 +2244,194 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
     >;
 
     fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
-        let svc = self.0.clone();
-        Box::pin(async move { hyper::service::Service::call(svc.as_ref(), req).await })
+        let svc = self.inner.clone();
+        let state = self.state.clone();
+        // Everything CORS needs, captured before the request is consumed.
+        let bucket = path_bucket(req.uri().path());
+        let header = |name: &str| {
+            req.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+        };
+        let origin = header("origin");
+        let acr_method = header("access-control-request-method");
+        let acr_headers = header("access-control-request-headers");
+        let is_options = req.method() == hyper::Method::OPTIONS;
+        let method = req.method().as_str().to_string();
+        Box::pin(async move {
+            if is_options {
+                // The preflight never reaches an S3 operation: it is
+                // unauthenticated by design and answered from the bucket's
+                // stored CORS rules alone.
+                return Ok(preflight(
+                    &state,
+                    bucket.as_deref(),
+                    origin.as_deref(),
+                    acr_method.as_deref(),
+                    acr_headers.as_deref(),
+                ));
+            }
+            let mut resp = hyper::service::Service::call(svc.as_ref(), req).await?;
+            // A cross-origin actual request gets the Access-Control-*
+            // headers on WHATEVER response the operation produced — a 403
+            // from auth still carries them, as AWS does. The method under
+            // evaluation is the announced one when present.
+            if let (Some(bucket), Some(origin)) = (bucket, origin) {
+                let method = acr_method.as_deref().unwrap_or(&method);
+                if let Some(grant) = cors_grant(&state, &bucket, &origin, method, None) {
+                    let h = resp.headers_mut();
+                    insert_header(h, "access-control-allow-origin", &grant.allow_origin);
+                    insert_header(h, "access-control-allow-methods", method);
+                    if let Some(expose) = &grant.expose_headers {
+                        insert_header(h, "access-control-expose-headers", expose);
+                    }
+                    insert_header(h, "vary", "Origin");
+                }
+            }
+            Ok(resp)
+        })
     }
+}
+
+/// The bucket a path-style request addresses: the first path segment.
+fn path_bucket(path: &str) -> Option<String> {
+    let bucket = path.trim_start_matches('/').split('/').next()?;
+    (!bucket.is_empty()).then(|| bucket.to_string())
+}
+
+/// What a matched CORS rule grants a request.
+struct CorsGrant {
+    /// `*` when the rule allowed every origin, the echoed origin otherwise.
+    allow_origin: String,
+    expose_headers: Option<String>,
+    max_age: Option<i32>,
+}
+
+/// Finds the first CORS rule of `bucket` matching the request, per the S3
+/// rules: the origin matches one of AllowedOrigins (`*` or one-wildcard
+/// patterns), the method is in AllowedMethods, and — when the request
+/// announces headers — every one is covered by AllowedHeaders.
+fn cors_grant(
+    state: &Arc<ApiState>,
+    bucket: &str,
+    origin: &str,
+    method: &str,
+    requested_headers: Option<&str>,
+) -> Option<CorsGrant> {
+    let s3 = state.app.app_state().s3;
+    let cfg = cors_from_xml(s3.buckets.get(bucket)?.cors.as_deref()?)?;
+    for rule in &cfg.cors_rules {
+        let matched_origin = rule
+            .allowed_origins
+            .iter()
+            .find(|p| wildcard_matches(p, origin));
+        let Some(pattern) = matched_origin else {
+            continue;
+        };
+        if !rule.allowed_methods.iter().any(|m| m == method) {
+            continue;
+        }
+        if let Some(requested) = requested_headers {
+            let allowed = rule.allowed_headers.as_deref().unwrap_or(&[]);
+            let all_allowed = requested
+                .split(',')
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty())
+                .all(|h| {
+                    allowed
+                        .iter()
+                        .any(|p| wildcard_matches(&p.to_ascii_lowercase(), &h))
+                });
+            if !all_allowed {
+                continue;
+            }
+        }
+        return Some(CorsGrant {
+            allow_origin: if pattern == "*" {
+                "*".into()
+            } else {
+                origin.to_string()
+            },
+            expose_headers: rule
+                .expose_headers
+                .as_ref()
+                .filter(|e| !e.is_empty())
+                .map(|e| e.join(", ")),
+            max_age: rule.max_age_seconds,
+        });
+    }
+    None
+}
+
+/// A CORS pattern with at most one `*`: literal match, or the wildcard
+/// swallows the middle.
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == value,
+        Some((prefix, suffix)) => {
+            value.len() >= prefix.len() + suffix.len()
+                && value.starts_with(prefix)
+                && value.ends_with(suffix)
+        }
+    }
+}
+
+/// Answers an OPTIONS preflight from the bucket's CORS rules: 400 when the
+/// request is not a preflight at all (no Origin or no announced method),
+/// 403 when no rule allows it, 200 with the Access-Control-* headers when
+/// one does.
+fn preflight(
+    state: &Arc<ApiState>,
+    bucket: Option<&str>,
+    origin: Option<&str>,
+    acr_method: Option<&str>,
+    acr_headers: Option<&str>,
+) -> hyper::Response<s3s::Body> {
+    let empty = || s3s::Body::from(Vec::new());
+    let status = |code: u16| {
+        hyper::Response::builder()
+            .status(code)
+            .body(empty())
+            .unwrap_or_else(|_| hyper::Response::new(empty()))
+    };
+    let (Some(origin), Some(method)) = (origin, acr_method) else {
+        // Not a preflight: a browser always sends both.
+        return status(400);
+    };
+    let Some(bucket) = bucket else {
+        return status(403);
+    };
+    match cors_grant(state, bucket, origin, method, acr_headers) {
+        Some(grant) => {
+            let mut resp = status(200);
+            let h = resp.headers_mut();
+            insert_header(h, "access-control-allow-origin", &grant.allow_origin);
+            insert_header(h, "access-control-allow-methods", method);
+            if let Some(headers) = acr_headers {
+                insert_header(h, "access-control-allow-headers", headers);
+            }
+            if let Some(age) = grant.max_age {
+                insert_header(h, "access-control-max-age", &age.to_string());
+            }
+            insert_header(h, "vary", "Origin");
+            resp
+        }
+        None => status(403),
+    }
+}
+
+/// Inserts a header, skipping values that cannot be encoded rather than
+/// failing the response over a cosmetic addition.
+fn insert_header(headers: &mut hyper::HeaderMap, name: &'static str, value: &str) {
+    if let Ok(v) = value.parse::<hyper::header::HeaderValue>() {
+        headers.insert(name, v);
+    }
+}
+
+fn cors_from_xml(xml: &str) -> Option<CORSConfiguration> {
+    let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
+    s3s::xml::Deserialize::deserialize(&mut de).ok()
 }
 
 /// Applies the conditional headers S3 defines on reads and copies.

@@ -28,7 +28,6 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | Marker | Feature | Phase |
 | --- | --- | --- |
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
-| `cors` | CORS configuration | 5 |
 | `s3website` | Static website hosting + routing | 5 |
 | `checksum` | Additional checksums (CRC32/C, SHA1/256) | 5 |
 | `bucket_logging` | Server access logging | 5 |
@@ -42,9 +41,14 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 ## Deferred, but unmarked by the suite
 
 Some phase-5/6 tests carry no pytest marker, so `run.sh` excludes them by
-name substring (`-k`): `website`, `cors`, `checksum`, plus the ACL / POST /
+name substring (`-k`): `website`, `checksum`, plus the ACL / POST /
 anonymous / presigned families. Same status as the marked ones above —
 they come off when the feature lands.
+
+The `cors` name filter came off when CORS landed: configuration storage,
+OPTIONS preflight and Access-Control-* response headers, plus just enough
+anonymous access for its tests — an unauthenticated READ of a bucket whose
+canned ACL is `public-read`. Full ACL evaluation is still phase 6.
 
 The `lifecycle` markers came off when lifecycle configuration landed: rule
 storage and validation, plus the `x-amz-expiration` header. The

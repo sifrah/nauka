@@ -26,6 +26,11 @@ pub struct Bucket {
     pub created_at: u64,
     /// The access key that created it (its owner).
     pub owner: String,
+    /// The canned ACL set at creation (`public-read`, …). `None` means
+    /// `private`. Full ACL grants are phase-6; the canned value is what
+    /// anonymous-access decisions read.
+    #[serde(default)]
+    pub acl: Option<String>,
     pub versioning: VersioningState,
     /// Raw JSON of the bucket policy, evaluated at request time.
     #[serde(default)]
