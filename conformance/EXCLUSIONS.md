@@ -16,7 +16,8 @@ never come off the list.
 | Marker | Why |
 | --- | --- |
 | `fails_on_aws` | The suite itself marks these as not matching AWS. |
-| `fails_on_rgw`, `fails_on_dbstore` | Ceph-backend-specific expectations, not the S3 contract. |
+| `fails_on_rgw` | Ceph-RGW-specific expectations, not the S3 contract. |
+| `fails_on_dbstore` (partially!) | "Fails on Ceph's dbstore reference backend" — which says nothing about Nauka. The 223 tests carrying ONLY this marker were all executed against Nauka: the 94 that pass are pinned in `dbstore-passing.txt` and run as a second gate pass; the ~129 that fail map to features still to land (real SSE-S3/KMS at rest, multipart checksums, conditional writes, ObjectOwnership, POST…) and rejoin the list as those land. |
 | `s3select` | SQL-over-objects — an AWS compute feature, not storage. |
 | `cloud_transition`, `cloud_restore`, `lifecycle_transition` | Tiering to external cloud / Glacier. No cold tier here. |
 | `sns` | Bucket-notification delivery to AWS SNS topics. |

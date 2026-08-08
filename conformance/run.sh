@@ -63,9 +63,22 @@ set +e
   -m "$EXCLUDE" -k "$KEYWORDS" $DESELECT \
   --junitxml="$HERE/results.xml"
 status=$?
+
+# Second pass: tests upstream marks `fails_on_dbstore` — failures of
+# CEPH'S reference backend, not ours. Nauka passes every test listed in
+# dbstore-passing.txt (measured, then pinned); a regression in any of
+# them fails CI like any other in-scope test. The rest of that marker's
+# tests stay out and are tracked in EXCLUSIONS.md.
+# shellcheck disable=SC2046
+./.venv/bin/python -m pytest \
+  -p no:cacheprovider -q --no-header --timeout=300 \
+  $(sed 's|^|s3tests/functional/test_s3.py::|' "$HERE/dbstore-passing.txt" | tr '\n' ' ') \
+  --junitxml="$HERE/results-dbstore.xml"
+status2=$?
 set -e
 
 # The gate: any in-scope failure fails CI. Exit 0 (all pass) and exit 5
 # (nothing collected) are the only acceptable outcomes; 1 means a real
 # conformance regression.
-exit $status
+[ "$status" -ne 0 ] && exit "$status"
+exit $status2

@@ -20,7 +20,8 @@ commit on `main`, each CI-green on a release build):
 | + Checksums | 188 | ✅ CI |
 | + Bucket policies (phase 6 start) | 204 | ✅ CI |
 | + Full ACLs (buckets + objects) | 250 | ✅ CI |
-| + SSE (SSE-C real crypto, S3/KMS surface) | 273 | local ✅, CI pending |
+| + SSE (SSE-C real crypto, S3/KMS surface) | 273 | ✅ CI |
+| + dbstore triage: 94 upstream-excluded tests measured green and pinned | 367 | local ✅, CI pending |
 
 The suite has ~838 collectable tests; the rest are **excluded on purpose**
 and tracked in `conformance/EXCLUSIONS.md` (each exclusion is debt meant to
@@ -137,12 +138,23 @@ cases deselected by name with a reason.
     and `s3:x-amz-server-side-encryption`; explicit Deny now binds the
     OWNER too (except the policy subresource — lockout stays
     repairable).
+  - **dbstore triage — DONE (367).** The 223 tests carrying only the
+    `fails_on_dbstore` marker (Ceph's reference backend's failures, not
+    ours) were all run against Nauka: 94 pass — object_lock 32/32,
+    object_copy 11, sse_kms 10, multipart 5… — and are now PINNED in
+    `conformance/dbstore-passing.txt`, run as a second pytest pass in
+    run.sh (a regression there fails CI like any in-scope test). The
+    ~129 that fail cluster by missing feature: ~60 real SSE-S3/KMS at
+    rest, 14 multipart (part checksums), 12 listing edge cases, 9
+    policy extras, 5 conditional writes (If-Match on PUT), 5
+    ObjectOwnership ops, GetBucketLocation, range-read trailing
+    checksum handling. Each future feature moves its wins into the
+    pinned list.
   - TODO next: POST-object (browser uploads), presigned URLs (`anon` /
     `_raw_` families), object_ownership (the BucketOwnerEnforced knob),
     bucket_logging (needs policy-evaluation extras: service principals,
-    SourceArn conditions), event notifications. Then the
-    `fails_on_dbstore` triage (223 tests excluded on Ceph-dbstore's
-    behalf, not ours — measure what already passes, keep it in scope).
+    SourceArn conditions), event notifications, real at-rest SSE-S3/KMS
+    (~60 more pool tests), conditional writes, GetBucketLocation.
 
 ## How to run the gate locally
 
@@ -169,7 +181,7 @@ reg 'youruseridhere'     9876543210abcdef0123456789abcdef0123456789abcdef0123456
 
 # 4. run the gate (clones/pins ceph/s3-tests, applies the exclusion filters)
 ./conformance/run.sh
-# expect: 273 passed, 0 failed
+# expect: 273 passed on pass 1, then 94 passed on the dbstore pass (367 total)
 ```
 
 To iterate on ONE feature's family fast, run pytest with `-k "<marker or
