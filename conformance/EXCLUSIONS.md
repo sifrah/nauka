@@ -27,9 +27,8 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 
 | Marker | Feature | Phase |
 | --- | --- | --- |
-| `versioning`, `delete_marker` | Object versioning + delete markers | 5 |
+| `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
 | `object_lock` | Object Lock (retention, legal hold) | 5 |
-| `tagging` | Object and bucket tagging | 5 |
 | `lifecycle`, `lifecycle_expiration` | Lifecycle expiration rules | 5 |
 | `cors` | CORS configuration | 5 |
 | `s3website` | Static website hosting + routing | 5 |
@@ -60,6 +59,7 @@ are the only per-test exclusions; everything else in scope must pass.
 | `test_bucket_list_prefix_unreadable` | A raw control character (`\n`) in a prefix; the XML serializer percent-encodes it. Cosmetic, harmless. |
 | `test_multi_object_delete_key_limit`, `test_multi_objectv2_delete_key_limit` | Create 1000 objects then delete; a timing test, slow under a debug build. |
 | `test_multipart_resend_first_finishes_last` | Re-reads the part body multiple times via a fake file; an upload pattern no real client uses. |
+| `test_get_versioned_object_attributes` | `GetObjectAttributes` is the one operation AWS returns the ETag *unquoted*; the `s3s` XML serializer always quotes it. An `s3s` limitation, not a Nauka behaviour. |
 
 `test_get_object_ifnonematch_good` used to be here (the `304 Not Modified`
 was missing its `ETag`/`Last-Modified` headers) and is now in scope — the

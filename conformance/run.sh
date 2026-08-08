@@ -22,7 +22,7 @@ S3TESTS_REF="${S3TESTS_REF:-5522d1c351f75bc00ae0f64f742f3f095f5939d9}"
 # quotes is a LITERAL backslash, which pytest rejects in a -k/-m
 # expression (it passed locally only because the manual runs used one
 # line — the divergence that reached CI).
-EXCLUDE='not fails_on_rgw and not fails_on_aws and not fails_on_dbstore and not s3select and not sns and not cloud_transition and not cloud_restore and not sse_s3 and not encryption and not versioning and not delete_marker and not object_lock and not tagging and not lifecycle and not lifecycle_expiration and not lifecycle_transition and not cors and not s3website and not checksum and not bucket_logging and not bucket_policy and not object_ownership and not conditional_write and not group and not user_policy and not role_policy and not session_policy and not iam_account and not iam_role and not iam_user and not webidentity_test'
+EXCLUDE='not fails_on_rgw and not fails_on_aws and not fails_on_dbstore and not s3select and not sns and not cloud_transition and not cloud_restore and not sse_s3 and not encryption and not delete_marker and not object_lock and not lifecycle and not lifecycle_expiration and not lifecycle_transition and not cors and not s3website and not checksum and not bucket_logging and not bucket_policy and not object_ownership and not conditional_write and not group and not user_policy and not role_policy and not session_policy and not iam_account and not iam_role and not iam_user and not webidentity_test'
 
 # Name-based exclusions for phase-5/6 features whose tests carry NO pytest
 # marker, so a marker cannot deselect them: ACLs and ACL-driven access
@@ -31,7 +31,7 @@ EXCLUDE='not fails_on_rgw and not fails_on_aws and not fails_on_dbstore and not 
 # UploadPartCopy, cross-owner ops, and the versioning / object-lock / CORS /
 # checksum families whose tests the suite left unmarked. Documented in
 # EXCLUSIONS.md. Single logical line, same reason as above.
-KEYWORDS='not acl and not access_bucket and not post_object and not anon and not _raw_ and not policy and not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website and not lifecycle and not versioning and not versioned and not object_lock and not cors and not checksum'
+KEYWORDS='not acl and not access_bucket and not post_object and not anon and not _raw_ and not policy and not public_block and not torrent and not aws_chunked and not chunked_transfer and not multipart_copy and not copy_not_owned and not 100_continue and not expected_bucket_owner and not website and not lifecycle and not object_lock and not cors and not checksum'
 
 # A handful of individual edge-case tests, deselected by full node id with
 # a reason each (see EXCLUSIONS.md): anonymous access, a control character
@@ -42,6 +42,7 @@ DESELECT="
   --deselect s3tests/functional/test_s3.py::test_multi_object_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multi_objectv2_delete_key_limit
   --deselect s3tests/functional/test_s3.py::test_multipart_resend_first_finishes_last
+  --deselect s3tests/functional/test_s3.py::test_get_versioned_object_attributes
 "
 
 if [ ! -d "$WORK" ]; then

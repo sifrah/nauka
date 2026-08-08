@@ -515,6 +515,38 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 info: None,
                             }
                         }
+                        AppCommand::SetObjectTags {
+                            bucket,
+                            key,
+                            version_id,
+                            tags,
+                        } => {
+                            let found =
+                                inner
+                                    .state
+                                    .s3
+                                    .objects
+                                    .get_mut(&(bucket, key))
+                                    .and_then(|entry| match &version_id {
+                                        Some(id) => {
+                                            entry.versions.iter_mut().find(|v| v.version_id == *id)
+                                        }
+                                        None => entry.versions.first_mut(),
+                                    });
+                            match found {
+                                Some(v) => {
+                                    v.tags = tags;
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                                None => AppResponse {
+                                    ok: false,
+                                    info: Some("no such object".into()),
+                                },
+                            }
+                        }
                         AppCommand::PutUpload(upload) => {
                             let id = upload.upload_id.clone();
                             inner.state.s3.uploads.insert(id.clone(), *upload);

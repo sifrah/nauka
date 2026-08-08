@@ -16,6 +16,6 @@ pub mod naming;
 
 pub use creds::{generate_credential, Action};
 pub use model::{
-    Bucket, BucketPermission, Credential, MultipartUpload, ObjectEntry, ObjectVersion, S3State,
-    UploadedPart, VersioningState,
+    new_version_id, Bucket, BucketPermission, Credential, MultipartUpload, ObjectEntry,
+    ObjectVersion, S3State, UploadedPart, VersioningState,
 };

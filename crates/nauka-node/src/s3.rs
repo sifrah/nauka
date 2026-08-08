@@ -110,6 +110,121 @@ impl NaukaS3 {
         }
     }
 
+    /// A bucket's versioning state (Unversioned by default).
+    fn versioning_of(&self, bucket: &str) -> nauka_s3::VersioningState {
+        self.state
+            .app
+            .app_state()
+            .s3
+            .buckets
+            .get(bucket)
+            .map(|b| b.versioning)
+            .unwrap_or_default()
+    }
+
+    /// The version id a write should carry: a fresh one in an
+    /// Enabled bucket, the literal "null" otherwise (Unversioned or
+    /// Suspended both write to the single null version).
+    fn version_id_for(state: nauka_s3::VersioningState) -> String {
+        match state {
+            nauka_s3::VersioningState::Enabled => nauka_s3::new_version_id(),
+            _ => "null".into(),
+        }
+    }
+
+    /// Deletes one object, honouring versioning. Shared by DeleteObject and
+    /// the DeleteObjects batch.
+    ///
+    /// - a specific `version_id` is removed permanently (and if it was a
+    ///   delete marker, the response says so);
+    /// - without a version id, a versioned bucket does NOT erase anything —
+    ///   it lays a *delete marker* on top, which is what makes the deletion
+    ///   undoable. Enabled gets a fresh marker version; Suspended replaces
+    ///   the null one;
+    /// - an unversioned bucket just drops the null version.
+    async fn delete_one(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> S3Result<DeleteOutcome> {
+        if let Some(id) = version_id {
+            // Permanent removal of one version. Report whether it was a
+            // delete marker (S3 sets x-amz-delete-marker on the response).
+            let was_marker = self
+                .state
+                .app
+                .app_state()
+                .s3
+                .objects
+                .get(&(bucket.to_string(), key.to_string()))
+                .and_then(|e| e.version(id))
+                .map(|v| v.is_delete_marker())
+                .unwrap_or(false);
+            let _ = self
+                .state
+                .app
+                .write(nauka_raft::types::AppCommand::DeleteObjectVersion {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    version_id: id.to_string(),
+                })
+                .await;
+            return Ok(DeleteOutcome {
+                delete_marker: was_marker,
+                version_id: Some(id.to_string()),
+            });
+        }
+
+        match self.versioning_of(bucket) {
+            nauka_s3::VersioningState::Unversioned => {
+                // Idempotent: removing an absent key is a success.
+                let _ = self
+                    .state
+                    .app
+                    .write(nauka_raft::types::AppCommand::DeleteObjectVersion {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        version_id: "null".into(),
+                    })
+                    .await;
+                Ok(DeleteOutcome::default())
+            }
+            state => {
+                // Lay a delete marker on top. Enabled gets a fresh version
+                // id; Suspended reuses the null version.
+                let marker_id = Self::version_id_for(state);
+                let marker = nauka_s3::ObjectVersion {
+                    version_id: marker_id.clone(),
+                    content: None,
+                    delete_marker: true,
+                    size: 0,
+                    etag: String::new(),
+                    last_modified: Self::now(),
+                    content_type: None,
+                    user_metadata: BTreeMap::new(),
+                    system_metadata: BTreeMap::new(),
+                    storage_class: None,
+                    tags: BTreeMap::new(),
+                    checksums: BTreeMap::new(),
+                    retention: None,
+                    legal_hold: false,
+                    sse: None,
+                };
+                self.write(nauka_raft::types::AppCommand::PutObjectVersion {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    version: Box::new(marker),
+                })
+                .await?;
+                Ok(DeleteOutcome {
+                    delete_marker: true,
+                    version_id: (marker_id != "null").then_some(marker_id),
+                })
+            }
+        }
+    }
+
     /// The Owner block S3 attaches to a listed object. Single-tenant: the
     /// object's owner is the credential that created it (or the cluster).
     fn owner_of(&self, _v: &nauka_s3::ObjectVersion) -> Owner {
@@ -272,8 +387,15 @@ impl S3 for NaukaS3 {
             let odt: time::OffsetDateTime = v.clone().into();
             system_metadata.insert("expires".into(), odt.unix_timestamp().to_string());
         }
+        let versioning = self.versioning_of(&input.bucket);
+        let version_id = Self::version_id_for(versioning);
+        // The x-amz-tagging header sets tags at creation time.
+        let tags = match &input.tagging {
+            Some(header) => parse_tagging_header(header)?,
+            None => BTreeMap::new(),
+        };
         let version = nauka_s3::ObjectVersion {
-            version_id: "null".into(),
+            version_id: version_id.clone(),
             content,
             delete_marker: false,
             size,
@@ -286,7 +408,7 @@ impl S3 for NaukaS3 {
                 .unwrap_or_default(),
             system_metadata,
             storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
-            tags: BTreeMap::new(),
+            tags,
             checksums: BTreeMap::new(),
             retention: None,
             legal_hold: false,
@@ -301,6 +423,59 @@ impl S3 for NaukaS3 {
 
         Ok(S3Response::new(PutObjectOutput {
             e_tag: etag.parse().ok(),
+            // Only an Enabled bucket surfaces a version id on the write.
+            version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
+            ..Default::default()
+        }))
+    }
+
+    async fn put_bucket_versioning(
+        &self,
+        req: S3Request<PutBucketVersioningInput>,
+    ) -> S3Result<S3Response<PutBucketVersioningOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let status = req
+            .input
+            .versioning_configuration
+            .status
+            .as_ref()
+            .map(|s| s.as_str());
+        bucket.versioning = match status {
+            Some(s) if s == BucketVersioningStatus::ENABLED => nauka_s3::VersioningState::Enabled,
+            Some(s) if s == BucketVersioningStatus::SUSPENDED => {
+                // Suspending keeps existing versions; only new writes go
+                // back to the null version. Versioning cannot be turned
+                // fully off once enabled, so we never return to Unversioned.
+                nauka_s3::VersioningState::Suspended
+            }
+            _ => return Err(s3_error!(IllegalVersioningConfigurationException)),
+        };
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutBucketVersioningOutput::default()))
+    }
+
+    async fn get_bucket_versioning(
+        &self,
+        req: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        // An unversioned bucket has never had versioning set: S3 returns an
+        // empty Status, not the word "Suspended".
+        let status = match bucket.versioning {
+            nauka_s3::VersioningState::Unversioned => None,
+            nauka_s3::VersioningState::Enabled => Some(BucketVersioningStatus::from_static(
+                BucketVersioningStatus::ENABLED,
+            )),
+            nauka_s3::VersioningState::Suspended => Some(BucketVersioningStatus::from_static(
+                BucketVersioningStatus::SUSPENDED,
+            )),
+        };
+        Ok(S3Response::new(GetBucketVersioningOutput {
+            status,
             ..Default::default()
         }))
     }
@@ -315,11 +490,9 @@ impl S3 for NaukaS3 {
             .objects
             .get(&(req.input.bucket, req.input.key))
             .ok_or_else(|| s3_error!(NoSuchKey))?;
-        let v = entry
-            .current_content()
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, req.input.version_id.as_deref())?;
         let sys = |k: &str| v.system_metadata.get(k).cloned();
-        Ok(S3Response::new(HeadObjectOutput {
+        let mut resp = S3Response::new(HeadObjectOutput {
             content_length: Some(v.size as i64),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
@@ -331,7 +504,144 @@ impl S3 for NaukaS3 {
             expires: sys("expires")
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Self::timestamp),
+            version_id: versioned_id(v),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
+            ..Default::default()
+        });
+        // HeadObjectOutput has no tag-count field, so set the header
+        // directly, as S3 does.
+        if !v.tags.is_empty() {
+            if let Ok(val) = v.tags.len().to_string().parse() {
+                resp.headers.insert("x-amz-tagging-count", val);
+            }
+        }
+        Ok(resp)
+    }
+
+    async fn put_object_tagging(
+        &self,
+        req: S3Request<PutObjectTaggingInput>,
+    ) -> S3Result<S3Response<PutObjectTaggingOutput>> {
+        self.require_bucket(&req.input.bucket)?;
+        let tags = tag_set_to_map(&req.input.tagging.tag_set, 10)?;
+        let resp = self
+            .state
+            .app
+            .write(nauka_raft::types::AppCommand::SetObjectTags {
+                bucket: req.input.bucket,
+                key: req.input.key,
+                version_id: req.input.version_id.clone(),
+                tags,
+            })
+            .await
+            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+        if !resp.ok {
+            return Err(s3_error!(NoSuchKey));
+        }
+        Ok(S3Response::new(PutObjectTaggingOutput {
+            version_id: req.input.version_id,
+        }))
+    }
+
+    async fn get_object_tagging(
+        &self,
+        req: S3Request<GetObjectTaggingInput>,
+    ) -> S3Result<S3Response<GetObjectTaggingOutput>> {
+        self.require_bucket(&req.input.bucket)?;
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3
+            .objects
+            .get(&(req.input.bucket, req.input.key))
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, req.input.version_id.as_deref())?;
+        Ok(S3Response::new(GetObjectTaggingOutput {
+            tag_set: map_to_tag_set(&v.tags),
+            version_id: versioned_id(v),
+        }))
+    }
+
+    async fn delete_object_tagging(
+        &self,
+        req: S3Request<DeleteObjectTaggingInput>,
+    ) -> S3Result<S3Response<DeleteObjectTaggingOutput>> {
+        self.require_bucket(&req.input.bucket)?;
+        let _ = self
+            .state
+            .app
+            .write(nauka_raft::types::AppCommand::SetObjectTags {
+                bucket: req.input.bucket,
+                key: req.input.key,
+                version_id: req.input.version_id.clone(),
+                tags: BTreeMap::new(),
+            })
+            .await;
+        Ok(S3Response::new(DeleteObjectTaggingOutput {
+            version_id: req.input.version_id,
+        }))
+    }
+
+    async fn put_bucket_tagging(
+        &self,
+        req: S3Request<PutBucketTaggingInput>,
+    ) -> S3Result<S3Response<PutBucketTaggingOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        bucket.tags = tag_set_to_map(&req.input.tagging.tag_set, 50)?;
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(PutBucketTaggingOutput::default()))
+    }
+
+    async fn get_bucket_tagging(
+        &self,
+        req: S3Request<GetBucketTaggingInput>,
+    ) -> S3Result<S3Response<GetBucketTaggingOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        // S3 answers NoSuchTagSet when a bucket has no tags at all.
+        if bucket.tags.is_empty() {
+            return Err(s3_error!(NoSuchTagSet, "The bucket has no tags"));
+        }
+        Ok(S3Response::new(GetBucketTaggingOutput {
+            tag_set: map_to_tag_set(&bucket.tags),
+        }))
+    }
+
+    async fn delete_bucket_tagging(
+        &self,
+        req: S3Request<DeleteBucketTaggingInput>,
+    ) -> S3Result<S3Response<DeleteBucketTaggingOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        bucket.tags.clear();
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(DeleteBucketTaggingOutput::default()))
+    }
+
+    async fn get_object_attributes(
+        &self,
+        req: S3Request<GetObjectAttributesInput>,
+    ) -> S3Result<S3Response<GetObjectAttributesOutput>> {
+        self.require_bucket(&req.input.bucket)?;
+        let s3 = self.state.app.app_state().s3;
+        let entry = s3
+            .objects
+            .get(&(req.input.bucket, req.input.key))
+            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, req.input.version_id.as_deref())?;
+        // GetObjectAttributes reports the ETag WITHOUT quotes, unlike every
+        // other operation — a quirk the suite checks explicitly.
+        let bare_etag = v.etag.trim_matches('"').to_string();
+        Ok(S3Response::new(GetObjectAttributesOutput {
+            e_tag: bare_etag.parse().ok(),
+            object_size: Some(v.size as i64),
+            last_modified: Some(Self::timestamp(v.last_modified)),
+            storage_class: Some(StorageClass::from_static(StorageClass::STANDARD)),
+            version_id: versioned_id(v),
             ..Default::default()
         }))
     }
@@ -347,10 +657,7 @@ impl S3 for NaukaS3 {
             .objects
             .get(&(input.bucket.clone(), input.key.clone()))
             .ok_or_else(|| s3_error!(NoSuchKey))?;
-        let v = entry
-            .current_content()
-            .cloned()
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+        let v = resolve_version(entry, input.version_id.as_deref())?.clone();
 
         check_preconditions(
             &v,
@@ -414,6 +721,8 @@ impl S3 for NaukaS3 {
             expires: sys("expires")
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(Self::timestamp),
+            version_id: versioned_id(&v),
+            tag_count: (!v.tags.is_empty()).then_some(v.tags.len() as i32),
             metadata: Some(v.user_metadata.clone().into_iter().collect()),
             ..Default::default()
         }))
@@ -425,8 +734,16 @@ impl S3 for NaukaS3 {
     ) -> S3Result<S3Response<CopyObjectOutput>> {
         let input = req.input;
         self.require_bucket(&input.bucket)?;
-        let (src_bucket, src_key) = match &input.copy_source {
-            CopySource::Bucket { bucket, key, .. } => (bucket.to_string(), key.to_string()),
+        let (src_bucket, src_key, src_version) = match &input.copy_source {
+            CopySource::Bucket {
+                bucket,
+                key,
+                version_id,
+            } => (
+                bucket.to_string(),
+                key.to_string(),
+                version_id.as_ref().map(|v| v.to_string()),
+            ),
             // Access points and Outposts are AWS-side routing concepts
             // with no meaning in a self-hosted cluster.
             CopySource::AccessPoint { .. } | CopySource::Outpost { .. } => {
@@ -449,12 +766,13 @@ impl S3 for NaukaS3 {
             ));
         }
         let s3 = self.state.app.app_state().s3;
-        let source = s3
+        let entry = s3
             .objects
             .get(&(src_bucket, src_key))
-            .and_then(|e| e.current_content())
-            .cloned()
             .ok_or_else(|| s3_error!(NoSuchKey))?;
+        // Honour the source version: copy the exact version asked for, not
+        // whatever is current.
+        let source = resolve_version(entry, src_version.as_deref())?.clone();
 
         check_preconditions(
             &source,
@@ -468,8 +786,10 @@ impl S3 for NaukaS3 {
         // this free, and the derived refcount keeps both alive until the
         // last key referencing them goes.
         let now = Self::now();
+        let versioning = self.versioning_of(&input.bucket);
+        let new_version_id = Self::version_id_for(versioning);
         let copy = nauka_s3::ObjectVersion {
-            version_id: "null".into(),
+            version_id: new_version_id.clone(),
             delete_marker: false,
             last_modified: now,
             content_type: if replace {
@@ -502,6 +822,9 @@ impl S3 for NaukaS3 {
                 last_modified: Some(Self::timestamp(now)),
                 ..Default::default()
             }),
+            version_id: (versioning == nauka_s3::VersioningState::Enabled)
+                .then_some(new_version_id),
+            copy_source_version_id: src_version,
             ..Default::default()
         }))
     }
@@ -536,7 +859,10 @@ impl S3 for NaukaS3 {
                 .unwrap_or_default(),
             system_metadata: BTreeMap::new(),
             storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
-            tags: BTreeMap::new(),
+            tags: match &input.tagging {
+                Some(h) => parse_tagging_header(h)?,
+                None => BTreeMap::new(),
+            },
             sse: None,
             parts: BTreeMap::new(),
         };
@@ -744,8 +1070,10 @@ impl S3 for NaukaS3 {
         self.write(nauka_raft::types::AppCommand::RegisterManifest(joined))
             .await?;
 
+        let versioning = self.versioning_of(&upload.bucket);
+        let new_version_id = Self::version_id_for(versioning);
         let version = nauka_s3::ObjectVersion {
-            version_id: "null".into(),
+            version_id: new_version_id.clone(),
             content: Some(content_hash),
             delete_marker: false,
             size: total,
@@ -778,6 +1106,8 @@ impl S3 for NaukaS3 {
             bucket: Some(upload.bucket),
             key: Some(upload.key),
             e_tag: etag.parse().ok(),
+            version_id: (versioning == nauka_s3::VersioningState::Enabled)
+                .then_some(new_version_id),
             ..Default::default()
         }))
     }
@@ -881,22 +1211,19 @@ impl S3 for NaukaS3 {
         let mut deleted = Vec::new();
         let mut errors = Vec::new();
         for obj in req.input.delete.objects {
-            // S3 reports per-object outcomes rather than failing the batch,
-            // and deleting an absent key counts as success.
+            // Per-object outcomes, versioning-aware, exactly like the
+            // single-object DeleteObject.
             match self
-                .state
-                .app
-                .write(nauka_raft::types::AppCommand::DeleteObjectVersion {
-                    bucket: bucket.clone(),
-                    key: obj.key.clone(),
-                    version_id: obj.version_id.clone().unwrap_or_else(|| "null".into()),
-                })
+                .delete_one(&bucket, &obj.key, obj.version_id.as_deref())
                 .await
             {
-                Ok(_) => deleted.push(DeletedObject {
+                Ok(out) => deleted.push(DeletedObject {
                     key: Some(obj.key),
+                    // The version id acted on, and — when a delete marker
+                    // was created — its own id, so the client can undo it.
                     version_id: obj.version_id,
-                    ..Default::default()
+                    delete_marker: out.delete_marker.then_some(true),
+                    delete_marker_version_id: out.version_id,
                 }),
                 Err(e) => errors.push(s3s::dto::Error {
                     key: Some(obj.key),
@@ -918,17 +1245,18 @@ impl S3 for NaukaS3 {
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
         self.require_bucket(&req.input.bucket)?;
-        // S3 deletes are idempotent: removing an absent key is a success.
-        let _ = self
-            .state
-            .app
-            .write(nauka_raft::types::AppCommand::DeleteObjectVersion {
-                bucket: req.input.bucket,
-                key: req.input.key,
-                version_id: "null".into(),
-            })
-            .await;
-        Ok(S3Response::new(DeleteObjectOutput::default()))
+        let out = self
+            .delete_one(
+                &req.input.bucket,
+                &req.input.key,
+                req.input.version_id.as_deref(),
+            )
+            .await?;
+        Ok(S3Response::new(DeleteObjectOutput {
+            delete_marker: out.delete_marker.then_some(true),
+            version_id: out.version_id,
+            ..Default::default()
+        }))
     }
 
     async fn list_objects_v2(
@@ -1309,6 +1637,121 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
 /// The order is imposed by RFC 9110 and checked by the conformance suite:
 /// `If-Match` first (412 on mismatch), then `If-None-Match` (304 — or 412
 /// on a copy source), then the date conditions.
+/// Converts an S3 `TagSet` into a map, enforcing the S3 limits: at most
+/// `max` tags, keys 1–128 characters, values 0–256, and no duplicate keys.
+fn tag_set_to_map(tag_set: &[Tag], max: usize) -> S3Result<BTreeMap<String, String>> {
+    if tag_set.len() > max {
+        return Err(s3_error!(
+            InvalidTag,
+            "a resource may carry at most {max} tags"
+        ));
+    }
+    let mut map = BTreeMap::new();
+    for tag in tag_set {
+        let key = tag.key.clone().unwrap_or_default();
+        let value = tag.value.clone().unwrap_or_default();
+        if key.is_empty() || key.chars().count() > 128 || value.chars().count() > 256 {
+            return Err(s3_error!(InvalidTag, "invalid tag key or value"));
+        }
+        if map.insert(key, value).is_some() {
+            return Err(s3_error!(InvalidTag, "duplicate tag key"));
+        }
+    }
+    Ok(map)
+}
+
+/// Parses the `x-amz-tagging` header — a url-encoded `k=v&k2=v2` query
+/// string — into a tag map, enforcing the same 10-tag object limit.
+fn parse_tagging_header(header: &str) -> S3Result<BTreeMap<String, String>> {
+    let mut tags: Vec<Tag> = Vec::new();
+    for pair in header.split('&').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let decode = |s: &str| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .into_owned()
+        };
+        tags.push(Tag {
+            key: Some(decode(k)),
+            value: Some(decode(v)),
+        });
+    }
+    tag_set_to_map(&tags, 10)
+}
+
+/// Renders a tag map back as an S3 `TagSet`.
+fn map_to_tag_set(tags: &BTreeMap<String, String>) -> Vec<Tag> {
+    tags.iter()
+        .map(|(k, v)| Tag {
+            key: Some(k.clone()),
+            value: Some(v.clone()),
+        })
+        .collect()
+}
+
+/// The outcome of deleting one object, shaping the DeleteObject /
+/// DeleteObjects response fields.
+#[derive(Default)]
+struct DeleteOutcome {
+    /// True when the delete created (or removed) a delete marker.
+    delete_marker: bool,
+    /// The version id involved: the new marker's id on a versioned delete,
+    /// or the removed version's id on a permanent delete.
+    version_id: Option<String>,
+}
+
+/// Resolves the version a read targets: a specific one when `version_id`
+/// is given, otherwise the current content (a delete marker on top reads
+/// as absent). A delete marker requested by id is not a body — S3 answers
+/// 405 MethodNotAllowed.
+fn resolve_version<'a>(
+    entry: &'a nauka_s3::ObjectEntry,
+    version_id: Option<&str>,
+) -> S3Result<&'a nauka_s3::ObjectVersion> {
+    match version_id {
+        Some(id) => {
+            let v = entry.version(id).ok_or_else(|| s3_error!(NoSuchVersion))?;
+            if v.is_delete_marker() {
+                return Err(s3_error!(MethodNotAllowed));
+            }
+            Ok(v)
+        }
+        None => match entry.current() {
+            Some(v) if !v.is_delete_marker() => Ok(v),
+            // The newest version is a delete marker: the key reads as
+            // absent (404), but S3 flags it with x-amz-delete-marker and
+            // the marker's version id so a client can tell a deletion from
+            // a key that never existed.
+            Some(marker) => Err(delete_marker_404(marker)),
+            None => Err(s3_error!(NoSuchKey)),
+        },
+    }
+}
+
+/// A 404 that carries `x-amz-delete-marker: true` and the marker's version
+/// id, as S3 does when the current version is a delete marker.
+fn delete_marker_404(marker: &nauka_s3::ObjectVersion) -> S3Error {
+    let mut err = s3_error!(NoSuchKey);
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        "x-amz-delete-marker",
+        hyper::header::HeaderValue::from_static("true"),
+    );
+    if marker.version_id != "null" {
+        if let Ok(id) = marker.version_id.parse::<hyper::header::HeaderValue>() {
+            headers.insert("x-amz-version-id", id);
+        }
+    }
+    err.set_headers(headers);
+    err
+}
+
+/// The version id to surface on a response — `None` for the "null" version
+/// of an unversioned object, so an unversioned bucket shows no version id.
+fn versioned_id(v: &nauka_s3::ObjectVersion) -> Option<String> {
+    (v.version_id != "null").then(|| v.version_id.clone())
+}
+
 fn check_preconditions(
     v: &nauka_s3::ObjectVersion,
     if_match: Option<&ETagCondition>,

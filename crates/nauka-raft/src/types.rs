@@ -77,6 +77,15 @@ pub enum AppCommand {
         key: String,
         version_id: String,
     },
+    /// Replaces the tag set on one object version (the current version when
+    /// `version_id` is None). Tags live on the version, not the content, so
+    /// this never touches shards.
+    SetObjectTags {
+        bucket: String,
+        key: String,
+        version_id: Option<String>,
+        tags: BTreeMap<String, String>,
+    },
     /// Registers an in-flight multipart upload.
     PutUpload(Box<nauka_s3::MultipartUpload>),
     /// Adds ONE part to an existing upload.
