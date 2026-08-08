@@ -140,6 +140,55 @@ impl NaukaS3 {
         Some((info.mode, info.until))
     }
 
+    /// The `x-amz-expiration` value for a key, if a lifecycle rule will
+    /// expire it: `expiry-date="…", rule-id="…"` for the earliest-expiring
+    /// Enabled rule with an Expiration action whose filter matches the key.
+    /// A days-based expiry lands at the first midnight UTC more than
+    /// `days` after the write, as AWS rounds; a date-based one is the date
+    /// itself.
+    fn expiration_of(
+        &self,
+        bucket: &str,
+        key: &str,
+        tags: &BTreeMap<String, String>,
+        written: u64,
+    ) -> Option<String> {
+        const DAY: u64 = 86_400;
+        let s3 = self.state.app.app_state().s3;
+        let cfg = lifecycle_from_xml(s3.buckets.get(bucket)?.lifecycle.as_deref()?)?;
+        let mut best: Option<(u64, &str)> = None;
+        for rule in &cfg.rules {
+            if rule.status.as_str() != ExpirationStatus::ENABLED {
+                continue;
+            }
+            let Some(exp) = &rule.expiration else {
+                continue;
+            };
+            if !lifecycle_rule_matches(rule, key, tags) {
+                continue;
+            }
+            let when = match (&exp.date, exp.days) {
+                (Some(date), _) => match timestamp_secs(date) {
+                    Some(s) => s,
+                    None => continue,
+                },
+                (None, Some(days)) => (written / DAY + days as u64 + 1) * DAY,
+                // An ExpiredObjectDeleteMarker-only action has no date to
+                // announce.
+                _ => continue,
+            };
+            if best.is_none_or(|(b, _)| when < b) {
+                best = Some((when, rule.id.as_deref().unwrap_or("")));
+            }
+        }
+        let (when, id) = best?;
+        let odt = time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(when as i64);
+        let date = odt
+            .format(&time::format_description::well_known::Rfc2822)
+            .ok()?;
+        Some(format!("expiry-date=\"{date}\", rule-id=\"{id}\""))
+    }
+
     /// Whether a version is protected from deletion by Object Lock — a
     /// retention still in force, or a legal hold. GOVERNANCE yields to the
     /// bypass header; COMPLIANCE and legal holds never do.
@@ -481,6 +530,14 @@ impl S3 for NaukaS3 {
             legal_hold,
             sse: None,
         };
+        // Announced on the response: the lifecycle rule that will expire
+        // this key, decided at write time.
+        let expiration = self.expiration_of(
+            &input.bucket,
+            &input.key,
+            &version.tags,
+            version.last_modified,
+        );
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
             bucket: input.bucket,
             key: input.key,
@@ -490,6 +547,7 @@ impl S3 for NaukaS3 {
 
         Ok(S3Response::new(PutObjectOutput {
             e_tag: etag.parse().ok(),
+            expiration,
             // Only an Enabled bucket surfaces a version id on the write.
             version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
             ..Default::default()
@@ -563,11 +621,17 @@ impl S3 for NaukaS3 {
         let s3 = self.state.app.app_state().s3;
         let entry = s3
             .objects
-            .get(&(req.input.bucket, req.input.key))
+            .get(&(req.input.bucket.clone(), req.input.key.clone()))
             .ok_or_else(|| s3_error!(NoSuchKey))?;
         let v = resolve_version(entry, req.input.version_id.as_deref())?;
         let sys = |k: &str| v.system_metadata.get(k).cloned();
         let mut resp = S3Response::new(HeadObjectOutput {
+            expiration: self.expiration_of(
+                &req.input.bucket,
+                &req.input.key,
+                &v.tags,
+                v.last_modified,
+            ),
             content_length: Some(v.size as i64),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
@@ -696,6 +760,64 @@ impl S3 for NaukaS3 {
         })
         .await?;
         Ok(S3Response::new(DeleteBucketTaggingOutput::default()))
+    }
+
+    async fn put_bucket_lifecycle_configuration(
+        &self,
+        req: S3Request<PutBucketLifecycleConfigurationInput>,
+    ) -> S3Result<S3Response<PutBucketLifecycleConfigurationOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        let mut cfg = req
+            .input
+            .lifecycle_configuration
+            .ok_or_else(|| s3_error!(MalformedXML, "missing lifecycle configuration"))?;
+        validate_lifecycle_rules(&mut cfg.rules)?;
+        bucket.lifecycle = Some(lifecycle_to_xml(&cfg)?);
+        self.write(nauka_raft::types::AppCommand::UpdateBucket {
+            name: req.input.bucket,
+            bucket: Box::new(bucket),
+        })
+        .await?;
+        Ok(S3Response::new(
+            PutBucketLifecycleConfigurationOutput::default(),
+        ))
+    }
+
+    async fn get_bucket_lifecycle_configuration(
+        &self,
+        req: S3Request<GetBucketLifecycleConfigurationInput>,
+    ) -> S3Result<S3Response<GetBucketLifecycleConfigurationOutput>> {
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        let cfg = bucket
+            .lifecycle
+            .as_deref()
+            .and_then(lifecycle_from_xml)
+            .ok_or_else(|| {
+                s3_error!(
+                    NoSuchLifecycleConfiguration,
+                    "The lifecycle configuration does not exist"
+                )
+            })?;
+        Ok(S3Response::new(GetBucketLifecycleConfigurationOutput {
+            rules: Some(cfg.rules),
+            ..Default::default()
+        }))
+    }
+
+    async fn delete_bucket_lifecycle(
+        &self,
+        req: S3Request<DeleteBucketLifecycleInput>,
+    ) -> S3Result<S3Response<DeleteBucketLifecycleOutput>> {
+        let mut bucket = self.require_bucket(&req.input.bucket)?;
+        // Deleting an absent configuration is still a 204, per S3.
+        if bucket.lifecycle.take().is_some() {
+            self.write(nauka_raft::types::AppCommand::UpdateBucket {
+                name: req.input.bucket,
+                bucket: Box::new(bucket),
+            })
+            .await?;
+        }
+        Ok(S3Response::new(DeleteBucketLifecycleOutput::default()))
     }
 
     async fn put_object_lock_configuration(
@@ -1038,6 +1160,7 @@ impl S3 for NaukaS3 {
         // different value (?response-cache-control=…), which S3 supports.
         let sys = |k: &str| v.system_metadata.get(k).cloned();
         let mut resp = S3Response::new(GetObjectOutput {
+            expiration: self.expiration_of(&input.bucket, &input.key, &v.tags, v.last_modified),
             body: Some(body),
             content_length: Some(length as i64),
             content_range: partial.then(|| format!("bytes {start}-{end}/{}", v.size)),
@@ -2045,6 +2168,143 @@ fn map_to_tag_set(tags: &BTreeMap<String, String>) -> Vec<Tag> {
             value: Some(v.clone()),
         })
         .collect()
+}
+
+/// Validates a lifecycle configuration the way S3 does, generating an id
+/// for any rule that lacks one (GET returns the generated ids).
+fn validate_lifecycle_rules(rules: &mut [LifecycleRule]) -> S3Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for rule in rules.iter_mut() {
+        let id = rule.id.get_or_insert_with(uuid_like).clone();
+        if id.chars().count() > 255 {
+            return Err(s3_error!(
+                InvalidArgument,
+                "a lifecycle rule id is at most 255 characters"
+            ));
+        }
+        if !ids.insert(id) {
+            return Err(s3_error!(InvalidArgument, "duplicate lifecycle rule id"));
+        }
+        let status = rule.status.as_str();
+        if status != ExpirationStatus::ENABLED && status != ExpirationStatus::DISABLED {
+            return Err(s3_error!(
+                MalformedXML,
+                "Status must be Enabled or Disabled"
+            ));
+        }
+        if let Some(exp) = &rule.expiration {
+            // Exactly one action per Expiration block, as AWS requires.
+            let set = [
+                exp.days.is_some(),
+                exp.date.is_some(),
+                exp.expired_object_delete_marker.is_some(),
+            ];
+            if set.iter().filter(|s| **s).count() != 1 {
+                return Err(s3_error!(
+                    MalformedXML,
+                    "Expiration needs exactly one of Days, Date or ExpiredObjectDeleteMarker"
+                ));
+            }
+            // Days: 0 is legal in a transition rule, not in an expiration.
+            if exp.days.is_some_and(|d| d <= 0) {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "Expiration Days must be a positive integer"
+                ));
+            }
+            if let Some(date) = &exp.date {
+                lifecycle_midnight(date)?;
+            }
+        }
+        if let Some(nc) = &rule.noncurrent_version_expiration {
+            if nc.noncurrent_days.is_some_and(|d| d <= 0) {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "NoncurrentDays must be a positive integer"
+                ));
+            }
+        }
+        for t in rule.transitions.iter().flatten() {
+            if t.days.is_some_and(|d| d < 0) {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "Transition Days must not be negative"
+                ));
+            }
+            if let Some(date) = &t.date {
+                lifecycle_midnight(date)?;
+            }
+        }
+        for t in rule.noncurrent_version_transitions.iter().flatten() {
+            if t.noncurrent_days.is_some_and(|d| d < 0) {
+                return Err(s3_error!(
+                    InvalidArgument,
+                    "NoncurrentDays must not be negative"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A lifecycle `Date` must be midnight UTC — AWS rejects any other time.
+/// (This is a real rejection path: a malformed client date string like
+/// "20200101" reaches us as a valid epoch-seconds timestamp that is not
+/// midnight.)
+fn lifecycle_midnight(date: &Timestamp) -> S3Result<()> {
+    if timestamp_secs(date).is_some_and(|s| s % 86_400 == 0) {
+        Ok(())
+    } else {
+        Err(s3_error!(InvalidArgument, "'Date' must be at midnight GMT"))
+    }
+}
+
+/// Serializes a lifecycle configuration back to its XML wire form — the
+/// storage format, so GET returns exactly the rules PUT accepted.
+fn lifecycle_to_xml(cfg: &BucketLifecycleConfiguration) -> S3Result<String> {
+    let mut buf = Vec::new();
+    let mut ser = s3s::xml::Serializer::new(&mut buf);
+    s3s::xml::Serialize::serialize(cfg, &mut ser)
+        .map_err(|e| s3_error!(InternalError, "serializing the lifecycle rules: {e}"))?;
+    String::from_utf8(buf).map_err(|e| s3_error!(InternalError, "{e}"))
+}
+
+fn lifecycle_from_xml(xml: &str) -> Option<BucketLifecycleConfiguration> {
+    let mut de = s3s::xml::Deserializer::new(xml.as_bytes());
+    s3s::xml::Deserialize::deserialize(&mut de).ok()
+}
+
+/// Whether a lifecycle rule's filter selects a key: the prefix (top-level
+/// or inside the Filter) matches, and every tag the filter requires is on
+/// the object.
+fn lifecycle_rule_matches(
+    rule: &LifecycleRule,
+    key: &str,
+    tags: &BTreeMap<String, String>,
+) -> bool {
+    let filter = rule.filter.as_ref();
+    let and = filter.and_then(|f| f.and.as_ref());
+    let prefix = rule
+        .prefix
+        .as_deref()
+        .or_else(|| filter.and_then(|f| f.prefix.as_deref()))
+        .or_else(|| and.and_then(|a| a.prefix.as_deref()))
+        .unwrap_or("");
+    if !key.starts_with(prefix) {
+        return false;
+    }
+    let mut required: Vec<&Tag> = Vec::new();
+    if let Some(t) = filter.and_then(|f| f.tag.as_ref()) {
+        required.push(t);
+    }
+    if let Some(ts) = and.and_then(|a| a.tags.as_ref()) {
+        required.extend(ts.iter());
+    }
+    required.iter().all(|t| {
+        t.key
+            .as_ref()
+            .is_some_and(|k| tags.get(k) == t.value.as_ref())
+    })
 }
 
 /// Adds the `x-amz-object-lock-*` headers S3 puts on GET/HEAD of an object

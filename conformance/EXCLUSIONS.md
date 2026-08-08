@@ -28,7 +28,6 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | Marker | Feature | Phase |
 | --- | --- | --- |
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
-| `lifecycle`, `lifecycle_expiration` | Lifecycle expiration rules | 5 |
 | `cors` | CORS configuration | 5 |
 | `s3website` | Static website hosting + routing | 5 |
 | `checksum` | Additional checksums (CRC32/C, SHA1/256) | 5 |
@@ -43,9 +42,15 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 ## Deferred, but unmarked by the suite
 
 Some phase-5/6 tests carry no pytest marker, so `run.sh` excludes them by
-name substring (`-k`): `versioning`, `versioned`, `object_lock`, `cors`,
-`checksum`, plus the ACL / POST / anonymous / presigned families. Same
-status as the marked ones above — they come off when the feature lands.
+name substring (`-k`): `website`, `cors`, `checksum`, plus the ACL / POST /
+anonymous / presigned families. Same status as the marked ones above —
+they come off when the feature lands.
+
+The `lifecycle` markers came off when lifecycle configuration landed: rule
+storage and validation, plus the `x-amz-expiration` header. The
+timing-based expiration tests (`lifecycle_expiration` + `fails_on_aws` /
+`fails_on_dbstore`) exercise RGW's compressed debug clock and stay out via
+those permanent markers, as they do on AWS itself.
 
 ## Individually deselected edge cases
 
