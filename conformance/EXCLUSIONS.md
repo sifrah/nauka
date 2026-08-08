@@ -28,8 +28,7 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 | Marker | Feature | Phase |
 | --- | --- | --- |
 | `delete_marker` | Delete-marker corner cases (e.g. a plain 404 in an unversioned bucket carrying `x-amz-delete-marker: false`) | 5 |
-| `s3website` | Static website hosting + routing | 5 |
-| `checksum` | Additional checksums (CRC32/C, SHA1/256) | 5 |
+| `s3website` | Static website hosting + routing — the pinned suite carries NO website tests (`test_s3_website.py` was removed upstream), so this marker currently deselects nothing; it stays as documentation until a suite bump restores coverage | 5 |
 | `bucket_logging` | Server access logging | 5 |
 | `bucket_policy` | Bucket policies (IAM-style evaluation) | 6 |
 | `object_ownership` | Object ownership / bucket & object ACLs | 6 |
@@ -41,14 +40,22 @@ Built later; the marker comes off then. Each maps to a task on the roadmap.
 ## Deferred, but unmarked by the suite
 
 Some phase-5/6 tests carry no pytest marker, so `run.sh` excludes them by
-name substring (`-k`): `website`, `checksum`, plus the ACL / POST /
-anonymous / presigned families. Same status as the marked ones above —
-they come off when the feature lands.
+name substring (`-k`): `website`, plus the ACL / POST / anonymous /
+presigned families. Same status as the marked ones above — they come off
+when the feature lands.
 
 The `cors` name filter came off when CORS landed: configuration storage,
 OPTIONS preflight and Access-Control-* response headers, plus just enough
 anonymous access for its tests — an unauthenticated READ of a bucket whose
 canned ACL is `public-read`. Full ACL evaluation is still phase 6.
+
+The `checksum` markers came off when additional checksums landed: a
+client-sent CRC32/CRC32C/CRC64NVME/SHA1/SHA256 is verified against the
+body on PUT (BadDigest on mismatch), stored on the version, echoed on the
+PUT response, and returned on GET/HEAD under `ChecksumMode: ENABLED` and
+in `GetObjectAttributes`. The multipart-checksum tests stay out via the
+permanent `fails_on_dbstore` marker; aws-chunked trailer checksums stay
+with the `aws_chunked` exclusion.
 
 The `lifecycle` markers came off when lifecycle configuration landed: rule
 storage and validation, plus the `x-amz-expiration` header. The
@@ -67,7 +74,7 @@ are the only per-test exclusions; everything else in scope must pass.
 | `test_bucket_list_prefix_unreadable` | A raw control character (`\n`) in a prefix; the XML serializer percent-encodes it. Cosmetic, harmless. |
 | `test_multi_object_delete_key_limit`, `test_multi_objectv2_delete_key_limit` | Create 1000 objects then delete; a timing test, slow under a debug build. |
 | `test_multipart_resend_first_finishes_last` | Re-reads the part body multiple times via a fake file; an upload pattern no real client uses. |
-| `test_get_versioned_object_attributes` | `GetObjectAttributes` is the one operation AWS returns the ETag *unquoted*; the `s3s` XML serializer always quotes it. An `s3s` limitation, not a Nauka behaviour. |
+| `test_get_versioned_object_attributes`, `test_get_checksum_object_attributes` | `GetObjectAttributes` is the one operation AWS returns the ETag *unquoted*; the `s3s` XML serializer always quotes it. An `s3s` limitation, not a Nauka behaviour. (The checksum variant's `Checksum` block itself is served correctly.) |
 
 `test_get_object_ifnonematch_good` used to be here (the `304 Not Modified`
 was missing its `ETag`/`Last-Modified` headers) and is now in scope — the

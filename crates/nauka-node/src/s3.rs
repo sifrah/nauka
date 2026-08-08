@@ -445,19 +445,33 @@ impl S3 for NaukaS3 {
         &self,
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
-        let input = req.input;
+        let mut input = req.input;
         self.require_bucket(&input.bucket)?;
         if !nauka_s3::naming::valid_key(&input.key) {
             return Err(s3_error!(InvalidArgument, "invalid key"));
         }
 
         // Buffer to disk while hashing twice: BLAKE3 addresses the content
-        // for the engine, MD5 becomes the ETag the client expects.
+        // for the engine, MD5 becomes the ETag the client expects. The
+        // additional checksums the client requested are computed in the
+        // same pass.
+        let mut hasher = checksum_hasher_for(&input);
         let tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
-        let (size, blake, md5) = write_body(input.body, &tmp).await.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            s3_error!(InternalError, "{e:#}")
-        })?;
+        let (size, blake, md5) = write_body(input.body.take(), &tmp, &mut hasher)
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                s3_error!(InternalError, "{e:#}")
+            })?;
+        // A checksum the client sent must match what the body hashes to,
+        // before the object is allowed to exist.
+        let checksums = match verify_checksums(&input, hasher.finalize()) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e);
+            }
+        };
 
         // An empty object has no shards to place — it is pure metadata.
         let content = if size == 0 {
@@ -528,7 +542,7 @@ impl S3 for NaukaS3 {
             system_metadata,
             storage_class: input.storage_class.map(|s| s.as_str().to_owned()),
             tags,
-            checksums: BTreeMap::new(),
+            checksums,
             retention,
             legal_hold,
             sse: None,
@@ -541,6 +555,20 @@ impl S3 for NaukaS3 {
             &version.tags,
             version.last_modified,
         );
+        // The computed checksums echo back on the response, as S3 does.
+        let cks = |name: &str| version.checksums.get(name).cloned();
+        let output = PutObjectOutput {
+            e_tag: etag.parse().ok(),
+            expiration,
+            checksum_crc32: cks("CRC32"),
+            checksum_crc32c: cks("CRC32C"),
+            checksum_crc64nvme: cks("CRC64NVME"),
+            checksum_sha1: cks("SHA1"),
+            checksum_sha256: cks("SHA256"),
+            // Only an Enabled bucket surfaces a version id on the write.
+            version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
+            ..Default::default()
+        };
         self.write(nauka_raft::types::AppCommand::PutObjectVersion {
             bucket: input.bucket,
             key: input.key,
@@ -548,13 +576,7 @@ impl S3 for NaukaS3 {
         })
         .await?;
 
-        Ok(S3Response::new(PutObjectOutput {
-            e_tag: etag.parse().ok(),
-            expiration,
-            // Only an Enabled bucket surfaces a version id on the write.
-            version_id: (versioning == nauka_s3::VersioningState::Enabled).then_some(version_id),
-            ..Default::default()
-        }))
+        Ok(S3Response::new(output))
     }
 
     async fn put_bucket_versioning(
@@ -628,6 +650,14 @@ impl S3 for NaukaS3 {
             .ok_or_else(|| s3_error!(NoSuchKey))?;
         let v = resolve_version(entry, req.input.version_id.as_deref())?;
         let sys = |k: &str| v.system_metadata.get(k).cloned();
+        // Stored checksums come back only when the client opts in.
+        let cks = |name: &str| {
+            req.input
+                .checksum_mode
+                .as_ref()
+                .filter(|m| m.as_str() == ChecksumMode::ENABLED)
+                .and_then(|_| v.checksums.get(name).cloned())
+        };
         let mut resp = S3Response::new(HeadObjectOutput {
             expiration: self.expiration_of(
                 &req.input.bucket,
@@ -635,6 +665,11 @@ impl S3 for NaukaS3 {
                 &v.tags,
                 v.last_modified,
             ),
+            checksum_crc32: cks("CRC32"),
+            checksum_crc32c: cks("CRC32C"),
+            checksum_crc64nvme: cks("CRC64NVME"),
+            checksum_sha1: cks("SHA1"),
+            checksum_sha256: cks("SHA256"),
             content_length: Some(v.size as i64),
             e_tag: v.etag.parse().ok(),
             last_modified: Some(Self::timestamp(v.last_modified)),
@@ -1183,8 +1218,23 @@ impl S3 for NaukaS3 {
         // GetObjectAttributes reports the ETag WITHOUT quotes, unlike every
         // other operation — a quirk the suite checks explicitly.
         let bare_etag = v.etag.trim_matches('"').to_string();
+        // The stored checksums, when the client asked for that attribute.
+        let checksum = req
+            .input
+            .object_attributes
+            .iter()
+            .any(|a| a.as_str() == ObjectAttributes::CHECKSUM)
+            .then(|| Checksum {
+                checksum_crc32: v.checksums.get("CRC32").cloned(),
+                checksum_crc32c: v.checksums.get("CRC32C").cloned(),
+                checksum_crc64nvme: v.checksums.get("CRC64NVME").cloned(),
+                checksum_sha1: v.checksums.get("SHA1").cloned(),
+                checksum_sha256: v.checksums.get("SHA256").cloned(),
+                ..Default::default()
+            });
         Ok(S3Response::new(GetObjectAttributesOutput {
             e_tag: bare_etag.parse().ok(),
+            checksum,
             object_size: Some(v.size as i64),
             last_modified: Some(Self::timestamp(v.last_modified)),
             storage_class: Some(StorageClass::from_static(StorageClass::STANDARD)),
@@ -1244,8 +1294,21 @@ impl S3 for NaukaS3 {
         // A response header override lets the client ask GET to echo a
         // different value (?response-cache-control=…), which S3 supports.
         let sys = |k: &str| v.system_metadata.get(k).cloned();
+        // Stored checksums come back only when the client opts in.
+        let cks = |name: &str| {
+            input
+                .checksum_mode
+                .as_ref()
+                .filter(|m| m.as_str() == ChecksumMode::ENABLED)
+                .and_then(|_| v.checksums.get(name).cloned())
+        };
         let mut resp = S3Response::new(GetObjectOutput {
             expiration: self.expiration_of(&input.bucket, &input.key, &v.tags, v.last_modified),
+            checksum_crc32: cks("CRC32"),
+            checksum_crc32c: cks("CRC32C"),
+            checksum_crc64nvme: cks("CRC64NVME"),
+            checksum_sha1: cks("SHA1"),
+            checksum_sha256: cks("SHA256"),
             body: Some(body),
             content_length: Some(length as i64),
             content_range: partial.then(|| format!("bytes {start}-{end}/{}", v.size)),
@@ -1455,10 +1518,13 @@ impl S3 for NaukaS3 {
             .ok_or_else(|| s3_error!(InvalidArgument, "part number must be 1..=10000"))?;
 
         let tmp = self.state.tmp_dir.join(format!("s3p-{}", uuid_like()));
-        let (size, blake, md5) = write_body(input.body, &tmp).await.map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            s3_error!(InternalError, "{e:#}")
-        })?;
+        let mut hasher = s3s::checksum::ChecksumHasher::default();
+        let (size, blake, md5) = write_body(input.body, &tmp, &mut hasher)
+            .await
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                s3_error!(InternalError, "{e:#}")
+            })?;
         if size == 0 {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(s3_error!(InvalidArgument, "an empty part is not allowed"));
@@ -2119,6 +2185,7 @@ impl S3 for NaukaS3 {
 async fn write_body(
     body: Option<StreamingBlob>,
     path: &std::path::Path,
+    checksums: &mut s3s::checksum::ChecksumHasher,
 ) -> anyhow::Result<(u64, blake3::Hasher, [u8; 16])> {
     use md5::Digest;
     use tokio::io::AsyncWriteExt;
@@ -2135,12 +2202,69 @@ async fn write_body(
             let chunk = chunk.map_err(|e| anyhow::anyhow!("reading the body: {e}"))?;
             blake.update(&chunk);
             md5.update(&chunk);
+            checksums.update(&chunk);
             file.write_all(&chunk).await?;
             size += chunk.len() as u64;
         }
     }
     file.flush().await?;
     Ok((size, blake, md5.finalize().into()))
+}
+
+/// The checksum hasher a PUT needs: an algorithm is enabled by the
+/// declared checksum algorithm or by an explicit value header — computing
+/// only what was asked keeps the common no-checksum PUT free.
+fn checksum_hasher_for(input: &PutObjectInput) -> s3s::checksum::ChecksumHasher {
+    let mut h = s3s::checksum::ChecksumHasher::default();
+    let algo = input.checksum_algorithm.as_ref().map(|a| a.as_str());
+    if input.checksum_crc32.is_some() || algo == Some(ChecksumAlgorithm::CRC32) {
+        h.crc32 = Some(Default::default());
+    }
+    if input.checksum_crc32c.is_some() || algo == Some(ChecksumAlgorithm::CRC32C) {
+        h.crc32c = Some(Default::default());
+    }
+    if input.checksum_sha1.is_some() || algo == Some(ChecksumAlgorithm::SHA1) {
+        h.sha1 = Some(Default::default());
+    }
+    if input.checksum_sha256.is_some() || algo == Some(ChecksumAlgorithm::SHA256) {
+        h.sha256 = Some(Default::default());
+    }
+    if input.checksum_crc64nvme.is_some() || algo == Some(ChecksumAlgorithm::CRC64NVME) {
+        h.crc64nvme = Some(Default::default());
+    }
+    h
+}
+
+/// Verifies every checksum the client sent against the computed ones —
+/// a mismatch is BadDigest, as AWS answers — and returns the algorithm →
+/// base64 map the object version stores.
+fn verify_checksums(
+    input: &PutObjectInput,
+    computed: Checksum,
+) -> S3Result<BTreeMap<String, String>> {
+    let pairs = [
+        ("CRC32", &input.checksum_crc32, computed.checksum_crc32),
+        ("CRC32C", &input.checksum_crc32c, computed.checksum_crc32c),
+        (
+            "CRC64NVME",
+            &input.checksum_crc64nvme,
+            computed.checksum_crc64nvme,
+        ),
+        ("SHA1", &input.checksum_sha1, computed.checksum_sha1),
+        ("SHA256", &input.checksum_sha256, computed.checksum_sha256),
+    ];
+    let mut out = BTreeMap::new();
+    for (name, provided, computed) in pairs {
+        let Some(computed) = computed else { continue };
+        if provided.as_deref().is_some_and(|p| p != computed) {
+            return Err(s3_error!(
+                BadDigest,
+                "The {name} you specified did not match the calculated checksum."
+            ));
+        }
+        out.insert(name.to_string(), computed);
+    }
+    Ok(out)
 }
 
 fn uuid_like() -> String {
