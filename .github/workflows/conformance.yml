@@ -61,3 +61,77 @@ jobs:
       - name: Node log on failure
         if: failure()
         run: tail -100 node.log
+
+  distributed-semantics:
+    name: distributed read consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: distsem
+
+      - name: Build nauka
+        run: cargo build --release --locked -p nauka-node
+
+      - name: Install boto3
+        run: pip install --quiet boto3
+
+      - name: Start a 3-node loopback cluster
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/release/nauka"
+          TOKEN=$("$BIN" token 2>/dev/null | grep -v '^#' | head -1)
+          echo "NAUKA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          # Nodes on 127.0.0.1 with data ports spaced by 2 (port+1 = Raft plane).
+          declare -a ID PID
+          for i in 1 2 3; do
+            port=$((7311 + (i-1)*2)); s3=$((8000+i))
+            mkdir -p "nd$i"
+            NAUKA_TOKEN="$TOKEN" "$BIN" --data-dir "nd$i" serve \
+              --listen 127.0.0.1:$port --advertise 127.0.0.1:$port \
+              --s3 127.0.0.1:$s3 --no-http --no-discover --scrub-interval 30 \
+              > "node$i.log" 2>&1 &
+            PID[$i]=$!
+          done
+          # Wait for each node's S3 port, then scrape its crypto-derived id.
+          for i in 1 2 3; do
+            s3=$((8000+i))
+            for _ in $(seq 1 40); do curl -s -o /dev/null "http://127.0.0.1:$s3" && break || sleep 1; done
+            for _ in $(seq 1 30); do
+              ID[$i]=$(grep -oE 'identity: node-id [0-9]+' "node$i.log" | grep -oE '[0-9]+' | head -1 || true)
+              [ -n "${ID[$i]:-}" ] && break || sleep 1
+            done
+          done
+          "$BIN" --data-dir nd1 --token "$TOKEN" cluster-init \
+            "${ID[1]}@127.0.0.1:7311" "${ID[2]}@127.0.0.1:7313" "${ID[3]}@127.0.0.1:7315"
+          sleep 5
+          "$BIN" --data-dir nd1 --token "$TOKEN" s3-key-create \
+            --name t --user-id tester \
+            --access-key TESTKEY000000000000A \
+            --secret-key testsecret0123456789testsecret0123456789 \
+            --peer 127.0.0.1:7311
+          # The freeze test needs a FOLLOWER (freezing the leader is a
+          # different scenario): find the leader, pick another node's PID+port.
+          LEADER=$("$BIN" --data-dir nd1 --token "$TOKEN" cluster-metrics \
+            --peer 127.0.0.1:7311 | head -1 | grep -oE 'leader: Some\([0-9]+\)' | grep -oE '[0-9]+')
+          FIDX=0
+          for i in 1 2 3; do [ "${ID[$i]}" != "$LEADER" ] && FIDX=$i && break; done
+          echo "leader=$LEADER freeze follower n$FIDX pid=${PID[$FIDX]} port=$((8000+FIDX))"
+          echo "FREEZE_PID=${PID[$FIDX]}" >> "$GITHUB_ENV"
+          echo "PROBE_PORT=$((8000+FIDX))" >> "$GITHUB_ENV"
+
+      - name: Gate the distributed consistency contract
+        run: |
+          python3 conformance/distributed_semantics.py \
+            --ports 8001,8002,8003 \
+            --ak TESTKEY000000000000A \
+            --sk testsecret0123456789testsecret0123456789 \
+            --freeze-pid "$FREEZE_PID" --probe-port "$PROBE_PORT"
+
+      - name: Node logs on failure
+        if: failure()
+        run: for f in node1.log node2.log node3.log; do echo "=== $f ==="; tail -60 "$f"; done

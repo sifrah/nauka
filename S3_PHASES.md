@@ -266,8 +266,17 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   snapshot install itself is healthy (105KB / 4s for a 342-entry gap on the
   3-node repro); the minutes-long WAN lag was repeated re-faulting plus
   elections interrupting catch-up — hence the SlowDown honesty rather than
-  any snapshot-policy change. Remaining blind spot: conformance CI runs one
-  node, where none of these windows exist.
+  any snapshot-policy change. The single-node-CI blind spot is now closed:
+  the `distributed-semantics` job in `conformance.yml` stands up a 3-node
+  loopback cluster and runs `conformance/distributed_semantics.py`, which
+  gates read-after-write and LIST across nodes, the prompt genuine-404, and
+  the freeze/thaw SlowDown-not-lies contract (SIGSTOP a follower, advance
+  the log, SIGCONT, assert 503-then-served with zero false NoSuchKey).
+  **Known gap the gate is scoped around:** read-after-write holds for NEW
+  keys (the miss path catches up); an OVERWRITE of an existing key can serve
+  the stale local version, because a node cannot tell locally that a newer
+  version exists without asking the leader on every GET — the same
+  ReadIndex-per-read that full LIST linearizability needs. Future work.
 
 ## Cluster / infra state (unrelated to S3, don't disturb)
 
