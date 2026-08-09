@@ -150,10 +150,10 @@ enum Cmd {
         /// Auto-healing scrub interval, in seconds.
         #[arg(long, default_value_t = 30)]
         scrub_interval: u64,
-        /// Raft identifier of this node. Enables consensus mode:
-        /// membership and the file registry are replicated by Raft
-        /// (the --peers list becomes useless for healing).
-        #[arg(long)]
+        /// Obsolete and ignored: the Raft node id is derived from the
+        /// cluster identity (the token or key directory), not declared.
+        /// Kept only so existing scripts that pass it still start.
+        #[arg(long, hide = true)]
         node_id: Option<u64>,
         /// Storage capacity of this node in bytes (weight in weighted
         /// placement). Default: size of the data-dir filesystem.
@@ -509,17 +509,17 @@ async fn main() -> Result<()> {
             let mut raft_handler: Option<Arc<dyn nauka_transport::server::RaftHandler>> = None;
 
             // With a crypto identity, the node-id is PROVEN (derived from
-            // the public key) instead of being self-declared.
+            // the public key) instead of being self-declared. --node-id is
+            // therefore obsolete whenever a token or key directory is in
+            // use (i.e. always, in practice): we ignore it — never crash on
+            // it — and say so once, plainly.
             let node_id = match (&node_tls, node_id) {
                 (Some((derived, fp)), cli_id) => {
-                    if let Some(cli_id) = cli_id {
-                        if cli_id != *derived {
-                            eprintln!(
-                                "--node-id {cli_id} ignored: the crypto identity imposes {derived} \
-                                 (fingerprint {})",
-                                &fp[..16]
-                            );
-                        }
+                    if cli_id.is_some() {
+                        eprintln!(
+                            "note: --node-id is obsolete and ignored — the node id is derived \
+                             from the cluster identity ({derived})"
+                        );
                     }
                     println!("identity: node-id {derived} (fingerprint {})", &fp[..16]);
                     Some(*derived)
