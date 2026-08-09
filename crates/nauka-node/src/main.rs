@@ -632,12 +632,17 @@ async fn main() -> Result<()> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                // Both front doors stage uploads here; create it now rather
+                // than in serve_http — an S3-only node (--no-http) needs it
+                // too, and PUTs fail with a bare ENOENT without it.
+                let tmp_dir = cli.data_dir.join("tmp");
+                std::fs::create_dir_all(&tmp_dir).context("creating the upload tmp dir")?;
                 let api_state = Arc::new(api::ApiState {
                     store: store.clone(),
                     app: app.clone(),
                     self_id: self_id.clone(),
                     config: ErasureConfig::default(),
-                    tmp_dir: cli.data_dir.join("tmp"),
+                    tmp_dir,
                     health: health.clone(),
                     egress: Arc::new(egress::EgressMeter::new(egress_quota, now_secs)),
                     cache: match cache_budget {
