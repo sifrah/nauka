@@ -97,16 +97,32 @@ impl NaukaS3 {
     /// pattern every S3 client assumes. So before a GET/HEAD takes the
     /// negative path, catch up with the leader once and look again — hits
     /// stay on the fast local path, only misses pay the round-trip.
-    async fn ensure_visible(&self, bucket: &str, key: &str) {
+    ///
+    /// Returns the achieved freshness. Only `Fresh` earns a trusted
+    /// NoSuchKey: on `ConfirmedStale` (provably behind, catch-up timed
+    /// out — a node healing after a fault) and on `Unknown` (no leader:
+    /// an election or a partition, exactly when this node lags the most)
+    /// a still-missing key answers 503 SlowDown, not a false NoSuchKey.
+    /// S3 clients retry a 503; none of them retries a 404.
+    async fn ensure_visible(&self, bucket: &str, key: &str) -> nauka_raft::Freshness {
         let s3 = self.state.app.app_state().s3;
         if s3.buckets.contains_key(bucket)
             && s3
                 .objects
                 .contains_key(&(bucket.to_string(), key.to_string()))
         {
-            return;
+            return nauka_raft::Freshness::Fresh;
         }
-        self.state.app.catch_up_with_leader().await;
+        self.state.app.catch_up_with_leader().await
+    }
+
+    /// The SlowDown error for a negative lookup on a confirmably-stale
+    /// node (see [`Self::ensure_visible`]).
+    fn stale_read_error() -> S3Error {
+        s3_error!(
+            SlowDown,
+            "this node is catching up with the cluster; retry shortly"
+        )
     }
 
     /// URL-encodes a listing value when the client asked for
@@ -1061,13 +1077,16 @@ impl S3 for NaukaS3 {
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
-        self.ensure_visible(&req.input.bucket, &req.input.key).await;
+        let freshness = self.ensure_visible(&req.input.bucket, &req.input.key).await;
         self.require_bucket(&req.input.bucket)?;
         let s3 = self.state.app.app_state().s3;
         let entry = s3
             .objects
             .get(&(req.input.bucket.clone(), req.input.key.clone()))
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+            .ok_or_else(|| match freshness {
+                nauka_raft::Freshness::Fresh => s3_error!(NoSuchKey),
+                _ => Self::stale_read_error(),
+            })?;
         let v = resolve_version(entry, req.input.version_id.as_deref())?;
         // A HEAD of an SSE-C object without (or with the wrong) customer
         // key is a 400, exactly like the GET.
@@ -2069,13 +2088,16 @@ impl S3 for NaukaS3 {
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
         let input = req.input;
-        self.ensure_visible(&input.bucket, &input.key).await;
+        let freshness = self.ensure_visible(&input.bucket, &input.key).await;
         self.require_bucket(&input.bucket)?;
         let s3 = self.state.app.app_state().s3;
         let entry = s3
             .objects
             .get(&(input.bucket.clone(), input.key.clone()))
-            .ok_or_else(|| s3_error!(NoSuchKey))?;
+            .ok_or_else(|| match freshness {
+                nauka_raft::Freshness::Fresh => s3_error!(NoSuchKey),
+                _ => Self::stale_read_error(),
+            })?;
         let v = resolve_version(entry, input.version_id.as_deref())?.clone();
 
         check_preconditions(
@@ -2871,6 +2893,15 @@ impl S3 for NaukaS3 {
         // Accepts the `tenant:bucket` form; the flat namespace makes it
         // the same bucket.
         let bucket = tenant_suffix(&req.input.bucket).to_string();
+        // S3 listings are strongly consistent: an acked PUT is in the next
+        // LIST. Unlike GET/HEAD there is no "miss" to detect — an absent
+        // entry is just silently absent — so every listing catches up
+        // first (the leader query is batched: a wave of listings shares
+        // one round-trip), and a listing served from a confirmably-stale
+        // node would silently omit entries, so it answers SlowDown.
+        if self.state.app.catch_up_with_leader().await != nauka_raft::Freshness::Fresh {
+            return Err(Self::stale_read_error());
+        }
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();
@@ -2990,6 +3021,10 @@ impl S3 for NaukaS3 {
         // The v1 listing, kept for older clients. Same walk as v2, with the
         // v1 marker/next-marker shape.
         let bucket = tenant_suffix(&req.input.bucket).to_string();
+        // Strong listing consistency, same as v2.
+        if self.state.app.catch_up_with_leader().await != nauka_raft::Freshness::Fresh {
+            return Err(Self::stale_read_error());
+        }
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();
@@ -3072,6 +3107,10 @@ impl S3 for NaukaS3 {
         // is exactly what the test suite's cleanup relies on to enumerate
         // and delete objects, so this one method unblocks the whole run.
         let bucket = req.input.bucket;
+        // Strong listing consistency, same as the object listings.
+        if self.state.app.catch_up_with_leader().await != nauka_raft::Freshness::Fresh {
+            return Err(Self::stale_read_error());
+        }
         self.require_bucket(&bucket)?;
         let s3 = self.state.app.app_state().s3;
         let prefix = req.input.prefix.clone().unwrap_or_default();

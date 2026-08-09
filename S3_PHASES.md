@@ -244,19 +244,30 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   merge (`PutUploadPart`), tag/retention/legal-hold sets are Raft commands
   so the log serializes them — clients hit these concurrently (boto3 uses
   8 threads for multipart).
-- **Reads are local; a MISS catches up first.** GET/HEAD serve the
-  locally-applied Raft state — fast and available under partition. But the
-  apply lag (~0.8s at rest, minutes under leader churn — measured on an
-  18-node WAN test cluster, 2026-08-09) breaks S3's read-after-write
-  contract on the negative path: an acked PUT would answer NoSuchKey for a
-  moment. So before answering NoSuchBucket/NoSuchKey, a GET/HEAD asks the
-  leader for its applied index and waits (bounded,
+- **Reads are local; a MISS catches up first; only `Fresh` earns a 404.**
+  GET/HEAD serve the locally-applied Raft state — fast and available under
+  partition. But the apply lag (~0.8s at rest, minutes under leader churn —
+  measured on an 18-node WAN test cluster, 2026-08-09) breaks S3's
+  read-after-write contract on the negative path: an acked PUT would answer
+  NoSuchKey for a moment. So before answering NoSuchBucket/NoSuchKey, a
+  GET/HEAD asks the leader for its applied index and waits (bounded,
   `RaftApp::FRESH_READ_TIMEOUT` = 1.2s) until the local state caught up,
   then looks again. Hits never pay; a genuine 404 pays one leader
-  round-trip. Listings (and full linearizable reads) are still eventually
-  consistent — ReadIndex on LIST is future work, tracked with the
-  single-node-CI blind spot: conformance runs one node, where the window
-  does not exist.
+  round-trip. If freshness can NOT be proven — the leader is ahead and the
+  wait timed out (a node healing after a fault), or no leader is known (an
+  election, a partition) — a still-missing key answers **503 SlowDown**,
+  never a false NoSuchKey: clients retry a 503, none retries a 404.
+  Positive lookups are always served (content-addressed objects make a
+  stale HIT still correct). Listings are strongly consistent the same way:
+  every LIST catches up first (leader queries are batched through
+  `FreshGate` — a wave of listings shares one round-trip) and a listing
+  that cannot prove freshness answers SlowDown rather than silently
+  omitting entries. Leader-churn apply lag was investigated (2026-08-09):
+  snapshot install itself is healthy (105KB / 4s for a 342-entry gap on the
+  3-node repro); the minutes-long WAN lag was repeated re-faulting plus
+  elections interrupting catch-up — hence the SlowDown honesty rather than
+  any snapshot-policy change. Remaining blind spot: conformance CI runs one
+  node, where none of these windows exist.
 
 ## Cluster / infra state (unrelated to S3, don't disturb)
 

@@ -24,11 +24,59 @@ use types::{AdminRequest, AdminResponse, AppCommand, AppState, NodeId, TypeConfi
 pub use openraft;
 pub use types::AppResponse;
 
+/// Outcome of a pre-read freshness catch-up (`catch_up_with_leader`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Local state has applied at least up to the leader's applied index
+    /// from a query started after the call — a negative lookup is real.
+    Fresh,
+    /// The leader is confirmed AHEAD and this node could not catch up in
+    /// time (typically a node healing after a fault). A negative lookup
+    /// here would lie; the reader should answer "retry later" instead.
+    ConfirmedStale,
+    /// No leader known or reachable (an election in flight, a partition).
+    /// Freshness is unknowable — and an unprovable negative is still not
+    /// a trustworthy one: readers treat this like `ConfirmedStale` for
+    /// negative answers, while positive lookups are served normally
+    /// (objects are immutable-addressed; a stale HIT is still correct).
+    Unknown,
+}
+
 /// A node's Raft instance, with access to the materialized state.
 pub struct RaftApp {
     pub id: NodeId,
     pub raft: Raft<TypeConfig>,
     state_machine: StateMachineStore,
+    fresh: Arc<FreshGate>,
+}
+
+/// Batches concurrent leader-freshness queries. A single miss pays one
+/// leader round-trip; a WAVE of them (every LIST, plus every miss during
+/// a churn-induced lag spike) must not open one QUIC connection to the
+/// leader each. Queries are generational: an answer only satisfies a
+/// caller if the query STARTED after the caller arrived — an in-flight
+/// query may predate the write whose ack the caller is entitled to see —
+/// so a wave costs at most two round-trips, and the fetch itself runs in
+/// a detached task (a caller cancelled mid-flight can't wedge the gate).
+struct FreshGate {
+    state: tokio::sync::Mutex<FreshState>,
+    /// (generation, leader-applied-index) of the last finished query.
+    done: tokio::sync::watch::Sender<(u64, Option<u64>)>,
+}
+
+#[derive(Default)]
+struct FreshState {
+    started: u64,
+    fetching: bool,
+}
+
+impl Default for FreshGate {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(FreshState::default()),
+            done: tokio::sync::watch::channel((0, None)).0,
+        }
+    }
 }
 
 impl RaftApp {
@@ -68,6 +116,7 @@ impl RaftApp {
             id,
             raft,
             state_machine,
+            fresh: Arc::new(FreshGate::default()),
         }))
     }
 
@@ -131,50 +180,92 @@ impl RaftApp {
     /// freshness an acked write is entitled to — wait (bounded) until
     /// this node has applied at least as far, then look again.
     ///
-    /// Never fails the read: on timeout, no leader, or an unreachable
-    /// leader the caller just serves its possibly-stale view, which is
-    /// what it would have done anyway. On the leader itself this is a
-    /// no-op.
-    pub async fn catch_up_with_leader(&self) {
-        let _ = tokio::time::timeout(Self::FRESH_READ_TIMEOUT, async {
-            let metrics = self.raft.metrics().borrow().clone();
-            let Some(leader) = metrics.current_leader else {
-                return;
-            };
-            if leader == self.id {
-                return;
+    /// Never blocks past its bounds, and reports what it achieved: `Fresh`
+    /// when the local state provably covers every acked write, `Unknown`
+    /// when no leader answered (serve the local view best-effort — the
+    /// pre-existing behaviour), `ConfirmedStale` when the leader is known
+    /// to be ahead and the wait timed out — a healing node mid-catch-up,
+    /// whose negative answers must not be trusted. On the leader itself
+    /// this is a cheap local no-op.
+    pub async fn catch_up_with_leader(&self) -> Freshness {
+        let Some(target) = self.leader_applied_fresh().await else {
+            // No leader, or unreachable: freshness is unknowable. The
+            // caller serves its local view — same as before this existed.
+            return Freshness::Unknown;
+        };
+        match self
+            .raft
+            .wait(Some(Self::FRESH_READ_TIMEOUT))
+            .metrics(
+                |m| m.last_applied.is_some_and(|l| l.index >= target),
+                "catch up to the leader's applied index",
+            )
+            .await
+        {
+            Ok(_) => Freshness::Fresh,
+            Err(_) => {
+                // We KNOW the leader is ahead and we could not catch up in
+                // time (a node healing after a fault, mid-snapshot). A
+                // negative answer from here would be a lie.
+                tracing::debug!(target, "read freshness: confirmed behind the leader");
+                Freshness::ConfirmedStale
             }
-            let Some(leader_addr) = metrics
-                .membership_config
-                .nodes()
-                .find(|(id, _)| **id == leader)
-                .map(|(_, node)| node.addr.clone())
-            else {
-                return;
-            };
-            let Ok(addr) = leader_addr.parse::<std::net::SocketAddr>() else {
-                return;
-            };
-            let Ok(client) = nauka_transport::PeerClient::connect(addr).await else {
-                return;
-            };
-            let target = match admin_call(&client, &AdminRequest::Metrics).await {
-                Ok(AdminResponse::Metrics {
-                    last_applied: Some(idx),
-                    ..
-                }) => idx,
-                _ => return,
-            };
-            let _ = self
-                .raft
-                .wait(Some(Self::FRESH_READ_TIMEOUT))
-                .metrics(
-                    |m| m.last_applied.is_some_and(|l| l.index >= target),
-                    "catch up to the leader's applied index",
-                )
-                .await;
-        })
-        .await;
+        }
+    }
+
+    /// The leader's applied index, from a query started after this call —
+    /// batched through [`FreshGate`]. `None` when the leader is unknown or
+    /// unreachable: the caller degrades to serving its local view.
+    async fn leader_applied_fresh(&self) -> Option<u64> {
+        let mut rx = self.fresh.done.subscribe();
+        let need = {
+            let mut st = self.fresh.state.lock().await;
+            if st.fetching {
+                st.started + 1
+            } else {
+                self.spawn_fetch(&mut st);
+                st.started
+            }
+        };
+        loop {
+            {
+                let mut st = self.fresh.state.lock().await;
+                let (finished, result) = *self.fresh.done.borrow();
+                if finished >= need {
+                    return result;
+                }
+                if !st.fetching {
+                    self.spawn_fetch(&mut st);
+                }
+            }
+            if rx.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Starts one leader query in a detached task (caller may be cancelled;
+    /// the gate must still settle). Caller holds the state lock.
+    fn spawn_fetch(&self, st: &mut FreshState) {
+        st.fetching = true;
+        st.started += 1;
+        let generation = st.started;
+        let raft = self.raft.clone();
+        let self_id = self.id;
+        let fresh = self.fresh.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(900),
+                query_leader_applied(&raft, self_id),
+            )
+            .await
+            .ok()
+            .flatten();
+            let mut st = fresh.state.lock().await;
+            st.fetching = false;
+            drop(st);
+            let _ = fresh.done.send((generation, result));
+        });
     }
 
     /// Current members (id → address), from the Raft metrics.
@@ -284,6 +375,29 @@ impl RaftApp {
             },
             other => AdminResponse::Err(other.to_string()),
         }
+    }
+}
+
+/// One leader-freshness query: the leader's applied index right now. On
+/// the leader itself that's the local metric; on a follower it's one
+/// admin round-trip. The leader acks a write only after applying it, so
+/// this index is exactly the freshness an acked write is entitled to.
+async fn query_leader_applied(raft: &Raft<TypeConfig>, self_id: NodeId) -> Option<u64> {
+    let metrics = raft.metrics().borrow().clone();
+    let leader = metrics.current_leader?;
+    if leader == self_id {
+        return metrics.last_applied.map(|l| l.index);
+    }
+    let leader_addr = metrics
+        .membership_config
+        .nodes()
+        .find(|(id, _)| **id == leader)
+        .map(|(_, node)| node.addr.clone())?;
+    let addr: std::net::SocketAddr = leader_addr.parse().ok()?;
+    let client = nauka_transport::PeerClient::connect(addr).await.ok()?;
+    match admin_call(&client, &AdminRequest::Metrics).await {
+        Ok(AdminResponse::Metrics { last_applied, .. }) => last_applied,
+        _ => None,
     }
 }
 
