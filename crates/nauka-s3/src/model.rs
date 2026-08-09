@@ -60,6 +60,11 @@ pub struct Bucket {
     pub object_lock_default: Option<String>,
     #[serde(default)]
     pub public_access_block: Option<String>,
+    /// The LocationConstraint given at creation, echoed verbatim by
+    /// GetBucketLocation. `None` (also every older bucket) reports the
+    /// null constraint — S3's us-east-1 convention.
+    #[serde(default)]
+    pub location: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

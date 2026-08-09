@@ -131,7 +131,15 @@ impl RaftApp {
     /// triggered the upload hangs with no status, forever (observed with
     /// 2 nodes alive out of 5: the request sat at "100 Continue" until the
     /// client's own timeout). A cluster that cannot commit must say so.
-    pub const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    ///
+    /// A healthy commit is metadata-only and takes milliseconds, so this is
+    /// slack, not a target. It is kept just above the election timeout
+    /// (`election_timeout_max` = 3s): a partitioned leader that still
+    /// believes it leads sheds leadership within that window, after which
+    /// `leader_known()` fails the write instantly. So the worst case a
+    /// caller sees is one ~4s timeout, then immediate 503s — not a 10s
+    /// hang on every attempt.
+    pub const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
     /// Writes a command to the registry: locally if this node is the leader,
     /// otherwise by forwarding it to the leader over the transport. Bounded
@@ -268,6 +276,33 @@ impl RaftApp {
         });
     }
 
+    /// Whether the state machine we serve reads from is still behind the
+    /// log this node has accepted — true only while a freshly-received
+    /// snapshot or a burst of entries is being applied. openraft bumps the
+    /// applied-index METRIC a hair before the state machine reflects an
+    /// installed snapshot, so a reader that just got a `Fresh` verdict yet
+    /// finds a key absent uses this to tell "genuinely absent" (not behind:
+    /// trust the 404) from "not visible yet" (behind: poll a moment).
+    pub fn state_lagging(&self) -> bool {
+        let metric = self
+            .raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .map(|l| l.index)
+            .unwrap_or(0);
+        metric > self.state_machine.applied_index()
+    }
+
+    /// Whether a leader is currently known to this node. A write with no
+    /// leader cannot commit — it would sit until [`Self::WRITE_TIMEOUT`]
+    /// and then fail. Checking first lets the caller fail fast and
+    /// retryably (503) instead of hanging (an isolated node, a partition
+    /// with no quorum, or an election in flight).
+    pub fn leader_known(&self) -> bool {
+        self.raft.metrics().borrow().current_leader.is_some()
+    }
+
     /// Current members (id → address), from the Raft metrics.
     pub fn members(&self) -> BTreeMap<NodeId, String> {
         let metrics = self.raft.metrics().borrow().clone();
@@ -386,7 +421,19 @@ async fn query_leader_applied(raft: &Raft<TypeConfig>, self_id: NodeId) -> Optio
     let metrics = raft.metrics().borrow().clone();
     let leader = metrics.current_leader?;
     if leader == self_id {
-        return metrics.last_applied.map(|l| l.index);
+        // We believe we are the leader — but a leader that was paused (a GC
+        // stall, a SIGSTOP, a partition) still reports `state == Leader` with
+        // its OLD applied index right after it resumes, before it learns it
+        // was deposed. Trusting that stale index would declare a stale read
+        // "fresh". So confirm leadership the linearizable way: a heartbeat to
+        // a quorum. A genuine leader gets the acks and the confirmed applied
+        // index back; a deposed one cannot, and we return None so the caller
+        // answers SlowDown instead of a false negative. Only runs on a local
+        // read MISS, so a served (present) key never pays for it.
+        return match raft.ensure_linearizable().await {
+            Ok(read_log_id) => read_log_id.map(|l| l.index),
+            Err(_) => None,
+        };
     }
     let leader_addr = metrics
         .membership_config

@@ -68,15 +68,60 @@ impl NaukaS3 {
 
     /// Writes a command through Raft, mapping a refusal to an S3 error.
     async fn write(&self, cmd: nauka_raft::types::AppCommand) -> S3Result<Option<String>> {
+        // Fail fast when the write provably cannot commit. Two signals:
+        //   - no leader at all (an isolated follower, an election in
+        //     flight) — instant; and
+        //   - this node cannot see a quorum of voters on the data plane.
+        //     openraft keeps a partitioned leader believing it still
+        //     leads, so `leader_known()` alone would let the write sit for
+        //     WRITE_TIMEOUT; the health map (updated by the peer pinger)
+        //     catches the lost quorum and fails immediately instead.
+        // Either way it is 503, retryable — never a hang, never a 500.
+        if !self.state.app.leader_known() || !self.quorum_reachable() {
+            return Err(Self::unavailable_write_error());
+        }
         match self.state.app.write(cmd).await {
             Ok(r) if r.ok => Ok(r.info),
+            // A command the state machine deliberately rejected (a real
+            // conflict, e.g. a bucket-exists race) is a genuine error.
             Ok(r) => Err(s3_error!(
                 InternalError,
                 "{}",
                 r.info.unwrap_or_else(|| "refused".into())
             )),
-            Err(e) => Err(s3_error!(InternalError, "{e:#}")),
+            // Reaching here means the registry did not commit in time
+            // (quorum lost mid-flight, the leader went away): an
+            // availability failure, not an internal bug — 503, retryable.
+            Err(_) => Err(Self::unavailable_write_error()),
         }
+    }
+
+    /// 503 for a write that cannot reach quorum right now.
+    fn unavailable_write_error() -> S3Error {
+        s3_error!(
+            ServiceUnavailable,
+            "the cluster cannot commit this write right now (no quorum); retry shortly"
+        )
+    }
+
+    /// Whether a majority of the voters is reachable on the data plane,
+    /// per the peer-health pinger. A write needs a quorum to commit; if
+    /// this node can see fewer than a majority (itself included — it is
+    /// never pinged, so it counts as alive), the write is doomed and we
+    /// say so at once instead of waiting out `WRITE_TIMEOUT`. Optimistic
+    /// by construction: an unprobed peer counts as alive, so this only
+    /// trips once the pinger has actually observed peers as gone — it
+    /// never manufactures a false 503 on a healthy cluster.
+    fn quorum_reachable(&self) -> bool {
+        let members = self.state.app.members();
+        if members.is_empty() {
+            return true; // not in consensus mode; nothing to gate on
+        }
+        let alive = members
+            .values()
+            .filter(|addr| self.state.health.is_alive(addr))
+            .count();
+        alive * 2 > members.len()
     }
 
     fn require_bucket(&self, name: &str) -> S3Result<nauka_s3::Bucket> {
@@ -105,15 +150,44 @@ impl NaukaS3 {
     /// a still-missing key answers 503 SlowDown, not a false NoSuchKey.
     /// S3 clients retry a 503; none of them retries a 404.
     async fn ensure_visible(&self, bucket: &str, key: &str) -> nauka_raft::Freshness {
+        if self.key_present(bucket, key) {
+            return nauka_raft::Freshness::Fresh;
+        }
+        let freshness = self.state.app.catch_up_with_leader().await;
+        // Catch-up proved we applied up to the leader's index — but openraft
+        // bumps the applied-index metric a hair before a freshly INSTALLED
+        // snapshot is visible in the state machine we read here (a node
+        // healing from far behind). While the state machine is still behind
+        // that metric, a `Fresh`-but-absent key may just be not-visible-yet,
+        // so poll the visibility window briefly before trusting the 404. On
+        // a caught-up node `state_lagging` is false immediately, so a
+        // genuinely-absent key 404s with no added latency.
+        // Fresh means openraft's applied-index metric reached the leader's
+        // index — but that metric can lead the state machine we read here by
+        // a hair while a freshly-received snapshot finishes installing (a
+        // node healing from far behind). While the state machine is still
+        // behind that metric, poll the visibility window briefly before
+        // trusting a `Fresh`-but-absent negative. On a caught-up node
+        // `state_lagging` is false at once, so a genuinely-absent key 404s
+        // with no added latency.
+        if freshness == nauka_raft::Freshness::Fresh {
+            for _ in 0..20 {
+                if !self.state.app.state_lagging() || self.key_present(bucket, key) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            }
+        }
+        freshness
+    }
+
+    /// Bucket exists locally and holds this key, in the applied state.
+    fn key_present(&self, bucket: &str, key: &str) -> bool {
         let s3 = self.state.app.app_state().s3;
-        if s3.buckets.contains_key(bucket)
+        s3.buckets.contains_key(bucket)
             && s3
                 .objects
                 .contains_key(&(bucket.to_string(), key.to_string()))
-        {
-            return nauka_raft::Freshness::Fresh;
-        }
-        self.state.app.catch_up_with_leader().await
     }
 
     /// The SlowDown error for a negative lookup on a confirmably-stale
@@ -556,6 +630,13 @@ impl S3 for NaukaS3 {
             // The canned ACL, kept for the anonymous-access decision
             // (`public-read` lets unauthenticated reads through).
             acl: req.input.acl.map(|a| a.as_str().to_owned()),
+            // Echoed by GetBucketLocation; empty = the null constraint.
+            location: req
+                .input
+                .create_bucket_configuration
+                .and_then(|c| c.location_constraint)
+                .map(|l| l.as_str().to_owned())
+                .filter(|l| !l.is_empty()),
             object_lock_enabled: object_lock,
             // Object Lock requires versioning, so enabling it at creation
             // turns versioning on too, as S3 does.
@@ -1048,6 +1129,21 @@ impl S3 for NaukaS3 {
                 .filter(|i| i.is_customer())
                 .and_then(|i| i.key_md5.clone()),
             ..Default::default()
+        }))
+    }
+
+    async fn get_bucket_location(
+        &self,
+        req: S3Request<GetBucketLocationInput>,
+    ) -> S3Result<S3Response<GetBucketLocationOutput>> {
+        // Echo the LocationConstraint recorded at creation. A bucket
+        // created without one (every older bucket too) reports the null
+        // constraint, S3's us-east-1 convention. Third-party tooling
+        // (rclone, warp, Terraform) calls this as a preamble — a 501
+        // here breaks them before their first real request.
+        let bucket = self.require_bucket(&req.input.bucket)?;
+        Ok(S3Response::new(GetBucketLocationOutput {
+            location_constraint: bucket.location.map(BucketLocationConstraint::from),
         }))
     }
 

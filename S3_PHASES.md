@@ -244,6 +244,18 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   merge (`PutUploadPart`), tag/retention/legal-hold sets are Raft commands
   so the log serializes them — clients hit these concurrently (boto3 uses
   8 threads for multipart).
+- **Writes fail fast and retryably when quorum is gone.** A registry write
+  is bounded by `RaftApp::WRITE_TIMEOUT` (4s, just over the election
+  timeout). Before even trying, the S3 layer short-circuits to **503
+  ServiceUnavailable** when no leader is known OR the peer-health map shows
+  fewer than a majority of voters reachable — an isolated node, a partition
+  with no quorum. So a doomed write is an immediate retryable 503, never a
+  10s hang and never a 500. A commit that the state machine deliberately
+  rejects (a real conflict) is still a genuine error.
+- **GetBucketLocation** echoes the `LocationConstraint` recorded at bucket
+  creation (`Bucket.location`; `None` = the us-east-1 null constraint).
+  Third-party tooling (rclone, warp, Terraform) calls it as a preamble, so
+  the old `501 NotImplemented` broke them before their first real request.
 - **Reads are local; a MISS catches up first; only `Fresh` earns a 404.**
   GET/HEAD serve the locally-applied Raft state — fast and available under
   partition. But the apply lag (~0.8s at rest, minutes under leader churn —
@@ -257,6 +269,13 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   wait timed out (a node healing after a fault), or no leader is known (an
   election, a partition) — a still-missing key answers **503 SlowDown**,
   never a false NoSuchKey: clients retry a 503, none retries a 404.
+  **Stale leader:** a leader that was paused (GC stall, SIGSTOP, partition)
+  still reports `state == Leader` with its OLD applied index right after it
+  resumes, before it learns it was deposed. The freshness query therefore
+  confirms self-leadership the linearizable way — `Raft::ensure_linearizable`
+  (a heartbeat to a quorum) — instead of trusting the metric: a deposed
+  leader cannot get the acks, so it answers SlowDown, not a stale 404. Only
+  runs on a local read MISS, so a served key never pays for it.
   Positive lookups are always served (content-addressed objects make a
   stale HIT still correct). Listings are strongly consistent the same way:
   every LIST catches up first (leader queries are batched through

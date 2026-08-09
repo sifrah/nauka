@@ -262,6 +262,19 @@ impl StateMachineStore {
         self.inner.lock().unwrap().state.clone()
     }
 
+    /// The log index this state machine has actually applied — the index
+    /// `read_state` reflects. openraft's reported metric can lead this by a
+    /// moment while a freshly-received snapshot is being installed, so a
+    /// reader comparing the two can tell whether what it sees is caught up.
+    pub fn applied_index(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap()
+            .last_applied
+            .map(|l| l.index)
+            .unwrap_or(0)
+    }
+
     /// Writes the snapshot to disk: temp file + fsync + rename.
     fn persist_snapshot(&self, stored: &StoredSnapshot) -> Result<(), StorageError<NodeId>> {
         let sig = stored.meta.signature();

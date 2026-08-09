@@ -1,4 +1,5 @@
 test_bucket_create_special_key_names
+test_bucket_get_location
 test_bucket_list_many
 test_bucket_listv2_many
 test_bucket_policy_put_obj_kms_noenc
