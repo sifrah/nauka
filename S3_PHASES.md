@@ -244,6 +244,19 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   merge (`PutUploadPart`), tag/retention/legal-hold sets are Raft commands
   so the log serializes them — clients hit these concurrently (boto3 uses
   8 threads for multipart).
+- **Reads are local; a MISS catches up first.** GET/HEAD serve the
+  locally-applied Raft state — fast and available under partition. But the
+  apply lag (~0.8s at rest, minutes under leader churn — measured on an
+  18-node WAN test cluster, 2026-08-09) breaks S3's read-after-write
+  contract on the negative path: an acked PUT would answer NoSuchKey for a
+  moment. So before answering NoSuchBucket/NoSuchKey, a GET/HEAD asks the
+  leader for its applied index and waits (bounded,
+  `RaftApp::FRESH_READ_TIMEOUT` = 1.2s) until the local state caught up,
+  then looks again. Hits never pay; a genuine 404 pays one leader
+  round-trip. Listings (and full linearizable reads) are still eventually
+  consistent — ReadIndex on LIST is future work, tracked with the
+  single-node-CI blind spot: conformance runs one node, where the window
+  does not exist.
 
 ## Cluster / infra state (unrelated to S3, don't disturb)
 

@@ -90,6 +90,25 @@ impl NaukaS3 {
             .ok_or_else(|| s3_error!(NoSuchBucket))
     }
 
+    /// A local miss is ambiguous: state reads are eventually consistent,
+    /// so a just-written key can be committed cluster-wide yet not applied
+    /// on this node for a moment (~1s at rest, much longer under leader
+    /// churn). Answering NoSuchKey there breaks the read-after-write
+    /// pattern every S3 client assumes. So before a GET/HEAD takes the
+    /// negative path, catch up with the leader once and look again — hits
+    /// stay on the fast local path, only misses pay the round-trip.
+    async fn ensure_visible(&self, bucket: &str, key: &str) {
+        let s3 = self.state.app.app_state().s3;
+        if s3.buckets.contains_key(bucket)
+            && s3
+                .objects
+                .contains_key(&(bucket.to_string(), key.to_string()))
+        {
+            return;
+        }
+        self.state.app.catch_up_with_leader().await;
+    }
+
     /// URL-encodes a listing value when the client asked for
     /// `encoding-type=url`. S3 percent-encodes Key, Prefix, Delimiter and
     /// the markers (RFC 3986, space as %20 — never `+`), and the client
@@ -1042,6 +1061,7 @@ impl S3 for NaukaS3 {
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
+        self.ensure_visible(&req.input.bucket, &req.input.key).await;
         self.require_bucket(&req.input.bucket)?;
         let s3 = self.state.app.app_state().s3;
         let entry = s3
@@ -2049,6 +2069,7 @@ impl S3 for NaukaS3 {
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
         let input = req.input;
+        self.ensure_visible(&input.bucket, &input.key).await;
         self.require_bucket(&input.bucket)?;
         let s3 = self.state.app.app_state().s3;
         let entry = s3

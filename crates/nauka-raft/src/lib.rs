@@ -118,6 +118,65 @@ impl RaftApp {
         }
     }
 
+    /// Upper bound on a freshness catch-up before a negative read.
+    pub const FRESH_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    /// Closes the read-after-write window before a negative answer.
+    ///
+    /// State reads are local and the log is applied asynchronously, so a
+    /// key can be committed cluster-wide (its PUT acked by the leader)
+    /// yet invisible on this node for a moment. On a lookup MISS the
+    /// reader calls this: fetch the leader's applied index — the leader
+    /// acks a write only after applying it, so that index is exactly the
+    /// freshness an acked write is entitled to — wait (bounded) until
+    /// this node has applied at least as far, then look again.
+    ///
+    /// Never fails the read: on timeout, no leader, or an unreachable
+    /// leader the caller just serves its possibly-stale view, which is
+    /// what it would have done anyway. On the leader itself this is a
+    /// no-op.
+    pub async fn catch_up_with_leader(&self) {
+        let _ = tokio::time::timeout(Self::FRESH_READ_TIMEOUT, async {
+            let metrics = self.raft.metrics().borrow().clone();
+            let Some(leader) = metrics.current_leader else {
+                return;
+            };
+            if leader == self.id {
+                return;
+            }
+            let Some(leader_addr) = metrics
+                .membership_config
+                .nodes()
+                .find(|(id, _)| **id == leader)
+                .map(|(_, node)| node.addr.clone())
+            else {
+                return;
+            };
+            let Ok(addr) = leader_addr.parse::<std::net::SocketAddr>() else {
+                return;
+            };
+            let Ok(client) = nauka_transport::PeerClient::connect(addr).await else {
+                return;
+            };
+            let target = match admin_call(&client, &AdminRequest::Metrics).await {
+                Ok(AdminResponse::Metrics {
+                    last_applied: Some(idx),
+                    ..
+                }) => idx,
+                _ => return,
+            };
+            let _ = self
+                .raft
+                .wait(Some(Self::FRESH_READ_TIMEOUT))
+                .metrics(
+                    |m| m.last_applied.is_some_and(|l| l.index >= target),
+                    "catch up to the leader's applied index",
+                )
+                .await;
+        })
+        .await;
+    }
+
     /// Current members (id → address), from the Raft metrics.
     pub fn members(&self) -> BTreeMap<NodeId, String> {
         let metrics = self.raft.metrics().borrow().clone();
