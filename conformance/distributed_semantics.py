@@ -148,7 +148,12 @@ def main():
     # 5. a lagging node answers SlowDown, never a false NoSuchKey
     print("[5] SlowDown-not-lies on a healing node")
     probe = client(a.probe_port, a.ak, a.sk, read_timeout=8)
-    writer = client(ports[0], a.ak, a.sk, read_timeout=8)
+    # Write through ANY node but the one we're about to freeze — otherwise
+    # every advance-write hits the frozen process and the log never moves.
+    # (The frozen node is a follower, but it may be ports[0]: the leader can
+    # be any of the three.)
+    writer_port = next(p for p in ports if p != a.probe_port)
+    writer = client(writer_port, a.ak, a.sk, read_timeout=8)
     os.kill(a.freeze_pid, signal.SIGSTOP)         # freeze the follower
     try:
         # A frozen node also holds shards, so the first writes stall until
