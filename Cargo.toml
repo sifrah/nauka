@@ -26,4 +26,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Facade only: recording sites live in every crate, the recorder is installed
+# once by nauka-node. Without one the macros compile to no-ops.
+metrics = "0.24"
 reed-solomon-erasure = { version = "6", features = ["simd-accel"] }

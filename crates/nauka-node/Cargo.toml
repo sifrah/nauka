@@ -45,6 +45,11 @@ blake3.workspace = true
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
+metrics.workspace = true
+# default-features would pull http-listener and push-gateway (hyper-rustls,
+# aws-lc-rs, prost) to run a second HTTP server. We render from our own axum
+# route instead, so none of that is needed.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
