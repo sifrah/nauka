@@ -7,6 +7,7 @@
 
 pub mod network;
 pub mod store;
+pub mod telemetry;
 pub mod types;
 
 use std::collections::BTreeMap;
@@ -112,12 +113,18 @@ impl RaftApp {
         )
         .await?;
         info!("raft started, node_id={id}");
-        Ok(Arc::new(Self {
+        let app = Arc::new(Self {
             id,
             raft,
             state_machine,
             fresh: Arc::new(FreshGate::default()),
-        }))
+        });
+        // Consensus telemetry: describe the metrics, then follow openraft's
+        // watch channel. Both are no-ops when no recorder is installed, so
+        // this costs an embedder that does not want metrics one idle task.
+        telemetry::describe();
+        telemetry::spawn(Arc::downgrade(&app));
+        Ok(app)
     }
 
     /// Current replicated state (local read, possibly lagging behind the
@@ -464,6 +471,11 @@ impl nauka_transport::server::RaftHandler for RaftApp {
             RaftRpc::Vote(p) => {
                 let req = bincode::deserialize(&p).map_err(|e| err(&e))?;
                 let resp = self.raft.vote(req).await.map_err(|e| err(&e))?;
+                // An election in progress, observed from the side that is
+                // being asked. A term that moved between two scrapes only
+                // suggests one; this proves it, and says whether we backed
+                // the candidate.
+                telemetry::record_vote_received(resp.vote_granted);
                 bincode::serialize(&resp).map_err(|e| err(&e))
             }
             RaftRpc::InstallSnapshot(p) => {

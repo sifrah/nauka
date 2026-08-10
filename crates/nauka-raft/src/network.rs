@@ -24,6 +24,12 @@ pub struct QuicRaftNetworkFactory;
 
 pub struct QuicRaftClient {
     addr: SocketAddr,
+    /// The peer's advertised (data-plane) address, used as the `peer` label
+    /// on this node's RPC metrics. Deliberately the advertised address and
+    /// not the consensus one: it is the identity the rest of the cluster
+    /// knows the node by, so the label joins against `nauka_build_info` and
+    /// against the membership.
+    peer: String,
     client: Option<PeerClient>,
 }
 
@@ -39,15 +45,21 @@ impl RaftNetworkFactory<TypeConfig> for QuicRaftNetworkFactory {
             .expect("invalid node address in membership");
         QuicRaftClient {
             addr: nauka_transport::consensus_addr(data),
+            peer: node.addr.clone(),
             client: None,
         }
     }
 }
 
 impl QuicRaftClient {
+    /// The single choke point for every outbound Raft RPC — and therefore
+    /// the only place per-peer RPC health has to be measured. `rpc` names
+    /// the caller for the metric label; it is one of the three constants in
+    /// [`crate::telemetry`], never a formatted value.
     async fn call<Req, Resp>(
         &mut self,
         wrap: fn(Vec<u8>) -> RaftRpc,
+        rpc: &'static str,
         req: &Req,
         option: RPCOption,
     ) -> Result<Resp, Unreachable>
@@ -62,16 +74,46 @@ impl QuicRaftClient {
         // that peer fails the same way. Owning the deadline lets us drop
         // the dead client and reconnect on the next attempt.
         let budget = option.hard_ttl().mul_f32(0.9);
+        let started = std::time::Instant::now();
         match tokio::time::timeout(budget, self.call_inner(wrap, req)).await {
-            Ok(r) => r,
+            Ok(Ok(resp)) => {
+                crate::telemetry::record_rpc(&self.peer, rpc, started.elapsed());
+                Ok(resp)
+            }
+            // Answered nothing, but not by running out of time: no
+            // connection, a connection that died mid-call, or a payload we
+            // could not put on the wire.
+            Ok(Err(e)) => {
+                crate::telemetry::record_rpc_failure(
+                    &self.peer,
+                    rpc,
+                    crate::telemetry::FAIL_UNREACHABLE,
+                );
+                Err(e)
+            }
+            // Silence for the whole budget. Distinct from unreachable: the
+            // peer may be alive and merely wedged, which is the difference
+            // between "restart the node" and "look at its disk".
             Err(_) => {
                 self.client = None;
+                crate::telemetry::record_rpc_failure(
+                    &self.peer,
+                    rpc,
+                    crate::telemetry::FAIL_TIMEOUT,
+                );
                 Err(Unreachable::new(&IoErr(format!(
                     "{} did not answer within {budget:?}",
                     self.addr
                 ))))
             }
         }
+    }
+
+    /// A peer that answered, and refused. Counted apart from a peer that did
+    /// not answer at all: a cluster full of `rejected` is a consensus
+    /// problem, a cluster full of `unreachable` is a network one.
+    fn note_rejected(&self, rpc: &'static str) {
+        crate::telemetry::record_rpc_failure(&self.peer, rpc, crate::telemetry::FAIL_REJECTED);
     }
 
     async fn call_inner<Req, Resp>(
@@ -110,9 +152,26 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         rpc: AppendEntriesRequest<TypeConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        self.call(RaftRpc::AppendEntries, &rpc, option)
+        let resp: AppendEntriesResponse<NodeId> = self
+            .call(
+                RaftRpc::AppendEntries,
+                crate::telemetry::RPC_APPEND_ENTRIES,
+                &rpc,
+                option,
+            )
             .await
-            .map_err(RPCError::Unreachable)
+            .map_err(RPCError::Unreachable)?;
+        // `Conflict` is the follower saying our previous log id does not
+        // match — normal once per follower while a fresh leader backtracks,
+        // pathological if it keeps happening. `HigherVote` is the follower
+        // telling us we are not the leader any more.
+        if matches!(
+            resp,
+            AppendEntriesResponse::Conflict | AppendEntriesResponse::HigherVote(_)
+        ) {
+            self.note_rejected(crate::telemetry::RPC_APPEND_ENTRIES);
+        }
+        Ok(resp)
     }
 
     async fn install_snapshot(
@@ -123,9 +182,14 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        self.call(RaftRpc::InstallSnapshot, &rpc, option)
-            .await
-            .map_err(RPCError::Unreachable)
+        self.call(
+            RaftRpc::InstallSnapshot,
+            crate::telemetry::RPC_INSTALL_SNAPSHOT,
+            &rpc,
+            option,
+        )
+        .await
+        .map_err(RPCError::Unreachable)
     }
 
     async fn vote(
@@ -133,9 +197,16 @@ impl RaftNetwork<TypeConfig> for QuicRaftClient {
         rpc: VoteRequest<NodeId>,
         option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        self.call(RaftRpc::Vote, &rpc, option)
+        let resp: VoteResponse<NodeId> = self
+            .call(RaftRpc::Vote, crate::telemetry::RPC_VOTE, &rpc, option)
             .await
-            .map_err(RPCError::Unreachable)
+            .map_err(RPCError::Unreachable)?;
+        // A denied vote is the other half of a contested election, seen
+        // from the candidate's side.
+        if !resp.vote_granted {
+            self.note_rejected(crate::telemetry::RPC_VOTE);
+        }
+        Ok(resp)
     }
 }
 

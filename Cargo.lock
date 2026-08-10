@@ -1965,6 +1965,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
+ "metrics",
  "nauka-cluster",
  "nauka-erasure",
  "nauka-s3",
