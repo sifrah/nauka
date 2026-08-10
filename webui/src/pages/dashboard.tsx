@@ -100,6 +100,7 @@ export function DashboardPage() {
               <th className="px-5 py-2 font-medium">Address</th>
               <th className="px-5 py-2 font-medium">Capacity</th>
               <th className="px-5 py-2 font-medium">Placement share</th>
+              <th className="px-5 py-2 font-medium">State</th>
               <th className="px-5 py-2 font-medium text-right">Role</th>
             </tr>
           </thead>
@@ -122,6 +123,19 @@ export function DashboardPage() {
                       }}
                     />
                   </div>
+                </td>
+                <td className="px-5 py-2.5">
+                  {n.is_alive === false ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-destructive">
+                      <span className="w-1.5 h-1.5 rounded-full bg-destructive" />
+                      down
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-success">
+                      <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                      up
+                    </span>
+                  )}
                 </td>
                 <td className="px-5 py-2.5 text-right">
                   {n.is_leader ? (

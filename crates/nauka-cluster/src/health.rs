@@ -41,6 +41,23 @@ impl PeerHealth {
             .is_none_or(|n| *n < MISS_THRESHOLD)
     }
 
+    /// Liveness of every peer the map has an opinion about — `false` once
+    /// the misses reached the threshold. A peer nobody has probed yet is
+    /// simply ABSENT from the result: the map stays optimistic, and the
+    /// caller reads a missing entry exactly as `is_alive` does, alive.
+    ///
+    /// This reads the raw counters on purpose. `filter_view` cannot answer
+    /// the question — it returns the full view when everyone is down, so
+    /// "all peers dead" and "all peers alive" are the same answer there.
+    pub fn snapshot(&self) -> BTreeMap<String, bool> {
+        self.misses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(addr, n)| (addr.clone(), *n < MISS_THRESHOLD))
+            .collect()
+    }
+
     /// The placement view restricted to peers currently answering. If the
     /// filter would empty the view — this node partitioned from everyone —
     /// the full view is returned instead: behaving like the liveness map
@@ -81,6 +98,48 @@ mod tests {
         assert!(!h.is_alive("a:1"));
         h.record_success("a:1");
         assert!(h.is_alive("a:1"), "one success clears the slate");
+    }
+
+    #[test]
+    fn snapshot_reports_only_probed_peers_and_agrees_with_is_alive() {
+        let h = PeerHealth::default();
+        assert!(h.snapshot().is_empty(), "nothing probed yet: no opinion");
+
+        h.record_miss("a:1");
+        assert_eq!(
+            h.snapshot().get("a:1"),
+            Some(&true),
+            "one miss is not death"
+        );
+        for _ in 1..MISS_THRESHOLD {
+            h.record_miss("a:1");
+        }
+        assert_eq!(h.snapshot().get("a:1"), Some(&false));
+        assert!(!h.snapshot().contains_key("b:2"), "unprobed stays unknown");
+        assert_eq!(h.snapshot().get("a:1").copied(), Some(h.is_alive("a:1")));
+
+        h.record_success("a:1");
+        assert!(
+            !h.snapshot().contains_key("a:1"),
+            "a success forgets the peer entirely — back to optimistic"
+        );
+    }
+
+    #[test]
+    fn snapshot_distinguishes_everyone_down_from_everyone_up() {
+        // The trap `filter_view` sets: with every peer down it returns the
+        // full view, which is indistinguishable from every peer being up.
+        let h = PeerHealth::default();
+        let view = vec![("a:1".to_string(), 10), ("b:2".to_string(), 10)];
+        for _ in 0..MISS_THRESHOLD {
+            h.record_miss("a:1");
+            h.record_miss("b:2");
+        }
+        assert_eq!(h.filter_view(view.clone()), view, "the trap");
+        assert_eq!(
+            h.snapshot(),
+            BTreeMap::from([("a:1".to_string(), false), ("b:2".to_string(), false)])
+        );
     }
 
     #[test]

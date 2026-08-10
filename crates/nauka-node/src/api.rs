@@ -113,6 +113,12 @@ struct NodeStatus {
     capacity_bytes: u64,
     is_leader: bool,
     is_self: bool,
+    /// Liveness as the local pinger sees it: false once the peer missed
+    /// `MISS_THRESHOLD` probes in a row (~15 s). This is THIS node's view,
+    /// not a cluster-wide verdict — a member is still a full member while
+    /// down, it just takes no new shards. Optimistic like the map it comes
+    /// from: a peer nobody has probed yet reads alive.
+    is_alive: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -131,12 +137,20 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         .current_leader
         .and_then(|id| members.get(&id).cloned());
     let app_state = state.app.app_state();
+    // The FULL membership, annotated with liveness — not `view_alive()`:
+    // a down member must still be listed, marked down, rather than vanish
+    // from the cluster page. One snapshot for the whole list, so every row
+    // reports the same probe round.
+    let liveness = state.health.snapshot();
     let nodes = state
         .view()
         .into_iter()
         .map(|(addr, capacity_bytes)| NodeStatus {
             is_leader: leader_addr.as_deref() == Some(addr.as_str()),
             is_self: addr == state.self_id,
+            // Nobody pings themselves, so self is never in the map; an
+            // unprobed peer reads alive, same rule as `is_alive`.
+            is_alive: liveness.get(&addr).copied().unwrap_or(true),
             addr,
             capacity_bytes,
         })

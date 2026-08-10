@@ -20,6 +20,8 @@ export interface NodeStatus {
   capacity_bytes: number;
   is_leader: boolean;
   is_self: boolean;
+  /** Answering the pings of the node serving this page (down after ~15 s of silence). */
+  is_alive: boolean;
 }
 
 export interface ClusterStatus {
