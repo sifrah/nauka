@@ -55,7 +55,7 @@ pub fn describe() {
     );
     metrics::describe_gauge!(
         "nauka_peer_rtt_seconds",
-        "Round-trip time to a peer as estimated by its Vivaldi coordinates. Absent while either coordinate is still unsettled — an unconverged estimate is noise, not a measurement."
+        "Round-trip time to a peer as estimated from the replicated Vivaldi coordinates, which is what placement and read routing decide on. A model output, not a measurement: it cannot go below ~2 ms, so inside one datacenter it reads as that floor."
     );
 }
 
@@ -98,21 +98,29 @@ pub fn record_peer_liveness<'a>(peers: impl IntoIterator<Item = &'a str>, health
 /// Publish the estimated RTT to each peer, from the Vivaldi coordinates
 /// that placement and read-routing already decide on.
 ///
-/// Only settled coordinates are exported. A fresh node starts at the
-/// maximum error with a placeholder position; publishing that distance
-/// would put a confident-looking number on a guess, and the reader has no
-/// way to tell it apart from a measurement.
+/// `peers` must come from the replicated coordinate map, so every entry is
+/// a position a node actually published — never a `Coord::default()` stood
+/// in for a node that has never been heard from.
+///
+/// Deliberately NOT gated on [`Coord::is_settled`]. That gate looks right
+/// and is a trap: the model floors a predicted distance at twice
+/// `MIN_HEIGHT`, i.e. 2 ms, so inside one datacenter — where the real RTT
+/// is a few hundred microseconds — the relative error never falls and
+/// `is_settled` stays false forever (measured: error pinned at the 1.5
+/// maximum after 500 observations at 0.5 ms; the same node settles within a
+/// handful of observations at 20 ms). Gating on it would have left this
+/// metric permanently empty on every single-datacenter cluster.
+///
+/// So the value exported is the estimate placement is using, whatever its
+/// confidence — which is the only number that explains a placement
+/// decision. On a LAN it reads as a ~2 ms floor rather than a measurement,
+/// and it should be read as "how far apart the placer thinks these nodes
+/// are", not as a latency SLI.
 pub fn record_peer_rtt<'a>(
     self_coord: &Coord,
     peers: impl IntoIterator<Item = (&'a str, &'a Coord)>,
 ) {
-    if !self_coord.is_settled() {
-        return;
-    }
     for (peer, coord) in peers {
-        if !coord.is_settled() {
-            continue;
-        }
         // Vivaldi works in milliseconds; the metric is named `_seconds` and
         // inherits the latency buckets from the exporter's suffix matcher,
         // so the conversion is not optional.
@@ -207,12 +215,42 @@ mod tests {
         record_peer_rtt(&Coord::default(), [("a:1", &Coord::default())]);
     }
 
+    /// Guards the reason `record_peer_rtt` does not gate on `is_settled`:
+    /// inside one datacenter a coordinate never settles, so that gate would
+    /// silence the metric exactly where most clusters run.
     #[test]
-    fn unsettled_coordinates_are_not_exported() {
-        let fresh = Coord::default();
+    fn coordinates_never_settle_at_datacenter_latencies() {
+        let mut lan = Coord::default();
+        for _ in 0..500 {
+            lan.observe(&Coord::default(), 0.5);
+        }
         assert!(
-            !fresh.is_settled(),
-            "a default coordinate is a guess, and must stay out of the metric"
+            !lan.is_settled(),
+            "0.5 ms is below the 2 x MIN_HEIGHT floor, so the relative error \
+             cannot fall — if this ever starts settling, the gate becomes \
+             safe to reintroduce"
         );
+
+        let mut wan = Coord::default();
+        for _ in 0..500 {
+            wan.observe(&Coord::default(), 20.0);
+        }
+        assert!(wan.is_settled(), "a WAN-scale RTT converges normally");
+    }
+
+    #[test]
+    fn distance_is_exported_in_seconds_not_milliseconds() {
+        // The metric name ends in `_seconds` and inherits the latency
+        // buckets from it; Vivaldi speaks milliseconds. A missing division
+        // would put every cluster three buckets past `+Inf`.
+        let here = Coord::default();
+        let there = Coord {
+            vec: [30.0, 0.0],
+            height: 1.0,
+            error: 0.1,
+        };
+        let ms = here.distance(&there);
+        assert!((ms - 32.0).abs() < 1e-9, "{ms}");
+        assert!((ms / 1000.0 - 0.032).abs() < 1e-9);
     }
 }
