@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -66,6 +66,35 @@ impl ApiState {
     /// since it also works on the live view).
     fn view_alive(&self) -> Vec<(String, u64)> {
         self.health.filter_view(self.view())
+    }
+
+    /// Whether a registry write can plausibly commit right now. Two cheap
+    /// local signals:
+    ///   - no leader at all (an isolated follower, an election in flight)
+    ///     — instant; and
+    ///   - this node cannot see a quorum of voters on the data plane.
+    ///     openraft keeps a partitioned leader believing it still leads,
+    ///     so `leader_known()` alone would let the write sit for the whole
+    ///     write timeout; the health map (fed by the peer pinger) catches
+    ///     the lost quorum and lets the caller refuse immediately instead.
+    ///
+    /// Optimistic by construction: an unprobed peer counts as alive, so
+    /// this only says "no" once the pinger has actually observed peers as
+    /// gone — it never manufactures a false refusal on a healthy cluster.
+    pub(crate) fn can_commit_write(&self) -> bool {
+        if !self.app.leader_known() {
+            return false;
+        }
+        let members = self.app.members();
+        if members.is_empty() {
+            return true; // not in consensus mode; nothing to gate on
+        }
+        // This node is never pinged, so it counts as alive by construction.
+        let alive = members
+            .values()
+            .filter(|addr| self.health.is_alive(addr))
+            .count();
+        alive * 2 > members.len()
     }
 }
 
@@ -244,18 +273,68 @@ async fn delete_file(
     Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
-/// Uniform HTTP error.
-struct ApiError(anyhow::Error);
+/// Uniform HTTP error. Anything that is not deliberately classified is an
+/// internal error, as before; the status is carried so the paths that can
+/// tell "the cluster cannot take this write right now" from "this failed"
+/// answer something the client can act on.
+struct ApiError(StatusCode, anyhow::Error);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("{:#}", self.0)).into_response()
+        (self.0, format!("{:#}", self.1)).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
-        Self(e.into())
+        Self(StatusCode::INTERNAL_SERVER_ERROR, e.into())
+    }
+}
+
+impl From<DispatchError> for ApiError {
+    fn from(e: DispatchError) -> Self {
+        // A cluster that cannot commit right now is a transient condition
+        // the client should retry — 503, not 500.
+        let status = match e {
+            DispatchError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            DispatchError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self(status, e.into_anyhow())
+    }
+}
+
+/// Why a file dispatch failed.
+///
+/// `dispatch_file` is the single object-write path behind both front doors
+/// (the S3 endpoint and the native HTTP API), so it must not decide the
+/// wire status itself — it reports *what* went wrong and each front door
+/// renders it in its own protocol. The distinction that matters is
+/// availability (retryable) versus a genuine failure of this upload.
+pub(crate) enum DispatchError {
+    /// The registry could not commit: no leader, no quorum, or the commit
+    /// timed out. Retryable. Carries the closed-set label the S3 write
+    /// rejection counter uses.
+    Unavailable(&'static str),
+    /// Anything else: this upload really did fail.
+    Failed(anyhow::Error),
+}
+
+/// What both front doors tell a client whose write cannot commit.
+pub(crate) const WRITE_UNAVAILABLE_MSG: &str =
+    "the cluster cannot commit this write right now (no quorum); retry shortly";
+
+impl DispatchError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Unavailable(_) => anyhow!(WRITE_UNAVAILABLE_MSG),
+            Self::Failed(e) => e,
+        }
+    }
+}
+
+impl<E: Into<anyhow::Error>> From<E> for DispatchError {
+    fn from(e: E) -> Self {
+        Self::Failed(e.into())
     }
 }
 
@@ -333,9 +412,17 @@ pub(crate) async fn dispatch_file(
     hasher: blake3::Hasher,
     name: Option<String>,
     expires_at: Option<u64>,
-) -> Result<(FileManifest, usize)> {
+) -> std::result::Result<(FileManifest, usize), DispatchError> {
     if size == 0 {
-        bail!("empty file");
+        return Err(anyhow!("empty file").into());
+    }
+    // Fail fast when the manifest provably cannot be recorded. Checked
+    // before a single shard is encoded or placed: an upload that ends in
+    // an uncommittable registry write is wasted work on every node it
+    // touches, and the client would otherwise wait out the write timeout
+    // (~4s) for an answer we already know.
+    if !state.can_commit_write() {
+        return Err(DispatchError::Unavailable(NO_QUORUM));
     }
     let file_hash = hasher.finalize().to_hex().to_string();
     // Place on the members currently answering: a dead node must cost a
@@ -405,12 +492,13 @@ pub(crate) async fn dispatch_file(
         // Below k placed shards the stripe is not reconstructible anywhere:
         // that is a failed upload, not a degraded one.
         if placed < cfg.data_shards {
-            bail!(
+            return Err(anyhow!(
                 "stripe {si}: only {placed} of {} shards could be placed \
                  ({} required) — upload aborted",
                 shards.len(),
                 cfg.data_shards
-            );
+            )
+            .into());
         }
         stripes_meta.push(StripeMeta {
             data_len: filled,
@@ -435,18 +523,30 @@ pub(crate) async fn dispatch_file(
     };
     // Available locally right away, then replicated by the registry.
     state.store.put_manifest(&manifest)?;
-    let resp = state
+    let resp = match state
         .app
         .write(nauka_raft::types::AppCommand::RegisterManifest(
             manifest.clone(),
         ))
         .await
-        .context("recording in the Raft registry")?;
+    {
+        Ok(resp) => resp,
+        // The registry did not commit in time: quorum lost mid-flight, or
+        // the leader went away between the check above and now. An
+        // availability failure, not an internal bug.
+        Err(_) => return Err(DispatchError::Unavailable(COMMIT_TIMEOUT)),
+    };
     if !resp.ok {
-        bail!("the registry refused the manifest (banned content?)");
+        // A command the state machine deliberately rejected is a real
+        // error, not a retryable one.
+        return Err(anyhow!("the registry refused the manifest (banned content?)").into());
     }
     Ok((manifest, undelivered))
 }
+
+/// Rejection reasons, the closed label set of the write-rejection counter.
+pub(crate) const NO_QUORUM: &str = "no_quorum";
+pub(crate) const COMMIT_TIMEOUT: &str = "commit_timeout";
 
 /// Sends a shard to a peer, reconnecting as needed (idempotent: storage is
 /// content-addressed, so a resend duplicates nothing).
@@ -952,7 +1052,21 @@ fn uuid_ish() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_range;
+    use super::{parse_range, ApiError, DispatchError, StatusCode, NO_QUORUM};
+
+    #[test]
+    fn an_uncommittable_write_is_retryable_on_the_native_api() {
+        // S3 clients retry a 503 and never a 500; so does anything sane
+        // driving /api/upload. A cluster that momentarily has no quorum
+        // must not look like a bug in the node.
+        let e: ApiError = DispatchError::Unavailable(NO_QUORUM).into();
+        assert_eq!(e.0, StatusCode::SERVICE_UNAVAILABLE);
+        let e: ApiError = DispatchError::Failed(anyhow::anyhow!("disk on fire")).into();
+        assert_eq!(e.0, StatusCode::INTERNAL_SERVER_ERROR);
+        // An ordinary error keeps the old behaviour.
+        let e: ApiError = std::io::Error::other("nope").into();
+        assert_eq!(e.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[test]
     fn ranges_are_parsed_and_clamped() {

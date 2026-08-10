@@ -68,20 +68,14 @@ impl NaukaS3 {
 
     /// Writes a command through Raft, mapping a refusal to an S3 error.
     async fn write(&self, cmd: nauka_raft::types::AppCommand) -> S3Result<Option<String>> {
-        // Fail fast when the write provably cannot commit. Two signals:
-        //   - no leader at all (an isolated follower, an election in
-        //     flight) — instant; and
-        //   - this node cannot see a quorum of voters on the data plane.
-        //     openraft keeps a partitioned leader believing it still
-        //     leads, so `leader_known()` alone would let the write sit for
-        //     WRITE_TIMEOUT; the health map (updated by the peer pinger)
-        //     catches the lost quorum and fails immediately instead.
-        // Either way it is 503, retryable — never a hang, never a 500.
-        if !self.state.app.leader_known() || !self.quorum_reachable() {
+        // Fail fast when the write provably cannot commit (no leader, or
+        // no quorum reachable on the data plane): 503, retryable — never a
+        // hang, never a 500. See `ApiState::can_commit_write`.
+        if !self.state.can_commit_write() {
             // Counted apart from the mid-flight loss below: this one means
             // the node knew up front it could not commit, which points at
             // the cluster, not at the request.
-            crate::telemetry::s3::record_write_rejected("no_quorum");
+            crate::telemetry::s3::record_write_rejected(crate::api::NO_QUORUM);
             return Err(Self::unavailable_write_error());
         }
         match self.state.app.write(cmd).await {
@@ -100,7 +94,7 @@ impl NaukaS3 {
             // (quorum lost mid-flight, the leader went away): an
             // availability failure, not an internal bug — 503, retryable.
             Err(_) => {
-                crate::telemetry::s3::record_write_rejected("commit_timeout");
+                crate::telemetry::s3::record_write_rejected(crate::api::COMMIT_TIMEOUT);
                 Err(Self::unavailable_write_error())
             }
         }
@@ -108,30 +102,22 @@ impl NaukaS3 {
 
     /// 503 for a write that cannot reach quorum right now.
     fn unavailable_write_error() -> S3Error {
-        s3_error!(
-            ServiceUnavailable,
-            "the cluster cannot commit this write right now (no quorum); retry shortly"
-        )
+        s3_error!(ServiceUnavailable, "{}", crate::api::WRITE_UNAVAILABLE_MSG)
     }
 
-    /// Whether a majority of the voters is reachable on the data plane,
-    /// per the peer-health pinger. A write needs a quorum to commit; if
-    /// this node can see fewer than a majority (itself included — it is
-    /// never pinged, so it counts as alive), the write is doomed and we
-    /// say so at once instead of waiting out `WRITE_TIMEOUT`. Optimistic
-    /// by construction: an unprobed peer counts as alive, so this only
-    /// trips once the pinger has actually observed peers as gone — it
-    /// never manufactures a false 503 on a healthy cluster.
-    fn quorum_reachable(&self) -> bool {
-        let members = self.state.app.members();
-        if members.is_empty() {
-            return true; // not in consensus mode; nothing to gate on
+    /// Renders an object-data dispatch failure as an S3 error. The object
+    /// path writes its manifest through `dispatch_file`, not through
+    /// `write` above, so it needs the same classification: a cluster that
+    /// cannot commit is a retryable 503 (and is counted with the same
+    /// reasons), anything else is a genuine internal error.
+    fn dispatch_error(e: crate::api::DispatchError) -> S3Error {
+        match e {
+            crate::api::DispatchError::Unavailable(reason) => {
+                crate::telemetry::s3::record_write_rejected(reason);
+                Self::unavailable_write_error()
+            }
+            crate::api::DispatchError::Failed(e) => s3_error!(InternalError, "{e:#}"),
         }
-        let alive = members
-            .values()
-            .filter(|addr| self.state.health.is_alive(addr))
-            .count();
-        alive * 2 > members.len()
     }
 
     fn require_bucket(&self, name: &str) -> S3Result<nauka_s3::Bucket> {
@@ -848,7 +834,7 @@ impl S3 for NaukaS3 {
             )
             .await;
             let _ = tokio::fs::remove_file(&store_path).await;
-            let (manifest, _degraded) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+            let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
             Some(manifest.file_hash)
         };
 
@@ -1083,7 +1069,7 @@ impl S3 for NaukaS3 {
             )
             .await;
             let _ = tokio::fs::remove_file(&store_path).await;
-            let (manifest, _degraded) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+            let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
             Some(manifest.file_hash)
         };
 
@@ -2631,7 +2617,7 @@ impl S3 for NaukaS3 {
         )
         .await;
         let _ = tokio::fs::remove_file(&store_path).await;
-        let (manifest, _) = result.map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+        let (manifest, _) = result.map_err(Self::dispatch_error)?;
 
         let etag = nauka_s3::naming::etag_single(&md5);
         // One part at a time: parts arrive concurrently, so the merge
