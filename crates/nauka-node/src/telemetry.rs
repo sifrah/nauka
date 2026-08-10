@@ -98,6 +98,8 @@ pub fn seed(node_addr: &str) {
         .unwrap_or_default()
         .as_secs();
     metrics::gauge!("nauka_start_time_seconds").set(start_unix as f64);
+
+    s3::describe();
 }
 
 /// Serve `/metrics` until the listener dies.
@@ -136,6 +138,185 @@ async fn render(State(handle): State<PrometheusHandle>) -> impl IntoResponse {
         )],
         handle.render(),
     )
+}
+
+/// Per-request S3 telemetry.
+///
+/// The measurement is split across two layers that cannot see each other.
+/// The canonical operation name exists only deep inside `s3s`, at the access
+/// check; latency and the status the client actually received exist only at
+/// the outer hyper service, which knows nothing of S3 routing. A task-local
+/// carries the former out to the latter.
+///
+/// This is sound because `s3s` never spawns: the access check runs in the
+/// same task as the outer service call, so the slot written during the check
+/// is still the slot belonging to that request when the response is recorded.
+pub mod s3 {
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::time::Duration;
+
+    tokio::task_local! {
+        static CURRENT: RefCell<Option<Op>>;
+    }
+
+    /// What the access check learned about the request in flight.
+    #[derive(Clone)]
+    pub struct Op {
+        name: String,
+        class: &'static str,
+    }
+
+    /// Label for a request that never reached the access check: a bad
+    /// signature, an unparseable path, a CDN offload redirect. One extra
+    /// series, not an unbounded one — and deliberately not dropped, since
+    /// requests rejected before routing are exactly the ones an operator
+    /// misses otherwise.
+    const UNKNOWN: &str = "unknown";
+
+    /// Register the HELP/TYPE text once, at startup.
+    pub fn describe() {
+        metrics::describe_counter!(
+            "nauka_s3_requests_total",
+            "S3 requests served, by operation, status class and read/write class."
+        );
+        metrics::describe_histogram!(
+            "nauka_s3_request_duration_seconds",
+            "Wall-clock time to serve an S3 request, measured at the outer HTTP layer."
+        );
+        metrics::describe_histogram!(
+            "nauka_s3_request_bytes",
+            "Declared Content-Length of S3 requests and responses. Streaming bodies without a Content-Length are not counted."
+        );
+        metrics::describe_counter!(
+            "nauka_s3_writes_rejected_total",
+            "S3 writes refused before or during the Raft commit, by reason."
+        );
+        metrics::describe_counter!(
+            "nauka_s3_reads_total",
+            "Object visibility checks on the read path, by the freshness achieved."
+        );
+    }
+
+    /// Give the request in flight a slot to record its identity in.
+    pub async fn scoped<F: Future>(fut: F) -> F::Output {
+        CURRENT.scope(RefCell::new(None), fut).await
+    }
+
+    /// Name the operation being served, from the one place `s3s` exposes a
+    /// canonical name. A no-op outside a [`scoped`] future.
+    pub fn set_op(name: &str, class: &'static str) {
+        let _ = CURRENT.try_with(|slot| {
+            *slot.borrow_mut() = Some(Op {
+                name: name.to_owned(),
+                class,
+            });
+        });
+    }
+
+    /// Record a finished request. `status` must be read *after* any
+    /// post-hoc rewriting of the response, or the metric will disagree with
+    /// what the client received.
+    pub fn record_request(
+        status: u16,
+        elapsed: Duration,
+        req_bytes: Option<u64>,
+        resp_bytes: Option<u64>,
+    ) {
+        let op = CURRENT
+            .try_with(|slot| slot.borrow().clone())
+            .ok()
+            .flatten();
+        let (name, class) = match &op {
+            Some(op) => (op.name.as_str(), op.class),
+            None => (UNKNOWN, UNKNOWN),
+        };
+        metrics::counter!(
+            "nauka_s3_requests_total",
+            "operation" => name.to_owned(),
+            "status_class" => status_class(status),
+            "class" => class,
+        )
+        .increment(1);
+        metrics::histogram!(
+            "nauka_s3_request_duration_seconds",
+            "operation" => name.to_owned(),
+        )
+        .record(elapsed.as_secs_f64());
+        if let Some(bytes) = req_bytes {
+            metrics::histogram!(
+                "nauka_s3_request_bytes",
+                "operation" => name.to_owned(),
+                "direction" => "in",
+            )
+            .record(bytes as f64);
+        }
+        if let Some(bytes) = resp_bytes {
+            metrics::histogram!(
+                "nauka_s3_request_bytes",
+                "operation" => name.to_owned(),
+                "direction" => "out",
+            )
+            .record(bytes as f64);
+        }
+    }
+
+    /// A write that could not be committed. `reason` is a closed set.
+    pub fn record_write_rejected(reason: &'static str) {
+        metrics::counter!("nauka_s3_writes_rejected_total", "reason" => reason).increment(1);
+    }
+
+    /// The freshness a read-path visibility check achieved.
+    pub fn record_read_freshness(freshness: &'static str) {
+        metrics::counter!("nauka_s3_reads_total", "freshness" => freshness).increment(1);
+    }
+
+    /// Status class rather than the raw code: bounded, and the distinction
+    /// an operator actually alerts on.
+    fn status_class(status: u16) -> &'static str {
+        match status {
+            100..=199 => "1xx",
+            200..=299 => "2xx",
+            300..=399 => "3xx",
+            400..=499 => "4xx",
+            _ => "5xx",
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn status_classes_cover_the_ranges() {
+            assert_eq!(status_class(200), "2xx");
+            assert_eq!(status_class(204), "2xx");
+            assert_eq!(status_class(302), "3xx");
+            assert_eq!(status_class(403), "4xx");
+            assert_eq!(status_class(404), "4xx");
+            assert_eq!(status_class(500), "5xx");
+            assert_eq!(status_class(503), "5xx");
+        }
+
+        #[tokio::test]
+        async fn op_is_visible_later_in_the_same_scope() {
+            scoped(async {
+                assert!(CURRENT.with(|slot| slot.borrow().is_none()));
+                set_op("GetObject", "read");
+                let seen = CURRENT.with(|slot| slot.borrow().clone()).unwrap();
+                assert_eq!(seen.name, "GetObject");
+                assert_eq!(seen.class, "read");
+            })
+            .await;
+        }
+
+        #[test]
+        fn set_op_outside_a_scope_is_a_no_op() {
+            // Must not panic: the access check can run on paths that were
+            // never wrapped, and telemetry may never break a request.
+            set_op("GetObject", "read");
+        }
+    }
 }
 
 #[cfg(test)]
