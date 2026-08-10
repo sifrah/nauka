@@ -715,6 +715,7 @@ async fn main() -> Result<()> {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
                     let mut published_egress: Option<(String, u64)> = None;
+                    let mut cache_report: Option<(usize, u64, u64, u64)> = None;
                     let mut my_coord = nauka_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
@@ -814,6 +815,25 @@ async fn main() -> Result<()> {
                                 .flat_map(cache::StripeCache::keys_of)
                                 .collect();
                             cache.sweep(&live);
+                            // Occupancy and hit rate: the two numbers that
+                            // say whether --cache-size is sized right. Only
+                            // when something moved, so an idle node stays
+                            // quiet.
+                            let (entries, bytes) = cache.stats();
+                            let (hits, misses) = cache.hit_stats();
+                            if cache_report != Some((entries, bytes, hits, misses)) {
+                                cache_report = Some((entries, bytes, hits, misses));
+                                let lookups = hits + misses;
+                                let rate = match lookups {
+                                    0 => 0.0,
+                                    n => hits as f64 * 100.0 / n as f64,
+                                };
+                                eprintln!(
+                                    "stripe cache: {entries} entries, {:.2}/{:.2} GB, {hits} hits / {misses} misses ({rate:.0}% hit rate)",
+                                    bytes as f64 / 1e9,
+                                    cache.budget() as f64 / 1e9,
+                                );
+                            }
                         }
 
                         // Expiration: the leader drops from the registry

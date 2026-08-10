@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// One cached stripe on disk.
@@ -26,6 +27,15 @@ pub struct StripeCache {
     dir: PathBuf,
     budget: u64,
     inner: Mutex<Inner>,
+    /// Lookups served from disk, and lookups that had to go to the
+    /// cluster. Occupancy alone cannot tell a warm cache from a useless
+    /// one — a cache pinned at its budget serving nothing but misses is
+    /// exactly a `--cache-size` too small for the working set. Counted
+    /// with atomics off the `Inner` lock, like `EgressMeter`, so the read
+    /// path pays nothing for them. Process-lifetime totals: they start at
+    /// zero on restart even though the entries on disk are adopted.
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 struct Inner {
@@ -84,6 +94,8 @@ impl StripeCache {
                 total,
                 clock,
             }),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         };
         cache.evict_to_budget();
         Ok(cache)
@@ -95,16 +107,32 @@ impl StripeCache {
 
     pub fn get(&self, file_hash: &str, stripe_idx: usize) -> Option<Vec<u8>> {
         let key = entry_key(file_hash, stripe_idx);
-        {
+        let known = {
             let mut inner = self.lock();
-            let e = inner.entries.get(&key)?;
-            let _ = e;
-            inner.clock += 1;
-            let clock = inner.clock;
-            inner.entries.get_mut(&key).unwrap().last_used = clock;
-        }
+            match inner.entries.contains_key(&key) {
+                true => {
+                    inner.clock += 1;
+                    let clock = inner.clock;
+                    inner.entries.get_mut(&key).unwrap().last_used = clock;
+                    true
+                }
+                false => false,
+            }
+        };
         // Read outside the lock; a racing eviction just means a miss.
-        std::fs::read(self.dir.join(&key)).ok()
+        let data = if known {
+            std::fs::read(self.dir.join(&key)).ok()
+        } else {
+            None
+        };
+        // Counted on the outcome, not on the bookkeeping: an entry the
+        // index knows but whose file lost the race is a miss like any
+        // other, because the caller pays the same cross-cluster fetch.
+        match data.is_some() {
+            true => self.hits.fetch_add(1, Ordering::Relaxed),
+            false => self.misses.fetch_add(1, Ordering::Relaxed),
+        };
+        data
     }
 
     /// Stores a decoded stripe, then evicts least-recently-used entries
@@ -193,10 +221,25 @@ impl StripeCache {
         (0..manifest.stripes.len()).map(|i| entry_key(&manifest.file_hash, i))
     }
 
-    #[cfg(test)]
+    /// Occupancy: `(entries, bytes on disk)`. Compared against the budget
+    /// it says whether `--cache-size` is ever reached at all.
     pub fn stats(&self) -> (usize, u64) {
         let inner = self.lock();
         (inner.entries.len(), inner.total)
+    }
+
+    /// The disk budget this cache was opened with — the denominator the
+    /// occupancy above is only meaningful against.
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
+
+    /// `(hits, misses)` since this process started.
+    pub fn hit_stats(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -242,6 +285,46 @@ mod tests {
         assert!(c.get("c", 0).is_some());
         let (n, total) = c.stats();
         assert_eq!((n, total), (2, 8));
+    }
+
+    #[test]
+    fn counts_hits_and_misses_on_the_read_path() {
+        let c = StripeCache::open(tmp(), 1024).unwrap();
+        assert_eq!(c.hit_stats(), (0, 0), "no lookup, no opinion");
+        assert!(c.get("h", 0).is_none());
+        assert_eq!(c.hit_stats(), (0, 1), "cold read: a miss");
+        c.put("h", 0, b"decoded stripe");
+        assert_eq!(c.hit_stats(), (0, 1), "storing is not a lookup");
+        assert!(c.get("h", 0).is_some());
+        assert!(c.get("h", 0).is_some());
+        assert_eq!(c.hit_stats(), (2, 1));
+        // Occupancy says the cache is full of something; only the hit
+        // rate says that something is being read.
+        assert_eq!(c.stats(), (1, 14));
+        assert_eq!(c.budget(), 1024);
+    }
+
+    #[test]
+    fn an_evicted_entry_reads_as_a_miss_again() {
+        let c = StripeCache::open(tmp(), 8).unwrap();
+        c.put("a", 0, b"aaaa");
+        c.put("b", 0, b"bbbb");
+        assert!(c.get("a", 0).is_some());
+        c.put("c", 0, b"cccc"); // evicts b
+        assert!(c.get("b", 0).is_none());
+        assert_eq!(c.hit_stats(), (1, 1));
+    }
+
+    #[test]
+    fn a_file_lost_under_the_index_counts_as_a_miss() {
+        // The index knows the entry, the bytes are gone (a racing sweep,
+        // an operator's rm). The caller pays a cluster fetch: a miss.
+        let dir = tmp();
+        let c = StripeCache::open(dir.clone(), 1024).unwrap();
+        c.put("h", 0, b"stripe");
+        std::fs::remove_file(dir.join(entry_key("h", 0))).unwrap();
+        assert!(c.get("h", 0).is_none());
+        assert_eq!(c.hit_stats(), (0, 1));
     }
 
     #[test]
