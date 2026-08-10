@@ -8,6 +8,7 @@ mod api;
 mod cache;
 mod e2e;
 mod egress;
+mod ingest;
 mod s3;
 mod telemetry;
 mod update;
@@ -694,7 +695,15 @@ async fn main() -> Result<()> {
                         )),
                         None => None,
                     },
+                    // An eighth of the machine for upload buffering,
+                    // decided now: what uploads may hold in RAM must not
+                    // depend on what happens to be free later.
+                    ingest_pool: ingest::RamPool::sized_from_system(8),
                 });
+                tracing::info!(
+                    "upload buffer pool: {} MiB (fixed at startup)",
+                    api_state.ingest_pool.capacity() >> 20
+                );
 
                 if !no_http {
                     // No fallback to ./webui/dist: the binary carries its own

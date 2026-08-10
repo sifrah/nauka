@@ -42,6 +42,10 @@ pub struct ApiState {
     /// Opt-in stripe cache (`NAUKA_CACHE_SIZE`): decoded stripes that
     /// crossed the cluster once are served from local disk after.
     pub cache: Option<Arc<crate::cache::StripeCache>>,
+    /// Global admission budget for upload RAM windows — sized once at
+    /// startup so concurrent uploads share a fixed fraction of the machine
+    /// instead of racing for "what is left".
+    pub ingest_pool: Arc<crate::ingest::RamPool>,
 }
 
 impl ApiState {
