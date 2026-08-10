@@ -78,21 +78,31 @@ impl NaukaS3 {
         //     catches the lost quorum and fails immediately instead.
         // Either way it is 503, retryable — never a hang, never a 500.
         if !self.state.app.leader_known() || !self.quorum_reachable() {
+            // Counted apart from the mid-flight loss below: this one means
+            // the node knew up front it could not commit, which points at
+            // the cluster, not at the request.
+            crate::telemetry::s3::record_write_rejected("no_quorum");
             return Err(Self::unavailable_write_error());
         }
         match self.state.app.write(cmd).await {
             Ok(r) if r.ok => Ok(r.info),
             // A command the state machine deliberately rejected (a real
             // conflict, e.g. a bucket-exists race) is a genuine error.
-            Ok(r) => Err(s3_error!(
-                InternalError,
-                "{}",
-                r.info.unwrap_or_else(|| "refused".into())
-            )),
+            Ok(r) => {
+                crate::telemetry::s3::record_write_rejected("conflict");
+                Err(s3_error!(
+                    InternalError,
+                    "{}",
+                    r.info.unwrap_or_else(|| "refused".into())
+                ))
+            }
             // Reaching here means the registry did not commit in time
             // (quorum lost mid-flight, the leader went away): an
             // availability failure, not an internal bug — 503, retryable.
-            Err(_) => Err(Self::unavailable_write_error()),
+            Err(_) => {
+                crate::telemetry::s3::record_write_rejected("commit_timeout");
+                Err(Self::unavailable_write_error())
+            }
         }
     }
 
@@ -149,7 +159,20 @@ impl NaukaS3 {
     /// an election or a partition, exactly when this node lags the most)
     /// a still-missing key answers 503 SlowDown, not a false NoSuchKey.
     /// S3 clients retry a 503; none of them retries a 404.
+    /// Wrapper so every exit is counted — the fast local hit included,
+    /// otherwise the freshness series would only ever describe misses and
+    /// look alarming on a perfectly healthy node.
     async fn ensure_visible(&self, bucket: &str, key: &str) -> nauka_raft::Freshness {
+        let freshness = self.ensure_visible_inner(bucket, key).await;
+        crate::telemetry::s3::record_read_freshness(match freshness {
+            nauka_raft::Freshness::Fresh => "fresh",
+            nauka_raft::Freshness::ConfirmedStale => "confirmed_stale",
+            nauka_raft::Freshness::Unknown => "unknown",
+        });
+        freshness
+    }
+
+    async fn ensure_visible_inner(&self, bucket: &str, key: &str) -> nauka_raft::Freshness {
         if self.key_present(bucket, key) {
             return nauka_raft::Freshness::Fresh;
         }
@@ -3438,6 +3461,16 @@ fn grant_class_of(op: &str, is_object: bool) -> nauka_s3::Action {
     }
 }
 
+/// The grant class as a metric label. Bounded by construction, and the
+/// cheapest useful split of S3 traffic: reads behave nothing like writes.
+fn class_label(action: nauka_s3::Action) -> &'static str {
+    match action {
+        nauka_s3::Action::Read => "read",
+        nauka_s3::Action::Write => "write",
+        nauka_s3::Action::Own => "own",
+    }
+}
+
 /// Strips an RGW-style tenant prefix: `tenant:bucket` and `:bucket` both
 /// address `bucket`. Nauka is single-tenant — the syntax is accepted so
 /// tenanted clients (and the conformance suite's) can name buckets, but
@@ -3499,6 +3532,11 @@ impl s3s::access::S3Access for NaukaAccess {
         use nauka_s3::policy::{Decision, Requester};
 
         let op = cx.s3_op().name();
+        // The only place `s3s` exposes a canonical operation name. Recorded
+        // before any early return below, so every routed request is named
+        // even when the authorization decision is delegated elsewhere.
+        let is_object = matches!(cx.s3_path(), s3s::path::S3Path::Object { .. });
+        crate::telemetry::s3::set_op(op, class_label(grant_class_of(op, is_object)));
         // The object-ACL ops authorize in their handlers: their owner is
         // the OBJECT's owner, which only the object itself knows.
         if matches!(op, "GetObjectAcl" | "PutObjectAcl") {
@@ -3818,114 +3856,147 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for ServiceR
         let raw_path = req.uri().path().to_string();
         let raw_query = req.uri().query().map(String::from);
         let host_header = header("host");
-        Box::pin(async move {
-            if is_options {
-                // The preflight never reaches an S3 operation: it is
-                // unauthenticated by design and answered from the bucket's
-                // stored CORS rules alone.
-                return Ok(preflight(
-                    &state,
-                    bucket.as_deref(),
-                    origin.as_deref(),
-                    acr_method.as_deref(),
-                    acr_headers.as_deref(),
-                ));
-            }
-            // A presigned URL with an out-of-range lifetime is refused as
-            // FORBIDDEN, not as a parse error: negative or beyond the
-            // 7-day AWS maximum, it never reaches signature verification
-            // (`s3s` would answer 400 on the negative case; AWS and the
-            // suite say 403).
-            if let Some(raw) = &expires_param {
-                const MAX_PRESIGN_SECS: i64 = 604_800;
-                let ok = raw
-                    .parse::<i64>()
-                    .is_ok_and(|v| v > 0 && v <= MAX_PRESIGN_SECS);
-                if !ok {
-                    let mut resp = hyper::Response::new(s3s::Body::from(
-                        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+        let req_bytes = content_length(req.headers());
+        // Every exit below is measured, including the three that never
+        // reach an S3 operation. Wrapping the body rather than recording at
+        // each `return` keeps that true when a fourth early exit is added.
+        Box::pin(crate::telemetry::s3::scoped(async move {
+            let started = std::time::Instant::now();
+            let result = async move {
+                if is_options {
+                    // The preflight never reaches an S3 operation: it is
+                    // unauthenticated by design and answered from the bucket's
+                    // stored CORS rules alone. Named anyway, so preflight volume
+                    // does not hide inside the `unknown` series next to the
+                    // requests that failed signature verification.
+                    crate::telemetry::s3::set_op("Preflight", "read");
+                    return Ok(preflight(
+                        &state,
+                        bucket.as_deref(),
+                        origin.as_deref(),
+                        acr_method.as_deref(),
+                        acr_headers.as_deref(),
+                    ));
+                }
+                // A presigned URL with an out-of-range lifetime is refused as
+                // FORBIDDEN, not as a parse error: negative or beyond the
+                // 7-day AWS maximum, it never reaches signature verification
+                // (`s3s` would answer 400 on the negative case; AWS and the
+                // suite say 403).
+                if let Some(raw) = &expires_param {
+                    const MAX_PRESIGN_SECS: i64 = 604_800;
+                    let ok = raw
+                        .parse::<i64>()
+                        .is_ok_and(|v| v > 0 && v <= MAX_PRESIGN_SECS);
+                    if !ok {
+                        let mut resp = hyper::Response::new(s3s::Body::from(
+                            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                           <Error><Code>AccessDenied</Code>\
                           <Message>invalid X-Amz-Expires</Message></Error>"
-                            .to_vec(),
-                    ));
-                    *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
-                    return Ok(resp);
+                                .to_vec(),
+                        ));
+                        *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
+                        return Ok(resp);
+                    }
                 }
-            }
-            // CDN offload: past our egress budget, big presigned GETs are
-            // redirected to the member with the most headroom, on a URL
-            // we sign for it.
-            if method == "GET" {
-                if let Some(resp) = maybe_offload_redirect(
-                    &state,
-                    &raw_path,
-                    raw_query.as_deref(),
-                    host_header.as_deref(),
-                ) {
-                    return Ok(resp);
+                // CDN offload: past our egress budget, big presigned GETs are
+                // redirected to the member with the most headroom, on a URL
+                // we sign for it.
+                if method == "GET" {
+                    if let Some(resp) = maybe_offload_redirect(
+                        &state,
+                        &raw_path,
+                        raw_query.as_deref(),
+                        host_header.as_deref(),
+                    ) {
+                        return Ok(resp);
+                    }
                 }
-            }
-            let mut resp = hyper::service::Service::call(svc.as_ref(), req).await?;
-            // POST-object polish over `s3s`'s protocol handling:
-            // - an UNMET policy condition is 403 AccessDenied on AWS, but
-            //   `s3s` answers 400 InvalidPolicyDocument (same code it uses
-            //   for a structurally bad policy, which IS a 400 — the
-            //   "Policy condition" message tells the two apart);
-            // - the success_action_redirect Location must carry the ETag
-            //   WITH its quotes, which `s3s` strips.
-            if method == "POST" {
-                if resp.status() == hyper::StatusCode::BAD_REQUEST {
-                    let body_bytes = resp.body().bytes();
-                    if let Some(b) = body_bytes {
-                        let text = String::from_utf8_lossy(&b);
-                        if text.contains("<Code>InvalidPolicyDocument</Code>")
-                            && (text.contains("Policy condition")
-                                || text.contains("does not match bucket in URL"))
-                        {
-                            let fixed = text.replace(
-                                "<Code>InvalidPolicyDocument</Code>",
-                                "<Code>AccessDenied</Code>",
-                            );
-                            *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
-                            *resp.body_mut() = s3s::Body::from(fixed.into_bytes());
+                let mut resp = hyper::service::Service::call(svc.as_ref(), req).await?;
+                // POST-object polish over `s3s`'s protocol handling:
+                // - an UNMET policy condition is 403 AccessDenied on AWS, but
+                //   `s3s` answers 400 InvalidPolicyDocument (same code it uses
+                //   for a structurally bad policy, which IS a 400 — the
+                //   "Policy condition" message tells the two apart);
+                // - the success_action_redirect Location must carry the ETag
+                //   WITH its quotes, which `s3s` strips.
+                if method == "POST" {
+                    if resp.status() == hyper::StatusCode::BAD_REQUEST {
+                        let body_bytes = resp.body().bytes();
+                        if let Some(b) = body_bytes {
+                            let text = String::from_utf8_lossy(&b);
+                            if text.contains("<Code>InvalidPolicyDocument</Code>")
+                                && (text.contains("Policy condition")
+                                    || text.contains("does not match bucket in URL"))
+                            {
+                                let fixed = text.replace(
+                                    "<Code>InvalidPolicyDocument</Code>",
+                                    "<Code>AccessDenied</Code>",
+                                );
+                                *resp.status_mut() = hyper::StatusCode::FORBIDDEN;
+                                *resp.body_mut() = s3s::Body::from(fixed.into_bytes());
+                            }
+                        }
+                    }
+                    if resp.status() == hyper::StatusCode::SEE_OTHER {
+                        let requoted = resp
+                            .headers()
+                            .get(hyper::header::LOCATION)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|loc| {
+                                let (head, etag) = loc.split_once("etag=")?;
+                                (!etag.starts_with("%22"))
+                                    .then(|| format!("{head}etag=%22{etag}%22"))
+                            });
+                        if let Some(loc) = requoted {
+                            if let Ok(v) = loc.parse() {
+                                resp.headers_mut().insert(hyper::header::LOCATION, v);
+                            }
                         }
                     }
                 }
-                if resp.status() == hyper::StatusCode::SEE_OTHER {
-                    let requoted = resp
-                        .headers()
-                        .get(hyper::header::LOCATION)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|loc| {
-                            let (head, etag) = loc.split_once("etag=")?;
-                            (!etag.starts_with("%22")).then(|| format!("{head}etag=%22{etag}%22"))
-                        });
-                    if let Some(loc) = requoted {
-                        if let Ok(v) = loc.parse() {
-                            resp.headers_mut().insert(hyper::header::LOCATION, v);
+                // A cross-origin actual request gets the Access-Control-*
+                // headers on WHATEVER response the operation produced — a 403
+                // from auth still carries them, as AWS does. The method under
+                // evaluation is the announced one when present.
+                if let (Some(bucket), Some(origin)) = (bucket, origin) {
+                    let method = acr_method.as_deref().unwrap_or(&method);
+                    if let Some(grant) = cors_grant(&state, &bucket, &origin, method, None) {
+                        let h = resp.headers_mut();
+                        insert_header(h, "access-control-allow-origin", &grant.allow_origin);
+                        insert_header(h, "access-control-allow-methods", method);
+                        if let Some(expose) = &grant.expose_headers {
+                            insert_header(h, "access-control-expose-headers", expose);
                         }
+                        insert_header(h, "vary", "Origin");
                     }
                 }
+                Ok(resp)
             }
-            // A cross-origin actual request gets the Access-Control-*
-            // headers on WHATEVER response the operation produced — a 403
-            // from auth still carries them, as AWS does. The method under
-            // evaluation is the announced one when present.
-            if let (Some(bucket), Some(origin)) = (bucket, origin) {
-                let method = acr_method.as_deref().unwrap_or(&method);
-                if let Some(grant) = cors_grant(&state, &bucket, &origin, method, None) {
-                    let h = resp.headers_mut();
-                    insert_header(h, "access-control-allow-origin", &grant.allow_origin);
-                    insert_header(h, "access-control-allow-methods", method);
-                    if let Some(expose) = &grant.expose_headers {
-                        insert_header(h, "access-control-expose-headers", expose);
-                    }
-                    insert_header(h, "vary", "Origin");
-                }
-            }
-            Ok(resp)
-        })
+            .await;
+            // Read after the POST-object rewriting above: the metric must
+            // agree with the status the client actually received, not with
+            // the one `s3s` first produced.
+            let (status, resp_bytes) = match &result {
+                Ok(resp) => (resp.status().as_u16(), content_length(resp.headers())),
+                // A transport-level failure never produced a status. From
+                // the client's side it is a server failure, so count it as
+                // one rather than dropping the request from the metrics.
+                Err(_) => (500, None),
+            };
+            crate::telemetry::s3::record_request(status, started.elapsed(), req_bytes, resp_bytes);
+            result
+        }))
     }
+}
+
+/// A declared `Content-Length`, when there is one. Streaming bodies without
+/// the header are simply not counted — better a gap than a wrong number.
+fn content_length(headers: &hyper::HeaderMap) -> Option<u64> {
+    headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
 }
 
 /// The bucket a path-style request addresses: the first path segment.
