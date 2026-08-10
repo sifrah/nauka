@@ -9,6 +9,7 @@ mod cache;
 mod e2e;
 mod egress;
 mod s3;
+mod telemetry;
 mod update;
 mod webui;
 
@@ -187,6 +188,18 @@ enum Cmd {
         /// Disable the HTTP API.
         #[arg(long)]
         no_http: bool,
+        /// Address of the Prometheus metrics endpoint. Loopback by
+        /// default: the exposition describes cluster topology, node
+        /// capacities and peer addresses, which have no business on a
+        /// public interface. Widen it explicitly to scrape from a
+        /// private network.
+        #[arg(long, default_value = "127.0.0.1:9100")]
+        metrics: SocketAddr,
+        /// Disable the metrics endpoint. Also leaves every instrumentation
+        /// site in the binary inert: the recording macros are no-ops when
+        /// no recorder has been installed.
+        #[arg(long)]
+        no_metrics: bool,
         /// Disable DHT discovery (implied as soon as --keys is given
         /// without --peers): static / air-gapped cluster.
         #[arg(long)]
@@ -484,6 +497,8 @@ async fn main() -> Result<()> {
             no_s3,
             webui,
             no_http,
+            metrics: metrics_addr,
+            no_metrics,
             no_discover,
             dht_bootstrap,
         } => {
@@ -568,6 +583,22 @@ async fn main() -> Result<()> {
                 }
                 None => listen,
             };
+
+            // Telemetry, before any subsystem starts, so nothing that
+            // happens during startup is recorded into a void. Placed ahead
+            // of the consensus/static split because both modes are worth
+            // observing. Like the other two front doors, a listener that
+            // dies is reported and survived: losing observability must
+            // never take the data plane down with it.
+            if !no_metrics {
+                let handle = telemetry::install()?;
+                telemetry::seed(&advertise_addr.to_string());
+                tokio::spawn(async move {
+                    if let Err(e) = telemetry::serve(metrics_addr, handle).await {
+                        eprintln!("metrics endpoint stopped: {e:#}");
+                    }
+                });
+            }
 
             if let Some(id) = node_id {
                 // Consensus mode: membership and registry come from Raft.
