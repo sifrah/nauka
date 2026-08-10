@@ -831,7 +831,16 @@ impl Fetcher {
             .clone()
     }
 
+    /// Writes a peer off for the rest of THIS request.
+    ///
+    /// A verdict of a different kind from `PeerHealth`'s: that one is
+    /// cross-request and needs three consecutive misses before it commits,
+    /// this one is immediate and forgotten when the download ends. A node
+    /// whose writeoff counter climbs while `nauka_peer_up` stays at 1 is
+    /// the interesting case — a peer healthy enough to answer pings and too
+    /// slow to serve a 1 MiB shard inside `SHARD_TIMEOUT`.
     async fn mark_dead(&self, node: &str) {
+        metrics::counter!("nauka_read_peer_writeoffs_total").increment(1);
         self.clients.lock().await.insert(node.to_string(), None);
     }
 
@@ -840,6 +849,7 @@ impl Fetcher {
     /// if the decoded stripe is worth caching.
     pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<(Vec<u8>, bool)> {
         if let Ok(data) = self.state.store.get_shard(&hash) {
+            record_shard_fetch(SHARD_LOCAL);
             return Some((data, false));
         }
         for (node, _) in self.view.iter().filter(|(n, _)| *n != self.state.self_id) {
@@ -847,15 +857,45 @@ impl Fetcher {
                 continue;
             };
             match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
-                Ok(Ok(Some(data))) => return Some((data, true)),
+                Ok(Ok(Some(data))) => {
+                    record_shard_fetch(SHARD_REMOTE);
+                    return Some((data, true));
+                }
                 Ok(Ok(None)) => {}
                 // Error or timeout: the connection is suspect, we write it
                 // off for the rest of the request.
                 _ => self.mark_dead(node).await,
             }
         }
+        record_shard_fetch(SHARD_MISSING);
         None
     }
+}
+
+/// The shard was already on this node's disk — no network, no erasure
+/// arithmetic beyond the decode itself.
+const SHARD_LOCAL: &str = "local";
+/// The shard came from a peer. The ratio of this to `local` is what says
+/// whether reads are being served where the data actually lives.
+const SHARD_REMOTE: &str = "remote";
+/// Nobody had it. Not an error on its own — Reed-Solomon only needs k of
+/// the k+m shards — but a rising rate is redundancy being eaten away.
+const SHARD_MISSING: &str = "missing";
+
+fn record_shard_fetch(source: &'static str) {
+    metrics::counter!("nauka_read_shard_fetches_total", "source" => source).increment(1);
+}
+
+/// Register the HELP/TYPE text of the read-path metrics.
+pub(crate) fn describe_metrics() {
+    metrics::describe_counter!(
+        "nauka_read_shard_fetches_total",
+        "Shard lookups on the download path, by where the bytes came from: the local store, a peer, or nowhere at all."
+    );
+    metrics::describe_counter!(
+        "nauka_read_peer_writeoffs_total",
+        "Peers written off for the remainder of a download after a failed or timed-out shard transfer. Per-request and independent of the cluster-wide liveness map."
+    );
 }
 
 /// Delay past which a peer is considered unreachable.

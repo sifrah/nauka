@@ -1863,6 +1863,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "metrics",
  "nauka-erasure",
  "nauka-store",
  "nauka-transport",
@@ -2013,6 +2014,7 @@ dependencies = [
  "bincode",
  "blake3",
  "data-encoding",
+ "metrics",
  "nauka-erasure",
  "nauka-store",
  "quinn",

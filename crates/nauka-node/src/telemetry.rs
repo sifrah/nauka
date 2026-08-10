@@ -100,6 +100,9 @@ pub fn seed(node_addr: &str) {
     metrics::gauge!("nauka_start_time_seconds").set(start_unix as f64);
 
     s3::describe();
+    crate::api::describe_metrics();
+    nauka_cluster::telemetry::describe();
+    nauka_transport::telemetry::describe();
 }
 
 /// Serve `/metrics` until the listener dies.

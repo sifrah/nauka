@@ -629,6 +629,7 @@ async fn main() -> Result<()> {
                         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
                         loop {
                             tick.tick().await;
+                            let mut probed: Vec<String> = Vec::new();
                             for (peer, _) in
                                 app.weighted_view(nauka_cluster::placement::DEFAULT_CAPACITY)
                             {
@@ -652,7 +653,17 @@ async fn main() -> Result<()> {
                                 } else {
                                     health.record_miss(&peer);
                                 }
+                                probed.push(peer);
                             }
+                            // Published from this loop rather than from the
+                            // maintenance ticker: both feed the same map,
+                            // but this one runs every 5 s, and a gauge must
+                            // never be staler than the fastest writer that
+                            // moves it.
+                            nauka_cluster::telemetry::record_peer_liveness(
+                                probed.iter().map(String::as_str),
+                                &health,
+                            );
                         }
                     });
                 }
@@ -929,6 +940,19 @@ async fn main() -> Result<()> {
                                 .await;
                         }
                         let coords = app.coords();
+
+                        // Export the estimated distances the placement and
+                        // read-routing decisions below are about to be made
+                        // on. Without them, a shard landing on a node that
+                        // looks arbitrary from the outside has no
+                        // explanation anywhere.
+                        nauka_cluster::telemetry::record_peer_rtt(
+                            &my_coord,
+                            coords
+                                .iter()
+                                .filter(|(peer, _)| **peer != self_id)
+                                .map(|(peer, coord)| (peer.as_str(), coord)),
+                        );
 
                         // The scrubber repairs towards the LIVE view: with
                         // a member down, its shards become the living

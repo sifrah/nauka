@@ -10,6 +10,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
 use crate::protocol::{read_message, write_message, Request, Response, ALPN};
+use crate::telemetry;
 
 /// Upper bound on a single request/response exchange. Generous enough for a
 /// 1 MiB shard over a slow WAN link, short enough that a wedged peer cannot
@@ -44,9 +45,20 @@ impl PeerClient {
     }
 
     async fn connect_buf(addr: SocketAddr, buf: usize) -> Result<Self> {
-        tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(addr, buf))
-            .await
-            .map_err(|_| anyhow!("peer {addr} unreachable after {CONNECT_TIMEOUT:?}"))?
+        // The single establishment point, so the only place outbound
+        // connections can be counted. `connect_inner` builds a fresh
+        // endpoint every time — there is no pool to read a live count
+        // off, which is exactly why the attempts have to be counted here.
+        let outcome = tokio::time::timeout(CONNECT_TIMEOUT, Self::connect_inner(addr, buf)).await;
+        telemetry::record_connection(
+            telemetry::OUT,
+            match &outcome {
+                Err(_) => telemetry::conn::TIMEOUT,
+                Ok(Err(_)) => telemetry::conn::ERROR,
+                Ok(Ok(_)) => telemetry::conn::OK,
+            },
+        );
+        outcome.map_err(|_| anyhow!("peer {addr} unreachable after {CONNECT_TIMEOUT:?}"))?
     }
 
     async fn connect_inner(addr: SocketAddr, buf: usize) -> Result<Self> {
@@ -75,6 +87,20 @@ impl PeerClient {
     }
 
     async fn call(&self, req: Request) -> Result<Response> {
+        // Every typed helper below funnels through here, so this is the one
+        // place that sees every outbound RPC — and the one place where the
+        // three failure modes are still distinguishable. Once the error has
+        // been flattened into `anyhow`, a wedged peer and a peer that
+        // politely refused look identical.
+        let op = telemetry::op(&req);
+        let started = std::time::Instant::now();
+        let outcome = self.call_inner(req).await;
+        telemetry::record_request_duration(op, started.elapsed());
+        telemetry::record_request(telemetry::OUT, op, outcome.label());
+        outcome.into_result(self.addr)
+    }
+
+    async fn call_inner(&self, req: Request) -> Outcome {
         // Every exchange is bounded. A peer that accepts the stream and then
         // goes silent — a stalled path, a wedged process — must surface as an
         // error the caller can retry or route around, never as an indefinite
@@ -87,14 +113,12 @@ impl PeerClient {
                 .await
                 .map_err(anyhow::Error::from)
         };
-        let resp = tokio::time::timeout(REQUEST_TIMEOUT, exchange)
-            .await
-            .map_err(|_| anyhow::anyhow!("peer {} timed out after {REQUEST_TIMEOUT:?}", self.addr))?
-            .map_err(|e: anyhow::Error| e)?;
-        if let Response::Error(e) = resp {
-            bail!("error from peer {}: {e}", self.addr);
+        match tokio::time::timeout(REQUEST_TIMEOUT, exchange).await {
+            Err(_) => Outcome::Timeout,
+            Ok(Err(e)) => Outcome::Transport(e),
+            Ok(Ok(Response::Error(e))) => Outcome::PeerError(e),
+            Ok(Ok(resp)) => Outcome::Ok(resp),
         }
-        Ok(resp)
     }
 
     pub async fn ping(&self) -> Result<()> {
@@ -162,6 +186,42 @@ impl PeerClient {
         match self.call(Request::Raft(rpc)).await? {
             Response::Raft(payload) => Ok(payload),
             other => Err(unexpected(other)),
+        }
+    }
+}
+
+/// How one exchange ended, before it is flattened into `anyhow`.
+///
+/// The three failure arms are the distinction the metric is built on and
+/// the reason this type exists at all: a timeout means the peer is slow or
+/// wedged, a transport error means the connection broke, and a peer error
+/// means a healthy peer answered with a refusal — an application fault
+/// that says nothing about the network. Collapsing them loses the only
+/// signal that tells an operator which of the three to go and fix.
+enum Outcome {
+    Ok(Response),
+    Timeout,
+    Transport(anyhow::Error),
+    PeerError(String),
+}
+
+impl Outcome {
+    fn label(&self) -> &'static str {
+        match self {
+            Outcome::Ok(_) => telemetry::result::OK,
+            Outcome::Timeout => telemetry::result::TIMEOUT,
+            Outcome::Transport(_) => telemetry::result::TRANSPORT,
+            Outcome::PeerError(_) => telemetry::result::PEER_ERROR,
+        }
+    }
+
+    /// The error text callers already match on and log; unchanged.
+    fn into_result(self, addr: SocketAddr) -> Result<Response> {
+        match self {
+            Outcome::Ok(resp) => Ok(resp),
+            Outcome::Timeout => bail!("peer {addr} timed out after {REQUEST_TIMEOUT:?}"),
+            Outcome::Transport(e) => Err(e),
+            Outcome::PeerError(e) => bail!("error from peer {addr}: {e}"),
         }
     }
 }

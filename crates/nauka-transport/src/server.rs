@@ -10,6 +10,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tracing::{debug, info, warn};
 
 use crate::protocol::{read_message, write_message, RaftRpc, Request, Response, ALPN};
+use crate::telemetry;
 
 /// Extension point: the consensus layer (nauka-raft) registers here to receive
 /// the Raft RPCs coming in over the transport.
@@ -56,8 +57,14 @@ pub async fn serve_endpoint(
         let raft = raft.clone();
         tokio::spawn(async move {
             match incoming.await {
-                Ok(conn) => handle_connection(Some(store), raft, conn).await,
-                Err(e) => warn!("connection rejected: {e}"),
+                Ok(conn) => {
+                    telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
+                    handle_connection(Some(store), raft, conn).await
+                }
+                Err(e) => {
+                    telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
+                    warn!("connection rejected: {e}")
+                }
             }
         });
     }
@@ -75,8 +82,14 @@ pub async fn serve_consensus_endpoint(
         let handler = handler.clone();
         tokio::spawn(async move {
             match incoming.await {
-                Ok(conn) => handle_connection(None, Some(handler), conn).await,
-                Err(e) => warn!("connection rejected: {e}"),
+                Ok(conn) => {
+                    telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
+                    handle_connection(None, Some(handler), conn).await
+                }
+                Err(e) => {
+                    telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
+                    warn!("connection rejected: {e}")
+                }
             }
         });
     }
@@ -167,10 +180,26 @@ pub async fn handle_connection(
     loop {
         let (mut send, mut recv) = match conn.accept_bi().await {
             Ok(s) => s,
-            Err(quinn::ConnectionError::ApplicationClosed(_))
-            | Err(quinn::ConnectionError::ConnectionClosed(_))
-            | Err(quinn::ConnectionError::TimedOut) => return,
+            // The classification was already here, only unlabelled: the
+            // three expected endings are how a connection normally goes
+            // away, everything else is a fault. Counting them apart turns
+            // "peers reconnect constantly" into a question with an answer —
+            // clean churn from short-lived clients, or idle timeouts from
+            // peers that keep dying.
+            Err(quinn::ConnectionError::ApplicationClosed(_)) => {
+                telemetry::record_close(telemetry::close::APPLICATION);
+                return;
+            }
+            Err(quinn::ConnectionError::ConnectionClosed(_)) => {
+                telemetry::record_close(telemetry::close::CONNECTION);
+                return;
+            }
+            Err(quinn::ConnectionError::TimedOut) => {
+                telemetry::record_close(telemetry::close::TIMED_OUT);
+                return;
+            }
             Err(e) => {
+                telemetry::record_close(telemetry::close::ERROR);
                 warn!("accept_bi: {e}");
                 return;
             }
@@ -202,7 +231,28 @@ pub async fn handle_connection(
     }
 }
 
+/// The inbound counterpart of `PeerClient::call`: every non-Raft peer RPC
+/// this node serves passes through here exactly once.
+///
+/// Inbound Raft is deliberately not counted here. It is dispatched upstream
+/// in [`handle_connection`], and the consensus plane carries its own
+/// instrumentation — counting it twice under two different names would only
+/// make the two disagree.
 fn handle_request(store: &ShardStore, req: Request) -> Response {
+    let op = telemetry::op(&req);
+    let response = dispatch(store, req);
+    telemetry::record_request(
+        telemetry::IN,
+        op,
+        match &response {
+            Response::Error(_) => telemetry::result::ERROR,
+            _ => telemetry::result::OK,
+        },
+    );
+    response
+}
+
+fn dispatch(store: &ShardStore, req: Request) -> Response {
     match req {
         Request::Raft(_) => unreachable!("handled upstream"),
         Request::Ping => Response::Pong,

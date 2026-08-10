@@ -93,6 +93,10 @@ pub async fn write_message<T: Serialize>(
     send.write_all(&payload)
         .await
         .map_err(|e| WireError::Stream(e.to_string()))?;
+    // After the write, not before: a message that failed halfway never
+    // reached the wire in full, and counting it would inflate throughput
+    // exactly when the link is broken.
+    crate::telemetry::record_wire_bytes(crate::telemetry::OUT, payload.len());
     Ok(())
 }
 
@@ -112,5 +116,8 @@ pub async fn read_message<T: serde::de::DeserializeOwned>(
     recv.read_exact(&mut payload)
         .await
         .map_err(|e| WireError::Stream(e.to_string()))?;
+    // The bytes arrived; whether they deserialize is a separate question,
+    // and a truncated or corrupt payload still cost the link its bandwidth.
+    crate::telemetry::record_wire_bytes(crate::telemetry::IN, payload.len());
     Ok(bincode::deserialize(&payload)?)
 }
