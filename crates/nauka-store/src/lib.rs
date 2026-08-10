@@ -77,12 +77,25 @@ impl ShardStore {
         let data = fs::read(&path).map_err(|_| StoreError::ShardNotFound(hash.to_string()))?;
         let actual = hash_bytes(&data);
         if actual != hash {
+            // Silent disk corruption, caught by the on-read verification.
+            // Counted here so a rotting disk shows up as a climbing counter
+            // long before enough shards die to threaten a stripe.
+            metrics::counter!("nauka_store_corrupt_shards_total").increment(1);
             return Err(StoreError::CorruptShard {
                 expected: hash.to_string(),
                 actual,
             });
         }
         Ok(data)
+    }
+
+    /// Register the HELP/TYPE text of the store metrics. The store has no
+    /// init hook of its own; the node calls this once at startup.
+    pub fn describe_metrics() {
+        metrics::describe_counter!(
+            "nauka_store_corrupt_shards_total",
+            "Shards whose bytes failed BLAKE3 verification on read — silent disk corruption. The scrubber heals them; the counter is the disk's health record."
+        );
     }
 
     pub fn has_shard(&self, hash: &str) -> bool {

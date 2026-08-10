@@ -129,6 +129,98 @@ pub fn record_peer_rtt<'a>(
     }
 }
 
+/// Register the HELP/TYPE text of the maintenance metrics — the reports
+/// every scrub/GC/audit pass already computes and, until now, printed to
+/// stderr and dropped.
+pub fn describe_maintenance() {
+    metrics::describe_counter!(
+        "nauka_scrub_shards_checked_total",
+        "Shards this node verified across all scrub passes."
+    );
+    metrics::describe_counter!(
+        "nauka_scrub_shards_healed_total",
+        "Shards reconstructed from surviving peers across all scrub passes."
+    );
+    metrics::describe_gauge!(
+        "nauka_scrub_shards_unrecoverable",
+        "Shards this node should hold but could not rebuild in the LAST pass. There is no repair queue — each pass is a full scan — so this is the backlog: anything above zero means data is currently below its intended redundancy."
+    );
+    metrics::describe_histogram!(
+        "nauka_scrub_pass_duration_seconds",
+        "Wall-clock time of one full maintenance pass (scrub + GC + audit + publications). If it exceeds the scrub interval the ticker silently falls behind and the cluster heals less often than configured."
+    );
+    metrics::describe_counter!(
+        "nauka_gc_shards_released_total",
+        "Shards deleted because placement no longer assigns them to this node."
+    );
+    metrics::describe_counter!(
+        "nauka_gc_orphans_purged_total",
+        "Shards deleted because no live manifest references them."
+    );
+    metrics::describe_counter!(
+        "nauka_gc_manifests_purged_total",
+        "Manifests deleted because the registry no longer knows them."
+    );
+    metrics::describe_counter!(
+        "nauka_audit_challenged_total",
+        "Proof-of-storage challenges this node issued to peers."
+    );
+    metrics::describe_counter!(
+        "nauka_audit_proved_total",
+        "Challenges a peer answered with a valid proof."
+    );
+    metrics::describe_counter!(
+        "nauka_audit_missing_total",
+        "Challenges a peer answered with 'I do not have that shard'."
+    );
+    metrics::describe_counter!(
+        "nauka_audit_failed_total",
+        "Challenges answered with a WRONG proof — a peer claiming to hold data it cannot produce. The audit's whole reason to exist; anything above zero deserves a look."
+    );
+    metrics::describe_counter!(
+        "nauka_audit_unreachable_total",
+        "Challenges that could not be delivered. Overlaps with peer liveness; kept separate so audit coverage is honest about what it could not check."
+    );
+}
+
+/// Record a scrub pass. Checked/healed accumulate; unrecoverable is the
+/// last pass's level — a healed cluster must be able to walk it back to 0,
+/// which a counter could never do.
+pub fn record_heal_report(checked: u64, healed: u64, unrecoverable: u64) {
+    metrics::counter!("nauka_scrub_shards_checked_total").increment(checked);
+    metrics::counter!("nauka_scrub_shards_healed_total").increment(healed);
+    metrics::gauge!("nauka_scrub_shards_unrecoverable").set(unrecoverable as f64);
+}
+
+/// Record a GC or purge pass. Both feed the same counters: their fields are
+/// disjoint in practice (GC releases shards, purge removes orphans and dead
+/// manifests) and an operator cares about the totals, not the pass kind.
+pub fn record_gc_report(released: u64, orphans: u64, manifests: u64) {
+    metrics::counter!("nauka_gc_shards_released_total").increment(released);
+    metrics::counter!("nauka_gc_orphans_purged_total").increment(orphans);
+    metrics::counter!("nauka_gc_manifests_purged_total").increment(manifests);
+}
+
+/// Record an audit pass.
+pub fn record_audit_report(
+    challenged: u64,
+    proved: u64,
+    missing: u64,
+    failed: u64,
+    unreachable: u64,
+) {
+    metrics::counter!("nauka_audit_challenged_total").increment(challenged);
+    metrics::counter!("nauka_audit_proved_total").increment(proved);
+    metrics::counter!("nauka_audit_missing_total").increment(missing);
+    metrics::counter!("nauka_audit_failed_total").increment(failed);
+    metrics::counter!("nauka_audit_unreachable_total").increment(unreachable);
+}
+
+/// Record the wall-clock of one full maintenance pass.
+pub fn record_maintenance_pass(seconds: f64) {
+    metrics::histogram!("nauka_scrub_pass_duration_seconds").record(seconds);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

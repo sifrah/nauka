@@ -48,6 +48,7 @@ pub async fn run_background(store: Arc<ShardStore>, view: ClusterView, scrub_int
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
+        let pass_started = std::time::Instant::now();
 
         // Heartbeat: log unreachable peers (healing still works as long as
         // k shards per stripe remain reachable).
@@ -72,5 +73,6 @@ pub async fn run_background(store: Arc<ShardStore>, view: ClusterView, scrub_int
             Ok(_) => {}
             Err(e) => warn!("scrub failed: {e}"),
         }
+        telemetry::record_maintenance_pass(pass_started.elapsed().as_secs_f64());
     }
 }

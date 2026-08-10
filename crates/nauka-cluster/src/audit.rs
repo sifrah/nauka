@@ -156,6 +156,13 @@ pub async fn audit_once_geo(
             report.proved, report.challenged, report.missing
         );
     }
+    crate::telemetry::record_audit_report(
+        report.challenged as u64,
+        report.proved as u64,
+        report.missing as u64,
+        report.failed as u64,
+        report.unreachable as u64,
+    );
     Ok(report)
 }
 

@@ -730,6 +730,11 @@ async fn main() -> Result<()> {
                     let mut my_coord = nauka_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
+                        // Timed as a whole: if the pass outlasts the scrub
+                        // interval, the ticker silently falls behind and
+                        // the cluster heals less often than the operator
+                        // configured. The histogram makes that visible.
+                        let pass_started = std::time::Instant::now();
                         // Declare this node's capacity in the replicated
                         // state (placement weight) — on the first tick,
                         // then whenever it moves by more than 1%.
@@ -774,6 +779,16 @@ async fn main() -> Result<()> {
                                 }
                             }
                             let (month, served) = meter_bg.snapshot(now);
+                            // Gauges, refreshed every tick regardless of
+                            // the publication delta below: the ledger only
+                            // replicates every 256 MiB, but the operator's
+                            // view should not be that coarse. Quota only
+                            // when metered — an absent series reads as
+                            // "unmetered", a 0 would read as "exhausted".
+                            metrics::gauge!("nauka_egress_served_bytes").set(served as f64);
+                            if let Some(q) = meter_bg.quota() {
+                                metrics::gauge!("nauka_egress_quota_bytes").set(q as f64);
+                            }
                             const REPUBLISH_DELTA: u64 = 256 * 1024 * 1024;
                             let due = match &published_egress {
                                 None => true,
@@ -832,6 +847,16 @@ async fn main() -> Result<()> {
                             // quiet.
                             let (entries, bytes) = cache.stats();
                             let (hits, misses) = cache.hit_stats();
+                            // Metrics every tick — the log line below is
+                            // deduplicated for humans, but a scrape must
+                            // never miss the current level. The counters
+                            // are absolute: the cache owns the running
+                            // totals, the recorder just mirrors them.
+                            metrics::gauge!("nauka_cache_entries").set(entries as f64);
+                            metrics::gauge!("nauka_cache_size_bytes").set(bytes as f64);
+                            metrics::gauge!("nauka_cache_budget_bytes").set(cache.budget() as f64);
+                            metrics::counter!("nauka_cache_hits_total").absolute(hits);
+                            metrics::counter!("nauka_cache_misses_total").absolute(misses);
                             if cache_report != Some((entries, bytes, hits, misses)) {
                                 cache_report = Some((entries, bytes, hits, misses));
                                 let lookups = hits + misses;
@@ -1007,6 +1032,9 @@ async fn main() -> Result<()> {
                             Ok(_) => {}
                             Err(e) => eprintln!("audit failed: {e}"),
                         }
+                        nauka_cluster::telemetry::record_maintenance_pass(
+                            pass_started.elapsed().as_secs_f64(),
+                        );
                     }
                 });
             } else if !peers.is_empty() {

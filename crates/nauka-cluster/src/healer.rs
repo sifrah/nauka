@@ -98,6 +98,11 @@ pub fn purge_deleted(
             _ => report.shards_kept += 1,
         }
     }
+    crate::telemetry::record_gc_report(
+        0,
+        report.orphans_purged as u64,
+        report.manifests_purged as u64,
+    );
     Ok(report)
 }
 
@@ -190,6 +195,7 @@ pub async fn gc_once_geo(
             report.shards_kept += 1;
         }
     }
+    crate::telemetry::record_gc_report(report.shards_released as u64, 0, 0);
     Ok(report)
 }
 
@@ -249,6 +255,14 @@ pub async fn scrub_once_geo(
             }
         }
     }
+    // Recorded here, at the single implementation both entry points funnel
+    // through, so every caller — consensus ticker, static loop, tests — is
+    // counted exactly once.
+    crate::telemetry::record_heal_report(
+        report.shards_checked as u64,
+        report.shards_healed as u64,
+        report.shards_unrecoverable as u64,
+    );
     Ok(report)
 }
 

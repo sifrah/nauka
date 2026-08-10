@@ -511,6 +511,11 @@ pub(crate) async fn dispatch_file(
             undelivered,
             "degraded upload: redundancy will be completed by the scrubber"
         );
+        // One count per degraded upload, plus the shard shortfall itself:
+        // the first says how often writes land under-replicated, the second
+        // how much repair debt each one leaves for the scrubber.
+        metrics::counter!("nauka_writes_degraded_total").increment(1);
+        metrics::counter!("nauka_write_shards_undelivered_total").increment(undelivered as u64);
     }
 
     let manifest = FileManifest {
@@ -558,6 +563,9 @@ async fn send_shard(
     let addr: SocketAddr = owner.parse()?;
     for attempt in 0..3u32 {
         if attempt > 0 {
+            // Retry volume is the early warning: a peer that needs retries
+            // is sick well before the liveness map declares it dead.
+            metrics::counter!("nauka_shard_send_retries_total").increment(1);
             tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
             clients.remove(owner);
         }

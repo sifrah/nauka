@@ -102,7 +102,56 @@ pub fn seed(node_addr: &str) {
     s3::describe();
     crate::api::describe_metrics();
     nauka_cluster::telemetry::describe();
+    nauka_cluster::telemetry::describe_maintenance();
     nauka_transport::telemetry::describe();
+    nauka_store::ShardStore::describe_metrics();
+    describe_node();
+}
+
+/// HELP/TYPE for the node-level metrics recorded from `main` and `api`:
+/// degraded writes, shard-send retries, the egress ledger and the stripe
+/// cache.
+fn describe_node() {
+    metrics::describe_counter!(
+        "nauka_writes_degraded_total",
+        "Uploads that completed under-replicated (every stripe reconstructible, but at least one shard undelivered). The scrubber completes them; the counter says how often writes land in that state."
+    );
+    metrics::describe_counter!(
+        "nauka_write_shards_undelivered_total",
+        "Shards that could not be delivered during uploads — the repair debt handed to the scrubber."
+    );
+    metrics::describe_counter!(
+        "nauka_shard_send_retries_total",
+        "Retries while sending shards to peers. Climbing retries flag a sick peer well before the liveness map declares it dead."
+    );
+    metrics::describe_gauge!(
+        "nauka_egress_served_bytes",
+        "Bytes served this month, per the egress meter. Resets when the month rolls over."
+    );
+    metrics::describe_gauge!(
+        "nauka_egress_quota_bytes",
+        "Monthly egress budget. Absent when the node is unmetered — absence means no quota, a value of 0 would mean an exhausted one."
+    );
+    metrics::describe_gauge!(
+        "nauka_cache_entries",
+        "Stripes currently held by the stripe cache."
+    );
+    metrics::describe_gauge!(
+        "nauka_cache_size_bytes",
+        "Bytes currently held by the stripe cache."
+    );
+    metrics::describe_gauge!(
+        "nauka_cache_budget_bytes",
+        "Configured stripe-cache budget (--cache-size)."
+    );
+    metrics::describe_counter!(
+        "nauka_cache_hits_total",
+        "Stripe-cache lookups served from local disk instead of the cluster."
+    );
+    metrics::describe_counter!(
+        "nauka_cache_misses_total",
+        "Stripe-cache lookups that had to cross the cluster. A miss whose backing file lost a race with eviction counts here too — the caller pays the same fetch."
+    );
 }
 
 /// Serve `/metrics` until the listener dies.
