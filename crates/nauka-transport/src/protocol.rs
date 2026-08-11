@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 /// Safety net: max size of a message (1 MiB shard + headroom, manifests).
 pub const MAX_MESSAGE_SIZE: u32 = 64 * 1024 * 1024;
 
-/// ALPN of the yogfile protocol.
-pub const ALPN: &[u8] = b"yog/0";
+/// ALPN of the Nauka cluster protocol.
+pub const ALPN: &[u8] = b"nauka/0";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {

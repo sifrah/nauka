@@ -2,7 +2,7 @@
 //!
 //! Ties together erasure coding, content-addressed storage, QUIC transport,
 //! Raft consensus, and placement/healing. Exposes the HTTP API and the web
-//! UI of the Yogfile service. Cluster membership is managed explicitly from
+//! HTTP API. Cluster membership is managed explicitly from
 //! the CLI (`node add` / `cluster-add`); there is no discovery layer.
 
 mod api;
@@ -15,7 +15,6 @@ mod node;
 mod s3;
 mod telemetry;
 mod update;
-mod webui;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -183,10 +182,6 @@ enum Cmd {
         /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
-        /// Serve the web UI from this directory instead of the one built
-        /// into the binary (front-end development).
-        #[arg(long)]
-        webui: Option<PathBuf>,
         /// Address of the S3-compatible endpoint.
         #[cfg(feature = "s3")]
         #[arg(long, default_value = "0.0.0.0:8333")]
@@ -539,7 +534,6 @@ async fn main() -> Result<()> {
                 s3: s3_addr,
             #[cfg(feature = "s3")]
             no_s3,
-            webui,
             no_http,
             metrics: metrics_addr,
             no_metrics,
@@ -757,13 +751,9 @@ async fn main() -> Result<()> {
                 );
 
                 if !no_http {
-                    // No fallback to ./webui/dist: the binary carries its own
-                    // UI, so behaviour no longer depends on the directory the
-                    // node happens to be started from.
-                    let webui_dir = webui;
                     let state = api_state.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = api::serve_http(http, state, webui_dir).await {
+                        if let Err(e) = api::serve_http(http, state).await {
                             eprintln!("HTTP API stopped: {e:#}");
                         }
                     });

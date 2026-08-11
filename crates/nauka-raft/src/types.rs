@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub type NodeId = u64;
 
 openraft::declare_raft_types!(
-    /// yogfile's openraft configuration.
+    /// Nauka's openraft configuration.
     pub TypeConfig:
         D = AppCommand,
         R = AppResponse,

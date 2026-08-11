@@ -75,7 +75,7 @@ impl PeerClient {
         let server_name = if crate::tls::cluster_tls().is_some() {
             crate::tls::NODE_SAN
         } else {
-            "yogfile"
+            "nauka"
         };
         let conn = endpoint.connect(addr, server_name)?.await?;
         Ok(Self { conn, addr })

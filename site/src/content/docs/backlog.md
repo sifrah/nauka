@@ -28,7 +28,7 @@ within each section.
 ### 1. S3-compatible API — *the adoption multiplier*
 Exposing a subset of the S3 API brings in an entire ecosystem at once:
 rclone, restic, Velero, Terraform, the AWS SDKs, Docker registries,
-Thanos/Loki. A self-hoster points `restic` at yogfile and gets an
+Thanos/Loki. A self-hoster points `restic` at a Nauka cluster and gets an
 **encrypted, erasure-coded, geo-distributed, self-healing** backup in one
 command. That is the road Garage took — except Garage replicates ×3 (+200%)
 where we do 4+2 (+50%), with topology-aware placement and attestation on

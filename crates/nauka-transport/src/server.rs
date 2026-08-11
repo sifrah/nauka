@@ -145,7 +145,7 @@ fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> 
                 "INSECURE mode: no cluster key loaded — link is encrypted \
                  but peers are not authenticated"
             );
-            let cert = rcgen::generate_simple_self_signed(vec!["yogfile".into()])
+            let cert = rcgen::generate_simple_self_signed(vec!["nauka".into()])
                 .context("generating the self-signed certificate")?;
             let cert_der = CertificateDer::from(cert.cert);
             let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());

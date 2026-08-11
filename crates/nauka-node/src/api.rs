@@ -105,13 +105,12 @@ impl ApiState {
     }
 }
 
-pub async fn serve_http(
-    listen: SocketAddr,
-    state: Arc<ApiState>,
-    webui_dir: Option<PathBuf>,
-) -> Result<()> {
+pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> {
     tokio::fs::create_dir_all(&state.tmp_dir).await?;
-    let mut router = Router::new()
+    // Nauka is the storage engine: it serves its HTTP API and nothing
+    // more. A user-facing web interface belongs to a product built on top,
+    // not in the engine.
+    let router = Router::new()
         .route("/api/upload", post(upload))
         .route("/api/files", get(files))
         .route("/api/status", get(status))
@@ -120,23 +119,6 @@ pub async fn serve_http(
             get(download).head(download_head).delete(delete_file),
         )
         .with_state(state);
-    // Web UI (SPA). Served from the binary by default; --webui points at a
-    // dist directory instead, for front-end development.
-    match webui_dir {
-        Some(dir) => {
-            let index = dir.join("index.html");
-            router = router.fallback_service(
-                tower_http::services::ServeDir::new(&dir)
-                    .fallback(tower_http::services::ServeFile::new(index)),
-            );
-            tracing::info!("web UI served from {}", dir.display());
-        }
-        None if crate::webui::is_embedded() => {
-            router = router.fallback(crate::webui::serve);
-            tracing::info!("web UI served from the binary");
-        }
-        None => tracing::warn!("no web UI in this build — API only"),
-    }
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("HTTP API on http://{listen}");
     axum::serve(listener, router).await?;
@@ -798,9 +780,9 @@ async fn serve_staged(
 /// Whether a new local-ack upload may be admitted.
 ///
 /// Only the S3 door consumes this today: the local-ack opt-in rides a
-/// bucket tag. Re-exposing the mode on the native door (where Yogfile
-/// wants it) is a planned follow-up; the machinery below it — staged
-/// files, recovery sweep, drain — is door-agnostic and stays live.
+/// bucket tag. Re-exposing the mode on the native door is a planned
+/// follow-up; the machinery below it — staged files, recovery sweep,
+/// drain — is door-agnostic and stays live.
 #[cfg(feature = "s3")]
 pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
     state

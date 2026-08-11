@@ -21,7 +21,7 @@ async fn raw_connect(
     server_name: &str,
 ) -> anyhow::Result<quinn::Connection> {
     let mut crypto = crypto;
-    crypto.alpn_protocols = vec![b"yog/0".to_vec()];
+    crypto.alpn_protocols = vec![b"nauka/0".to_vec()];
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(crypto)?,

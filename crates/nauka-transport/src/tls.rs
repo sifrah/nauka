@@ -34,7 +34,7 @@ fn ca_params() -> Result<CertificateParams> {
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params
         .distinguished_name
-        .push(DnType::CommonName, "yogfile-cluster-ca");
+        .push(DnType::CommonName, "nauka-cluster-ca");
     Ok(params)
 }
 

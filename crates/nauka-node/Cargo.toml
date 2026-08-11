@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 # The S3-compatible endpoint (SigV4, multipart, SSE-C, ~5000 lines) is not
-# part of the Yogfile product; it compiles only on demand. The replicated
+# part of the core engine; it compiles only on demand. The replicated
 # S3 state (buckets, credentials) stays unconditional — it is just data,
 # and gating it would fork the wire format.
 default = []
@@ -29,9 +29,6 @@ nauka-crypto = { path = "../nauka-crypto" }
 nauka-s3 = { path = "../nauka-s3" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 tokio-util = { version = "0.7", features = ["io"] }
-tower-http = { version = "0.6", features = ["fs"] }
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-mime_guess = "2"
 s3s = { version = "0.14", optional = true }
 async-trait = "0.1"
 md-5 = { version = "0.10", optional = true }

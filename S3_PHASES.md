@@ -303,9 +303,7 @@ substring> and not acl"` against a running node (S3TEST_CONF pointing at
   under systemd, with a soak timer (`nauka-soak`) uploading+verifying every
   5 min, logging to `/var/log/nauka-soak.csv`. Untouched during S3 work.
 - The working checkout is `~/Documents/nauka` on `main` (origin =
-  `sifrah/nauka`; the old platform history lives on `basics`). The
-  `~/Documents/yogfile` checkout is the same history via its `nauka`
-  remote — don't work in both at once.
+  `sifrah/nauka`; the old platform history lives on `basics`). 
   Releases are tagged `vX.Y.Z`; the engine is at v0.3.0. The S3 work has
   NOT been tagged into a release yet.
 - Known engine gap noted earlier but deferred: a genuinely-unreachable

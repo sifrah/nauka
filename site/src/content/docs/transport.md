@@ -27,7 +27,7 @@ Behavioral details:
   opaque bincode payloads as far as the transport is concerned, handed to
   the local openraft engine through the `RaftHandler` trait wired into the
   server.
-- ALPN: `yog/0`.
+- ALPN: `nauka/0`.
 
 ## The two network planes
 

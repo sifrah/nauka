@@ -27,7 +27,7 @@ use std::io::{Read, Write};
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 /// Per-chunk AEAD overhead (GCM tag).
 pub const TAG_SIZE: usize = 16;
-const MAGIC: &[u8; 4] = b"YGE1";
+const MAGIC: &[u8; 4] = b"NKA1";
 const FLAG_LAST: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -147,7 +147,9 @@ pub fn decrypt(
         .read_exact(&mut header)
         .map_err(|_| CryptoError::BadStream("missing header"))?;
     if &header[..4] != MAGIC {
-        return Err(CryptoError::BadStream("bad magic (not a yogfile stream?)"));
+        return Err(CryptoError::BadStream(
+            "bad magic (not a Nauka encrypted stream?)",
+        ));
     }
     let prefix: [u8; 8] = header[4..].try_into().unwrap();
 

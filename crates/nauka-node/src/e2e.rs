@@ -157,7 +157,7 @@ fn tempfile_path(source: &Path) -> Result<std::path::PathBuf> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     Ok(dir.join(format!(
-        "yog-e2e-{stamp:x}-{}",
+        "nauka-e2e-{stamp:x}-{}",
         base.chars().take(32).collect::<String>()
     )))
 }
