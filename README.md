@@ -102,7 +102,8 @@ NAUKA_EGRESS_QUOTA=20TB nauka serve …      # or --egress-quota 20TB
 ```
 
 Plain bytes and human sizes are accepted (`500GB`, `1.5TB`, `512MiB`).
-Unset means unmetered. A node past its budget is **deprioritized, never
+Under systemd, set the variable in `/etc/nauka/nauka.env` and
+`systemctl restart nauka`. Unset means unmetered. A node past its budget is **deprioritized, never
 refused**: serving the file always wins over saving a node's bandwidth, so
 an exhausted budget shifts load while alternatives exist and yields when
 they don't.
@@ -116,6 +117,7 @@ served directly afterwards:
 NAUKA_CACHE_SIZE=10GB nauka serve …        # or --cache-size 10GB
 ```
 
+Same thing under systemd: the variable goes in `/etc/nauka/nauka.env`.
 Because content is addressed by BLAKE3, a cache entry can never go stale;
 entries of deleted content age out by LRU and are swept alongside the
 shard GC. Reconstruct once per region, serve many times locally.
