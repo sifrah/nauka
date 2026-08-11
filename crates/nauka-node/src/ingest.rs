@@ -532,7 +532,7 @@ mod tests {
 
     async fn roundtrip(ram_window: u64, total: usize, read_size: usize, name: &str) {
         let pool = RamPool::with_capacity(ram_window);
-        let (mut tx, mut rx) = channel(&pool, ram_window, tmp(name), u64::MAX);
+        let (tx, mut rx) = channel(&pool, ram_window, tmp(name), u64::MAX);
         let (chunks, want_hash) = make_chunks(total, ram_window ^ total as u64);
         let producer = tokio::spawn(async move {
             let mut tx = tx;
