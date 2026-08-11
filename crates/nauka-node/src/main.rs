@@ -1,9 +1,9 @@
 //! Nauka — the engine binary: CLI and server.
 //!
 //! Ties together erasure coding, content-addressed storage, QUIC transport,
-//! Raft consensus, and placement/healing. Exposes the HTTP API and the web
-//! HTTP API. Cluster membership is managed explicitly from
-//! the CLI (`node add` / `cluster-add`); there is no discovery layer.
+//! Raft consensus, and placement/healing. Exposes the HTTP API. Cluster
+//! membership is managed explicitly from the CLI (`node add` /
+//! `node remove`); there is no discovery layer.
 
 mod api;
 mod cache;
@@ -327,30 +327,56 @@ async fn main() -> Result<()> {
         })
         .await;
     }
-    // `nauka init` leaves the cluster identity in /etc/nauka/nauka.env;
-    // managing the cluster from the same machine must not require
-    // re-exporting it by hand.
-    if cli.token.is_none() && cli.keys.is_none() {
-        if let Cmd::Node(_) = &cli.cmd {
-            let (token, keys) = node::identity_from_env_file();
-            cli.token = token;
-            cli.keys = keys;
+    // Which commands actually speak the cluster's mTLS. Everything else —
+    // status (plain HTTP), local store ops, keygen, update — must neither
+    // require an identity nor leave derived key material behind.
+    let needs_cluster_identity = match &cli.cmd {
+        Cmd::Serve { .. }
+        | Cmd::NodeInfo
+        | Cmd::Node(_)
+        | Cmd::Ban { .. }
+        | Cmd::Unban { .. }
+        | Cmd::PutRemote { .. }
+        | Cmd::GetRemote { .. } => true,
+        #[cfg(feature = "s3")]
+        Cmd::S3KeyCreate { .. } | Cmd::S3KeyList { .. } | Cmd::S3KeyDelete { .. } => true,
+        _ => false,
+    };
+    if needs_cluster_identity && cli.token.is_none() && cli.keys.is_none() {
+        // `nauka init` leaves the cluster identity in /etc/nauka/nauka.env;
+        // speaking to the cluster from an initialized machine must not
+        // require re-exporting it by hand.
+        let (token, keys) = node::identity_from_env_file();
+        if (token.is_some() || keys.is_some())
+            && cli.data_dir == std::path::Path::new("./nauka-data")
+        {
+            // A command inheriting the SERVICE's identity must also speak
+            // about the service's store: with the cwd default kept,
+            // node-info would derive its answer from an accidental
+            // ./nauka-data instead of the node everyone asks about.
+            if let Some(dir) = node::service_data_dir() {
+                cli.data_dir = dir;
+            }
         }
+        cli.token = token;
+        cli.keys = keys;
     }
     // A token is sugar over the key directory: derive the key material into
     // a private corner of the data dir, then follow the exact same paths as
     // --keys. One trust model, two spellings.
-    if let Some(token) = cli.token.clone() {
-        let dir = cli.data_dir.join("token-keys");
-        nauka_transport::materialize_token_keys(&token, &dir)
-            .context("deriving the cluster key from the token")?;
-        cli.keys = Some(dir);
+    if needs_cluster_identity {
+        if let Some(token) = cli.token.clone() {
+            let dir = cli.data_dir.join("token-keys");
+            nauka_transport::materialize_token_keys(&token, &dir)
+                .context("deriving the cluster key from the token")?;
+            cli.keys = Some(dir);
+        }
     }
 
     // Cluster identity: to be installed before any network use. A node
     // (serve/node-info) uses its persisted key; client commands use an
     // ephemeral identity signed by the same CA.
-    let node_tls = if let Some(keys_dir) = &cli.keys {
+    let node_tls = if let Some(keys_dir) = cli.keys.as_ref().filter(|_| needs_cluster_identity) {
         let identity = match &cli.cmd {
             Cmd::Serve { .. } | Cmd::NodeInfo => Some(cli.data_dir.join("node.key")),
             _ => None,
@@ -362,8 +388,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-
-    let store = ShardStore::open(&cli.data_dir)?;
 
     match cli.cmd {
         // Dispatched before the store opens; only here for exhaustiveness.
@@ -383,7 +407,10 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::NodeInfo => {
-            let (node_id, fingerprint) = node_tls.context("node-info requires --keys <dir>")?;
+            let (node_id, fingerprint) = node_tls.context(
+                "node-info needs the cluster identity: set NAUKA_TOKEN, pass --keys <dir>, \
+                 or run it on an initialized node (it reads /etc/nauka/nauka.env)",
+            )?;
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
@@ -476,6 +503,7 @@ async fn main() -> Result<()> {
             data_shards,
             parity_shards,
         } => {
+            let store = ShardStore::open(&cli.data_dir)?;
             let data =
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             let cfg = ErasureConfig {
@@ -504,12 +532,31 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Get { file_hash, output } => {
-            let data = reconstruct(&store, &file_hash)?;
+            let store = ShardStore::open(&cli.data_dir)?;
+            // "manifest not found" alone sent operators in circles: this
+            // command reads THIS machine's local store, not the cluster —
+            // a file the same machine serves over HTTP is not here.
+            let data = reconstruct(&store, &file_hash).with_context(|| {
+                format!(
+                    "not in the local store ({}). `get` reads this machine's own store only; \
+                     a file stored by a cluster is served over its API: \
+                     curl -O http://<node>:8080/f/{file_hash}",
+                    cli.data_dir.display()
+                )
+            })?;
             std::fs::write(&output, &data)?;
             println!("reconstructed: {} bytes → {}", data.len(), output.display());
         }
         Cmd::Verify { file_hash } => {
-            let manifest = store.get_manifest(&file_hash)?;
+            let store = ShardStore::open(&cli.data_dir)?;
+            let manifest = store.get_manifest(&file_hash).with_context(|| {
+                format!(
+                    "not in the local store ({}). `verify` checks this machine's own store \
+                     only; for a cluster file, download it over the API instead — the \
+                     hash-addressed read verifies integrity by construction",
+                    cli.data_dir.display()
+                )
+            })?;
             let mut missing = 0usize;
             let mut total = 0usize;
             for stripe in &manifest.stripes {
@@ -528,6 +575,14 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::List => {
+            let store = ShardStore::open(&cli.data_dir)?;
+            // The header keeps the local/cluster split visible: an empty
+            // list on a machine that serves files over HTTP is not a bug,
+            // it is a different store.
+            eprintln!(
+                "# local store {} — a cluster's files: curl http://<node>:8080/api/files",
+                cli.data_dir.display()
+            );
             for hash in store.list_manifests()? {
                 let m = store.get_manifest(&hash)?;
                 println!("{hash}  {} bytes", m.file_size);
@@ -565,7 +620,7 @@ async fn main() -> Result<()> {
                 })?),
                 None => None,
             };
-            let store = Arc::new(store);
+            let store = Arc::new(ShardStore::open(&cli.data_dir)?);
             let interval = std::time::Duration::from_secs(scrub_interval);
             // Assigned once, below, now that consensus is the only mode.
             let raft_handler: Option<Arc<dyn nauka_transport::server::RaftHandler>>;
@@ -626,6 +681,32 @@ async fn main() -> Result<()> {
                      or pass --keys <dir> (from `nauka keygen`)"
                 );
             };
+            // The doors first, the cluster second. Founding on a blank
+            // data dir is IRREVERSIBLE — it writes a cluster's birth into
+            // the Raft log — so every socket this node needs must be
+            // provably free before it happens. A busy port must die with
+            // NOTHING written; founding first then failing to bind left a
+            // fully-founded 1-node cluster behind, which a later start
+            // would resurrect as a fork of the deployment whose token it
+            // was given. Probe-and-release: the real listeners bind a
+            // moment later, and losing that benign race to another
+            // process still fails the honest way, at bind time.
+            {
+                let probe = |addr: SocketAddr, what: &str| -> Result<()> {
+                    std::net::UdpSocket::bind(addr).map(drop).with_context(|| {
+                        format!("cannot bind the {what} at {addr} — port already in use?")
+                    })
+                };
+                probe(listen, "data plane")?;
+                probe(nauka_transport::consensus_addr(listen), "consensus plane")?;
+                if !no_http {
+                    std::net::TcpListener::bind(http)
+                        .map(drop)
+                        .with_context(|| {
+                            format!("cannot bind the HTTP API at {http} — port already in use?")
+                        })?;
+                }
+            }
             {
                 let app = nauka_raft::RaftApp::start(id, &cli.data_dir.join("raft")).await?;
                 raft_handler = Some(app.clone());
@@ -777,6 +858,39 @@ async fn main() -> Result<()> {
                     tokio::spawn(async move {
                         if let Err(e) = s3::serve(s3_addr, state).await {
                             eprintln!("S3 endpoint stopped: {e:#}");
+                        }
+                    });
+                }
+                // First capacity declaration, urgently. Placement weighs an
+                // undeclared member at DEFAULT_CAPACITY (100 GiB flat), and
+                // at the scrub cadence that window lasts a whole round —
+                // long enough to mistarget every write toward a node whose
+                // real disk may be a tenth of that. A tight loop closes the
+                // window in seconds; the 1%-delta refreshes stay with the
+                // scrub tick below (a second declaration of the same value
+                // is idempotent).
+                {
+                    let app = app.clone();
+                    let self_id = self_id.clone();
+                    let data_dir = cli.data_dir.clone();
+                    tokio::spawn(async move {
+                        for _ in 0..60 {
+                            if app.members().contains_key(&app.id) {
+                                let cap =
+                                    capacity.unwrap_or_else(|| filesystem_capacity(&data_dir));
+                                if app
+                                    .write(nauka_raft::types::AppCommand::UpdateNodeStats {
+                                        addr: self_id.clone(),
+                                        capacity_bytes: cap,
+                                    })
+                                    .await
+                                    .is_ok()
+                                {
+                                    eprintln!("capacity declared: {:.1} GB", cap as f64 / 1e9);
+                                    return;
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     });
                 }

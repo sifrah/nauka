@@ -167,25 +167,40 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
     // The FULL membership, annotated with liveness — not `view_alive()`:
     // a down member must still be listed, marked down, rather than vanish
     // from the cluster page. One snapshot for the whole list, so every row
-    // reports the same probe round.
+    // reports the same probe round. One row PER MEMBER, id attached — two
+    // members can share an address (a replaced machine whose stale
+    // identity lingers), and rows keyed by address would collapse them
+    // into an indistinguishable duplicate.
     let liveness = state.health.snapshot();
-    let nodes = state
-        .view()
-        .into_iter()
-        .map(|(addr, capacity_bytes)| NodeStatus {
+    let capacities = app_state.node_capacities.clone();
+    let mut nodes: Vec<NodeStatus> = members
+        .iter()
+        .map(|(id, addr)| NodeStatus {
             is_leader: leader_addr.as_deref() == Some(addr.as_str()),
-            is_self: addr == state.self_id,
+            is_self: *addr == state.self_id,
             // Nobody pings themselves, so self is never in the map; an
             // unprobed peer reads alive, same rule as `is_alive`.
-            is_alive: liveness.get(&addr).copied().unwrap_or(true),
-            id: members
-                .iter()
-                .find(|(_, a)| a.as_str() == addr)
-                .map(|(id, _)| *id),
-            addr,
-            capacity_bytes,
+            is_alive: liveness.get(addr).copied().unwrap_or(true),
+            id: Some(*id),
+            addr: addr.clone(),
+            capacity_bytes: capacities
+                .get(addr)
+                .copied()
+                .unwrap_or(nauka_cluster::placement::DEFAULT_CAPACITY),
         })
         .collect();
+    // Not yet in consensus (a node still waiting to be added): show self.
+    if nodes.is_empty() {
+        nodes.push(NodeStatus {
+            is_leader: false,
+            is_self: true,
+            is_alive: true,
+            id: Some(state.app.id),
+            addr: state.self_id.clone(),
+            capacity_bytes: nauka_cluster::placement::DEFAULT_CAPACITY,
+        });
+    }
+    nodes.sort_by(|a, b| a.addr.cmp(&b.addr).then(a.id.cmp(&b.id)));
     Json(ClusterStatusResponse {
         self_addr: state.self_id.clone(),
         self_node_id: state.app.id,
@@ -367,6 +382,20 @@ async fn upload(
     Query(params): Query<UploadParams>,
     request: Request,
 ) -> Result<Json<UploadResponse>, ApiError> {
+    // A multipart form is a client mistake this endpoint must not absorb:
+    // the framing would be stored verbatim as the object, boundary and
+    // headers included. Refuse it with the remedy instead of storing junk.
+    let is_multipart = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok())
+        .is_some_and(|ct| ct.trim_start().starts_with("multipart/"));
+    if is_multipart {
+        return Err(ApiError(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            anyhow!("multipart forms are not accepted — send the raw file bytes (curl --data-binary @file)"),
+        ));
+    }
     // The body streams into the elastic buffer while the encoder drains it
     // concurrently — encoding starts on the first complete stripe, not
     // after the last byte. Placement still waits for the file hash (it is
@@ -417,6 +446,16 @@ async fn upload(
         }
     }
     tx.finish();
+    // An empty body is a client mistake (a typoed curl, a missing file),
+    // not a server failure — 4xx, not the 500 the encoder's "empty file"
+    // error would surface as.
+    if size == 0 {
+        let _ = dispatch.await;
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("empty upload — the request body must be the file's bytes"),
+        ));
+    }
     let (manifest, degraded_shards) = dispatch
         .await
         .map_err(|e| ApiError::from(anyhow!("dispatch task: {e}")))??;
@@ -643,6 +682,19 @@ async fn dispatch_core(
         metrics::counter!("nauka_write_shards_undelivered_total").increment(undelivered as u64);
     }
 
+    // A re-upload of existing content without ?name= must not ERASE the
+    // stored name — the name slot is per-hash, and the second uploader
+    // rarely means "unname it". Resolved HERE, before the Raft proposal,
+    // so every replica applies identical bytes; resolving inside the
+    // state machine would let mixed binary versions diverge.
+    let name = name.or_else(|| {
+        state
+            .app
+            .app_state()
+            .manifests
+            .get(&file_hash)
+            .and_then(|m| m.name.clone())
+    });
     let manifest = FileManifest {
         file_hash,
         file_size: size,

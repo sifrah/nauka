@@ -313,10 +313,75 @@ pub async fn add(o: AddOpts) -> Result<()> {
             .await?;
             step.done_as("existing data dir wiped (--force)");
         } else {
-            bail!(
-                "{ip} already has cluster state — it belongs to a cluster already. \
-                 Re-run with --force to wipe and re-add it."
-            );
+            // A target that already runs a node of THIS cluster is not an
+            // error to bounce off — `node add` converges: whatever id the
+            // machine currently runs under becomes the one voter at that
+            // address (a learner stuck mid-join gets promoted, stale
+            // same-address identities get evicted). Only then comes the
+            // hard refusal: state from some OTHER cluster is not this
+            // command's to wipe. And never suggest --force for a healthy
+            // member — that wipes its shards and swaps its identity,
+            // which is the exact accident this check exists to prevent.
+            let machine = ssh_run(
+                &o,
+                "curl -sf --max-time 5 http://127.0.0.1:8080/api/status 2>/dev/null || true",
+            )
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+            let machine_id = machine
+                .as_ref()
+                .and_then(|v| v.get("self_node_id").and_then(|i| i.as_u64()));
+            // A node that answers with NO leader and no peers is not "in a
+            // cluster" at all — it started once (which alone creates raft
+            // files, hence HAS_STATE) and is waiting to be added. That is
+            // this command's happy path, not a refusal: re-provision it in
+            // place, keeping its identity.
+            let machine_waiting = machine.as_ref().is_some_and(|v| {
+                v.get("leader").is_some_and(|l| l.is_null())
+                    && v.get("nodes")
+                        .and_then(|n| n.as_array())
+                        .is_none_or(|n| n.len() <= 1)
+            });
+            let members = current_members(&o.peers).await.unwrap_or_default();
+            match machine_id {
+                Some(id) if members.contains_key(&id) => {
+                    step.done_as(&format!(
+                        "{ip} already runs node {id} of this cluster — converging its membership"
+                    ));
+                    let step = ui.step("ensuring it is the one voter at this address");
+                    join_member(&o.peers, id, o.target).await?;
+                    step.done_as("membership converged");
+                    eprintln!(
+                        "\n{}",
+                        style(format!("{ip} is a voting member of the cluster.")).bold()
+                    );
+                    return Ok(());
+                }
+                Some(_) if machine_waiting => {
+                    step.done_as(&format!(
+                        "{ip} runs an unjoined node waiting to be added — provisioning in place"
+                    ));
+                }
+                Some(id) => bail!(
+                    "{ip} runs node {id}, which belongs to another cluster (it has its own \
+                     leader or peers). Wiping it is not this command's call; if you are \
+                     sure, re-run with --force."
+                ),
+                None => match members.values().any(|a| *a == o.target.to_string()) {
+                    true => bail!(
+                        "{ip} holds cluster state and is registered here, but its node is \
+                         not answering. Check it first: `systemctl status nauka` on the \
+                         machine. To retire it instead: `nauka node remove <id>` \
+                         (ids: `nauka status`)."
+                    ),
+                    false => bail!(
+                        "{ip} holds cluster state but is NOT a member here — it likely \
+                         belongs to another cluster. If you are sure it is fair game, \
+                         re-run with --force to wipe and add it."
+                    ),
+                },
+            }
         }
     } else {
         step.done_as("target is blank");
@@ -437,8 +502,16 @@ pub async fn add(o: AddOpts) -> Result<()> {
     Ok(())
 }
 
-/// AddLearner then promote to voter — the same two-step `cluster-add`
-/// performs, reused so there is one join path in the codebase.
+/// Current membership (id → address) as the leader reports it.
+async fn current_members(peers: &[SocketAddr]) -> Result<std::collections::BTreeMap<u64, String>> {
+    use nauka_raft::types::{AdminRequest, AdminResponse};
+    match nauka_raft::admin_via_leader(peers, &AdminRequest::Metrics).await? {
+        AdminResponse::Metrics { members, .. } => Ok(members),
+        other => bail!("metrics: {other:?}"),
+    }
+}
+
+/// AddLearner then promote to voter, one join path in the codebase.
 async fn join_member(peers: &[SocketAddr], id: u64, addr: SocketAddr) -> Result<()> {
     use nauka_raft::types::{AdminRequest, AdminResponse};
     match nauka_raft::admin_via_leader(
@@ -453,18 +526,57 @@ async fn join_member(peers: &[SocketAddr], id: u64, addr: SocketAddr) -> Result<
         AdminResponse::Ok(_) => {}
         other => bail!("add-learner: {other:?}"),
     }
-    let current = match nauka_raft::admin_via_leader(peers, &AdminRequest::Metrics).await? {
-        AdminResponse::Metrics { members, .. } => members,
-        other => bail!("metrics: {other:?}"),
-    };
-    let mut ids: Vec<u64> = current.keys().copied().collect();
+    let current = current_members(peers).await?;
+    // A member already registered at the joining node's ADDRESS is the
+    // machine being replaced: a wipe regenerates node.key, so the same
+    // machine comes back under a fresh id. Keeping the old id would leave
+    // a phantom voter that inflates quorum forever — and reads alive
+    // forever, because liveness is probed per address and the NEW node
+    // answers that address. Evict it in the same membership change.
+    let addr_str = addr.to_string();
+    let mut ids: Vec<u64> = Vec::new();
+    for (mid, maddr) in &current {
+        if *mid != id && *maddr == addr_str {
+            eprintln!(
+                "{}",
+                style(format!(
+                    "  evicting stale member {mid} — same address, replaced identity"
+                ))
+                .yellow()
+            );
+            continue;
+        }
+        ids.push(*mid);
+    }
     if !ids.contains(&id) {
         ids.push(id);
     }
-    match nauka_raft::admin_via_leader(peers, &AdminRequest::ChangeMembership(ids)).await? {
-        AdminResponse::Ok(_) => Ok(()),
-        other => bail!("change-membership: {other:?}"),
+    // The add-learner above is itself a membership entry, and openraft
+    // refuses a second change until it commits. On a healthy cluster that
+    // is milliseconds — retry through the transient instead of surfacing
+    // it. Bounded: a cluster that cannot commit the learner entry within
+    // 30 s has a real quorum problem the operator must hear about.
+    let mut last_err: Option<anyhow::Error> = None;
+    for _ in 0..15 {
+        match nauka_raft::admin_via_leader(peers, &AdminRequest::ChangeMembership(ids.clone()))
+            .await
+        {
+            Ok(AdminResponse::Ok(_)) => return Ok(()),
+            Ok(other) => bail!("change-membership: {other:?}"),
+            Err(e) if e.to_string().contains("configuration change") => {
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e),
+        }
     }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("change-membership kept being refused"))
+        .context(
+            "the cluster could not commit the membership change within 30 s — it likely \
+             lacks a quorum of LIVE voters (check `nauka status` for members marked down \
+             or sharing an address)",
+        ))
 }
 
 pub struct RemoveOpts {
@@ -577,8 +689,18 @@ pub async fn status(api: &str) -> Result<()> {
             Some(id) => id.to_string(),
             None => "joining…".to_string(),
         };
+        // Two members on one address = a replaced machine whose previous
+        // identity was never evicted. The liveness probe cannot tell them
+        // apart (it pings the address, which the live one answers), so
+        // this is the one place the phantom is visible — say it.
+        let shared = s
+            .nodes
+            .iter()
+            .filter(|m| m.addr == n.addr && m.id != n.id)
+            .count()
+            > 0;
         println!(
-            "  {health} {addr:width$}  {role}  {cap:>10}  {id}{me}",
+            "  {health} {addr:width$}  {role}  {cap:>10}  {id}{me}{warn}",
             addr = n.addr,
             cap = indicatif::HumanBytes(n.capacity_bytes).to_string(),
             id = style(id).dim(),
@@ -587,9 +709,34 @@ pub async fn status(api: &str) -> Result<()> {
             } else {
                 String::new()
             },
+            warn = if shared {
+                style("  ⚠ shares its address with another member — stale identity? (`nauka node remove <id>`)")
+                    .yellow()
+                    .to_string()
+            } else {
+                String::new()
+            },
         );
     }
     Ok(())
+}
+
+/// The data dir of the systemd deployment, when this machine has one. The
+/// unit sets NAUKA_DATA_DIR=/var/lib/nauka (Environment=), overridable in
+/// the env file. Commands that inherit the service identity must speak
+/// about the service's store, not about a ./nauka-data in their cwd —
+/// `node-info` would otherwise print the identity of a store nobody
+/// serves.
+pub fn service_data_dir() -> Option<std::path::PathBuf> {
+    let env = std::fs::read_to_string("/etc/nauka/nauka.env").ok()?;
+    let dir = env
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("NAUKA_DATA_DIR=")
+                .map(|v| v.trim().to_string())
+        })
+        .unwrap_or_else(|| "/var/lib/nauka".to_string());
+    Some(std::path::PathBuf::from(dir))
 }
 
 pub struct InitOpts {
