@@ -128,6 +128,11 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
 #[derive(serde::Serialize)]
 struct NodeStatus {
     addr: String,
+    /// Raft id of the member at this address, None for an address present
+    /// in the placement view but not (yet) in the consensus membership.
+    /// This is what `node remove <id>` takes — exposed here so the id can
+    /// be read over plain HTTP (`nauka status`) without a cluster identity.
+    id: Option<u64>,
     capacity_bytes: u64,
     is_leader: bool,
     is_self: bool,
@@ -173,6 +178,10 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
             // Nobody pings themselves, so self is never in the map; an
             // unprobed peer reads alive, same rule as `is_alive`.
             is_alive: liveness.get(&addr).copied().unwrap_or(true),
+            id: members
+                .iter()
+                .find(|(_, a)| a.as_str() == addr)
+                .map(|(id, _)| *id),
             addr,
             capacity_bytes,
         })

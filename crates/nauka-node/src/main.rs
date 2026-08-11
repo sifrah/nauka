@@ -221,12 +221,6 @@ enum Cmd {
         #[arg(long)]
         join: bool,
     },
-    /// Initialize the Raft cluster (once only, from any node).
-    ClusterInit {
-        /// Members as id@host:port, e.g. 1@10.0.0.1:7311 2@10.0.0.2:7311
-        #[arg(required = true)]
-        members: Vec<String>,
-    },
     /// Ban a file: removed from the registry, refused on download (410)
     /// and purged by the GC. To honor a report or a legal request
     /// without reading the content.
@@ -244,31 +238,17 @@ enum Cmd {
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
-    /// Print the Raft cluster state as seen by a node.
-    ClusterMetrics {
-        #[arg(long, default_value = "127.0.0.1:7311")]
-        peer: SocketAddr,
-    },
-    /// Add a node to the cluster live (learner → voter). The new node
-    /// must already be running (serve --node-id <id>). Shard
-    /// rebalancing follows automatically (scrub + GC).
-    ClusterAdd {
-        /// The node to add, as id@host:port.
-        member: String,
-        /// Any current nodes of the cluster.
-        #[arg(long, value_delimiter = ',', required = true)]
-        peers: Vec<SocketAddr>,
+    /// Show the cluster as this node sees it: members, leader, health,
+    /// capacities, stored bytes. Reads the HTTP API — no cluster identity
+    /// needed.
+    Status {
+        /// HTTP API address of any node.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
     },
     /// Add or remove cluster nodes.
     #[command(subcommand)]
     Node(NodeCmd),
-    /// Remove a node from the cluster live. Its shards are re-replicated
-    /// by the other nodes' scrubbers; it can then be shut down.
-    ClusterRemove {
-        node_id: u64,
-        #[arg(long, value_delimiter = ',', required = true)]
-        peers: Vec<SocketAddr>,
-    },
     /// Encode a file and dispatch its shards across peers (round-robin).
     PutRemote {
         file: PathBuf,
@@ -1129,52 +1109,6 @@ async fn main() -> Result<()> {
             }
             nauka_transport::serve(store, listen, raft_handler).await?;
         }
-        Cmd::ClusterInit { members } => {
-            let mut map = std::collections::BTreeMap::new();
-            for m in &members {
-                let (id, addr) = m
-                    .split_once('@')
-                    .with_context(|| format!("expected format id@host:port, got {m}"))?;
-                map.insert(id.parse::<u64>()?, addr.to_string());
-            }
-            // Pre-flight: every member must answer on BOTH planes, and the
-            // node-id answering on the consensus plane must be the right
-            // one — this catches dead nodes and port collisions (co-hosted
-            // nodes whose ports are not spaced by at least 2).
-            for (id, addr_str) in &map {
-                let addr: SocketAddr = addr_str.parse()?;
-                let data = PeerClient::connect(addr)
-                    .await
-                    .with_context(|| format!("node {id}: data plane {addr} unreachable"))?;
-                data.ping()
-                    .await
-                    .with_context(|| format!("node {id}: data plane {addr} does not answer"))?;
-                let cons_addr = nauka_transport::consensus_addr(addr);
-                let cons = PeerClient::connect_consensus(cons_addr)
-                    .await
-                    .with_context(|| {
-                        format!("node {id}: consensus plane {cons_addr} unreachable")
-                    })?;
-                match nauka_raft::admin_call(&cons, &nauka_raft::types::AdminRequest::Metrics).await
-                {
-                    Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) if got == *id => {
-                    }
-                    Ok(nauka_raft::types::AdminResponse::Metrics { id: got, .. }) => bail!(
-                        "port collision: {cons_addr} answers with node-id {got} instead of \
-                         {id} — space the ports by at least 2 on the same host"
-                    ),
-                    other => bail!("node {id}: unexpected consensus response: {other:?}"),
-                }
-            }
-            let first: SocketAddr = map.values().next().unwrap().parse()?;
-            let client = PeerClient::connect(first).await?;
-            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Init(map))
-                .await?
-            {
-                nauka_raft::types::AdminResponse::Ok(_) => println!("cluster initialized"),
-                other => bail!("init failed: {other:?}"),
-            }
-        }
         Cmd::Ban {
             file_hash,
             reason,
@@ -1211,89 +1145,8 @@ async fn main() -> Result<()> {
                 println!("this hash was not banned");
             }
         }
-        Cmd::ClusterMetrics { peer } => {
-            let client = PeerClient::connect(peer).await?;
-            match nauka_raft::admin_call(&client, &nauka_raft::types::AdminRequest::Metrics).await?
-            {
-                nauka_raft::types::AdminResponse::Metrics {
-                    id,
-                    leader,
-                    members,
-                    last_applied,
-                    capacities,
-                } => {
-                    println!("node {id} — leader: {leader:?}, applied log: {last_applied:?}");
-                    for (id, addr) in members {
-                        match capacities.get(&addr) {
-                            Some(cap) => println!(
-                                "  member {id} @ {addr} — capacity {:.1} GB",
-                                *cap as f64 / 1e9
-                            ),
-                            None => println!("  member {id} @ {addr} — capacity not declared"),
-                        }
-                    }
-                }
-                other => bail!("unexpected response: {other:?}"),
-            }
-        }
-        Cmd::ClusterAdd { member, peers } => {
-            use nauka_raft::types::{AdminRequest, AdminResponse};
-            let (id, addr) = member
-                .split_once('@')
-                .with_context(|| format!("expected format id@host:port, got {member}"))?;
-            let id: u64 = id.parse()?;
-            // 1. Learner: the node catches up on the log/snapshot without voting.
-            match nauka_raft::admin_via_leader(
-                &peers,
-                &AdminRequest::AddLearner {
-                    id,
-                    addr: addr.to_string(),
-                },
-            )
-            .await?
-            {
-                AdminResponse::Ok(_) => println!("node {id} added as a learner"),
-                other => bail!("add-learner: {other:?}"),
-            }
-            // 2. Promotion to voter: membership = current members + it.
-            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await?
-            {
-                AdminResponse::Metrics { members, .. } => members,
-                other => bail!("metrics: {other:?}"),
-            };
-            let mut ids: Vec<u64> = current.keys().copied().collect();
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await?
-            {
-                AdminResponse::Ok(_) => {
-                    println!(
-                        "node {id} promoted to voter — rebalancing will follow across the scrubs"
-                    )
-                }
-                other => bail!("change-membership: {other:?}"),
-            }
-        }
-        Cmd::ClusterRemove { node_id, peers } => {
-            use nauka_raft::types::{AdminRequest, AdminResponse};
-            let current = match nauka_raft::admin_via_leader(&peers, &AdminRequest::Metrics).await?
-            {
-                AdminResponse::Metrics { members, .. } => members,
-                other => bail!("metrics: {other:?}"),
-            };
-            let ids: Vec<u64> = current.keys().copied().filter(|i| *i != node_id).collect();
-            if ids.len() == current.len() {
-                bail!("node {node_id} is not a member of the cluster");
-            }
-            match nauka_raft::admin_via_leader(&peers, &AdminRequest::ChangeMembership(ids)).await?
-            {
-                AdminResponse::Ok(_) => println!(
-                    "node {node_id} removed — leave it running long enough for the scrubs \
-                     to re-replicate its shards, then shut it down"
-                ),
-                other => bail!("change-membership: {other:?}"),
-            }
+        Cmd::Status { api } => {
+            node::status(&api).await?;
         }
         Cmd::Node(node_cmd) => match node_cmd {
             NodeCmd::Add {

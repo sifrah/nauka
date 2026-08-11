@@ -2,18 +2,126 @@
 //! from one command, run on any existing member.
 //!
 //! The design is deliberately the automation of what an operator would do
-//! by hand: shell out to the system `ssh`/`scp`, which already carry the
+//! by hand: shell out to the system `ssh`, which already carries the
 //! forwarded agent key, host-key policy and connection multiplexing. A
 //! Rust SSH library would reimplement all of that, worse. `node add`
 //! provisions the target over SSH — binary, systemd unit, cluster identity
 //! — starts it in join-wait mode, then does the Raft membership change
 //! locally against the cluster.
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use console::style;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
+
+/// Step-by-step terminal UI: an animated spinner per step on a tty,
+/// plain chronological lines everywhere else (CI logs, `ssh` without
+/// `-t`, pipes) — progress display must never corrupt captured output.
+struct Ui {
+    fancy: Option<MultiProgress>,
+}
+
+struct Step {
+    bar: Option<ProgressBar>,
+    label: String,
+}
+
+impl Ui {
+    fn new() -> Self {
+        Self {
+            fancy: std::io::stderr().is_terminal().then(MultiProgress::new),
+        }
+    }
+
+    fn spinner_style() -> ProgressStyle {
+        ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .expect("static template")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "])
+    }
+
+    fn step(&self, label: &str) -> Step {
+        let bar = self.fancy.as_ref().map(|mp| {
+            let pb = mp.add(ProgressBar::new_spinner());
+            pb.set_style(Self::spinner_style());
+            pb.set_message(label.to_string());
+            pb.enable_steady_tick(Duration::from_millis(80));
+            pb
+        });
+        if bar.is_none() {
+            eprintln!("  {label}…");
+        }
+        Step {
+            bar,
+            label: label.to_string(),
+        }
+    }
+
+    /// A byte-progress step; falls back to one plain line off-tty.
+    fn transfer(&self, label: &str, total: u64) -> Step {
+        let bar = self.fancy.as_ref().map(|mp| {
+            let pb = mp.add(ProgressBar::new(total));
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.cyan} {msg} {bar:24.cyan/238} {bytes}/{total_bytes} ({bytes_per_sec})",
+                )
+                .expect("static template")
+                .progress_chars("━╸ ")
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]),
+            );
+            pb.set_message(label.to_string());
+            pb.enable_steady_tick(Duration::from_millis(80));
+            pb
+        });
+        if bar.is_none() {
+            eprintln!("  {label}…");
+        }
+        Step {
+            bar,
+            label: label.to_string(),
+        }
+    }
+}
+
+impl Step {
+    /// Finish the step, replacing the animation with a green check mark.
+    fn done(self) {
+        let label = self.label.clone();
+        self.done_as(&label);
+    }
+
+    /// Finish with a different closing line than the running label.
+    fn done_as(mut self, text: &str) {
+        if let Some(pb) = self.bar.take() {
+            pb.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
+            pb.finish_with_message(format!("{} {text}", style("✓").green().bold()));
+        } else if text != self.label {
+            eprintln!("  {text}");
+        }
+    }
+}
+
+/// A step dropped without `done()` died on an error: leave a red mark
+/// where the spinner was, so the failed step is identifiable after the
+/// anyhow chain prints below the bars.
+impl Drop for Step {
+    fn drop(&mut self) {
+        if let Some(pb) = self.bar.take() {
+            if !pb.is_finished() {
+                pb.set_style(ProgressStyle::with_template("{msg}").expect("static template"));
+                pb.abandon_with_message(format!(
+                    "{} {}",
+                    style("✗").red().bold(),
+                    self.label.clone()
+                ));
+            }
+        }
+    }
+}
 
 /// The systemd unit installed on a provisioned node. Same as the packaged
 /// one, but ExecStart points at /usr/local/bin (where `node add` puts the
@@ -101,40 +209,65 @@ async fn ssh_write_file(o: &AddOpts, path: &str, contents: &[u8], mode: &str) ->
     Ok(())
 }
 
-/// scp a local file to the target and verify it landed intact — transfers
-/// to fresh cloud instances truncate silently often enough that an
-/// unchecked copy is a real hazard.
-async fn scp_verified(o: &AddOpts, local: &std::path::Path, remote: &str) -> Result<()> {
-    let want = sha256_file(local)?;
-    for attempt in 1..=3 {
-        let status = tokio::process::Command::new("scp")
+/// Push bytes to a file on the target through ssh and verify they landed
+/// intact — transfers to fresh cloud instances truncate silently often
+/// enough that an unchecked copy is a real hazard. Streams in chunks so a
+/// progress bar can follow along.
+async fn ssh_push_bytes(
+    o: &AddOpts,
+    remote: &str,
+    bytes: &[u8],
+    mode: &str,
+    bar: Option<&ProgressBar>,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let want = hex::encode(Sha256::digest(bytes));
+    for _attempt in 1..=3 {
+        if let Some(b) = bar {
+            b.set_position(0);
+        }
+        let mut child = tokio::process::Command::new("ssh")
             .args(SSH_OPTS)
-            .arg(local)
-            .arg(format!("{}:{remote}", ssh_host(o)))
-            .status()
-            .await
-            .context("running scp")?;
-        if status.success() {
-            let got = ssh_run(o, &format!("sha256sum {remote} | cut -d' ' -f1"))
-                .await?
-                .trim()
-                .to_string();
-            if got == want {
-                return Ok(());
+            .arg(ssh_host(o))
+            .arg(format!("cat > {remote} && chmod {mode} {remote}"))
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("running ssh for a file push")?;
+        {
+            let stdin = child.stdin.as_mut().expect("stdin piped");
+            let mut pushed = true;
+            for chunk in bytes.chunks(256 * 1024) {
+                if stdin.write_all(chunk).await.is_err() {
+                    // A dropped connection mid-stream is a retry, not an
+                    // abort — same rationale as a truncated copy.
+                    pushed = false;
+                    break;
+                }
+                if let Some(b) = bar {
+                    b.inc(chunk.len() as u64);
+                }
             }
-            eprintln!("  copy of {remote} was truncated (attempt {attempt}) — retrying");
+            if !pushed {
+                let _ = child.wait().await;
+                continue;
+            }
+        }
+        drop(child.stdin.take());
+        if !child.wait().await?.success() {
+            continue;
+        }
+        let got = ssh_run(o, &format!("sha256sum {remote} | cut -d' ' -f1"))
+            .await?
+            .trim()
+            .to_string();
+        if got == want {
+            return Ok(());
         }
     }
     bail!(
         "could not copy {remote} to {} intact after 3 tries",
         o.target.ip()
     )
-}
-
-fn sha256_file(path: &std::path::Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
 pub async fn add(o: AddOpts) -> Result<()> {
@@ -144,12 +277,19 @@ pub async fn add(o: AddOpts) -> Result<()> {
         bail!("no cluster identity to give the new node: set NAUKA_TOKEN or pass --keys");
     }
     let ip = o.target.ip();
-    println!("provisioning {ip} over ssh ({}@{ip})…", o.ssh_user);
+    let ui = Ui::new();
+    eprintln!(
+        "{} {}",
+        style("nauka").bold(),
+        style(format!("— adding {ip} to the cluster")).dim()
+    );
 
     // 1. Reachable?
+    let step = ui.step(&format!("connecting to {}@{ip}", o.ssh_user));
     ssh_run(&o, "true")
         .await
         .with_context(|| format!("cannot ssh to {}@{ip}", o.ssh_user))?;
+    step.done_as(&format!("connected to {}@{ip}", o.ssh_user));
 
     // 2. Blank data dir, or --force. A target that already holds Raft state
     //    belongs to a cluster; founding a join on top would either fork or
@@ -157,6 +297,7 @@ pub async fn add(o: AddOpts) -> Result<()> {
     // Any non-empty redb in the raft dir means this node already has
     // consensus state — match by glob, not by a hardcoded filename, so a
     // future rename of the log file cannot silently defeat the check.
+    let step = ui.step("checking the target is blank");
     let state = ssh_run(
         &o,
         "ls -1 /var/lib/nauka/raft/*.redb 2>/dev/null | head -1 | grep -q . \
@@ -165,37 +306,49 @@ pub async fn add(o: AddOpts) -> Result<()> {
     .await?;
     if state.trim() == "HAS_STATE" {
         if o.force {
-            println!("  --force: wiping the existing data dir on {ip}");
             ssh_run(
                 &o,
                 "systemctl stop nauka 2>/dev/null; rm -rf /var/lib/nauka/*",
             )
             .await?;
+            step.done_as("existing data dir wiped (--force)");
         } else {
             bail!(
                 "{ip} already has cluster state — it belongs to a cluster already. \
                  Re-run with --force to wipe and re-add it."
             );
         }
+    } else {
+        step.done_as("target is blank");
     }
 
     // 3. The binary this very process is running — a static musl build runs
     //    on any x86_64 Linux, so the common same-fleet case needs no
-    //    cross-compilation.
+    //    cross-compilation. Landed under a temp name and renamed into
+    //    place: overwriting a RUNNING binary directly fails with ETXTBSY
+    //    (a re-add of a live node, or a retry); rename is atomic and
+    //    unlinks the busy inode safely.
     let self_exe = std::env::current_exe().context("finding my own binary to deploy")?;
-    println!("  copying the nauka binary…");
+    let binary =
+        std::fs::read(&self_exe).with_context(|| format!("reading {}", self_exe.display()))?;
     ssh_run(&o, "mkdir -p /var/lib/nauka /etc/nauka").await?;
-    // Land it under a temp name and rename into place: overwriting a
-    // RUNNING binary directly fails with ETXTBSY (a re-add of a live node,
-    // or a retry). rename is atomic and unlinks the busy inode safely.
-    scp_verified(&o, &self_exe, "/usr/local/bin/nauka.new").await?;
-    ssh_run(
+    let step = ui.transfer("copying the nauka binary", binary.len() as u64);
+    ssh_push_bytes(
         &o,
-        "chmod 755 /usr/local/bin/nauka.new && mv /usr/local/bin/nauka.new /usr/local/bin/nauka",
+        "/usr/local/bin/nauka.new",
+        &binary,
+        "755",
+        step.bar.as_ref(),
     )
     .await?;
+    ssh_run(&o, "mv /usr/local/bin/nauka.new /usr/local/bin/nauka").await?;
+    step.done_as(&format!(
+        "binary installed ({})",
+        indicatif::HumanBytes(binary.len() as u64)
+    ));
 
     // 4. Dedicated user + directory ownership (mirrors the deb postinst).
+    let step = ui.step("installing the cluster identity and unit");
     ssh_run(
         &o,
         "getent passwd nauka >/dev/null || adduser --system --group --no-create-home \
@@ -210,7 +363,6 @@ pub async fn add(o: AddOpts) -> Result<()> {
     //    one. The token is preferred when both are somehow present (a token
     //    materializes a key dir locally, so the invoking process may hold
     //    both — the token is the source of truth).
-    println!("  installing the cluster identity and unit…");
     let mut env = String::new();
     if let Some(token) = &o.token {
         env.push_str(&format!("NAUKA_TOKEN={token}\n"));
@@ -218,14 +370,12 @@ pub async fn add(o: AddOpts) -> Result<()> {
         for name in ["cluster-ca.key", "cluster-ca.pem"] {
             let p = dir.join(name);
             if p.exists() {
-                scp_verified(&o, &p, &format!("/etc/nauka/{name}")).await?;
+                let bytes =
+                    std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
+                ssh_push_bytes(&o, &format!("/etc/nauka/{name}"), &bytes, "640", None).await?;
             }
         }
-        ssh_run(
-            &o,
-            "chown root:nauka /etc/nauka/cluster-ca.* && chmod 640 /etc/nauka/cluster-ca.*",
-        )
-        .await?;
+        ssh_run(&o, "chown root:nauka /etc/nauka/cluster-ca.*").await?;
         env.push_str("NAUKA_KEYS_ARG=--keys /etc/nauka\n");
     }
     // Advertise its own address, and WAIT to be added rather than found a
@@ -248,12 +398,13 @@ pub async fn add(o: AddOpts) -> Result<()> {
         "systemctl daemon-reload && systemctl enable --now nauka",
     )
     .await?;
+    step.done();
 
     // 7. Wait for it to be up, and read its Raft id from its own HTTP
     //    status — no cluster identity needed for that query, unlike
     //    shelling `node-info`, which would need the token in the remote
     //    environment.
-    println!("  waiting for {ip} to come up…");
+    let step = ui.step(&format!("waiting for {ip} to come up"));
     let status_url = format!("http://{}:8080/api/status", o.target.ip());
     let mut node_id: Option<u64> = None;
     for _ in 0..15 {
@@ -271,11 +422,18 @@ pub async fn add(o: AddOpts) -> Result<()> {
     }
     let node_id = node_id
         .context("the new node did not come up in time — check `journalctl -u nauka` on it")?;
+    step.done_as(&format!("node {node_id} is up"));
 
     // 8. The Raft membership change, driven through an existing member.
-    println!("  adding node {node_id} to the cluster…");
+    let step = ui.step("joining the Raft cluster (learner → voter)");
     join_member(&o.peers, node_id, o.target).await?;
-    println!("done — {ip} is a voting member. Shard rebalancing follows on the next scrub passes.");
+    step.done_as("joined the Raft cluster as a voting member");
+
+    eprintln!(
+        "\n{} {}",
+        style(format!("{ip} is a member of the cluster.")).bold(),
+        style("Shards rebalance over the next scrub passes.").dim()
+    );
     Ok(())
 }
 
@@ -320,6 +478,8 @@ pub struct RemoveOpts {
 /// and forcing an ssh round-trip would make removing a dead node fail.
 pub async fn remove(o: RemoveOpts) -> Result<()> {
     use nauka_raft::types::{AdminRequest, AdminResponse};
+    let ui = Ui::new();
+    let step = ui.step(&format!("removing node {} from the membership", o.node_id));
     let current = match nauka_raft::admin_via_leader(&o.peers, &AdminRequest::Metrics).await? {
         AdminResponse::Metrics { members, .. } => members,
         other => bail!("metrics: {other:?}"),
@@ -334,15 +494,102 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
     }
     match nauka_raft::admin_via_leader(&o.peers, &AdminRequest::ChangeMembership(ids)).await? {
         AdminResponse::Ok(_) => {
-            println!(
-                "node {} removed — leave it running long enough for the scrubs to \
-                 re-replicate its shards, then shut it down",
-                o.node_id
+            step.done_as(&format!("node {} removed", o.node_id));
+            eprintln!(
+                "{}",
+                style(
+                    "Leave it running long enough for the scrubs to re-replicate \
+                     its shards, then shut it down."
+                )
+                .dim()
             );
             Ok(())
         }
         other => bail!("change-membership: {other:?}"),
     }
+}
+
+/// `nauka status` — the cluster as one node's HTTP API reports it. Plain
+/// HTTP on purpose: works from anywhere that can reach a node, without
+/// the cluster identity, which is exactly what a quick health check needs.
+pub async fn status(api: &str) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Node {
+        addr: String,
+        /// default: a pre-0.6 node does not serve the field yet.
+        #[serde(default)]
+        id: Option<u64>,
+        capacity_bytes: u64,
+        is_leader: bool,
+        is_self: bool,
+        is_alive: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Status {
+        leader: Option<String>,
+        nodes: Vec<Node>,
+        files: usize,
+        total_bytes: u64,
+    }
+
+    let url = format!("{}/api/status", api.trim_end_matches('/'));
+    let s: Status = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .with_context(|| format!("no node answering at {url}"))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("unexpected status payload")?;
+
+    let alive = s.nodes.iter().filter(|n| n.is_alive).count();
+    let capacity: u64 = s.nodes.iter().map(|n| n.capacity_bytes).sum();
+    println!(
+        "{} — {} node{}, {} alive · {} file{}, {} stored · {} capacity",
+        style("cluster").bold(),
+        s.nodes.len(),
+        if s.nodes.len() == 1 { "" } else { "s" },
+        alive,
+        s.files,
+        if s.files == 1 { "" } else { "s" },
+        indicatif::HumanBytes(s.total_bytes),
+        indicatif::HumanBytes(capacity),
+    );
+    if s.leader.is_none() {
+        println!("{}", style("no leader elected — cluster unavailable").red());
+    }
+
+    let width = s.nodes.iter().map(|n| n.addr.len()).max().unwrap_or(0);
+    for n in &s.nodes {
+        let health = if n.is_alive {
+            style("●").green()
+        } else {
+            style("●").red()
+        };
+        let role = if n.is_leader {
+            style("leader").cyan().to_string()
+        } else {
+            "      ".to_string()
+        };
+        let id = match n.id {
+            Some(id) => id.to_string(),
+            None => "joining…".to_string(),
+        };
+        println!(
+            "  {health} {addr:width$}  {role}  {cap:>10}  {id}{me}",
+            addr = n.addr,
+            cap = indicatif::HumanBytes(n.capacity_bytes).to_string(),
+            id = style(id).dim(),
+            me = if n.is_self {
+                style("  (this node)").dim().to_string()
+            } else {
+                String::new()
+            },
+        );
+    }
+    Ok(())
 }
 
 pub struct InitOpts {
