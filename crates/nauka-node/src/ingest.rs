@@ -256,7 +256,17 @@ impl IngestWriter {
                     self.shared.readable.notify_one();
                     return Ok(());
                 }
-                if inner.spool_pending + (chunk.len() as u64) <= self.shared.spool_bound {
+                if self.shared.ram_window >= chunk.len() as u64 {
+                    // The chunk can fit once the drain frees the window:
+                    // wait rather than spill. Spilling here re-created the
+                    // old 2.5x write amplification for any client faster
+                    // than the drain; waiting IS the encoded-ack contract.
+                    // The guard is >= chunk, not > 0: a chunk larger than
+                    // the WHOLE window can never fit, and waiting for that
+                    // is a hang (caught by the ingest tests, 300 KiB
+                    // chunks against a 256 KiB window).
+                    None
+                } else if inner.spool_pending + (chunk.len() as u64) <= self.shared.spool_bound {
                     // Reserve the range under the lock but do NOT publish
                     // the segment yet: the moment it is visible in the
                     // queue, a consumer woken by an earlier notify may

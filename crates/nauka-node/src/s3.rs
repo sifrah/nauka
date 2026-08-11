@@ -834,8 +834,8 @@ impl S3 for NaukaS3 {
             // orphans). MD5 still streams here: it is the ETag.
             use md5::Digest;
             let spool_path = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
-            // No spool in encoded-ack mode — see the native door for why.
-            let spool_bound = 0;
+            // Spool engages only on a zero RAM grant — see the native door.
+            let spool_bound = crate::ingest::fs_available(&self.state.tmp_dir) / 2;
             let (mut tx, rx) = crate::ingest::channel(
                 &self.state.ingest_pool,
                 crate::api::INGEST_RAM_WANT,

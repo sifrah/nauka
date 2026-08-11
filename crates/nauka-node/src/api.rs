@@ -380,14 +380,14 @@ async fn upload(
             + ttl
     });
     let spool_path = state.tmp_dir.join(format!("ingest-{}", uuid_ish()));
-    // No spool in encoded-ack mode: the 200 waits for the dispatch anyway,
-    // so spilling buys the client nothing while its writes compete with
-    // the shard writes for the very disk bandwidth the drain is bound by
-    // (measured: spilling re-created the old 2.5× write amplification).
-    // The ring at capacity backpressures the producer to drain speed —
-    // exactly the spec's hot-path invariant. The spool is the local-ack
-    // mode's tool, where an early fsync is the whole point.
-    let spool_bound = 0;
+    // The spool only engages for a ZERO RAM grant (pool dry under heavy
+    // concurrency): with a window, the ring at capacity backpressures the
+    // producer instead — spilling there re-created the old 2.5× write
+    // amplification. With no window, the spool is what keeps push() from
+    // waiting forever on capacity that will never exist (measured: the
+    // bound-0 version deadlocked concurrent uploads in the conformance
+    // suite until the client timed out).
+    let spool_bound = crate::ingest::fs_available(&state.tmp_dir) / 2;
     let (mut tx, rx) =
         crate::ingest::channel(&state.ingest_pool, INGEST_RAM_WANT, spool_path, spool_bound);
     let dispatch = tokio::spawn(dispatch_stream(
@@ -757,6 +757,11 @@ async fn peer_sender(
                 };
             }
             if client.is_none() {
+                // A failed CONNECT must feed the breaker like a failed put,
+                // or a frozen peer prices every shard at a 3 s connect
+                // timeout — 512 shards made that a 25-minute stall, seen
+                // as the conformance suite hanging and clients timing out.
+                consecutive += 1;
                 if store.put_shard(&data).is_ok() {
                     parked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
