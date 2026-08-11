@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
@@ -518,10 +518,32 @@ async fn dispatch_core(
     }
     let cfg = state.config;
 
-    // ── Phase 1, overlapped with reception: encode and store. ────────────
-    // BLAKE3 is computed here, where every byte is read anyway.
+    // One streaming pass: placement is keyed on stripe content, so the
+    // owners of a stripe are known the moment it is encoded — its shards
+    // go straight onto per-peer send queues while the next stripe is still
+    // arriving. The old two-phase shape (park everything locally, ship
+    // after the hash) died here; only the manifest still waits for the
+    // final hash.
+    //
+    // Placement view snapshotted once for the whole upload, like before:
+    // a dead node must cost a little redundancy (healed later), never the
+    // whole upload.
+    let view = state.view_alive();
+    let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+    let coords = state.app.coords();
+
+    // One bounded queue and one sender task per peer. A peer that FAILS
+    // trips its breaker and its shards are parked in the local store (the
+    // healer completes them — degraded, not lost). A peer that is merely
+    // busy backpressures the encoder through `send().await`: the upload
+    // then advances at dispatch speed, which is the encoded-ack contract.
+    let mut queues: HashMap<String, tokio::sync::mpsc::Sender<(usize, bytes::Bytes)>> =
+        HashMap::new();
+    let mut senders: tokio::task::JoinSet<HashMap<usize, usize>> = tokio::task::JoinSet::new();
+    let parked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut hasher = blake3::Hasher::new();
     let mut stripes_meta: Vec<StripeMeta> = Vec::new();
+    let mut local_placed: Vec<usize> = Vec::new();
     let mut size: u64 = 0;
     loop {
         let stripe = source.next_stripe(cfg.stripe_data_len()).await?;
@@ -530,13 +552,49 @@ async fn dispatch_core(
         }
         hasher.update(&stripe);
         size += stripe.len() as u64;
+        let si = stripes_meta.len();
         let shards = encode_stripe(&stripe, &cfg)?;
+        let stripe_key = shards[0].hash.clone();
+        let owners = nauka_cluster::placement::stripe_owners_geo(
+            &stripe_key,
+            si,
+            shards.len(),
+            &view_refs,
+            &coords,
+        );
+        let mut placed_here = 0usize;
         for shard in &shards {
-            // Every shard, ours or not: the store is the staging area the
-            // tail phase ships from, and a failed upload's leftovers are
-            // ordinary orphans for the GC.
-            state.store.put_shard(&shard.data)?;
+            let owner = owners[shard.index];
+            if owner == state.self_id {
+                state.store.put_shard(&shard.data)?;
+                placed_here += 1;
+                continue;
+            }
+            let q = match queues.get(owner) {
+                Some(q) => q.clone(),
+                None => {
+                    let (q_tx, q_rx) = tokio::sync::mpsc::channel(PEER_QUEUE_SHARDS);
+                    queues.insert(owner.to_string(), q_tx.clone());
+                    senders.spawn(peer_sender(
+                        state.store.clone(),
+                        owner.to_string(),
+                        q_rx,
+                        parked.clone(),
+                    ));
+                    q_tx
+                }
+            };
+            if q.send((si, bytes::Bytes::from(shard.data.clone())))
+                .await
+                .is_err()
+            {
+                // Sender task gone (breaker tripped and it drained out):
+                // park like any other undeliverable shard.
+                state.store.put_shard(&shard.data)?;
+                parked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
+        local_placed.push(placed_here);
         stripes_meta.push(StripeMeta {
             data_len: stripe.len(),
             shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
@@ -547,71 +605,22 @@ async fn dispatch_core(
     }
     let file_hash = hasher.finalize().to_hex().to_string();
 
-    // ── Phase 2, the tail: the content has a name; place and ship. ──────
-    // Place on the members currently answering: a dead node must cost a
-    // little redundancy (healed later), never the whole upload.
-    let view = state.view_alive();
-    let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
-    let coords = state.app.coords();
-    let mut clients: HashMap<String, PeerClient> = HashMap::new();
-    // Degraded-write bookkeeping. A stripe is durable once its k data
-    // shards' worth of pieces are placed; losing up to m deliveries is
-    // redundancy the scrubber rebuilds, not a failed upload. A destination
-    // that fails twice is skipped for the rest of the file (circuit
-    // breaker) so a freshly dead node costs seconds, not
-    // stripes × retries × timeout.
-    let mut undelivered: usize = 0;
-    let mut dest_failures: HashMap<String, u32> = HashMap::new();
-    const BREAKER_THRESHOLD: u32 = 2;
-    for (si, meta) in stripes_meta.iter().enumerate() {
-        let owners = nauka_cluster::placement::stripe_owners_geo(
-            nauka_cluster::placement::stripe_key_of(meta),
-            si,
-            meta.shard_hashes.len(),
-            &view_refs,
-            &coords,
-        );
-        let mut placed = 0usize;
-        for (idx, shard_hash) in meta.shard_hashes.iter().enumerate() {
-            let owner = owners[idx];
-            if owner == state.self_id {
-                // Already in our store from phase 1.
-                placed += 1;
-                continue;
-            }
-            if dest_failures
-                .get(owner)
-                .is_some_and(|f| *f >= BREAKER_THRESHOLD)
-            {
-                undelivered += 1;
-                continue;
-            }
-            let data = state.store.get_shard(shard_hash)?;
-            match send_shard(&mut clients, owner, &data).await {
-                Ok(()) => {
-                    placed += 1;
-                    // The local copy was transport staging, not durability:
-                    // the ack means the owner has it on disk. Deleting it
-                    // NOW matters enormously — left behind, every parked
-                    // foreign shard is rediscovered by the rebalancing GC,
-                    // which (rightly) demands a cryptographic proof from
-                    // every owner before releasing anything. Measured on a
-                    // real cluster: 52k prove_shard calls per half hour,
-                    // enough disk and network pressure to time out Raft
-                    // heartbeats. An undelivered shard, by contrast, stays
-                    // — it is what the healer completes the stripe from.
-                    let _ = state.store.delete_shard(shard_hash);
-                }
-                Err(_) => {
-                    *dest_failures.entry(owner.to_string()).or_insert(0) += 1;
-                    undelivered += 1;
-                }
-            }
+    // The tail is only the queues draining what reception outran; close
+    // them and collect the per-stripe delivery counts.
+    drop(queues);
+    let mut acked: HashMap<usize, usize> = HashMap::new();
+    while let Some(res) = senders.join_next().await {
+        for (si, n) in res.map_err(|e| anyhow!("peer sender task: {e}"))? {
+            *acked.entry(si).or_insert(0) += n;
         }
-        // Below k placed shards the stripe is not reconstructible anywhere
-        // BUT here: every shard exists in our local store, yet a single
-        // node is not the durability the client was promised. Same abort
-        // rule as always; the orphaned local shards are GC fodder.
+    }
+    let undelivered = parked.load(std::sync::atomic::Ordering::Relaxed);
+    // Below k placed shards a stripe is not reconstructible from the
+    // CLUSTER — its parked shards exist here, but a single node is not the
+    // durability the client was promised. Same abort rule as always,
+    // evaluated at the end because acks are asynchronous now.
+    for (si, meta) in stripes_meta.iter().enumerate() {
+        let placed = local_placed[si] + acked.get(&si).copied().unwrap_or(0);
         if placed < cfg.data_shards {
             return Err(anyhow!(
                 "stripe {si}: only {placed} of {} shards could be placed \
@@ -677,35 +686,98 @@ pub(crate) const INGEST_RAM_WANT: u64 = 48 << 20;
 
 /// Sends a shard to a peer, reconnecting as needed (idempotent: storage is
 /// content-addressed, so a resend duplicates nothing).
-async fn send_shard(
-    clients: &mut HashMap<String, PeerClient>,
-    owner: &str,
-    data: &[u8],
-) -> Result<()> {
-    let addr: SocketAddr = owner.parse()?;
-    for attempt in 0..3u32 {
-        if attempt > 0 {
-            // Retry volume is the early warning: a peer that needs retries
-            // is sick well before the liveness map declares it dead.
-            metrics::counter!("nauka_shard_send_retries_total").increment(1);
-            tokio::time::sleep(std::time::Duration::from_millis(200 * attempt as u64)).await;
-            clients.remove(owner);
+/// Per-peer send-queue depth, in shards (1 MiB each). Deep enough to keep
+/// the wire busy across stripe boundaries; shallow enough that the
+/// encoder feels a genuinely stalled peer quickly.
+const PEER_QUEUE_SHARDS: usize = 64;
+/// Consecutive failures after which a peer's sender gives up and parks
+/// everything else addressed to it.
+const PEER_BREAKER: u32 = 2;
+
+/// Drains one peer's queue for one upload. Owns its connection, retries a
+/// failed shard once (reconnecting), and after `PEER_BREAKER` consecutive
+/// failures parks every remaining shard in the local store — the healer's
+/// job from there, at the price of redundancy, never of the upload.
+/// Returns how many shards were ACKED per stripe index.
+async fn peer_sender(
+    store: Arc<ShardStore>,
+    owner: String,
+    mut rx: tokio::sync::mpsc::Receiver<(usize, bytes::Bytes)>,
+    parked: Arc<std::sync::atomic::AtomicUsize>,
+) -> HashMap<usize, usize> {
+    use futures::stream::{FuturesUnordered, StreamExt};
+    let mut acked: HashMap<usize, usize> = HashMap::new();
+    let mut consecutive = 0u32;
+    let addr: Option<SocketAddr> = owner.parse().ok();
+    let mut client: Option<PeerClient> = match addr {
+        Some(a) => connect_with_timeout(a).await,
+        None => None,
+    };
+    // Several puts in flight on the one connection — QUIC gives each its
+    // own stream, so this pipelines the peer's disk writes behind the
+    // wire instead of paying a full round trip per shard (measured: the
+    // one-at-a-time version spent the whole upload waiting, ~80 ms per
+    // shard against ~12 ms of actual work).
+    const PEER_INFLIGHT: usize = 4;
+    let mut inflight: FuturesUnordered<_> = FuturesUnordered::new();
+    let push = |c: &PeerClient, si: usize, data: bytes::Bytes| {
+        let c = c.clone();
+        async move {
+            let ok = matches!(
+                tokio::time::timeout(SHARD_TIMEOUT, c.put_shard(data.to_vec())).await,
+                Ok(Ok(_))
+            );
+            (si, data, ok)
         }
-        if !clients.contains_key(owner) {
-            match connect_with_timeout(addr).await {
-                Some(c) => {
-                    clients.insert(owner.to_string(), c);
+    };
+    let settle =
+        |res: (usize, bytes::Bytes, bool), acked: &mut HashMap<usize, usize>, cons: &mut u32| {
+            let (si, data, ok) = res;
+            if ok {
+                *cons = 0;
+                *acked.entry(si).or_insert(0) += 1;
+            } else {
+                // One immediate park rather than an in-order retry dance:
+                // the shard stays durable locally and the healer finishes
+                // the job. Retry-by-reconnect happens naturally on the
+                // next shard once the breaker logic below resets `client`.
+                metrics::counter!("nauka_shard_send_retries_total").increment(1);
+                *cons += 1;
+                if store.put_shard(&data).is_ok() {
+                    parked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                None => continue,
+            }
+        };
+    while let Some((si, data)) = rx.recv().await {
+        if consecutive >= PEER_BREAKER || client.is_none() {
+            if consecutive < PEER_BREAKER {
+                client = match addr {
+                    Some(a) => connect_with_timeout(a).await,
+                    None => None,
+                };
+            }
+            if client.is_none() {
+                if store.put_shard(&data).is_ok() {
+                    parked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                continue;
             }
         }
-        if let Ok(Ok(_)) =
-            tokio::time::timeout(SHARD_TIMEOUT, clients[owner].put_shard(data.to_vec())).await
-        {
-            return Ok(());
+        let c = client.as_ref().expect("checked above");
+        inflight.push(push(c, si, data));
+        if inflight.len() >= PEER_INFLIGHT {
+            if let Some(res) = inflight.next().await {
+                if !res.2 {
+                    client = None;
+                }
+                settle(res, &mut acked, &mut consecutive);
+            }
         }
     }
-    bail!("shard not delivered to {owner}")
+    while let Some(res) = inflight.next().await {
+        settle(res, &mut acked, &mut consecutive);
+    }
+    acked
 }
 
 /// Requested byte range, resolved to (start, inclusive end).
