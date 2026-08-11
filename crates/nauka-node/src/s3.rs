@@ -772,39 +772,41 @@ impl S3 for NaukaS3 {
             input.sse_customer_key_md5.as_deref(),
         )?;
 
-        // Buffer to disk while hashing twice: BLAKE3 addresses the content
-        // for the engine, MD5 becomes the ETag the client expects. The
-        // additional checksums the client requested are computed in the
-        // same pass.
         let mut hasher = checksum_hasher_for(&input);
-        let tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
-        let (size, blake, md5) = write_body(input.body.take(), &tmp, &mut hasher)
-            .await
-            .map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                s3_error!(InternalError, "{e:#}")
-            })?;
-        // A checksum the client sent must match what the body hashes to,
-        // before the object is allowed to exist.
-        let checksums = match verify_checksums(&input, hasher.finalize()) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(e);
-            }
-        };
-
-        // SSE-C: the plaintext never reaches the cluster. It is encrypted
-        // here with the customer's key (which is NOT kept), and what gets
-        // erasure-coded, placed and content-addressed is the ciphertext —
-        // the same guarantee as the native end-to-end flow.
         let mut sse_info = sse_req.info;
-        let (store_path, store_size, store_hasher) = match (&sse_req.customer_key, size) {
-            (Some(key), n) if n > 0 => {
-                let ct_tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
-                let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
+        let (content, size, md5, checksums) = if sse_req.customer_key.is_some() {
+            // SSE-C: the plaintext never reaches the cluster. It is
+            // encrypted here with the customer's key (which is NOT kept),
+            // and what gets erasure-coded is the ciphertext. Encryption
+            // needs the complete plaintext staged first, so this path
+            // keeps the buffered route — it cannot overlap with reception
+            // by construction.
+            let tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+            let (size, _blake, md5) = write_body(input.body.take(), &tmp, &mut hasher)
+                .await
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    s3_error!(InternalError, "{e:#}")
+                })?;
+            // A checksum the client sent must match what the body hashes
+            // to, before the object is allowed to exist.
+            let checksums = match verify_checksums(&input, hasher.finalize()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return Err(e);
+                }
+            };
+            // An empty object has no shards to place — pure metadata.
+            let content = if size == 0 {
                 let _ = tokio::fs::remove_file(&tmp).await;
-                let (ct_len, ct_hasher) = match r {
+                None
+            } else {
+                let key = sse_req.customer_key.clone().expect("branch condition");
+                let ct_tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+                let r = encrypt_to_tmp(key, tmp.clone(), ct_tmp.clone()).await;
+                let _ = tokio::fs::remove_file(&tmp).await;
+                let (ct_len, _ct_hasher) = match r {
                     Ok(v) => v,
                     Err(e) => {
                         let _ = tokio::fs::remove_file(&ct_tmp).await;
@@ -814,28 +816,90 @@ impl S3 for NaukaS3 {
                 if let Some(i) = &mut sse_info {
                     i.segments = vec![ct_len];
                 }
-                (ct_tmp, ct_len, ct_hasher)
-            }
-            _ => (tmp, size, blake),
-        };
-
-        // An empty object has no shards to place — it is pure metadata.
-        let content = if store_size == 0 {
-            let _ = tokio::fs::remove_file(&store_path).await;
-            None
+                let result =
+                    crate::api::dispatch_file(&self.state, &ct_tmp, Some(input.key.clone()), None)
+                        .await;
+                let _ = tokio::fs::remove_file(&ct_tmp).await;
+                let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
+                Some(manifest.file_hash)
+            };
+            (content, size, md5, checksums)
         } else {
-            let result = crate::api::dispatch_file(
-                &self.state,
-                &store_path,
-                store_size,
-                store_hasher,
+            // The streaming path: the body feeds the elastic buffer while
+            // the encoder drains it concurrently — encoding starts on the
+            // first complete stripe, not after the last byte. `finish` is
+            // only signalled once the client's checksums verify: a
+            // mismatch aborts the dispatcher mid-drain and the object
+            // never exists (already-written shards are ordinary GC
+            // orphans). MD5 still streams here: it is the ETag.
+            use md5::Digest;
+            let spool_path = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
+            // No spool in encoded-ack mode — see the native door for why.
+            let spool_bound = 0;
+            let (tx, rx) = crate::ingest::channel(
+                &self.state.ingest_pool,
+                crate::api::INGEST_RAM_WANT,
+                spool_path,
+                spool_bound,
+            );
+            let dispatch = tokio::spawn(crate::api::dispatch_stream(
+                self.state.clone(),
+                rx,
                 Some(input.key.clone()),
                 None,
-            )
-            .await;
-            let _ = tokio::fs::remove_file(&store_path).await;
-            let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
-            Some(manifest.file_hash)
+            ));
+            let mut md5 = md5::Md5::new();
+            let mut size = 0u64;
+            let mut body_err: Option<S3Error> = None;
+            if let Some(mut stream) = input.body.take() {
+                use futures::StreamExt;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = match chunk {
+                        Ok(c) => c,
+                        Err(e) => {
+                            body_err = Some(s3_error!(InternalError, "reading the body: {e}"));
+                            break;
+                        }
+                    };
+                    md5.update(&chunk);
+                    hasher.update(&chunk);
+                    size += chunk.len() as u64;
+                    if let Err(e) = tx.push(chunk).await {
+                        body_err = Some(s3_error!(InternalError, "{e:#}"));
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = body_err {
+                // Dropping the writer unfinished aborts the dispatcher: a
+                // truncated stream must never become an object.
+                drop(tx);
+                let _ = dispatch.await;
+                return Err(e);
+            }
+            let checksums = match verify_checksums(&input, hasher.finalize()) {
+                Ok(c) => c,
+                Err(e) => {
+                    drop(tx);
+                    let _ = dispatch.await;
+                    return Err(e);
+                }
+            };
+            let content = if size == 0 {
+                // Metadata-only object; the dispatcher would refuse an
+                // empty stream, so it is never asked to finish.
+                drop(tx);
+                let _ = dispatch.await;
+                None
+            } else {
+                tx.finish();
+                let result = dispatch
+                    .await
+                    .map_err(|e| s3_error!(InternalError, "dispatch task: {e}"))?;
+                let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
+                Some(manifest.file_hash)
+            };
+            (content, size, md5.finalize().into(), checksums)
         };
 
         let etag = nauka_s3::naming::etag_single(&md5);
@@ -1036,7 +1100,7 @@ impl S3 for NaukaS3 {
                 s3_error!(InternalError, "{e:#}")
             })?;
         let mut sse_info = sse_req.info;
-        let (store_path, store_size, store_hasher) = match (&sse_req.customer_key, size) {
+        let (store_path, store_size, _store_hasher) = match (&sse_req.customer_key, size) {
             (Some(key), n) if n > 0 => {
                 let ct_tmp = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
                 let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
@@ -1059,15 +1123,9 @@ impl S3 for NaukaS3 {
             let _ = tokio::fs::remove_file(&store_path).await;
             None
         } else {
-            let result = crate::api::dispatch_file(
-                &self.state,
-                &store_path,
-                store_size,
-                store_hasher,
-                Some(input.key.clone()),
-                None,
-            )
-            .await;
+            let result =
+                crate::api::dispatch_file(&self.state, &store_path, Some(input.key.clone()), None)
+                    .await;
             let _ = tokio::fs::remove_file(&store_path).await;
             let (manifest, _degraded) = result.map_err(Self::dispatch_error)?;
             Some(manifest.file_hash)
@@ -2591,7 +2649,7 @@ impl S3 for NaukaS3 {
         // SSE-C: what the cluster stores for this part is ciphertext,
         // encrypted with the customer's key. The ETag stays the MD5 of
         // the plaintext, which is what the client compares.
-        let (store_path, store_size, store_hasher, plain_size) = match &customer_key {
+        let (store_path, store_size, _store_hasher, plain_size) = match &customer_key {
             Some(key) => {
                 let ct_tmp = self.state.tmp_dir.join(format!("s3p-{}", uuid_like()));
                 let r = encrypt_to_tmp(key.clone(), tmp.clone(), ct_tmp.clone()).await;
@@ -2610,8 +2668,6 @@ impl S3 for NaukaS3 {
         let result = crate::api::dispatch_file(
             &self.state,
             &store_path,
-            store_size,
-            store_hasher,
             Some(format!("{}#part{}", input.key, part_number)),
             None,
         )

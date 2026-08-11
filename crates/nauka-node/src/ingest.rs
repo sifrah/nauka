@@ -457,6 +457,23 @@ impl Drop for IngestReader {
     }
 }
 
+/// Free bytes on the filesystem holding `path` — what a spool may still
+/// honestly claim. Half of it is a sane spool bound: the node must keep
+/// room for the shards the drain is about to write.
+pub fn fs_available(path: &std::path::Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+            if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
+                return (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+            }
+        }
+    }
+    u64::MAX / 2
+}
+
 fn total_system_ram() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {

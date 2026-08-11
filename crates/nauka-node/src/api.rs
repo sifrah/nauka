@@ -23,7 +23,7 @@ use axum::{Json, Router};
 use nauka_erasure::{decode_stripe, encode_stripe, ErasureConfig, FileManifest, StripeMeta};
 use nauka_store::ShardStore;
 use nauka_transport::PeerClient;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 pub struct ApiState {
     pub store: Arc<ShardStore>,
@@ -368,22 +368,10 @@ async fn upload(
     Query(params): Query<UploadParams>,
     request: Request,
 ) -> Result<Json<UploadResponse>, ApiError> {
-    // 1. Buffer the body to disk, hashing as it streams in: placement is
-    //    keyed on the file hash, which is only known at the very end.
-    let tmp_path = state.tmp_dir.join(format!("upload-{}", uuid_ish()));
-    let mut tmp = tokio::fs::File::create(&tmp_path).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut size: u64 = 0;
-    let mut body = request.into_body().into_data_stream();
-    use tokio_stream::StreamExt;
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.context("reading the request body")?;
-        hasher.update(&chunk);
-        tmp.write_all(&chunk).await?;
-        size += chunk.len() as u64;
-    }
-    tmp.flush().await?;
-    drop(tmp);
+    // The body streams into the elastic buffer while the encoder drains it
+    // concurrently — encoding starts on the first complete stripe, not
+    // after the last byte. Placement still waits for the file hash (it is
+    // keyed on it), but that is the dispatcher's phase 2, not ours.
     let expires_at = params.ttl.map(|ttl| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -391,9 +379,49 @@ async fn upload(
             .as_secs()
             + ttl
     });
-    let result = dispatch_file(&state, &tmp_path, size, hasher, params.name, expires_at).await;
-    let _ = tokio::fs::remove_file(&tmp_path).await;
-    let (manifest, degraded_shards) = result?;
+    let spool_path = state.tmp_dir.join(format!("ingest-{}", uuid_ish()));
+    // No spool in encoded-ack mode: the 200 waits for the dispatch anyway,
+    // so spilling buys the client nothing while its writes compete with
+    // the shard writes for the very disk bandwidth the drain is bound by
+    // (measured: spilling re-created the old 2.5× write amplification).
+    // The ring at capacity backpressures the producer to drain speed —
+    // exactly the spec's hot-path invariant. The spool is the local-ack
+    // mode's tool, where an early fsync is the whole point.
+    let spool_bound = 0;
+    let (tx, rx) =
+        crate::ingest::channel(&state.ingest_pool, INGEST_RAM_WANT, spool_path, spool_bound);
+    let dispatch = tokio::spawn(dispatch_stream(
+        state.clone(),
+        rx,
+        params.name.clone(),
+        expires_at,
+    ));
+    let mut size: u64 = 0;
+    let mut body = request.into_body().into_data_stream();
+    use tokio_stream::StreamExt;
+    while let Some(chunk) = body.next().await {
+        let chunk = match chunk.context("reading the request body") {
+            Ok(c) => c,
+            Err(e) => {
+                // Dropping the writer unfinished aborts the dispatcher: a
+                // truncated stream must never become an object.
+                drop(tx);
+                let _ = dispatch.await;
+                return Err(e.into());
+            }
+        };
+        size += chunk.len() as u64;
+        if let Err(e) = tx.push(chunk).await {
+            drop(tx);
+            let _ = dispatch.await;
+            return Err(e.into());
+        }
+    }
+    tx.finish();
+    let (manifest, degraded_shards) = dispatch
+        .await
+        .map_err(|e| ApiError::from(anyhow!("dispatch task: {e}")))??;
+    debug_assert_eq!(size, manifest.file_size);
 
     Ok(Json(UploadResponse {
         hash: manifest.file_hash.clone(),
@@ -407,39 +435,125 @@ async fn upload(
     }))
 }
 
-/// Encodes the temporary file stripe by stripe and pushes every shard to
-/// its owner (this node included), then records the manifest.
-pub(crate) async fn dispatch_file(
-    state: &Arc<ApiState>,
-    tmp_path: &std::path::Path,
-    size: u64,
-    hasher: blake3::Hasher,
+/// Where the bytes of an upload come from: a live client stream through
+/// the elastic buffer, or a file already sitting on disk (form uploads,
+/// multipart assembly, SSE-C ciphertext). The file variant reads directly
+/// — pumping an on-disk source through the buffer would be a pointless
+/// disk-to-disk copy.
+pub(crate) enum StripeSource {
+    Stream(crate::ingest::IngestReader),
+    File(tokio::fs::File),
+}
+
+impl StripeSource {
+    /// The next stripe's worth of data, short only at EOF, empty at EOF.
+    async fn next_stripe(&mut self, len: usize) -> Result<bytes::Bytes> {
+        match self {
+            Self::Stream(reader) => reader.next_exact(len).await,
+            Self::File(f) => {
+                let mut buf = vec![0u8; len];
+                let mut filled = 0;
+                while filled < len {
+                    let n = f.read(&mut buf[filled..]).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
+                }
+                buf.truncate(filled);
+                Ok(bytes::Bytes::from(buf))
+            }
+        }
+    }
+}
+
+/// Streaming entry: encode from a live client, overlapped with reception.
+/// Owned `Arc` because the caller runs this as a task concurrent with the
+/// pushes feeding the reader.
+pub(crate) async fn dispatch_stream(
+    state: Arc<ApiState>,
+    reader: crate::ingest::IngestReader,
     name: Option<String>,
     expires_at: Option<u64>,
 ) -> std::result::Result<(FileManifest, usize), DispatchError> {
-    if size == 0 {
-        return Err(anyhow!("empty file").into());
-    }
+    dispatch_core(&state, StripeSource::Stream(reader), name, expires_at).await
+}
+
+/// File entry: encode a source that is already on disk.
+pub(crate) async fn dispatch_file(
+    state: &Arc<ApiState>,
+    tmp_path: &std::path::Path,
+    name: Option<String>,
+    expires_at: Option<u64>,
+) -> std::result::Result<(FileManifest, usize), DispatchError> {
+    let f = tokio::fs::File::open(tmp_path)
+        .await
+        .map_err(|e| DispatchError::Failed(anyhow!("opening the staged upload: {e}")))?;
+    dispatch_core(state, StripeSource::File(f), name, expires_at).await
+}
+
+/// The shared engine, in two phases dictated by one architectural fact:
+/// placement is keyed on the FILE hash, which only exists after the last
+/// byte. So the streaming phase encodes each stripe as soon as it is
+/// complete and parks every shard in the local store — content-addressed,
+/// so a shard is valid wherever it ends up living — and the tail phase,
+/// once the content has a name, computes the owners and ships what is not
+/// ours. On a single node the tail is empty and the whole upload is the
+/// streaming phase. The local copies of foreign shards are released by the
+/// existing rebalancing GC once their owners confirm possession; until
+/// then they serve reads at local-disk speed.
+async fn dispatch_core(
+    state: &Arc<ApiState>,
+    mut source: StripeSource,
+    name: Option<String>,
+    expires_at: Option<u64>,
+) -> std::result::Result<(FileManifest, usize), DispatchError> {
     // Fail fast when the manifest provably cannot be recorded. Checked
-    // before a single shard is encoded or placed: an upload that ends in
-    // an uncommittable registry write is wasted work on every node it
+    // before a single stripe is encoded: an upload that ends in an
+    // uncommittable registry write is wasted work on every node it
     // touches, and the client would otherwise wait out the write timeout
     // (~4s) for an answer we already know.
     if !state.can_commit_write() {
         return Err(DispatchError::Unavailable(NO_QUORUM));
     }
+    let cfg = state.config;
+
+    // ── Phase 1, overlapped with reception: encode and store. ────────────
+    // BLAKE3 is computed here, where every byte is read anyway.
+    let mut hasher = blake3::Hasher::new();
+    let mut stripes_meta: Vec<StripeMeta> = Vec::new();
+    let mut size: u64 = 0;
+    loop {
+        let stripe = source.next_stripe(cfg.stripe_data_len()).await?;
+        if stripe.is_empty() {
+            break;
+        }
+        hasher.update(&stripe);
+        size += stripe.len() as u64;
+        let shards = encode_stripe(&stripe, &cfg)?;
+        for shard in &shards {
+            // Every shard, ours or not: the store is the staging area the
+            // tail phase ships from, and a failed upload's leftovers are
+            // ordinary orphans for the GC.
+            state.store.put_shard(&shard.data)?;
+        }
+        stripes_meta.push(StripeMeta {
+            data_len: stripe.len(),
+            shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
+        });
+    }
+    if size == 0 {
+        return Err(anyhow!("empty file").into());
+    }
     let file_hash = hasher.finalize().to_hex().to_string();
+
+    // ── Phase 2, the tail: the content has a name; place and ship. ──────
     // Place on the members currently answering: a dead node must cost a
     // little redundancy (healed later), never the whole upload.
     let view = state.view_alive();
     let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     let coords = state.app.coords();
-    let cfg = state.config;
-
     let mut clients: HashMap<String, PeerClient> = HashMap::new();
-    let mut f = tokio::fs::File::open(tmp_path).await?;
-    let mut stripe_buf = vec![0u8; cfg.stripe_data_len()];
-    let mut stripes_meta: Vec<StripeMeta> = Vec::new();
     // Degraded-write bookkeeping. A stripe is durable once its k data
     // shards' worth of pieces are placed; losing up to m deliveries is
     // redundancy the scrubber rebuilds, not a failed upload. A destination
@@ -449,32 +563,19 @@ pub(crate) async fn dispatch_file(
     let mut undelivered: usize = 0;
     let mut dest_failures: HashMap<String, u32> = HashMap::new();
     const BREAKER_THRESHOLD: u32 = 2;
-    loop {
-        let mut filled = 0;
-        while filled < stripe_buf.len() {
-            let n = f.read(&mut stripe_buf[filled..]).await?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        if filled == 0 {
-            break;
-        }
-        let si = stripes_meta.len();
-        let shards = encode_stripe(&stripe_buf[..filled], &cfg)?;
+    for (si, meta) in stripes_meta.iter().enumerate() {
         let owners = nauka_cluster::placement::stripe_owners_geo(
             &file_hash,
             si,
-            shards.len(),
+            meta.shard_hashes.len(),
             &view_refs,
             &coords,
         );
         let mut placed = 0usize;
-        for shard in &shards {
-            let owner = owners[shard.index];
+        for (idx, shard_hash) in meta.shard_hashes.iter().enumerate() {
+            let owner = owners[idx];
             if owner == state.self_id {
-                state.store.put_shard(&shard.data)?;
+                // Already in our store from phase 1.
                 placed += 1;
                 continue;
             }
@@ -485,29 +586,41 @@ pub(crate) async fn dispatch_file(
                 undelivered += 1;
                 continue;
             }
-            match send_shard(&mut clients, owner, &shard.data).await {
-                Ok(()) => placed += 1,
+            let data = state.store.get_shard(shard_hash)?;
+            match send_shard(&mut clients, owner, &data).await {
+                Ok(()) => {
+                    placed += 1;
+                    // The local copy was transport staging, not durability:
+                    // the ack means the owner has it on disk. Deleting it
+                    // NOW matters enormously — left behind, every parked
+                    // foreign shard is rediscovered by the rebalancing GC,
+                    // which (rightly) demands a cryptographic proof from
+                    // every owner before releasing anything. Measured on a
+                    // real cluster: 52k prove_shard calls per half hour,
+                    // enough disk and network pressure to time out Raft
+                    // heartbeats. An undelivered shard, by contrast, stays
+                    // — it is what the healer completes the stripe from.
+                    let _ = state.store.delete_shard(shard_hash);
+                }
                 Err(_) => {
                     *dest_failures.entry(owner.to_string()).or_insert(0) += 1;
                     undelivered += 1;
                 }
             }
         }
-        // Below k placed shards the stripe is not reconstructible anywhere:
-        // that is a failed upload, not a degraded one.
+        // Below k placed shards the stripe is not reconstructible anywhere
+        // BUT here: every shard exists in our local store, yet a single
+        // node is not the durability the client was promised. Same abort
+        // rule as always; the orphaned local shards are GC fodder.
         if placed < cfg.data_shards {
             return Err(anyhow!(
                 "stripe {si}: only {placed} of {} shards could be placed \
                  ({} required) — upload aborted",
-                shards.len(),
+                meta.shard_hashes.len(),
                 cfg.data_shards
             )
             .into());
         }
-        stripes_meta.push(StripeMeta {
-            data_len: filled,
-            shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
-        });
     }
     if undelivered > 0 {
         tracing::warn!(
@@ -556,6 +669,11 @@ pub(crate) async fn dispatch_file(
 /// Rejection reasons, the closed label set of the write-rejection counter.
 pub(crate) const NO_QUORUM: &str = "no_quorum";
 pub(crate) const COMMIT_TIMEOUT: &str = "commit_timeout";
+
+/// RAM window an upload asks the pool for: a dozen stripes. Enough to
+/// absorb encode-and-store hiccups without the spool; small enough that a
+/// dry pool is a degradation, not a cliff.
+pub(crate) const INGEST_RAM_WANT: u64 = 48 << 20;
 
 /// Sends a shard to a peer, reconnecting as needed (idempotent: storage is
 /// content-addressed, so a resend duplicates nothing).
