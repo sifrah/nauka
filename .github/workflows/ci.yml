@@ -42,6 +42,12 @@ jobs:
         run: cargo test --workspace --locked
         timeout-minutes: 20
 
+      # The s3 feature is off by default; build and test it explicitly so
+      # the gated code cannot rot unnoticed.
+      - name: Test (s3 feature)
+        run: cargo test -p nauka-node --features s3 --locked
+        timeout-minutes: 20
+
   lint:
     name: Format and clippy
     runs-on: ubuntu-latest
@@ -58,6 +64,9 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --all --check
+
+      - name: Clippy (s3 feature)
+        run: cargo clippy -p nauka-node --all-targets --features s3 --locked
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked

@@ -219,6 +219,10 @@ async fn render(State(handle): State<PrometheusHandle>) -> impl IntoResponse {
 /// This is sound because `s3s` never spawns: the access check runs in the
 /// same task as the outer service call, so the slot written during the check
 /// is still the slot belonging to that request when the response is recorded.
+// Recording call sites live in the S3 door; without the feature only the
+// describe() below runs (keeping the metric catalog stable for dashboards)
+// and the recorders are dead weight the compiler may drop.
+#[cfg_attr(not(feature = "s3"), allow(dead_code))]
 pub mod s3 {
     use std::cell::RefCell;
     use std::future::Future;

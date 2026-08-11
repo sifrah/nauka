@@ -1,9 +1,10 @@
 name: S3 conformance
 
+# Manual since the s3 cargo feature became opt-off by default: the default
+# build serves no S3, so running ceph/s3-tests on every push would test a
+# binary nobody ships. Trigger it when touching the s3 feature.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +29,7 @@ jobs:
         working-directory: webui
 
       - name: Build nauka
-        run: cargo build --release --locked -p nauka-node
+        run: cargo build --release --locked -p nauka-node --features s3
 
       - name: Start a single-node cluster
         run: |
@@ -75,7 +76,7 @@ jobs:
           key: distsem
 
       - name: Build nauka
-        run: cargo build --release --locked -p nauka-node
+        run: cargo build --release --locked -p nauka-node --features s3
 
       - name: Install boto3
         run: pip install --quiet boto3

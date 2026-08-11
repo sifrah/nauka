@@ -9,6 +9,7 @@ mod cache;
 mod e2e;
 mod egress;
 mod ingest;
+#[cfg(feature = "s3")]
 mod s3;
 mod telemetry;
 mod update;
@@ -53,6 +54,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// One value of this enum exists per process, parsed once at startup: the
+// size imbalance clippy flags (Serve dwarfs the rest, especially once the
+// s3 feature removes its variants) has no runtime cost worth boxing for.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Encode a file into Reed-Solomon shards and store it.
     Put {
@@ -102,6 +107,7 @@ enum Cmd {
     /// Generate a cluster token: the one string every machine needs.
     Token,
     /// Create a set of S3 credentials (prints the secret once).
+    #[cfg(feature = "s3")]
     S3KeyCreate {
         /// Label to recognize the key later.
         #[arg(long)]
@@ -121,11 +127,13 @@ enum Cmd {
         peer: SocketAddr,
     },
     /// List the S3 access keys (never the secrets).
+    #[cfg(feature = "s3")]
     S3KeyList {
         #[arg(long, default_value = "127.0.0.1:7311")]
         peer: SocketAddr,
     },
     /// Revoke a set of S3 credentials.
+    #[cfg(feature = "s3")]
     S3KeyDelete {
         access_key_id: String,
         #[arg(long, default_value = "127.0.0.1:7311")]
@@ -181,9 +189,11 @@ enum Cmd {
         #[arg(long)]
         webui: Option<PathBuf>,
         /// Address of the S3-compatible endpoint.
+        #[cfg(feature = "s3")]
         #[arg(long, default_value = "0.0.0.0:8333")]
         s3: SocketAddr,
         /// Disable the S3 endpoint.
+        #[cfg(feature = "s3")]
         #[arg(long)]
         no_s3: bool,
         /// Disable the HTTP API.
@@ -341,6 +351,7 @@ async fn main() -> Result<()> {
             println!("node-id     : {node_id}");
             println!("fingerprint : {fingerprint}");
         }
+        #[cfg(feature = "s3")]
         Cmd::S3KeyCreate {
             name,
             user_id,
@@ -384,6 +395,7 @@ async fn main() -> Result<()> {
             eprintln!("# the secret is shown once — store it now");
             eprintln!("# aws --endpoint-url http://<node>:8333 s3 ls");
         }
+        #[cfg(feature = "s3")]
         Cmd::S3KeyList { peer } => {
             let client = PeerClient::connect(peer).await?;
             let state = nauka_raft::fetch_s3_state(&client).await?;
@@ -402,6 +414,7 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        #[cfg(feature = "s3")]
         Cmd::S3KeyDelete {
             access_key_id,
             peer,
@@ -494,7 +507,9 @@ async fn main() -> Result<()> {
             egress_quota,
             cache_size,
             http,
-            s3: s3_addr,
+            #[cfg(feature = "s3")]
+                s3: s3_addr,
+            #[cfg(feature = "s3")]
             no_s3,
             webui,
             no_http,
@@ -722,6 +737,7 @@ async fn main() -> Result<()> {
                     });
                 }
 
+                #[cfg(feature = "s3")]
                 if !no_s3 {
                     let state = api_state.clone();
                     tokio::spawn(async move {

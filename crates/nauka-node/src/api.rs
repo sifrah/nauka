@@ -700,6 +700,7 @@ pub(crate) const STAGED_PREFIX: &str = "staged-";
 /// premise quietly becomes false while clients keep being told 200. The
 /// cap is what keeps the promise honest; past it, uploads simply pay the
 /// full dispersal again.
+#[cfg(feature = "s3")]
 const STAGED_BACKLOG_MAX: u64 = 4 << 30;
 
 pub(crate) fn staged_path(state: &Arc<ApiState>, hash: &str) -> PathBuf {
@@ -790,6 +791,12 @@ async fn serve_staged(
 }
 
 /// Whether a new local-ack upload may be admitted.
+///
+/// Only the S3 door consumes this today: the local-ack opt-in rides a
+/// bucket tag. Re-exposing the mode on the native door (where Yogfile
+/// wants it) is a planned follow-up; the machinery below it — staged
+/// files, recovery sweep, drain — is door-agnostic and stays live.
+#[cfg(feature = "s3")]
 pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
     state
         .staged_bytes

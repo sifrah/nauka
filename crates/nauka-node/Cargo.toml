@@ -11,6 +11,14 @@ repository = "https://github.com/sifrah/nauka"
 name = "nauka"
 path = "src/main.rs"
 
+[features]
+# The S3-compatible endpoint (SigV4, multipart, SSE-C, ~5000 lines) is not
+# part of the Yogfile product; it compiles only on demand. The replicated
+# S3 state (buckets, credentials) stays unconditional — it is just data,
+# and gating it would fork the wire format.
+default = []
+s3 = ["dep:s3s", "dep:md-5", "dep:data-encoding", "dep:percent-encoding", "dep:hmac"]
+
 [dependencies]
 nauka-erasure = { path = "../nauka-erasure" }
 nauka-store = { path = "../nauka-store" }
@@ -25,12 +33,12 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.6", features = ["fs"] }
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 mime_guess = "2"
-s3s = "0.14"
+s3s = { version = "0.14", optional = true }
 async-trait = "0.1"
-md-5 = "0.10"
-data-encoding = "2"
+md-5 = { version = "0.10", optional = true }
+data-encoding = { version = "2", optional = true }
 time = "0.3"
-percent-encoding = "2"
+percent-encoding = { version = "2", optional = true }
 futures = "0.3"
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }
@@ -38,7 +46,7 @@ rand = "0.8"
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
-hmac = "0.12"
+hmac = { version = "0.12", optional = true }
 anyhow.workspace = true
 axum = "0.8"
 blake3.workspace = true
