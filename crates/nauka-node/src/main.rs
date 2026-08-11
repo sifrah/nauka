@@ -107,6 +107,16 @@ enum Cmd {
     NodeInfo,
     /// Generate a cluster token: the one string every machine needs.
     Token,
+    /// Turn this machine into the first node of a new cluster: dedicated
+    /// user, cluster identity, systemd service enabled and started (the
+    /// node survives reboots and restarts on failure). Root + systemd
+    /// only. Grow the cluster afterwards with `nauka node add <ip>`.
+    Init {
+        /// Address advertised to future members (default: the
+        /// default-route address, port 7311).
+        #[arg(long)]
+        advertise: Option<SocketAddr>,
+    },
     /// Create a set of S3 credentials (prints the secret once).
     #[cfg(feature = "s3")]
     S3KeyCreate {
@@ -327,6 +337,26 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Also before any store or key materialization: `init` is run as root
+    // and must not scatter a data dir or derived keys into root's cwd —
+    // it manages /var/lib/nauka and /etc/nauka itself.
+    if let Cmd::Init { advertise } = &cli.cmd {
+        return node::init(node::InitOpts {
+            advertise: *advertise,
+            token: cli.token,
+        })
+        .await;
+    }
+    // `nauka init` leaves the cluster identity in /etc/nauka/nauka.env;
+    // managing the cluster from the same machine must not require
+    // re-exporting it by hand.
+    if cli.token.is_none() && cli.keys.is_none() {
+        if let Cmd::Node(_) = &cli.cmd {
+            let (token, keys) = node::identity_from_env_file();
+            cli.token = token;
+            cli.keys = keys;
+        }
+    }
     // A token is sugar over the key directory: derive the key material into
     // a private corner of the data dir, then follow the exact same paths as
     // --keys. One trust model, two spellings.
@@ -356,6 +386,8 @@ async fn main() -> Result<()> {
     let store = ShardStore::open(&cli.data_dir)?;
 
     match cli.cmd {
+        // Dispatched before the store opens; only here for exhaustiveness.
+        Cmd::Init { .. } => unreachable!("init returns before the store opens"),
         Cmd::Upload { file, api, name } => {
             e2e::upload(&api, &file, name).await?;
         }

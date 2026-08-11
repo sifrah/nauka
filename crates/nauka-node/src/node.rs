@@ -40,6 +40,20 @@ fn ssh_host(o: &AddOpts) -> String {
     format!("{}@{}", o.ssh_user, o.target.ip())
 }
 
+/// Options for every ssh/scp of the provisioning. accept-new and not the
+/// default ask-and-refuse: the target of `node add` is typically a fresh
+/// machine whose host key nobody has seen yet, and under BatchMode the
+/// prompt degrades into a bare failure. First contact pins the key; a
+/// key that CHANGES afterwards still refuses loudly.
+const SSH_OPTS: &[&str] = &[
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=15",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+];
+
 /// Run a command on the target over ssh, capturing output. The forwarded
 /// agent and host-key policy come from the caller's ssh environment.
 async fn ssh_run(o: &AddOpts, script: &str) -> Result<String> {
@@ -48,7 +62,7 @@ async fn ssh_run(o: &AddOpts, script: &str) -> Result<String> {
     // word as $0 and drop it — ssh already runs its single command argument
     // through the login shell, so hand it the script directly.
     let out = tokio::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        .args(SSH_OPTS)
         .arg(ssh_host(o))
         .arg(script)
         .output()
@@ -68,7 +82,7 @@ async fn ssh_run(o: &AddOpts, script: &str) -> Result<String> {
 /// keeps secrets off the argv). `mode` is applied after the write.
 async fn ssh_write_file(o: &AddOpts, path: &str, contents: &[u8], mode: &str) -> Result<()> {
     let mut child = tokio::process::Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+        .args(SSH_OPTS)
         .arg(ssh_host(o))
         .arg(format!("cat > {path} && chmod {mode} {path}"))
         .stdin(Stdio::piped())
@@ -94,7 +108,7 @@ async fn scp_verified(o: &AddOpts, local: &std::path::Path, remote: &str) -> Res
     let want = sha256_file(local)?;
     for attempt in 1..=3 {
         let status = tokio::process::Command::new("scp")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"])
+            .args(SSH_OPTS)
             .arg(local)
             .arg(format!("{}:{remote}", ssh_host(o)))
             .status()
@@ -329,4 +343,200 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
         }
         other => bail!("change-membership: {other:?}"),
     }
+}
+
+pub struct InitOpts {
+    /// Address advertised to future members (default: the default-route
+    /// address, port 7311).
+    pub advertise: Option<SocketAddr>,
+    /// Cluster token to install, if the operator already has one (a machine
+    /// re-initialized into an existing cluster's identity). Default:
+    /// generate a fresh one — this IS the birth of a new cluster.
+    pub token: Option<String>,
+}
+
+/// Run a shell snippet locally, capturing stderr for the error message.
+async fn local_run(script: &str) -> Result<String> {
+    let out = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .await
+        .with_context(|| format!("running: {script}"))?;
+    if !out.status.success() {
+        bail!(
+            "command failed: {script}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The address this machine reaches the outside world from. Connecting a
+/// UDP socket sends no packet — it only asks the kernel which source
+/// address the default route would pick.
+fn default_route_ip() -> Result<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").context("binding a probe socket")?;
+    s.connect("1.1.1.1:80").context("no default route")?;
+    Ok(s.local_addr()?.ip())
+}
+
+/// Identity left behind by `nauka init`, so that `node add` run on the
+/// same machine works without re-exporting the token. Returns
+/// (token, keys_dir) — at most one is Some, mirroring the CLI exclusivity.
+pub fn identity_from_env_file() -> (Option<String>, Option<std::path::PathBuf>) {
+    let Ok(env) = std::fs::read_to_string("/etc/nauka/nauka.env") else {
+        return (None, None);
+    };
+    for line in env.lines() {
+        if let Some(token) = line.strip_prefix("NAUKA_TOKEN=") {
+            if !token.trim().is_empty() {
+                return (Some(token.trim().to_string()), None);
+            }
+        }
+        if let Some(dir) = line.strip_prefix("NAUKA_KEYS_ARG=--keys ") {
+            if !dir.trim().is_empty() {
+                return (None, Some(std::path::PathBuf::from(dir.trim())));
+            }
+        }
+    }
+    (None, None)
+}
+
+/// `nauka init` — turn this machine into the first node of a cluster:
+/// the local counterpart of what `add` does over SSH. Dedicated user,
+/// cluster identity in /etc/nauka, hardened systemd unit enabled and
+/// started. The service founds a single-node cluster on its blank data
+/// dir; the cluster then grows with `nauka node add`.
+pub async fn init(o: InitOpts) -> Result<()> {
+    // Guards first, before touching anything. This command exists for
+    // servers; a laptop gets a clear refusal, not half a system service.
+    if !cfg!(target_os = "linux") {
+        bail!(
+            "`nauka init` sets up a systemd service — Linux only.\n\
+             Run a node by hand instead: NAUKA_TOKEN=$(nauka token) nauka serve"
+        );
+    }
+    if !std::path::Path::new("/run/systemd/system").is_dir() {
+        bail!("systemd is not running on this machine — run a node by hand: nauka serve");
+    }
+    // geteuid, not a $USER string: sudo keeps USER=root only sometimes.
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("`nauka init` writes system directories — run it as root (sudo nauka init)");
+    }
+    if std::path::Path::new("/etc/systemd/system/nauka.service").exists() {
+        bail!(
+            "this machine already runs a nauka service (`systemctl status nauka`).\n\
+             To reconfigure it, edit /etc/nauka/nauka.env and `systemctl restart nauka`."
+        );
+    }
+    // Same refusal as `add`: existing Raft state means this machine already
+    // belongs to a cluster, and re-founding on top would fork it.
+    let has_state = std::fs::read_dir("/var/lib/nauka/raft")
+        .map(|d| {
+            d.flatten()
+                .any(|e| e.path().extension().is_some_and(|x| x == "redb"))
+        })
+        .unwrap_or(false);
+    if has_state {
+        bail!(
+            "/var/lib/nauka already holds cluster state — this machine is a member already.\n\
+             To restart it: systemctl start nauka. To wipe it, remove /var/lib/nauka first."
+        );
+    }
+
+    let advertise = match o.advertise {
+        Some(a) => a,
+        None => {
+            let ip = default_route_ip()
+                .context("could not detect this machine's address — pass --advertise <ip>:7311")?;
+            SocketAddr::new(ip, 7311)
+        }
+    };
+    if advertise.ip().is_loopback() {
+        bail!("the detected address is loopback — pass --advertise <public-ip>:7311");
+    }
+
+    // 1. Dedicated user + directories (same commands `add` runs remotely,
+    //    same layout as the deb postinst).
+    println!("initializing the first node of a cluster on this machine…");
+    local_run(
+        "getent passwd nauka >/dev/null || adduser --system --group --no-create-home \
+         --home /var/lib/nauka --gecos 'Nauka storage node' nauka >/dev/null",
+    )
+    .await?;
+    std::fs::create_dir_all("/var/lib/nauka").context("creating /var/lib/nauka")?;
+    std::fs::create_dir_all("/etc/nauka").context("creating /etc/nauka")?;
+    local_run(
+        "chown nauka:nauka /var/lib/nauka && chmod 750 /var/lib/nauka && \
+         chown root:nauka /etc/nauka && chmod 750 /etc/nauka",
+    )
+    .await?;
+
+    // 2. The binary must live outside /home and /root: the unit runs with
+    //    ProtectHome=true, which would hide a home-dir binary from the
+    //    service. Copy under a temp name and rename into place — the same
+    //    ETXTBSY dodge as `add`, for re-init after a wipe while an old
+    //    process lingers.
+    let self_exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("finding my own binary")?;
+    let system_bin = std::path::Path::new("/usr/local/bin/nauka");
+    let exec_path = if self_exe == system_bin || self_exe == std::path::Path::new("/usr/bin/nauka")
+    {
+        self_exe
+    } else {
+        std::fs::copy(&self_exe, "/usr/local/bin/nauka.new")
+            .context("copying the binary to /usr/local/bin")?;
+        local_run(
+            "chmod 755 /usr/local/bin/nauka.new && mv /usr/local/bin/nauka.new /usr/local/bin/nauka",
+        )
+        .await?;
+        system_bin.to_path_buf()
+    };
+
+    // 3. Cluster identity → the env file, 640 root:nauka like everything
+    //    else under /etc/nauka. The token never goes through argv.
+    let token = o.token.unwrap_or_else(nauka_transport::generate_token);
+    let env = format!("NAUKA_TOKEN={token}\nNAUKA_ARGS=--advertise {advertise}\n");
+    std::fs::write("/etc/nauka/nauka.env", env).context("writing /etc/nauka/nauka.env")?;
+    local_run("chown root:nauka /etc/nauka/nauka.env && chmod 640 /etc/nauka/nauka.env").await?;
+
+    // 4. The unit, pointed at wherever the binary actually is, enabled so
+    //    it comes back on reboot, started now. No --join: the first serve
+    //    on a blank data dir founds the cluster.
+    let unit = UNIT.replace("/usr/bin/nauka", &exec_path.to_string_lossy());
+    std::fs::write("/etc/systemd/system/nauka.service", unit)
+        .context("writing the systemd unit")?;
+    local_run("systemctl daemon-reload && systemctl enable --now nauka").await?;
+
+    // 5. Wait for the node to answer, same probe as `add` (15 × 2 s).
+    println!("  waiting for the node to come up…");
+    let mut node_id: Option<u64> = None;
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let Ok(resp) = reqwest::get("http://127.0.0.1:8080/api/status").await else {
+            continue;
+        };
+        let Ok(body) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if let Some(id) = body.get("self_node_id").and_then(|v| v.as_u64()) {
+            node_id = Some(id);
+            break;
+        }
+    }
+    let node_id =
+        node_id.context("the node did not come up in time — check `journalctl -u nauka`")?;
+
+    println!("\ncluster founded — this machine is node {node_id}");
+    println!("  service : nauka.service (enabled: restarts on failure and on reboot)");
+    println!("  data    : /var/lib/nauka");
+    println!("  config  : /etc/nauka/nauka.env");
+    println!("  api     : http://{}:8080", advertise.ip());
+    println!("  token   : {token}");
+    println!("            anyone holding the token is a member — treat it like a password");
+    println!("\ngrow the cluster from this machine:");
+    println!("  nauka node add <ip>:7311");
+    Ok(())
 }
