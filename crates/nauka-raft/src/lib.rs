@@ -81,12 +81,37 @@ impl Default for FreshGate {
 }
 
 impl RaftApp {
+    /// Whether this node has ever been part of a cluster. Distinguishes
+    /// "never initialized" (a blank data dir, safe to found or join) from
+    /// "restarting with state" (must NOT found: openraft refuses and the
+    /// node crashes). Reads the Raft core directly via `is_initialized`,
+    /// NOT the metrics watch channel — that channel reports empty for the
+    /// instant between engine start and its first tick, which is exactly
+    /// the window a restart passes through and `members()` got wrong.
+    pub async fn has_cluster_state(&self) -> bool {
+        self.raft.is_initialized().await.unwrap_or(true)
+    }
+
+    /// Found a single-node cluster with this node as its only voter.
+    /// Called once, on a blank data dir, when no discovery layer exists to
+    /// negotiate membership — the birth of a cluster is now a deliberate
+    /// local act, not the outcome of a race.
+    ///
+    /// `addr` is this node's advertised address — its membership identity,
+    /// the same string `members()` returns and placement keys on.
+    pub async fn found_alone(&self, addr: String) -> Result<()> {
+        let members = std::collections::BTreeMap::from([(self.id, openraft::BasicNode { addr })]);
+        self.raft
+            .initialize(members)
+            .await
+            .map_err(|e| anyhow::anyhow!("initialize: {e}"))
+    }
+
     /// Starts this node's Raft engine, with durable state under `dir`
     /// (log + vote in redb, snapshots on file). A node restarting with the
     /// same dir picks up where it left off; a whole cluster powered off
-    /// comes back without loss. The node stays passive until the cluster is
-    /// initialized (`AdminRequest::Init`) or until an existing member adds
-    /// it.
+    /// comes back without loss. The node stays passive until it founds a
+    /// cluster ([`Self::found_alone`]) or an existing member adds it.
     pub async fn start(id: NodeId, dir: &std::path::Path) -> Result<Arc<Self>> {
         let config = Arc::new(
             Config {

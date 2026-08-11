@@ -3,7 +3,7 @@ name = "nauka-node"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Distributed storage engine that heals itself — Reed-Solomon erasure coding, config-free DHT discovery, a single binary"
+description = "Distributed storage engine that heals itself — Reed-Solomon erasure coding, a single binary"
 homepage = "https://getnauka.com"
 repository = "https://github.com/sifrah/nauka"
 
@@ -25,7 +25,6 @@ nauka-store = { path = "../nauka-store" }
 nauka-transport = { path = "../nauka-transport" }
 nauka-cluster = { path = "../nauka-cluster" }
 nauka-raft = { path = "../nauka-raft" }
-nauka-discovery = { path = "../nauka-discovery" }
 nauka-crypto = { path = "../nauka-crypto" }
 nauka-s3 = { path = "../nauka-s3" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
