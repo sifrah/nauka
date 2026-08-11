@@ -1433,7 +1433,8 @@ async fn main() -> Result<()> {
 }
 
 /// Discovery lifecycle of a node, entirely implicit: resolve the cluster on
-/// the DHT and join it; if the DHT is blank, run a genesis election (the
+/// the DHT and join it; if the DHT is blank — or if the record it carries
+/// has outlived the cluster's consensus state — run a genesis election (the
 /// smallest node-id founds the cluster — deterministic, no designated
 /// node); then republish the seeds for as long as we stay leader.
 async fn run_discovery(
@@ -1452,69 +1453,182 @@ async fn run_discovery(
     const GENESIS_CONFIRM: Duration = Duration::from_secs(12);
     /// A foreign candidate that never founds is declared dead after this.
     const FOREIGN_STALE: Duration = Duration::from_secs(45);
+    /// Consecutive probes that must ALL find every advertised seed up and
+    /// state-free before the DHT record is declared abandoned. One probe
+    /// would be enough logically — a node that answers cannot lie about
+    /// having no log — but a streak costs nothing and rules out a freak
+    /// window (a cluster caught mid-`initialize`, a node that answered
+    /// before loading its store).
+    const ABANDONED_CONFIRM: u32 = 4;
+    /// How often a node still outside a cluster says, in one line, what it
+    /// is waiting for and what would unblock it. Silence is what turned
+    /// this loop into an unexplained hang.
+    const REPORT_EVERY: Duration = Duration::from_secs(30);
 
     let mut our_candidacy_at: Option<Instant> = None;
     let mut foreign_since: Option<(u64, Instant)> = None;
+    // Every address ever advertised as a seed of this cluster. Publishing a
+    // genesis candidacy overwrites the `_seeds` record (same pkarr key), so
+    // the DHT stops being a reliable memory of who the cluster was the
+    // moment anyone stands as a candidate — this set is that memory, and
+    // it is what the last gate before founding re-checks.
+    let mut known_seeds: std::collections::BTreeSet<SocketAddr> = Default::default();
+    let mut abandoned_streak: u32 = 0;
+    let mut last_probes: Vec<SeedProbe> = Vec::new();
+    let waiting_since = Instant::now();
+    let mut last_report = Instant::now();
+    let mut blocked_on: Option<String> = None;
 
     // Phase 1: enter the cluster (skipped on restart — the durable Raft
     // state already knows the membership).
     while !app.members().contains_key(&app.id) {
-        // 1) Does a cluster already exist?
-        match nauka_discovery::resolve_seeds(&client, &dht_kp.public_key()).await {
-            Ok(seeds) if !seeds.is_empty() => {
-                eprintln!("cluster discovered on the DHT: {seeds:?} — joining…");
-                let join = async {
-                    match nauka_raft::admin_via_leader(
-                        &seeds,
-                        &AdminRequest::AddLearner {
-                            id: app.id,
-                            addr: advertise.to_string(),
-                        },
-                    )
-                    .await?
-                    {
-                        AdminResponse::Ok(_) => {}
-                        other => bail!("add-learner: {other:?}"),
-                    }
-                    let members =
-                        match nauka_raft::admin_via_leader(&seeds, &AdminRequest::Metrics).await? {
-                            AdminResponse::Metrics { members, .. } => members,
-                            other => bail!("metrics: {other:?}"),
-                        };
-                    let mut ids: Vec<u64> = members.keys().copied().collect();
-                    if !ids.contains(&app.id) {
-                        ids.push(app.id);
-                    }
-                    match nauka_raft::admin_via_leader(&seeds, &AdminRequest::ChangeMembership(ids))
-                        .await?
-                    {
-                        AdminResponse::Ok(_) => Ok(()),
-                        other => bail!("promotion: {other:?}"),
-                    }
-                };
-                match join.await {
-                    Ok(()) => {
-                        eprintln!("join succeeded — voting member of the cluster");
-                        break;
-                    }
-                    Err(e) => eprintln!("join failed ({e:#}), retrying…"),
-                }
-                tokio::time::sleep(POLL).await;
-                continue;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("DHT resolution failed ({e:#}), retrying…");
-                tokio::time::sleep(POLL).await;
-                continue;
+        if let Some(reason) = &blocked_on {
+            if last_report.elapsed() >= REPORT_EVERY {
+                last_report = Instant::now();
+                eprintln!(
+                    "still not part of a cluster after {}s: {reason}\n  \
+                     to bootstrap explicitly instead, from any machine:\n    \
+                     nauka cluster-init {}",
+                    waiting_since.elapsed().as_secs(),
+                    init_hint(app.id, advertise, &last_probes),
+                );
             }
         }
 
-        // 2) Blank DHT: genesis election through signed candidacies.
+        // 1) Does a cluster already exist?
+        let seeds = match nauka_discovery::resolve_seeds(&client, &dht_kp.public_key()).await {
+            Ok(seeds) => seeds,
+            Err(e) => {
+                eprintln!("DHT resolution failed ({e:#}), retrying…");
+                blocked_on = Some(format!("the DHT does not answer ({e:#})"));
+                tokio::time::sleep(POLL).await;
+                continue;
+            }
+        };
+        known_seeds.extend(seeds.iter().copied());
+
+        if !seeds.is_empty() {
+            eprintln!("cluster discovered on the DHT: {seeds:?} — joining…");
+            let join = async {
+                match nauka_raft::admin_via_leader(
+                    &seeds,
+                    &AdminRequest::AddLearner {
+                        id: app.id,
+                        addr: advertise.to_string(),
+                    },
+                )
+                .await?
+                {
+                    AdminResponse::Ok(_) => {}
+                    other => bail!("add-learner: {other:?}"),
+                }
+                let members =
+                    match nauka_raft::admin_via_leader(&seeds, &AdminRequest::Metrics).await? {
+                        AdminResponse::Metrics { members, .. } => members,
+                        other => bail!("metrics: {other:?}"),
+                    };
+                let mut ids: Vec<u64> = members.keys().copied().collect();
+                if !ids.contains(&app.id) {
+                    ids.push(app.id);
+                }
+                match nauka_raft::admin_via_leader(&seeds, &AdminRequest::ChangeMembership(ids))
+                    .await?
+                {
+                    AdminResponse::Ok(_) => Ok(()),
+                    other => bail!("promotion: {other:?}"),
+                }
+            };
+            match join.await {
+                Ok(()) => {
+                    eprintln!("join succeeded — voting member of the cluster");
+                    break;
+                }
+                Err(e) => eprintln!("join failed ({e:#})"),
+            }
+
+            // The join failed. Ask the seeds THEMSELVES what they are
+            // before retrying forever: a cluster that merely has no leader
+            // right now is worth waiting for, but a record whose every node
+            // has lost its consensus state is a dead end — nobody is left
+            // to admit anyone, and this is exactly the loop that used to
+            // run until an operator noticed.
+            last_probes = probe_seeds(&app, advertise, &seeds).await;
+            match judge_seeds(&last_probes) {
+                SeedsVerdict::Alive => {
+                    abandoned_streak = 0;
+                    blocked_on = Some(format!(
+                        "the cluster at {seeds:?} is alive but did not admit us — no leader \
+                         right now (election in flight, or quorum lost)"
+                    ));
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+                SeedsVerdict::Inconclusive => {
+                    abandoned_streak = 0;
+                    let silent: Vec<SocketAddr> = last_probes
+                        .iter()
+                        .filter(|p| p.state == SeedState::Silent)
+                        .map(|p| p.addr)
+                        .collect();
+                    blocked_on = Some(format!(
+                        "the DHT advertises seeds {seeds:?} and {silent:?} do not answer — they \
+                         may still hold this cluster's consensus state, so founding a new one \
+                         here would fork the registry; waiting instead"
+                    ));
+                    tokio::time::sleep(POLL).await;
+                    continue;
+                }
+                SeedsVerdict::Abandoned => {
+                    abandoned_streak += 1;
+                    blocked_on = Some(format!(
+                        "the seeds {seeds:?} advertised on the DHT all answer and NONE of them \
+                         holds any consensus state — the record outlived the cluster it points \
+                         at (data directories wiped, machines reprovisioned)"
+                    ));
+                    if abandoned_streak < ABANDONED_CONFIRM {
+                        tokio::time::sleep(POLL).await;
+                        continue;
+                    }
+                    eprintln!(
+                        "stale DHT record: {} advertised seed(s) answered, none holds any Raft \
+                         state — the cluster they point at no longer exists; re-founding through \
+                         the genesis election",
+                        last_probes.len()
+                    );
+                    // Fall through to the genesis election: it is the same
+                    // deterministic, id-ordered founding used on a blank
+                    // DHT, and it is gated again just before `initialize`.
+                }
+            }
+        }
+
+        // 2) Blank (or abandoned) DHT: genesis election through signed
+        //    candidacies.
         match nauka_discovery::resolve_genesis_candidacy(&client, &dht_kp.public_key()).await {
             Ok(Some((cid, _))) if cid == app.id => {
                 // Our candidacy is the most recent one visible.
                 if our_candidacy_at.is_some_and(|t| t.elapsed() >= GENESIS_CONFIRM) {
+                    // Last gate before founding — the one thing that must
+                    // never happen here is founding a second cluster next
+                    // to a live one. Every address this node has EVER seen
+                    // advertised for this cluster has to answer, and answer
+                    // blank. A single seed carrying a membership, or a
+                    // single seed that stays silent, aborts: an unprovable
+                    // absence is not an absence.
+                    let known: Vec<SocketAddr> = known_seeds.iter().copied().collect();
+                    if !known.is_empty() {
+                        last_probes = probe_seeds(&app, advertise, &known).await;
+                        if judge_seeds(&last_probes) != SeedsVerdict::Abandoned {
+                            blocked_on = Some(format!(
+                                "genesis withheld: {known:?} were advertised as this cluster's \
+                                 seeds and cannot all be proven state-free — founding here \
+                                 could fork the registry"
+                            ));
+                            eprintln!("genesis: aborted — {known:?} not proven state-free");
+                            tokio::time::sleep(POLL).await;
+                            continue;
+                        }
+                    }
                     let mut members = std::collections::BTreeMap::new();
                     members.insert(
                         app.id,
@@ -1543,6 +1657,9 @@ async fn run_discovery(
                         now
                     }
                 };
+                blocked_on = Some(format!(
+                    "candidate {cid} has priority to found the cluster — waiting for it"
+                ));
                 if since.elapsed() >= FOREIGN_STALE {
                     eprintln!("genesis: candidate {cid} silent — taking over");
                     if publish_candidacy(&client, &dht_kp, &app, advertise).await {
@@ -1555,17 +1672,22 @@ async fn run_discovery(
                 // Lower-priority candidate: our id is smaller, so we
                 // (re)publish — it will see us and stand down.
                 eprintln!("genesis: candidate {cid} lower priority — publishing our candidacy");
+                blocked_on = Some("standing as genesis candidate, confirming".into());
                 if publish_candidacy(&client, &dht_kp, &app, advertise).await {
                     our_candidacy_at = Some(Instant::now());
                 }
             }
             Ok(None) => {
                 eprintln!("no cluster on the DHT — standing as genesis candidate");
+                blocked_on = Some("standing as genesis candidate, confirming".into());
                 if publish_candidacy(&client, &dht_kp, &app, advertise).await {
                     our_candidacy_at = Some(Instant::now());
                 }
             }
-            Err(e) => eprintln!("reading the candidacies failed ({e:#})"),
+            Err(e) => {
+                eprintln!("reading the candidacies failed ({e:#})");
+                blocked_on = Some(format!("the DHT does not answer ({e:#})"));
+            }
         }
         tokio::time::sleep(POLL).await;
     }
@@ -1609,6 +1731,172 @@ fn filesystem_capacity(path: &std::path::Path) -> u64 {
         }
     }
     nauka_cluster::placement::DEFAULT_CAPACITY
+}
+
+/// What one advertised seed says about its own consensus state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedState {
+    /// The seed did not answer an admin call within the probe budget. It
+    /// may hold the whole cluster's log; nothing can be concluded from it.
+    Silent,
+    /// It answered AND it is part of a cluster: it knows a membership, an
+    /// applied log entry, or a leader.
+    InCluster,
+    /// It answered and its consensus engine is blank: no membership, no
+    /// applied entry, no leader. It cannot admit anyone — a node in this
+    /// state is why `AddLearner` comes back "no leader elected yet"
+    /// forever.
+    Blank,
+}
+
+/// One seed's answer. `id` is kept for the `cluster-init` hint printed to
+/// the operator; it is `None` when the seed stayed silent.
+#[derive(Debug, Clone, Copy)]
+struct SeedProbe {
+    addr: SocketAddr,
+    id: Option<u64>,
+    state: SeedState,
+}
+
+/// What the advertised seed set, taken as a whole, proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeedsVerdict {
+    /// At least one seed is up and part of a cluster: that cluster exists.
+    /// Keep trying to join it; never found a new one.
+    Alive,
+    /// Every advertised seed answered, and every one of them is blank: the
+    /// DHT record outlived the Raft state it points at. This is the only
+    /// verdict that may lead to founding.
+    Abandoned,
+    /// At least one seed stayed silent, or there was nothing to ask.
+    /// Unknowable — and an unprovable absence of cluster is not an absence.
+    Inconclusive,
+}
+
+/// Reads the verdict off a set of probes. Deliberately asymmetric: any
+/// single node still carrying cluster state means "alive", and any single
+/// silence means "unknown". Only unanimity — everybody reachable, nobody
+/// holding anything — can conclude that the record is abandoned.
+fn judge_seeds(probes: &[SeedProbe]) -> SeedsVerdict {
+    if probes.is_empty() {
+        return SeedsVerdict::Inconclusive;
+    }
+    if probes.iter().any(|p| p.state == SeedState::InCluster) {
+        return SeedsVerdict::Alive;
+    }
+    if probes.iter().all(|p| p.state == SeedState::Blank) {
+        return SeedsVerdict::Abandoned;
+    }
+    SeedsVerdict::Inconclusive
+}
+
+/// Upper bound on asking one seed what it is. The transport already caps a
+/// connection attempt at 3 s; this also caps the exchange, so a wedged peer
+/// reads as `Silent` (the safe answer) instead of stalling the loop.
+const SEED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Asks every seed, in parallel, whether it holds any consensus state.
+async fn probe_seeds(
+    app: &Arc<nauka_raft::RaftApp>,
+    advertise: SocketAddr,
+    seeds: &[SocketAddr],
+) -> Vec<SeedProbe> {
+    let mut tasks = Vec::new();
+    for addr in seeds {
+        let app = app.clone();
+        let addr = *addr;
+        tasks.push((
+            addr,
+            tokio::spawn(async move { probe_seed(&app, advertise, addr).await }),
+        ));
+    }
+    let mut out = Vec::with_capacity(tasks.len());
+    for (addr, task) in tasks {
+        match task.await {
+            Ok(probe) => out.push(probe),
+            // A panicked probe proves nothing: report it as silence, the
+            // answer that blocks the abandoned verdict.
+            Err(_) => out.push(SeedProbe {
+                addr,
+                id: None,
+                state: SeedState::Silent,
+            }),
+        }
+    }
+    out
+}
+
+async fn probe_seed(
+    app: &Arc<nauka_raft::RaftApp>,
+    advertise: SocketAddr,
+    addr: SocketAddr,
+) -> SeedProbe {
+    use nauka_raft::types::{AdminRequest, AdminResponse};
+    let silent = SeedProbe {
+        addr,
+        id: None,
+        state: SeedState::Silent,
+    };
+    if addr == advertise {
+        // Ourselves. Read the local engine rather than dialling our own
+        // socket: discovery starts before the listener is accepting, and a
+        // spurious self-silence would stall the verdict for no reason.
+        let metrics = app.raft.metrics().borrow().clone();
+        let in_cluster = metrics.current_leader.is_some()
+            || metrics.last_applied.is_some()
+            || metrics.membership_config.nodes().next().is_some();
+        return SeedProbe {
+            addr,
+            id: Some(app.id),
+            state: if in_cluster {
+                SeedState::InCluster
+            } else {
+                SeedState::Blank
+            },
+        };
+    }
+    let probe = async {
+        let client = PeerClient::connect(addr).await.ok()?;
+        match nauka_raft::admin_call(&client, &AdminRequest::Metrics).await {
+            Ok(AdminResponse::Metrics {
+                id,
+                leader,
+                members,
+                last_applied,
+                ..
+            }) => Some(SeedProbe {
+                addr,
+                id: Some(id),
+                state: if leader.is_some() || last_applied.is_some() || !members.is_empty() {
+                    SeedState::InCluster
+                } else {
+                    SeedState::Blank
+                },
+            }),
+            _ => None,
+        }
+    };
+    match tokio::time::timeout(SEED_PROBE_TIMEOUT, probe).await {
+        Ok(Some(probe)) => probe,
+        _ => silent,
+    }
+}
+
+/// The `cluster-init` line an operator can run to bootstrap explicitly.
+/// Node-ids we could not read are left as placeholders — `nauka node-info`
+/// on the machine in question prints the real one.
+fn init_hint(self_id: u64, self_addr: SocketAddr, probes: &[SeedProbe]) -> String {
+    let mut parts = vec![format!("{self_id}@{self_addr}")];
+    for probe in probes {
+        if probe.addr == self_addr {
+            continue;
+        }
+        match probe.id {
+            Some(id) => parts.push(format!("{id}@{}", probe.addr)),
+            None => parts.push(format!("<node-id>@{}", probe.addr)),
+        }
+    }
+    parts.join(" ")
 }
 
 /// Publishes our genesis candidacy; false if the DHT did not take it.
@@ -1678,4 +1966,69 @@ fn reconstruct(store: &ShardStore, file_hash: &str) -> Result<Vec<u8>> {
         })
         .collect();
     Ok(decode_file(&manifest, stripes)?)
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn probe(port: u16, state: SeedState) -> SeedProbe {
+        SeedProbe {
+            addr: format!("10.0.0.1:{port}").parse().unwrap(),
+            id: Some(port as u64),
+            state,
+        }
+    }
+
+    /// The whole safety argument in one table: only unanimous, reachable
+    /// blankness may lead to founding a cluster.
+    #[test]
+    fn only_unanimous_blankness_is_abandoned() {
+        use SeedState::*;
+        use SeedsVerdict::*;
+        let cases: &[(&[SeedState], SeedsVerdict)] = &[
+            (&[], Inconclusive),
+            (&[Blank], Abandoned),
+            (&[Blank, Blank, Blank], Abandoned),
+            // One node still carrying state: the cluster exists.
+            (&[Blank, Blank, InCluster], Alive),
+            (&[InCluster], Alive),
+            // A node we cannot reach may be the one holding the log.
+            (&[Blank, Blank, Silent], Inconclusive),
+            (&[Silent], Inconclusive),
+            (&[Silent, Silent, Silent], Inconclusive),
+            // State beats silence: something is definitely running.
+            (&[Silent, InCluster], Alive),
+        ];
+        for (states, want) in cases {
+            let probes: Vec<SeedProbe> = states
+                .iter()
+                .enumerate()
+                .map(|(i, s)| probe(7311 + i as u16, *s))
+                .collect();
+            assert_eq!(judge_seeds(&probes), *want, "states {states:?}");
+        }
+    }
+
+    #[test]
+    fn init_hint_names_every_machine_once() {
+        let me: SocketAddr = "10.0.0.1:7311".parse().unwrap();
+        let probes = vec![
+            SeedProbe {
+                addr: me,
+                id: Some(1),
+                state: SeedState::Blank,
+            },
+            probe(7312, SeedState::Blank),
+            SeedProbe {
+                addr: "10.0.0.1:7313".parse().unwrap(),
+                id: None,
+                state: SeedState::Silent,
+            },
+        ];
+        assert_eq!(
+            init_hint(1, me, &probes),
+            "1@10.0.0.1:7311 7312@10.0.0.1:7312 <node-id>@10.0.0.1:7313"
+        );
+    }
 }
