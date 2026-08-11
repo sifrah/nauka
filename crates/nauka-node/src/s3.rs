@@ -1344,13 +1344,10 @@ impl S3 for NaukaS3 {
             }
         }
         let sys = |k: &str| v.system_metadata.get(k).cloned();
-        // Stored checksums come back only when the client opts in.
+        // Stored checksums come back only when the client opts in. A HEAD
+        // carries no body to validate, so it is never "ranged" here.
         let cks = |name: &str| {
-            req.input
-                .checksum_mode
-                .as_ref()
-                .filter(|m| m.as_str() == ChecksumMode::ENABLED)
-                .and_then(|_| v.checksums.get(name).cloned())
+            response_checksum(&v.checksums, req.input.checksum_mode.as_ref(), false, name)
         };
         let mut resp = S3Response::new(HeadObjectOutput {
             expiration: self.expiration_of(
@@ -2434,13 +2431,10 @@ impl S3 for NaukaS3 {
         // A response header override lets the client ask GET to echo a
         // different value (?response-cache-control=…), which S3 supports.
         let sys = |k: &str| v.system_metadata.get(k).cloned();
-        // Stored checksums come back only when the client opts in.
+        // Stored checksums come back only when the client opts in — and
+        // never on a ranged read; see `response_checksum` for why.
         let cks = |name: &str| {
-            input
-                .checksum_mode
-                .as_ref()
-                .filter(|m| m.as_str() == ChecksumMode::ENABLED)
-                .and_then(|_| v.checksums.get(name).cloned())
+            response_checksum(&v.checksums, input.checksum_mode.as_ref(), partial, name)
         };
         // Client egress, counted when the response is committed to.
         self.state.egress.add(length);
@@ -3545,6 +3539,27 @@ fn verify_checksums(
         out.insert(name.to_string(), computed);
     }
     Ok(out)
+}
+
+/// The stored checksum echoed for `name` on a read response: only when
+/// the client opted in with `x-amz-checksum-mode: ENABLED`, and never on
+/// a ranged GET. The stored value covers the whole object, so a partial
+/// body can never validate against it — AWS S3 silently drops the
+/// checksum headers on ranged requests, and modern SDKs (which validate
+/// response checksums by default since early 2025) reject every ranged
+/// response that carries one.
+fn response_checksum(
+    checksums: &BTreeMap<String, String>,
+    checksum_mode: Option<&ChecksumMode>,
+    ranged: bool,
+    name: &str,
+) -> Option<String> {
+    if ranged {
+        return None;
+    }
+    checksum_mode
+        .filter(|m| m.as_str() == ChecksumMode::ENABLED)
+        .and_then(|_| checksums.get(name).cloned())
 }
 
 fn uuid_like() -> String {
@@ -5217,4 +5232,61 @@ fn multipart_content_hash(parts: &[nauka_s3::UploadedPart]) -> String {
         hasher.update(p.content.as_bytes());
     }
     hasher.finalize().to_hex().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("CRC32".to_string(), "u5dJ1Y9e84g=".to_string()),
+            ("SHA256".to_string(), "47DEQpj8HBSa+/TImW+5JA==".to_string()),
+        ])
+    }
+
+    #[test]
+    fn checksum_echoed_on_full_read_when_enabled() {
+        let mode = ChecksumMode::from_static(ChecksumMode::ENABLED);
+        assert_eq!(
+            response_checksum(&stored(), Some(&mode), false, "CRC32"),
+            Some("u5dJ1Y9e84g=".to_string())
+        );
+        assert_eq!(
+            response_checksum(&stored(), Some(&mode), false, "SHA256"),
+            Some("47DEQpj8HBSa+/TImW+5JA==".to_string())
+        );
+    }
+
+    /// Regression: a ranged GET must never carry the whole-object
+    /// checksum. AWS S3 silently drops the headers on ranged requests;
+    /// SDKs that validate response checksums by default (AWS CLI v2,
+    /// all current AWS SDKs) hash the partial body, compare it against
+    /// the header, and fail the download when the header is present.
+    #[test]
+    fn checksum_omitted_on_ranged_read_even_when_enabled() {
+        let mode = ChecksumMode::from_static(ChecksumMode::ENABLED);
+        for name in ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"] {
+            assert_eq!(response_checksum(&stored(), Some(&mode), true, name), None);
+        }
+    }
+
+    #[test]
+    fn checksum_omitted_without_opt_in() {
+        assert_eq!(response_checksum(&stored(), None, false, "CRC32"), None);
+        let off = ChecksumMode::from("DISABLED".to_string());
+        assert_eq!(
+            response_checksum(&stored(), Some(&off), false, "CRC32"),
+            None
+        );
+    }
+
+    #[test]
+    fn checksum_omitted_when_not_stored() {
+        let mode = ChecksumMode::from_static(ChecksumMode::ENABLED);
+        assert_eq!(
+            response_checksum(&BTreeMap::new(), Some(&mode), false, "CRC32"),
+            None
+        );
+    }
 }
