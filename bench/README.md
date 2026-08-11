@@ -55,3 +55,30 @@ silent for the whole encode + fan-out window — long enough on this
 hardware to trip the AWS CLI's default 60 s read timeout in cluster mode.
 The bench passes `--cli-read-timeout 600`; real clients would need the
 same workaround until acks overlap reception.
+
+## Ack policies — 2026-08-11, post-streaming
+
+Same 3-node cluster (PLAY2-MICRO, 4 vCPU / 8 GiB), same 1 GiB payloads,
+alternating buckets: `encoded` (default) and `local` (bucket tagged
+`nauka:ack=local`).
+
+| run | encoded | local |
+|---|---|---|
+| 1 | 18.11 s | 10.73 s |
+| 2 | 35.79 s | 11.42 s |
+| 3 | 35.48 s | 11.28 s |
+
+`local` is steady at ~11 s. The honest comparison is against run 1's
+**18.1 s** — the only `encoded` run not competing with a background
+drain. Runs 2 and 3 nearly doubled because the drains of the preceding
+`local` uploads were still dispersing: **the mode's latency gain is partly
+borrowed from concurrent uploads**, which the feature spec did not
+anticipate. On a node serving a mixed workload, that redistribution
+matters more than the headline number.
+
+`local` does not reach the spec's ~7 s (one payload write at 170 MB/s
+would be 6.3 s) because at this point the path is no longer disk-bound:
+SigV4, MD5, BLAKE3 and the fsync dominate.
+
+Verified alongside: all drains finished `degraded=0`, 3.1 GB of shards on
+each of the three nodes, no staged file left, 1 GiB GET byte-identical.
