@@ -85,7 +85,7 @@ pub async fn audit_once_geo(
         let manifest = store.get_manifest(&file_hash)?;
         for (si, stripe) in manifest.stripes.iter().enumerate() {
             let stripe_owners = crate::placement::stripe_owners_geo(
-                &manifest.file_hash,
+                crate::placement::stripe_key_of(stripe),
                 si,
                 stripe.shard_hashes.len(),
                 &node_refs,

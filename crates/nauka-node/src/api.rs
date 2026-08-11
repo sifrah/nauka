@@ -565,7 +565,7 @@ async fn dispatch_core(
     const BREAKER_THRESHOLD: u32 = 2;
     for (si, meta) in stripes_meta.iter().enumerate() {
         let owners = nauka_cluster::placement::stripe_owners_geo(
-            &file_hash,
+            nauka_cluster::placement::stripe_key_of(meta),
             si,
             meta.shard_hashes.len(),
             &view_refs,
@@ -757,7 +757,7 @@ pub(crate) async fn fetch_stripe_slots(
         .as_secs();
     let month = crate::egress::month_key(now);
     let holders = nauka_cluster::placement::stripe_owners_geo(
-        &m.file_hash,
+        nauka_cluster::placement::stripe_key_of(&m.stripes[stripe_idx]),
         stripe_idx,
         total,
         &view_refs,

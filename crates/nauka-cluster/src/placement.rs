@@ -65,14 +65,32 @@ pub fn rank_nodes<'a>(key: &str, nodes: &[WeightedNode<'a>]) -> Vec<&'a str> {
     scored.into_iter().map(|(_, n)| n).collect()
 }
 
+/// The placement key of a stripe: its first shard's content hash. Known
+/// both from the manifest and at encode time — which is the whole point,
+/// see `stripe_owners_geo`.
+pub fn stripe_key_of(stripe: &nauka_erasure::StripeMeta) -> &str {
+    stripe
+        .shard_hashes
+        .first()
+        .map(String::as_str)
+        .unwrap_or("")
+}
+
 /// Node responsible for shard `shard_idx` of stripe `stripe_idx` of a file.
 pub fn shard_owner<'a>(
-    file_hash: &str,
+    stripe_key: &str,
     stripe_idx: usize,
     shard_idx: usize,
     nodes: &[WeightedNode<'a>],
 ) -> &'a str {
-    let ranked = rank_nodes(&format!("{file_hash}/{stripe_idx}"), nodes);
+    // Keyed on the stripe's own content (its first shard hash), not on the
+    // file hash: the file hash only exists after the last byte, and keying
+    // placement on it forced every upload to finish receiving before a
+    // single shard could be shipped. The stripe key is known the moment
+    // the stripe is encoded, so dispatch can overlap reception. Identical
+    // stripes across files converge on the same owners — coherent, since
+    // content addressing already makes them share the shards themselves.
+    let ranked = rank_nodes(&format!("{stripe_key}/{stripe_idx}"), nodes);
     ranked[shard_idx % ranked.len()]
 }
 
@@ -86,7 +104,7 @@ pub fn shards_owned_by<'m>(
     let mut out = Vec::new();
     for (si, stripe) in manifest.stripes.iter().enumerate() {
         for (i, hash) in stripe.shard_hashes.iter().enumerate() {
-            if shard_owner(&manifest.file_hash, si, i, nodes) == node {
+            if shard_owner(stripe_key_of(stripe), si, i, nodes) == node {
                 out.push((si, i, hash.as_str()));
             }
         }
@@ -116,13 +134,20 @@ pub const NEARBY_MS: f64 = 15.0;
 ///
 /// `coords`: per-node position, as replicated in the Raft state.
 pub fn stripe_owners_geo<'a>(
-    file_hash: &str,
+    stripe_key: &str,
     stripe_idx: usize,
     shard_count: usize,
     nodes: &[WeightedNode<'a>],
     coords: &std::collections::BTreeMap<String, crate::vivaldi::Coord>,
 ) -> Vec<&'a str> {
-    let ranked = rank_nodes(&format!("{file_hash}/{stripe_idx}"), nodes);
+    // Keyed on the stripe's own content (its first shard hash), not on the
+    // file hash: the file hash only exists after the last byte, and keying
+    // placement on it forced every upload to finish receiving before a
+    // single shard could be shipped. The stripe key is known the moment
+    // the stripe is encoded, so dispatch can overlap reception. Identical
+    // stripes across files converge on the same owners — coherent, since
+    // content addressing already makes them share the shards themselves.
+    let ranked = rank_nodes(&format!("{stripe_key}/{stripe_idx}"), nodes);
     let n = ranked.len();
     let mut chosen: Vec<&str> = Vec::with_capacity(shard_count);
 
@@ -203,7 +228,7 @@ pub fn shards_owned_by_geo<'m>(
     let mut out = Vec::new();
     for (si, stripe) in manifest.stripes.iter().enumerate() {
         let owners = stripe_owners_geo(
-            &manifest.file_hash,
+            stripe_key_of(stripe),
             si,
             stripe.shard_hashes.len(),
             nodes,
