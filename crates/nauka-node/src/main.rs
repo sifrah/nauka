@@ -10,6 +10,7 @@ mod cache;
 mod e2e;
 mod egress;
 mod ingest;
+mod node;
 #[cfg(feature = "s3")]
 mod s3;
 mod telemetry;
@@ -253,6 +254,9 @@ enum Cmd {
         #[arg(long, value_delimiter = ',', required = true)]
         peers: Vec<SocketAddr>,
     },
+    /// Add or remove cluster nodes.
+    #[command(subcommand)]
+    Node(NodeCmd),
     /// Remove a node from the cluster live. Its shards are re-replicated
     /// by the other nodes' scrubbers; it can then be shut down.
     ClusterRemove {
@@ -278,6 +282,35 @@ enum Cmd {
         peers: Vec<SocketAddr>,
         #[arg(short, long)]
         output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum NodeCmd {
+    /// Provision a machine over SSH and add it to the cluster: install the
+    /// binary and a systemd unit, hand it the cluster identity, start it,
+    /// and make it a voting member. Run this on any existing member; your
+    /// forwarded SSH agent key is what reaches the target.
+    Add {
+        /// The new node's address, host:port (the port it advertises,
+        /// default plane is 7311).
+        target: SocketAddr,
+        /// SSH login on the target.
+        #[arg(long, default_value = "root")]
+        ssh_user: String,
+        /// Existing cluster members to drive the join through.
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+        /// Wipe the target's existing data dir instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove a node from the cluster (by node-id). Its shards are
+    /// re-replicated by the others; then it can be shut down.
+    Remove {
+        node_id: u64,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
     },
 }
 
@@ -1240,6 +1273,30 @@ async fn main() -> Result<()> {
                 other => bail!("change-membership: {other:?}"),
             }
         }
+        Cmd::Node(node_cmd) => match node_cmd {
+            NodeCmd::Add {
+                target,
+                ssh_user,
+                peers,
+                force,
+            } => {
+                // The identity to hand the new node is the one THIS command
+                // was invoked with — token or key dir, whichever the
+                // operator uses for the cluster.
+                node::add(node::AddOpts {
+                    target,
+                    ssh_user,
+                    peers,
+                    token: cli.token.clone(),
+                    keys_dir: cli.keys.clone(),
+                    force,
+                })
+                .await?;
+            }
+            NodeCmd::Remove { node_id, peers } => {
+                node::remove(node::RemoveOpts { node_id, peers }).await?;
+            }
+        },
         Cmd::PutRemote {
             file,
             peers,

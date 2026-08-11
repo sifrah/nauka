@@ -160,6 +160,10 @@ struct NodeStatus {
 #[derive(serde::Serialize)]
 struct ClusterStatusResponse {
     self_addr: String,
+    /// This node's Raft id. Exposed so `node add` can learn a freshly
+    /// provisioned node's id over plain HTTP — no cluster identity needed
+    /// for the query — instead of shelling `node-info` on the target.
+    self_node_id: u64,
     leader: Option<String>,
     nodes: Vec<NodeStatus>,
     files: usize,
@@ -193,6 +197,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         .collect();
     Json(ClusterStatusResponse {
         self_addr: state.self_id.clone(),
+        self_node_id: state.app.id,
         leader: leader_addr,
         nodes,
         files: app_state.manifests.len(),
