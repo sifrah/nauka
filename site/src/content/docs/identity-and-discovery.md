@@ -30,7 +30,7 @@ On **both QUIC planes** (data and consensus):
 
 A client with no certificate, or one bearing a certificate from *another*
 cluster, dies during the handshake (tested). CLI commands (`put-remote`,
-`cluster-metrics`, …) authenticate with an ephemeral identity signed by the
+`node add`, …) authenticate with an ephemeral identity signed by the
 same CA (global `--keys`).
 
 **Accepted v1 limitation**: the cluster key is distributed to every node —

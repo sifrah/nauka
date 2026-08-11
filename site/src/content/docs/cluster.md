@@ -96,17 +96,16 @@ unlike a declarative `has_shard`, cannot lie (see
 
 ## Live membership changes
 
-- **`cluster-add id@addr`**: the node joins as a **learner** (catches up on
-  the log and the snapshot without voting rights), then is **promoted to
-  voter**. Rebalancing follows automatically over the next scrub/GC cycles.
-- **`cluster-remove id`**: the node leaves the membership but **stays up
+- **`node add ip:port`**: the target is provisioned over SSH, then joins as
+  a **learner** (catches up on the log and the snapshot without voting
+  rights), then is **promoted to voter**. Rebalancing follows automatically
+  over the next scrub/GC cycles.
+- **`node remove id`**: the node leaves the membership but **stays up
   during the drain** — it keeps serving reads while the others
   re-replicate its share. You shut it down afterwards.
-- In discovery mode, `cluster-add` is automatic (auto-join, see
-  [Identity and discovery](/identity-and-discovery/)).
 
-Sequence measured for real: 3 nodes at 16/16/16 shards → `cluster-add` of a
-4th → 12/12/12/12 within a few cycles → `cluster-remove` of the 3rd →
+Sequence measured for real: 3 nodes at 16/16/16 shards → `node add` of a
+4th → 12/12/12/12 within a few cycles → `node remove` of the 3rd →
 16/16/16 on the survivors → the removed node shut down → file downloaded
 again, intact.
 

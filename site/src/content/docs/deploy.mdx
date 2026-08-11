@@ -129,8 +129,7 @@ nauka --data-dir ./n3 --keys ./nauka-keys serve --listen 0.0.0.0:7315 --http 0.0
 ```
 
 Use `7311, 7313, 7315`, never `7311, 7312, 7313` — the second node would bind
-the first one's consensus port. This failure used to be silent; `cluster-init`
-now pre-flights both planes and checks which node id answers.
+the first one's consensus port.
 
 ## How many nodes do you need?
 
@@ -219,7 +218,7 @@ error.
   off-cluster, before you need to. Backing up each node's
   `/var/lib/nauka/node.key` is worthwhile too: a reinstalled node without it
   takes on a new identity, and the old one has to be retired with
-  `nauka cluster-remove`.
+  `nauka node remove`.
 </Aside>
 
 ## Verifying it works
@@ -227,12 +226,12 @@ error.
 ### Ask a node for the cluster state
 
 ```bash
-nauka --keys /etc/nauka-keys cluster-metrics --peer 10.0.0.1:7311
+nauka status --api http://10.0.0.1:8080
 ```
 
 ```
-node 1 — leader: Some(1), applied log: Some(LogId { index: 42, ... })
-  member 1 @ 10.0.0.1:7311 — capacity 480.0 GB
+cluster — 3 nodes, 3 alive · 12 files, 4.20 GiB stored · 1.41 TiB capacity
+  ● 10.0.0.1:7311  leader  480.00 GiB  5140831482304991211
   member 2 @ 10.0.0.2:7311 — capacity 480.0 GB
   member 3 @ 10.0.0.3:7311 — capacity 960.0 GB
 ```
@@ -319,7 +318,8 @@ To remove a node, drain it first — it keeps serving reads while the others
 re-replicate its share:
 
 ```bash
-nauka --keys /etc/nauka-keys cluster-remove 5140831482304991211 --peers 10.0.0.1:7311
+# on any member (the node ids are in `nauka status`):
+nauka node remove 5140831482304991211
 # wait for the scrub reports to settle, then shut the machine down
 ```
 

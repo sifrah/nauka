@@ -85,8 +85,8 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
 6. **A port collision can be silent.** Node 2 was dying at bind time while
    its traffic was absorbed by node 1's consensus plane (which also served
    the data protocol). Two safeguards: the consensus plane serves ONLY
-   Raft, and `cluster-init` pre-flights both planes and verifies which
-   node-id answers.
+   Raft, and co-hosted nodes must space their `--listen` ports by at
+   least 2 — the collision fails loudly at bind time instead.
 7. **With no timeout and no memory of failure, one dead node blocks
    everything.** The API download retried a connection to the vanished node
    for every single shard. Rule: timeouts everywhere (3 s connect, 20 s
