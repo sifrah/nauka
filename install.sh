@@ -7,6 +7,10 @@
 #   VERSION       version to install (default: latest release)
 #   INSTALL_DIR   where the binary goes (default: /usr/local/bin)
 #   NO_SUDO       set to 1 to never escalate; falls back to ~/.local/bin
+#   NAUKA_NO_INIT set to 1 to only install the binary — on a systemd Linux
+#                 run as root, the installer otherwise finishes the job:
+#                 `nauka init` founds a cluster on this machine, managed by
+#                 systemd (started now, back after every reboot)
 
 set -eu
 
@@ -139,12 +143,30 @@ main() {
         *) warn "${INSTALL_DIR} is not in your PATH — add it to your shell profile" ;;
     esac
 
+    # A machine that already runs the service keeps running it: the new
+    # binary is picked up on the next restart, nothing else to redo.
+    if [ -f /etc/systemd/system/nauka.service ]; then
+        printf "\nThis machine already runs a nauka service. Pick up the new binary with:\n"
+        printf "  systemctl restart nauka\n"
+        return
+    fi
+
+    # On a systemd Linux run as root, finish the job: found a cluster on
+    # this machine, systemd-managed — started now, back after every reboot.
+    # NAUKA_NO_INIT=1 keeps the installer to the binary alone.
+    if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ] \
+        && [ -d /run/systemd/system ] && [ "${NAUKA_NO_INIT:-0}" != "1" ]; then
+        printf "\n"
+        info "founding a cluster on this machine (set NAUKA_NO_INIT=1 to skip)"
+        "${INSTALL_DIR}/${BINARY}" init </dev/null
+        return
+    fi
+
     printf "\nStart a cluster:\n"
-    printf "  ${DIM}# once, on your machine${NC}\n"
-    printf "  %s token\n\n" "$BINARY"
-    printf "  ${DIM}# then on every machine, the same command${NC}\n"
-    printf "  NAUKA_TOKEN=<token> %s serve\n\n" "$BINARY"
-    printf "The web interface is built in, on http://localhost:8080\n"
+    printf "  ${DIM}# first machine, as root — founds the cluster, systemd-managed${NC}\n"
+    printf "  sudo %s init\n\n" "$BINARY"
+    printf "  ${DIM}# grow it from that machine — provisions each target over SSH${NC}\n"
+    printf "  %s node add <ip>:7311\n\n" "$BINARY"
     printf "Docs: https://getnauka.com\n"
 }
 

@@ -13,10 +13,10 @@ continuously. Membership is managed explicitly from the CLI — no central
 server, no side infrastructure, no discovery layer to depend on.
 
 ```bash
-# On the first machine — founds a single-node cluster:
-NAUKA_TOKEN=$(nauka token) nauka serve --advertise <ip>:7311
+# First machine — installs nauka and founds a systemd-managed cluster:
+curl -sSfL https://sh.getnauka.com | sh
 
-# Grow it from any member — provisions the target over SSH and joins it:
+# Grow it from that machine — provisions the target over SSH and joins it:
 nauka node add <new-ip>:7311
 ```
 
@@ -57,6 +57,21 @@ sampling.
 
 ```bash
 curl -sSfL https://sh.getnauka.com | sh     # or a .deb / .rpm from the releases
+```
+
+On a systemd Linux run as root, the installer finishes the job: `nauka init`
+creates a dedicated user, generates the cluster token, and enables a hardened
+systemd service — the node starts immediately, founds a single-node cluster,
+and comes back after every reboot. Anywhere else (laptop, non-root, no
+systemd) only the binary is installed; run `sudo nauka init` yourself when
+ready, or set `NAUKA_NO_INIT=1` to keep the installer to the binary alone.
+
+The service is configured in `/etc/nauka/nauka.env`, stores under
+`/var/lib/nauka`, and logs to `journalctl -u nauka`. To run a node by hand
+instead — no systemd, a terminal in the foreground:
+
+```bash
+NAUKA_TOKEN=$(nauka token) nauka serve --advertise <ip>:7311
 ```
 
 From source:

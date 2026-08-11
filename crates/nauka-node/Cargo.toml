@@ -70,8 +70,8 @@ copyright = "Nauka contributors, AGPL-3.0"
 license-file = ["../../LICENSE", "0"]
 extended-description = """
 Nauka splits every file into Reed-Solomon shards scattered across the nodes \
-of a cluster and repairs itself continuously. Nodes find each other on the \
-BitTorrent DHT with no configuration."""
+of a cluster and repairs itself continuously. Membership is explicit: the \
+first node founds the cluster, `nauka node add` grows it."""
 section = "utils"
 priority = "optional"
 assets = [
