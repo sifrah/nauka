@@ -836,7 +836,7 @@ impl S3 for NaukaS3 {
             let spool_path = self.state.tmp_dir.join(format!("s3-{}", uuid_like()));
             // No spool in encoded-ack mode — see the native door for why.
             let spool_bound = 0;
-            let (tx, rx) = crate::ingest::channel(
+            let (mut tx, rx) = crate::ingest::channel(
                 &self.state.ingest_pool,
                 crate::api::INGEST_RAM_WANT,
                 spool_path,

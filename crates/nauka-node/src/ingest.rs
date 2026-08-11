@@ -241,7 +241,7 @@ impl IngestWriter {
     /// Append a chunk. RAM while the window allows, spool past it; waits
     /// only when the spool itself is at its bound — the ultimate
     /// backpressure, deliberately surfaced to the producer.
-    pub async fn push(&self, chunk: Bytes) -> Result<()> {
+    pub async fn push(&mut self, chunk: Bytes) -> Result<()> {
         if chunk.is_empty() {
             return Ok(());
         }
@@ -257,18 +257,19 @@ impl IngestWriter {
                     return Ok(());
                 }
                 if inner.spool_pending + (chunk.len() as u64) <= self.shared.spool_bound {
-                    // Reserve the range under the lock, carry it out, write
-                    // outside it. The offset must leave THIS critical
-                    // section: re-deriving it from the cursor after
-                    // re-locking would race a concurrent push.
+                    // Reserve the range under the lock but do NOT publish
+                    // the segment yet: the moment it is visible in the
+                    // queue, a consumer woken by an earlier notify may
+                    // read the file range — and the bytes are not there
+                    // until the blocking write below completes. (Caught by
+                    // CI: the Linux scheduler interleaves exactly there.)
+                    // Publication happens after the write, which stays
+                    // ordered because `push` takes &mut self — one
+                    // producer, one reservation in flight.
                     let offset = inner.spool_write_off;
                     inner.spool_write_off += chunk.len() as u64;
                     inner.spool_pending += chunk.len() as u64;
                     inner.spilled_total += chunk.len() as u64;
-                    inner.segs.push_back(Seg::Spool {
-                        offset,
-                        len: chunk.len() as u64,
-                    });
                     Some((offset, chunk.clone()))
                 } else {
                     None
@@ -278,6 +279,7 @@ impl IngestWriter {
                 Some((off, bytes)) => {
                     // Sequential append — the one thing disks do best.
                     let this = self.shared.clone();
+                    let len = bytes.len() as u64;
                     tokio::task::spawn_blocking(move || {
                         this.with_spool(|f| {
                             f.seek(SeekFrom::Start(off))?;
@@ -286,6 +288,11 @@ impl IngestWriter {
                     })
                     .await
                     .context("spool write task")??;
+                    // Only now is the range readable: publish it.
+                    {
+                        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        inner.segs.push_back(Seg::Spool { offset: off, len });
+                    }
                     self.shared.readable.notify_one();
                     return Ok(());
                 }
@@ -525,9 +532,10 @@ mod tests {
 
     async fn roundtrip(ram_window: u64, total: usize, read_size: usize, name: &str) {
         let pool = RamPool::with_capacity(ram_window);
-        let (tx, mut rx) = channel(&pool, ram_window, tmp(name), u64::MAX);
+        let (mut tx, mut rx) = channel(&pool, ram_window, tmp(name), u64::MAX);
         let (chunks, want_hash) = make_chunks(total, ram_window ^ total as u64);
         let producer = tokio::spawn(async move {
+            let mut tx = tx;
             for c in chunks {
                 tx.push(c).await.unwrap();
             }
@@ -553,7 +561,7 @@ mod tests {
         // Window bigger than the stream: the spool must never be created.
         let pool = RamPool::with_capacity(64 << 20);
         let path = tmp("ram-only");
-        let (tx, mut rx) = channel(&pool, 64 << 20, path.clone(), u64::MAX);
+        let (mut tx, mut rx) = channel(&pool, 64 << 20, path.clone(), u64::MAX);
         let (chunks, want) = make_chunks(4 << 20, 7);
         for c in chunks {
             tx.push(c).await.unwrap();
@@ -591,7 +599,7 @@ mod tests {
         let _hog = pool.acquire(1 << 20);
         // Pool is dry: this channel gets no RAM at all and must still move
         // bytes correctly through the spool.
-        let (tx, mut rx) = channel(&pool, 32 << 20, tmp("dry"), u64::MAX);
+        let (mut tx, mut rx) = channel(&pool, 32 << 20, tmp("dry"), u64::MAX);
         assert_eq!(tx.shared.ram_window, 0);
         tx.push(Bytes::from(vec![42u8; 100_000])).await.unwrap();
         tx.finish();
@@ -620,7 +628,7 @@ mod tests {
         let pool = RamPool::with_capacity(0);
         // No RAM, spool bound = 1 chunk: the second push must wait until
         // the consumer drains the first.
-        let (tx, mut rx) = channel(&pool, 0, tmp("backpressure"), 100_000);
+        let (mut tx, mut rx) = channel(&pool, 0, tmp("backpressure"), 100_000);
         tx.push(Bytes::from(vec![1u8; 100_000])).await.unwrap();
         let push2 = {
             let waited = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -648,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn vanished_producer_is_an_error_not_eof() {
         let pool = RamPool::with_capacity(1 << 20);
-        let (tx, mut rx) = channel(&pool, 1 << 20, tmp("abort"), u64::MAX);
+        let (mut tx, mut rx) = channel(&pool, 1 << 20, tmp("abort"), u64::MAX);
         tx.push(Bytes::from_static(b"partial")).await.unwrap();
         drop(tx); // no finish(): the client hung up
         let got = rx.next(7).await.unwrap();
@@ -664,7 +672,7 @@ mod tests {
     async fn spool_file_is_removed_on_drop() {
         let pool = RamPool::with_capacity(0);
         let path = tmp("cleanup");
-        let (tx, rx) = channel(&pool, 0, path.clone(), u64::MAX);
+        let (mut tx, rx) = channel(&pool, 0, path.clone(), u64::MAX);
         tx.push(Bytes::from(vec![9u8; 10_000])).await.unwrap();
         tx.finish();
         assert!(path.exists(), "spill created the file");

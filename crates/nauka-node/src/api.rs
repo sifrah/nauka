@@ -388,7 +388,7 @@ async fn upload(
     // exactly the spec's hot-path invariant. The spool is the local-ack
     // mode's tool, where an early fsync is the whole point.
     let spool_bound = 0;
-    let (tx, rx) =
+    let (mut tx, rx) =
         crate::ingest::channel(&state.ingest_pool, INGEST_RAM_WANT, spool_path, spool_bound);
     let dispatch = tokio::spawn(dispatch_stream(
         state.clone(),
