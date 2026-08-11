@@ -706,6 +706,89 @@ pub(crate) fn staged_path(state: &Arc<ApiState>, hash: &str) -> PathBuf {
     state.tmp_dir.join(format!("{STAGED_PREFIX}{hash}.bin"))
 }
 
+/// Length of the staged copy this node holds for `hash`, if any.
+pub(crate) async fn staged_len(state: &Arc<ApiState>, hash: &str) -> Option<u64> {
+    tokio::fs::metadata(staged_path(state, hash))
+        .await
+        .ok()
+        .map(|m| m.len())
+}
+
+/// Bytes `[start, end]` of a locally-staged upload.
+///
+/// A locally-acked object is readable from the moment it is acked, because
+/// the bytes are right here: local disk, no erasure decode, no cluster
+/// round-trip — strictly faster than the dispersed read that replaces it.
+/// Without this, the drain window would be a window of 404s on objects the
+/// registry already acknowledges, which is the one thing the ack promised
+/// would not happen.
+pub(crate) async fn staged_range(
+    state: &Arc<ApiState>,
+    hash: &str,
+    start: u64,
+    end: u64,
+) -> Option<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let path = staged_path(state, hash);
+    let len = tokio::fs::metadata(&path).await.ok()?.len();
+    if start >= len {
+        return None;
+    }
+    let end = end.min(len.saturating_sub(1));
+    let want = end.saturating_sub(start).saturating_add(1) as usize;
+    let mut f = tokio::fs::File::open(&path).await.ok()?;
+    f.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    let mut buf = vec![0u8; want];
+    f.read_exact(&mut buf).await.ok()?;
+    metrics::counter!("nauka_staged_reads_total").increment(1);
+    Some(buf)
+}
+
+/// Serves a staged upload over the native door, ranges included.
+///
+/// Deliberately plain: no erasure decode, no cluster fetch, just the file
+/// this node fsynced before it answered 200.
+async fn serve_staged(
+    state: &Arc<ApiState>,
+    hash: &str,
+    len: u64,
+    headers: &axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        len,
+    );
+    if headers.contains_key(header::RANGE) && range.is_none() {
+        return Ok((
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+        )
+            .into_response());
+    }
+    let (start, end) = range.unwrap_or((0, len.saturating_sub(1)));
+    let Some(bytes) = staged_range(state, hash, start, end).await else {
+        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
+    };
+    state.egress.add(bytes.len() as u64);
+    let mut resp = (
+        if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        },
+        bytes,
+    )
+        .into_response();
+    let h = resp.headers_mut();
+    h.insert(header::ACCEPT_RANGES, "bytes".parse().expect("static"));
+    if range.is_some() {
+        if let Ok(v) = format!("bytes {start}-{end}/{len}").parse() {
+            h.insert(header::CONTENT_RANGE, v);
+        }
+    }
+    Ok(resp)
+}
+
 /// Whether a new local-ack upload may be admitted.
 pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
     state
@@ -725,9 +808,15 @@ pub(crate) fn spawn_staged_drain(
     size: u64,
     name: Option<String>,
 ) {
-    state
+    let now = state
         .staged_bytes
-        .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
+        + size;
+    // Published here rather than only on the maintenance tick: the window
+    // is often shorter than the tick interval, so a 30 s gauge reads 0
+    // through the whole of it — telling an operator nothing is staged at
+    // exactly the moment something is.
+    metrics::gauge!("nauka_staged_bytes").set(now as f64);
     metrics::counter!("nauka_local_ack_uploads_total").increment(1);
     tokio::spawn(async move {
         match dispatch_file(&state, &path, name, None).await {
@@ -751,9 +840,11 @@ pub(crate) fn spawn_staged_drain(
                 metrics::counter!("nauka_local_ack_drain_failures_total").increment(1);
             }
         }
-        state
+        let left = state
             .staged_bytes
-            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(size);
+        metrics::gauge!("nauka_staged_bytes").set(left as f64);
     });
 }
 
@@ -1024,7 +1115,12 @@ async fn download(
         Ok(m) => m,
         Err(_) => match state.app.app_state().manifests.get(&hash) {
             Some(m) => m.clone(),
-            None => return Ok((StatusCode::NOT_FOUND, "unknown file").into_response()),
+            // Same fallback as the S3 door: a locally-acked upload still
+            // dispersing is readable from its staged copy on this disk.
+            None => match staged_len(&state, &hash).await {
+                Some(len) => return serve_staged(&state, &hash, len, &headers).await,
+                None => return Ok((StatusCode::NOT_FOUND, "unknown file").into_response()),
+            },
         },
     };
 

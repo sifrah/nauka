@@ -120,6 +120,14 @@ fn describe_node() {
         "nauka_write_shards_undelivered_total",
         "Shards that could not be delivered during uploads — the repair debt handed to the scrubber."
     );
+    metrics::describe_gauge!(
+        "nauka_staged_bytes",
+        "Bytes of locally-acked uploads not yet dispersed — the live size of the local-ack window. Past a cap, new uploads fall back to full dispersal."
+    );
+    metrics::describe_counter!(
+        "nauka_staged_reads_total",
+        "Reads served straight from a staged copy while its upload was still dispersing: local disk, no erasure decode, no cluster round-trip."
+    );
     metrics::describe_counter!(
         "nauka_local_ack_uploads_total",
         "Uploads acked after a local fsync, before cluster dispersal. Each one opens a window where the object lives on this node alone."

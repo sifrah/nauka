@@ -735,6 +735,7 @@ async fn main() -> Result<()> {
                 let health_bg = health.clone();
                 let meter_bg = api_state.egress.clone();
                 let cache_bg = api_state.cache.clone();
+                let staged_bg = api_state.staged_bytes.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
@@ -743,6 +744,11 @@ async fn main() -> Result<()> {
                     let mut my_coord = nauka_cluster::vivaldi::Coord::default();
                     loop {
                         ticker.tick().await;
+                        // Undispersed locally-acked bytes: the live size of
+                        // the local-ack window, and what the backlog cap
+                        // acts on.
+                        metrics::gauge!("nauka_staged_bytes")
+                            .set(staged_bg.load(std::sync::atomic::Ordering::Relaxed) as f64);
                         // Timed as a whole: if the pass outlasts the scrub
                         // interval, the ticker silently falls behind and
                         // the cluster heals less often than the operator

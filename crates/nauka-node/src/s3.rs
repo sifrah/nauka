@@ -2374,40 +2374,59 @@ impl S3 for NaukaS3 {
         let body = match &v.content {
             None => StreamingBlob::from(Body::from(Vec::<u8>::new())),
             Some(hash) => {
-                let manifest = self
-                    .state
-                    .app
-                    .app_state()
-                    .manifests
-                    .get(hash)
-                    .cloned()
-                    .ok_or_else(|| s3_error!(NoSuchKey))?;
-                match (&customer_key, &sse_info) {
-                    (Some(key), Some(info)) => {
-                        // The stored bytes are ciphertext: reconstruct all
-                        // of it, decrypt stream by stream, then serve the
-                        // requested window of the plaintext.
-                        let ct = reconstruct_range(
-                            &self.state,
-                            &manifest,
-                            0,
-                            manifest.file_size.saturating_sub(1),
-                        )
-                        .await
-                        .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
-                        let plain = decrypt_segments(key, &ct, &info.segments)?;
-                        let window = plain
-                            .get(start as usize..=(end as usize).min(plain.len().saturating_sub(1)))
-                            .unwrap_or(&[])
-                            .to_vec();
-                        StreamingBlob::from(Body::from(window))
+                let manifest = self.state.app.app_state().manifests.get(hash).cloned();
+                match manifest {
+                    // No manifest yet: a locally-acked upload still
+                    // dispersing keeps its bytes on this node's own disk.
+                    // Serving them is strictly faster than the dispersed
+                    // read that will replace it, and it is what makes the
+                    // ack's promise true — without it the drain window is
+                    // a window of 404s on objects the registry already
+                    // acknowledges. Never for SSE-C: that path never
+                    // stages, so a staged file cannot exist for one, and
+                    // serving raw bytes as if it did would hand out
+                    // unchecked content.
+                    None => {
+                        let staged = if customer_key.is_none() {
+                            crate::api::staged_range(&self.state, hash, start, end).await
+                        } else {
+                            None
+                        };
+                        match staged {
+                            Some(bytes) => StreamingBlob::from(Body::from(bytes)),
+                            None => return Err(s3_error!(NoSuchKey)),
+                        }
                     }
-                    _ => {
-                        let bytes = reconstruct_range(&self.state, &manifest, start, end)
+                    Some(manifest) => match (&customer_key, &sse_info) {
+                        (Some(key), Some(info)) => {
+                            // The stored bytes are ciphertext: reconstruct all
+                            // of it, decrypt stream by stream, then serve the
+                            // requested window of the plaintext.
+                            let ct = reconstruct_range(
+                                &self.state,
+                                &manifest,
+                                0,
+                                manifest.file_size.saturating_sub(1),
+                            )
                             .await
                             .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
-                        StreamingBlob::from(Body::from(bytes))
-                    }
+                            let plain = decrypt_segments(key, &ct, &info.segments)?;
+                            let window = plain
+                                .get(
+                                    start as usize
+                                        ..=(end as usize).min(plain.len().saturating_sub(1)),
+                                )
+                                .unwrap_or(&[])
+                                .to_vec();
+                            StreamingBlob::from(Body::from(window))
+                        }
+                        _ => {
+                            let bytes = reconstruct_range(&self.state, &manifest, start, end)
+                                .await
+                                .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+                            StreamingBlob::from(Body::from(bytes))
+                        }
+                    },
                 }
             }
         };
