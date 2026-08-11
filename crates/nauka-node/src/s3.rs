@@ -120,6 +120,21 @@ impl NaukaS3 {
         }
     }
 
+    /// Whether a bucket opted into local-ack uploads, via the standard
+    /// bucket tag `nauka:ack=local` (PutBucketTagging — replicated with
+    /// the bucket, no schema of our own). Anything else, including no
+    /// bucket at all, is the default `encoded`: full 4+2 dispersal before
+    /// the 200.
+    fn bucket_wants_local_ack(&self, bucket: &str) -> bool {
+        self.state
+            .app
+            .app_state()
+            .s3
+            .buckets
+            .get(bucket)
+            .is_some_and(|b| b.tags.get("nauka:ack").map(String::as_str) == Some("local"))
+    }
+
     fn require_bucket(&self, name: &str) -> S3Result<nauka_s3::Bucket> {
         self.state
             .app
