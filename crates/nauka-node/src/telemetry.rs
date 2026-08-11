@@ -121,6 +121,14 @@ fn describe_node() {
         "Shards that could not be delivered during uploads — the repair debt handed to the scrubber."
     );
     metrics::describe_counter!(
+        "nauka_local_ack_uploads_total",
+        "Uploads acked after a local fsync, before cluster dispersal. Each one opens a window where the object lives on this node alone."
+    );
+    metrics::describe_counter!(
+        "nauka_local_ack_drain_failures_total",
+        "Locally-acked uploads whose background dispersal failed. The staged copy stays on disk and the next restart retries it; a climbing counter means objects are sitting at single-node redundancy."
+    );
+    metrics::describe_counter!(
         "nauka_shard_send_retries_total",
         "Retries while sending shards to peers. Climbing retries flag a sick peer well before the liveness map declares it dead."
     );

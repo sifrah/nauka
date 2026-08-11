@@ -839,6 +839,60 @@ impl S3 for NaukaS3 {
                 Some(manifest.file_hash)
             };
             (content, size, md5, checksums)
+        } else if self.bucket_wants_local_ack(&input.bucket)
+            && crate::api::staged_window_open(&self.state)
+        {
+            // Local-ack: the body is written ONCE, fsynced, and the 200
+            // goes out — dispersal happens after. That is the whole trade:
+            // one payload write before the ack instead of the encoded
+            // path's 1.5x, at the price of a window where this object
+            // lives on one node.
+            //
+            // The window is deliberately short and already half-spent:
+            // nothing else here is slower than the client. It is bounded
+            // in two ways — by `staged_window_open` above, which pushes
+            // new uploads back to `encoded` once too much is undispersed,
+            // and by the drain itself, which starts immediately.
+            //
+            // Read-after-write survives because the object entry commits
+            // BEFORE the ack with its final content hash: BLAKE3 of the
+            // body is exactly the file hash the dispatcher will produce,
+            // so the registry never points at a name that will not exist.
+            let staged = crate::api::staged_path(&self.state, "pending");
+            let (size, blake, md5) = write_body_durable(input.body.take(), &staged, &mut hasher)
+                .await
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&staged);
+                    s3_error!(InternalError, "{e:#}")
+                })?;
+            let checksums = match verify_checksums(&input, hasher.finalize()) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&staged).await;
+                    return Err(e);
+                }
+            };
+            let content = if size == 0 {
+                let _ = tokio::fs::remove_file(&staged).await;
+                None
+            } else {
+                let file_hash = blake.finalize().to_hex().to_string();
+                // Name the staged file after its content: that is all a
+                // restart needs to find it and finish the job.
+                let final_path = crate::api::staged_path(&self.state, &file_hash);
+                if tokio::fs::rename(&staged, &final_path).await.is_err() {
+                    let _ = tokio::fs::remove_file(&staged).await;
+                    return Err(s3_error!(InternalError, "staging the upload"));
+                }
+                crate::api::spawn_staged_drain(
+                    self.state.clone(),
+                    final_path,
+                    size,
+                    Some(input.key.clone()),
+                );
+                Some(file_hash)
+            };
+            (content, size, md5, checksums)
         } else {
             // The streaming path: the body feeds the elastic buffer while
             // the encoder drains it concurrently — encoding starts on the
@@ -3372,6 +3426,23 @@ impl S3 for NaukaS3 {
 }
 
 /// Streams a request body to `path`, returning its size and both digests.
+/// `write_body`, plus a real fsync before returning.
+///
+/// The local-ack mode's entire defensibility rests on this: the 200 says
+/// "these bytes survive a power cut on this node", and at that moment
+/// nothing else in the flow has written them anywhere durable. Without the
+/// fsync only the `encoded` policy is defensible.
+async fn write_body_durable(
+    body: Option<StreamingBlob>,
+    path: &std::path::Path,
+    checksums: &mut s3s::checksum::ChecksumHasher,
+) -> anyhow::Result<(u64, blake3::Hasher, [u8; 16])> {
+    let out = write_body(body, path, checksums).await?;
+    let file = tokio::fs::File::open(path).await?;
+    file.sync_all().await?;
+    Ok(out)
+}
+
 async fn write_body(
     body: Option<StreamingBlob>,
     path: &std::path::Path,

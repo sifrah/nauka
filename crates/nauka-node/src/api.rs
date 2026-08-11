@@ -46,6 +46,9 @@ pub struct ApiState {
     /// startup so concurrent uploads share a fixed fraction of the machine
     /// instead of racing for "what is left".
     pub ingest_pool: Arc<crate::ingest::RamPool>,
+    /// Bytes of locally-acked uploads not yet dispersed. Bounds the
+    /// local-ack window: past a cap, uploads pay full dispersal again.
+    pub staged_bytes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ApiState {
@@ -683,6 +686,114 @@ pub(crate) const COMMIT_TIMEOUT: &str = "commit_timeout";
 /// absorb encode-and-store hiccups without the spool; small enough that a
 /// dry pool is a degradation, not a cliff.
 pub(crate) const INGEST_RAM_WANT: u64 = 48 << 20;
+
+/// Prefix of a locally-acked upload waiting to be dispersed. The content
+/// hash follows, which is the whole recovery index: a restart lists these
+/// and asks the registry which ones still lack a manifest.
+pub(crate) const STAGED_PREFIX: &str = "staged-";
+
+/// How many undispersed bytes this node tolerates before local-ack
+/// uploads fall back to `encoded`.
+///
+/// The mode's premise is a SHORT window of single-node residency. Let the
+/// backlog grow without bound — a stalled cluster, peers gone — and the
+/// premise quietly becomes false while clients keep being told 200. The
+/// cap is what keeps the promise honest; past it, uploads simply pay the
+/// full dispersal again.
+const STAGED_BACKLOG_MAX: u64 = 4 << 30;
+
+pub(crate) fn staged_path(state: &Arc<ApiState>, hash: &str) -> PathBuf {
+    state.tmp_dir.join(format!("{STAGED_PREFIX}{hash}.bin"))
+}
+
+/// Whether a new local-ack upload may be admitted.
+pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
+    state
+        .staged_bytes
+        .load(std::sync::atomic::Ordering::Relaxed)
+        < STAGED_BACKLOG_MAX
+}
+
+/// Disperse a staged upload in the background, then drop the staged copy.
+///
+/// Failure here is not silent data loss: the staged file stays on disk and
+/// its content hash is already in the registry, so the next restart's
+/// recovery sweep picks it up again.
+pub(crate) fn spawn_staged_drain(
+    state: Arc<ApiState>,
+    path: PathBuf,
+    size: u64,
+    name: Option<String>,
+) {
+    state
+        .staged_bytes
+        .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+    metrics::counter!("nauka_local_ack_uploads_total").increment(1);
+    tokio::spawn(async move {
+        match dispatch_file(&state, &path, name, None).await {
+            Ok((manifest, degraded)) => {
+                tracing::info!(
+                    file = %manifest.file_hash, degraded,
+                    "locally-acked upload dispersed"
+                );
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+            Err(e) => {
+                // Left on disk on purpose: the recovery sweep is the
+                // retry, and the object is unreadable-but-known until it
+                // succeeds — never silently absent.
+                tracing::error!(
+                    path = %path.display(),
+                    "dispersing a locally-acked upload failed, left staged: {}",
+                    match &e { DispatchError::Unavailable(r) => (*r).to_string(),
+                               DispatchError::Failed(e) => format!("{e:#}") }
+                );
+                metrics::counter!("nauka_local_ack_drain_failures_total").increment(1);
+            }
+        }
+        state
+            .staged_bytes
+            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// Finish the dispersal of uploads this node acked but had not dispersed
+/// when it stopped.
+///
+/// The staged file's name IS its content hash, and the registry already
+/// carries that hash: an entry whose manifest is missing is exactly an
+/// interrupted drain, and one whose manifest exists is a drain that
+/// finished before the file could be removed. No extra bookkeeping, no
+/// new garbage collector.
+pub(crate) async fn recover_staged_uploads(state: Arc<ApiState>) {
+    let mut dir = match tokio::fs::read_dir(&state.tmp_dir).await {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let mut resumed = 0usize;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        let Some(hash) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(STAGED_PREFIX))
+            .and_then(|n| n.strip_suffix(".bin"))
+        else {
+            continue;
+        };
+        if state.store.get_manifest(hash).is_ok() {
+            let _ = tokio::fs::remove_file(&path).await;
+            continue;
+        }
+        let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+        tracing::warn!(file = %hash, "resuming a locally-acked upload left undispersed");
+        spawn_staged_drain(state.clone(), path, size, None);
+        resumed += 1;
+    }
+    if resumed > 0 {
+        tracing::warn!(resumed, "resumed locally-acked uploads after restart");
+    }
+}
 
 /// Sends a shard to a peer, reconnecting as needed (idempotent: storage is
 /// content-addressed, so a resend duplicates nothing).

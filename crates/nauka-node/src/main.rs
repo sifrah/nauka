@@ -699,7 +699,11 @@ async fn main() -> Result<()> {
                     // decided now: what uploads may hold in RAM must not
                     // depend on what happens to be free later.
                     ingest_pool: ingest::RamPool::sized_from_system(8),
+                    staged_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 });
+                // Uploads this node acked locally but had not finished
+                // dispersing when it stopped: finish them before serving.
+                tokio::spawn(api::recover_staged_uploads(api_state.clone()));
                 tracing::info!(
                     "upload buffer pool: {} MiB (fixed at startup)",
                     api_state.ingest_pool.capacity() >> 20
