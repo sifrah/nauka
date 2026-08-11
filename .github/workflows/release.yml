@@ -44,18 +44,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: webui/package-lock.json
-
-      # The web interface is compiled into the binary, so it must be built
-      # before cargo runs.
-      - name: Build web interface
-        run: npm ci && npm run build
-        working-directory: webui
-
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p nauka-node
 
