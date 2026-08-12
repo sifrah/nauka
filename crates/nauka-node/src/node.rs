@@ -631,6 +631,8 @@ pub async fn status(api: &str, json: bool) -> Result<()> {
         /// default: a pre-0.6 node does not serve the field yet.
         #[serde(default)]
         id: Option<u64>,
+        #[serde(default)]
+        disabled: bool,
         capacity_bytes: u64,
         is_leader: bool,
         is_self: bool,
@@ -687,10 +689,12 @@ pub async fn status(api: &str, json: bool) -> Result<()> {
         } else {
             style("●").red()
         };
-        let role = if n.is_leader {
-            style("leader").cyan().to_string()
+        let role = if n.disabled {
+            style("draining").yellow().to_string()
+        } else if n.is_leader {
+            style("leader  ").cyan().to_string()
         } else {
-            "      ".to_string()
+            "        ".to_string()
         };
         let id = match n.id {
             Some(id) => id.to_string(),
@@ -744,6 +748,50 @@ pub fn service_data_dir() -> Option<std::path::PathBuf> {
         })
         .unwrap_or_else(|| "/var/lib/nauka".to_string());
     Some(std::path::PathBuf::from(dir))
+}
+
+/// Flip a member's draining state. Disabling starts an automatic,
+/// redundancy-safe evacuation: the node leaves the placement view, the
+/// scrubbers migrate its shards to their new owners, and its own GC
+/// releases each one once the owner has proven possession.
+pub async fn set_disabled(peers: &[SocketAddr], target: SocketAddr, disabled: bool) -> Result<()> {
+    let ui = Ui::new();
+    let verb = if disabled { "disabling" } else { "enabling" };
+    let step = ui.step(&format!("{verb} {target} in the replicated state"));
+    // Refuse a typo'd address outright: draining an addr nobody has is a
+    // silent no-op that reads as success.
+    let members = current_members(peers).await?;
+    if !members.values().any(|a| *a == target.to_string()) {
+        bail!("{target} is not a member of this cluster (addresses: `nauka status`)");
+    }
+    let resp = nauka_raft::write_via_leader(
+        peers,
+        nauka_raft::types::AppCommand::SetNodeDisabled {
+            addr: target.to_string(),
+            disabled,
+        },
+    )
+    .await?;
+    if !resp.ok {
+        bail!("the cluster refused the change");
+    }
+    if disabled {
+        step.done_as(&format!("{target} is draining"));
+        eprintln!(
+            "{}",
+            style(
+                "It stays a member and keeps serving reads while the others take over                  its shards. Watch it empty in `nauka top`; at 0 B, `nauka node remove`                  is instant and safe."
+            )
+            .dim()
+        );
+    } else {
+        step.done_as(&format!("{target} is back in the placement view"));
+        eprintln!(
+            "{}",
+            style("Shards will migrate back toward it over the next scrub passes.").dim()
+        );
+    }
+    Ok(())
 }
 
 pub struct InitOpts {

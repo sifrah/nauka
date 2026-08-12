@@ -56,6 +56,29 @@ unreachable and wedged a live cluster for writes. `nauka status` now flags
 members sharing an address, and `node add` evicts the stale identity
 atomically with the join.
 
+## Draining a machine before you remove it
+
+`node remove` already keeps a node serving while its shards re-replicate,
+so a straight removal is safe. But when you want to retire a machine
+deliberately — decommission a server, move a region — `node disable`
+drains it first, reversibly:
+
+```bash
+nauka node disable 51.15.222.206:7311
+```
+
+The node stays a full member: it still votes, still serves reads, still
+holds its registry. What changes is that it leaves the **placement
+view** — no new shard is ever sent to it, every shard it holds gains a
+new owner elsewhere, the scrubbers migrate them, and its own GC releases
+each one once the new owner has proven possession. Its store drains to
+zero while the cluster never dips below full redundancy. Watch it empty
+in [`nauka top`](/monitoring/) — the row is tagged `draining` — and at
+0 B, `node remove` is instant and truly safe.
+
+Changed your mind? `nauka node enable 51.15.222.206:7311` puts it back
+in the view and shards migrate toward it again. Nothing was lost.
+
 ## Removing a machine
 
 Ids are in `nauka status`. Removal drains rather than amputates:

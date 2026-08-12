@@ -142,6 +142,20 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
     pre-binds every socket before founding anything: a busy port fails
     loudly with nothing written. Never persist a commitment you are not
     yet able to serve.
+13. **The log is bincode; the on-disk format is a contract.** Adding a
+    node-disable feature meant a new `AppCommand` variant and a new
+    `AppState` field. Both were inserted mid-declaration — and the log
+    and snapshots are bincode, which is positional: an enum is its
+    variant INDEX, a struct is its fields in order, and `#[serde(default)]`
+    does nothing on read. On a live cluster whose binary self-updated,
+    every node crash-looped replaying its own log (the shifted variant
+    indices) and reloading its own snapshot (the extra field → EOF).
+    Recovery was a rollback to the binary that wrote the state. The rule
+    the incident bought: state-machine types are **append-only** — new
+    variants and fields go last, forever — and the snapshot loader falls
+    back to the previous shape and upgrades, so one snapshot cycle
+    migrates the format with zero downtime. A regression test now loads
+    a pre-feature snapshot into the current state.
 
 ## Accepted debt
 

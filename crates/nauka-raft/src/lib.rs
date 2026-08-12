@@ -353,10 +353,18 @@ impl RaftApp {
     /// Weighted view of the cluster for placement: membership members with
     /// their declared capacity (default if not declared yet), sorted.
     pub fn weighted_view(&self, default_capacity: u64) -> Vec<(String, u64)> {
-        let capacities = self.app_state().node_capacities;
+        let state = self.app_state();
+        let capacities = state.node_capacities;
+        // A DISABLED (draining) node leaves the placement view while
+        // remaining a full member: every shard it holds gains an owner
+        // elsewhere, the scrubbers migrate them, its own GC releases them
+        // against proofs — and its store drains to zero without the
+        // cluster ever dipping below full redundancy. Replicated state,
+        // so every node computes the same filtered view.
         let mut view: Vec<(String, u64)> = self
             .members()
             .into_values()
+            .filter(|addr| !state.disabled.contains(addr))
             .map(|addr| {
                 let w = capacities.get(&addr).copied().unwrap_or(default_capacity);
                 (addr, w)

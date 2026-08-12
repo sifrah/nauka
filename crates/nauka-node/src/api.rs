@@ -139,6 +139,10 @@ struct NodeStatus {
     capacity_bytes: u64,
     is_leader: bool,
     is_self: bool,
+    /// Draining (`nauka node disable`): still a member, excluded from
+    /// placement while its shards migrate away.
+    #[serde(default)]
+    disabled: bool,
     /// Liveness as the local pinger sees it: false once the peer missed
     /// `MISS_THRESHOLD` probes in a row (~15 s). This is THIS node's view,
     /// not a cluster-wide verdict — a member is still a full member while
@@ -215,6 +219,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         .map(|(id, addr)| NodeStatus {
             is_leader: leader_addr.as_deref() == Some(addr.as_str()),
             is_self: *addr == state.self_id,
+            disabled: app_state.disabled.contains(addr),
             // Nobody pings themselves, so self is never in the map; an
             // unprobed peer reads alive, same rule as `is_alive`.
             is_alive: liveness.get(addr).copied().unwrap_or(true),
@@ -232,6 +237,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
             is_leader: false,
             is_self: true,
             is_alive: true,
+            disabled: false,
             id: Some(state.app.id),
             addr: state.self_id.clone(),
             capacity_bytes: nauka_cluster::placement::DEFAULT_CAPACITY,

@@ -345,6 +345,23 @@ enum NodeCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Drain a node WITHOUT removing it: it stays a member and keeps
+    /// serving reads, but leaves the placement view — the other nodes
+    /// take over its shards (proof-gated), and its store empties. Watch
+    /// it in `nauka top`; when it reads 0 B, `node remove` is instant
+    /// and safe.
+    Disable {
+        /// The member's advertised address (as shown by `nauka status`).
+        target: SocketAddr,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Put a drained (disabled) node back into the placement view.
+    Enable {
+        target: SocketAddr,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
     /// Remove a node from the cluster (by node-id). Its shards are
     /// re-replicated by the others; then it can be shut down.
     Remove {
@@ -1072,7 +1089,17 @@ async fn main() -> Result<()> {
                     let mut declared_capacity: Option<u64> = None;
                     let mut published_egress: Option<(String, u64)> = None;
                     let mut cache_report: Option<(usize, u64, u64, u64)> = None;
-                    let mut my_coord = nauka_cluster::vivaldi::Coord::default();
+                    // Seeded from the PUBLISHED position, never the origin:
+                    // a process restarting at (0,0) reads as a huge drift
+                    // from its own published point, republishes an
+                    // unconverged coordinate, and geo placement re-decides
+                    // ownership — every restart used to cost the cluster a
+                    // rebalance wave (observed live, twice, before the
+                    // cause was found). Starting where the cluster already
+                    // believes we are makes a restart a non-event; a first
+                    // boot has nothing published and starts at the origin
+                    // like before.
+                    let mut my_coord = app.coords().get(&self_id).copied().unwrap_or_default();
                     loop {
                         ticker.tick().await;
                         // Undispersed locally-acked bytes: the live size of
@@ -1502,6 +1529,12 @@ async fn main() -> Result<()> {
             }
             NodeCmd::Remove { node_id, peers } => {
                 node::remove(node::RemoveOpts { node_id, peers }).await?;
+            }
+            NodeCmd::Disable { target, peers } => {
+                node::set_disabled(&peers, target, true).await?;
+            }
+            NodeCmd::Enable { target, peers } => {
+                node::set_disabled(&peers, target, false).await?;
             }
         },
         Cmd::PutRemote {

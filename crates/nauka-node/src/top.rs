@@ -34,6 +34,8 @@ struct ApiNode {
     is_leader: bool,
     #[serde(default)]
     is_alive: bool,
+    #[serde(default)]
+    disabled: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -65,6 +67,7 @@ struct NodeState {
     id: Option<u64>,
     capacity: u64,
     is_leader: bool,
+    disabled: bool,
     alive_per_seed: bool,
     reachable: bool,
     used: Option<u64>,
@@ -232,6 +235,7 @@ async fn poll(app: &mut App) {
         entry.id = n.id;
         entry.capacity = n.capacity_bytes;
         entry.is_leader = n.is_leader;
+        entry.disabled = n.disabled;
         entry.alive_per_seed = n.is_alive;
         match got {
             Some(s) => {
@@ -422,11 +426,14 @@ fn draw_nodes(f: &mut Frame, app: &App, area: Rect) {
         };
         f.render_widget(Paragraph::new(Line::from(dot)), dot_a);
         f.render_widget(Paragraph::new((*addr).clone()).bold(), addr_a);
-        f.render_widget(
-            Paragraph::new(if n.is_leader { "leader" } else { "" })
-                .style(Style::new().fg(Color::Cyan)),
-            role_a,
-        );
+        let (role_txt, role_style) = if n.disabled {
+            ("drain", Style::new().fg(Color::Yellow))
+        } else if n.is_leader {
+            ("leader", Style::new().fg(Color::Cyan))
+        } else {
+            ("", Style::new())
+        };
+        f.render_widget(Paragraph::new(role_txt).style(role_style), role_a);
         f.render_widget(
             Paragraph::new(match n.used {
                 Some(u) => human(u),

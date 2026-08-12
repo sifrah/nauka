@@ -18,7 +18,9 @@ characters, git-style): `nauka get 18445b -o x`.
 |---|---|
 | `init` | turns this machine into the first node: dedicated user, identity in `/etc/nauka`, hardened systemd unit, founds the cluster. Root + systemd only; `--advertise <ip>:7311` to override detection |
 | `node add <ip>:7311` | provisions a machine over SSH and joins it — [convergent](/growing/): blank → joined, member → re-affirmed, replaced → stale identity evicted. `--ssh-user`, `--force` (wipe), `--peers` |
-| `node remove <id>` | drains a member out of the cluster; shut the machine down after the scrubs settle |
+| `node disable <ip:port>` | drains a member WITHOUT removing it: it stays a voter and keeps serving reads, but leaves the placement view — the others take over its shards (proof-gated) and its store empties. Reversible with `node enable`. Watch it in `nauka top`; at 0 B, removal is instant |
+| `node enable <ip:port>` | puts a drained node back into the placement view; shards migrate back over the next scrubs |
+| `node remove <id>` | drops a member from the cluster; after a `disable` drain, instant and safe |
 | `serve` | runs a node in the foreground — what the systemd unit calls. `--listen 0.0.0.0:7311`, `--advertise`, `--join` (wait to be added instead of founding), `--http`, `--metrics`, `--scrub-interval 30`, `--capacity`, [`--egress-quota`, `--cache-size`](/egress-and-cache/). Co-hosted nodes: space `--listen` ports by ≥ 2 |
 | `status` | members, leader, liveness, capacities, stored bytes — plain HTTP, no identity needed. `--api <url>`, `--json` |
 | `top` | the live, full-screen cluster view (htop-style): per-node fill with sparklines, migration rates during a rebalance, the registry one keypress away (`2`, type to filter). Read-only. `--api <url>`, `--interval <s>` |

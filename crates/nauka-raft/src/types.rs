@@ -134,6 +134,21 @@ pub enum AppCommand {
     /// Forgets a multipart upload (completed or aborted); its parts lose
     /// their references and the GC reclaims what nothing else holds.
     DeleteUpload { upload_id: String },
+
+    // ── APPEND-ONLY BELOW ─────────────────────────────────────────────
+    // The log is bincode, which encodes an enum by its VARIANT INDEX.
+    // Inserting a variant anywhere above shifts every later index, so an
+    // old log entry deserializes as the wrong command — a live cluster
+    // whose binary was upgraded then crashes replaying its own log
+    // (learned the hard way). New variants go HERE, at the end, forever.
+    /// Marks a node as DRAINING (disabled=true) or active again. A
+    /// disabled node stays a full member — it votes, serves reads, keeps
+    /// its registry — but leaves the placement view: every shard it holds
+    /// gains a new owner elsewhere, the scrubbers migrate them, and its
+    /// own GC releases each one once the new owner proves possession. Its
+    /// store drains to zero while the cluster never dips below full
+    /// redundancy; `node remove` is then instant and safe.
+    SetNodeDisabled { addr: String, disabled: bool },
 }
 
 /// One node's egress ledger for one calendar month, self-declared and
@@ -176,6 +191,62 @@ pub struct AppState {
     /// The S3 view: buckets, keys, in-flight uploads, credentials.
     #[serde(default)]
     pub s3: nauka_s3::S3State,
+
+    // ── APPEND-ONLY BELOW ─────────────────────────────────────────────
+    // Snapshots are bincode, which is positional and NOT self-describing:
+    // `#[serde(default)]` does nothing on read. An old snapshot has no
+    // bytes for a field added here, so a naive load hits EOF. New fields
+    // go LAST, and the snapshot loader (see `store.rs`) falls back to the
+    // previous shape and upgrades — after one snapshot cycle the state is
+    // all new-format. Never insert above this line.
+    /// Nodes currently draining (see [`AppCommand::SetNodeDisabled`]):
+    /// excluded from placement, still full members. Keyed by advertised
+    /// address.
+    #[serde(default)]
+    pub disabled: std::collections::BTreeSet<String>,
+}
+
+/// The AppState shape BEFORE `disabled` was appended — every field of
+/// [`AppState`] except the trailing additions. An old bincode snapshot
+/// deserializes into this, and [`AppState::from_legacy`] upgrades it.
+/// A new legacy struct is minted each time [`AppState`] grows a trailing
+/// field, capturing the previous shape.
+#[derive(Deserialize)]
+pub struct AppStateLegacyV0 {
+    pub manifests: BTreeMap<String, FileManifest>,
+    #[serde(default)]
+    pub node_capacities: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+    #[serde(default)]
+    pub node_egress: BTreeMap<String, NodeEgress>,
+    #[serde(default)]
+    pub banned: BTreeMap<String, String>,
+    #[serde(default)]
+    pub s3: nauka_s3::S3State,
+}
+
+impl AppState {
+    /// Deserialize a bincode snapshot, tolerating the pre-`disabled`
+    /// format: try the current shape first, fall back to the legacy one
+    /// and fill the new fields with their defaults.
+    pub fn from_snapshot_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
+        match bincode::deserialize::<AppState>(data) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                let v0: AppStateLegacyV0 = bincode::deserialize(data)?;
+                Ok(AppState {
+                    manifests: v0.manifests,
+                    node_capacities: v0.node_capacities,
+                    node_coords: v0.node_coords,
+                    node_egress: v0.node_egress,
+                    banned: v0.banned,
+                    s3: v0.s3,
+                    disabled: Default::default(),
+                })
+            }
+        }
+    }
 }
 
 /// Admin requests addressed to a node (outside the Raft log).
@@ -219,4 +290,88 @@ pub enum AdminResponse {
     Manifests(Vec<String>),
     S3State(Box<nauka_s3::S3State>),
     Err(String),
+}
+
+#[cfg(test)]
+mod snapshot_compat_tests {
+    use super::*;
+
+    // A snapshot written by a PRE-`disabled` binary must load into the
+    // current AppState — the exact failure that crash-looped a live
+    // cluster when the field was first added mid-struct without a fallback.
+    #[test]
+    fn legacy_snapshot_loads_with_disabled_defaulted() {
+        // Serialize the OLD shape (no `disabled` field), as an old binary
+        // would have persisted it.
+        let mut legacy = AppStateLegacyV0 {
+            manifests: BTreeMap::new(),
+            node_capacities: BTreeMap::new(),
+            node_coords: BTreeMap::new(),
+            node_egress: BTreeMap::new(),
+            banned: BTreeMap::new(),
+            s3: Default::default(),
+        };
+        legacy.node_capacities.insert("10.0.0.1:7311".into(), 42);
+        legacy.banned.insert("deadbeef".into(), "report".into());
+        // AppStateLegacyV0 has no Serialize; mint identical bytes from an
+        // AppState carrying only the legacy fields, which is byte-for-byte
+        // what the old binary wrote (disabled is the trailing addition).
+        let old_equiv = AppState {
+            manifests: legacy.manifests.clone(),
+            node_capacities: legacy.node_capacities.clone(),
+            node_coords: legacy.node_coords.clone(),
+            node_egress: legacy.node_egress.clone(),
+            banned: legacy.banned.clone(),
+            s3: legacy.s3.clone(),
+            disabled: Default::default(),
+        };
+        // Truncate the trailing empty-BTreeSet length prefix to simulate a
+        // snapshot that predates the field entirely.
+        let full = bincode::serialize(&old_equiv).unwrap();
+        let no_disabled = bincode::serialize(&legacy_bytes_source(&old_equiv)).unwrap();
+        assert!(
+            no_disabled.len() < full.len(),
+            "legacy bytes must be shorter"
+        );
+
+        let loaded = AppState::from_snapshot_bytes(&no_disabled).unwrap();
+        assert_eq!(loaded.node_capacities.get("10.0.0.1:7311"), Some(&42));
+        assert_eq!(
+            loaded.banned.get("deadbeef").map(String::as_str),
+            Some("report")
+        );
+        assert!(loaded.disabled.is_empty());
+    }
+
+    // A current-shape snapshot round-trips through the tolerant loader.
+    #[test]
+    fn current_snapshot_round_trips() {
+        let mut s = AppState::default();
+        s.disabled.insert("2.2.2.2:7311".into());
+        let bytes = bincode::serialize(&s).unwrap();
+        let back = AppState::from_snapshot_bytes(&bytes).unwrap();
+        assert!(back.disabled.contains("2.2.2.2:7311"));
+    }
+
+    // Helper: a struct with exactly the legacy fields, so its bincode
+    // output is what a pre-`disabled` binary produced.
+    #[derive(serde::Serialize)]
+    struct LegacyBytes<'a> {
+        manifests: &'a BTreeMap<String, FileManifest>,
+        node_capacities: &'a BTreeMap<String, u64>,
+        node_coords: &'a BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+        node_egress: &'a BTreeMap<String, NodeEgress>,
+        banned: &'a BTreeMap<String, String>,
+        s3: &'a nauka_s3::S3State,
+    }
+    fn legacy_bytes_source(s: &AppState) -> LegacyBytes<'_> {
+        LegacyBytes {
+            manifests: &s.manifests,
+            node_capacities: &s.node_capacities,
+            node_coords: &s.node_coords,
+            node_egress: &s.node_egress,
+            banned: &s.banned,
+            s3: &s.s3,
+        }
+    }
 }

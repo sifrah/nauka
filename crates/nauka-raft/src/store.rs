@@ -246,7 +246,7 @@ impl StateMachineStore {
         let mut inner = StateMachineInner::default();
         if let Ok(bytes) = fs::read(&snapshot_path) {
             let stored: StoredSnapshot = bincode::deserialize(&bytes)?;
-            inner.state = bincode::deserialize(&stored.data)?;
+            inner.state = crate::types::AppState::from_snapshot_bytes(&stored.data)?;
             inner.last_applied = stored.meta.last_log_id;
             inner.membership = stored.meta.last_membership.clone();
             inner.snapshot = Some(stored);
@@ -391,6 +391,17 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             }
                             AppCommand::UpdateNodeCoord { addr, coord } => {
                                 inner.state.node_coords.insert(addr, coord);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
+                            AppCommand::SetNodeDisabled { addr, disabled } => {
+                                if disabled {
+                                    inner.state.disabled.insert(addr);
+                                } else {
+                                    inner.state.disabled.remove(&addr);
+                                }
                                 AppResponse {
                                     ok: true,
                                     info: None,
@@ -711,7 +722,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<NodeId>> {
         let data = snapshot.into_inner();
-        let state: AppState = bincode::deserialize(&data)
+        let state: AppState = crate::types::AppState::from_snapshot_bytes(&data)
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), &e))?;
         let stored = StoredSnapshot {
             meta: meta.clone(),
