@@ -36,7 +36,10 @@ Global options: `--data-dir <dir>` (default `./nauka-data`),
 | `keygen --out <dir>` | generates the cluster key (refuses to overwrite) |
 | `node-info` | this node's node-id + fingerprint (requires `--keys`) |
 | `serve` | starts the node (options below) |
-| `put <file>` / `get <hash> -o f` / `verify <hash>` / `list` | local operations (no network) |
+| `list` | the cluster's files via a node's API (`--local` for this machine's own store) |
+| `get <hash> -o f` | local store first, else downloaded from the cluster and BLAKE3-verified |
+| `verify <hash>` | local check, else the cluster serves it and the hash is verified end-to-end |
+| `put <file>` | encode into this machine's LOCAL store (standalone use, no network) |
 | `put-remote <file> --peers a,b,c` | encodes and dispatches from the client machine |
 | `get-remote <hash> --peers a,b,c -o f` | rebuilds from the reachable peers |
 | `init` | founds the first node on this machine, systemd-managed |

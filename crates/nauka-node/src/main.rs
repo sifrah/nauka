@@ -70,16 +70,35 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         parity_shards: usize,
     },
-    /// Rebuild a file from its shards (tolerates losses/corruption).
+    /// Rebuild a file: from this machine's own store if it is there,
+    /// otherwise downloaded from the cluster and BLAKE3-verified locally.
     Get {
         file_hash: String,
         #[arg(short, long)]
         output: PathBuf,
+        /// HTTP API of a cluster node, for files not in the local store.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
     },
-    /// Check that a file is reconstructible and intact.
-    Verify { file_hash: String },
-    /// List stored files.
-    List,
+    /// Check that a file is intact and reconstructible: locally if this
+    /// machine's own store holds it, otherwise by having the cluster
+    /// serve it and verifying the BLAKE3 hash end-to-end.
+    Verify {
+        file_hash: String,
+        /// HTTP API of a cluster node, for files not in the local store.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
+    /// List the cluster's files (hash, size, name). --local lists this
+    /// machine's own store instead.
+    List {
+        /// List the local store (./nauka-data) rather than the cluster.
+        #[arg(long)]
+        local: bool,
+        /// HTTP API of a cluster node.
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+    },
     /// Encrypt a file (AES-256-GCM, local key) then upload it to a node.
     /// Servers see ONLY ciphertext; the printed link carries the key in
     /// its fragment (#…), which is never sent to the server.
@@ -531,61 +550,113 @@ async fn main() -> Result<()> {
                 cfg.parity_shards,
             );
         }
-        Cmd::Get { file_hash, output } => {
-            let store = ShardStore::open(&cli.data_dir)?;
-            // "manifest not found" alone sent operators in circles: this
-            // command reads THIS machine's local store, not the cluster —
-            // a file the same machine serves over HTTP is not here.
-            let data = reconstruct(&store, &file_hash).with_context(|| {
-                format!(
-                    "not in the local store ({}). `get` reads this machine's own store only; \
-                     a file stored by a cluster is served over its API: \
-                     curl -O http://<node>:8080/f/{file_hash}",
-                    cli.data_dir.display()
-                )
-            })?;
-            std::fs::write(&output, &data)?;
-            println!("reconstructed: {} bytes → {}", data.len(), output.display());
+        Cmd::Get {
+            file_hash,
+            output,
+            api,
+        } => {
+            // Local store first — free and offline. Only an EXISTING dir:
+            // opening would create ./nauka-data in the cwd for nothing.
+            if let Some(store) = open_existing_store(&cli.data_dir)? {
+                if let Ok(data) = reconstruct(&store, &file_hash) {
+                    std::fs::write(&output, &data)?;
+                    println!(
+                        "reconstructed from the local store: {} bytes → {}",
+                        data.len(),
+                        output.display()
+                    );
+                    return Ok(());
+                }
+            }
+            let n = cluster_fetch_verified(&api, &file_hash, Some(&output))
+                .await
+                .with_context(|| {
+                    format!(
+                        "neither in the local store ({}) nor served by the node at {api}",
+                        cli.data_dir.display()
+                    )
+                })?;
+            println!(
+                "downloaded from the cluster, BLAKE3 verified: {n} bytes → {}",
+                output.display()
+            );
         }
-        Cmd::Verify { file_hash } => {
-            let store = ShardStore::open(&cli.data_dir)?;
-            let manifest = store.get_manifest(&file_hash).with_context(|| {
-                format!(
-                    "not in the local store ({}). `verify` checks this machine's own store \
-                     only; for a cluster file, download it over the API instead — the \
-                     hash-addressed read verifies integrity by construction",
-                    cli.data_dir.display()
-                )
-            })?;
-            let mut missing = 0usize;
-            let mut total = 0usize;
-            for stripe in &manifest.stripes {
-                for hash in &stripe.shard_hashes {
-                    total += 1;
-                    if store.get_shard(hash).is_err() {
-                        missing += 1;
+        Cmd::Verify { file_hash, api } => {
+            // Local store when it holds the file; otherwise the honest
+            // cluster check — have a node reconstruct and serve it, and
+            // verify the bytes hash back to the requested address. Same
+            // guarantee, exercised over the real read path.
+            let local =
+                open_existing_store(&cli.data_dir)?.filter(|s| s.get_manifest(&file_hash).is_ok());
+            match local {
+                Some(store) => {
+                    let manifest = store.get_manifest(&file_hash)?;
+                    let mut missing = 0usize;
+                    let mut total = 0usize;
+                    for stripe in &manifest.stripes {
+                        for hash in &stripe.shard_hashes {
+                            total += 1;
+                            if store.get_shard(hash).is_err() {
+                                missing += 1;
+                            }
+                        }
+                    }
+                    match reconstruct(&store, &file_hash) {
+                        Ok(_) => println!(
+                            "OK: intact and reconstructible ({missing}/{total} shards unavailable)"
+                        ),
+                        Err(e) => {
+                            bail!("UNRECOVERABLE ({missing}/{total} shards unavailable): {e}")
+                        }
+                    }
+                }
+                None => {
+                    let n = cluster_fetch_verified(&api, &file_hash, None)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "neither in the local store ({}) nor served by the node at {api}",
+                                cli.data_dir.display()
+                            )
+                        })?;
+                    println!(
+                        "OK: the cluster reconstructed and served it intact \
+                         ({n} bytes, BLAKE3 verified end-to-end)"
+                    );
+                }
+            }
+        }
+        Cmd::List { local, api } => {
+            if !local {
+                match cluster_files(&api).await {
+                    Ok(files) => {
+                        println!("cluster via {api} — {} file(s)", files.len());
+                        for f in &files {
+                            println!(
+                                "{}  {:>10}  {}",
+                                f.hash,
+                                indicatif::HumanBytes(f.size).to_string(),
+                                f.name.as_deref().unwrap_or("—")
+                            );
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "# no node answering at {api} ({e}) — listing the local store instead"
+                        );
                     }
                 }
             }
-            match reconstruct(&store, &file_hash) {
-                Ok(_) => println!(
-                    "OK: intact and reconstructible ({missing}/{total} shards unavailable)"
-                ),
-                Err(e) => bail!("UNRECOVERABLE ({missing}/{total} shards unavailable): {e}"),
-            }
-        }
-        Cmd::List => {
-            let store = ShardStore::open(&cli.data_dir)?;
-            // The header keeps the local/cluster split visible: an empty
-            // list on a machine that serves files over HTTP is not a bug,
-            // it is a different store.
-            eprintln!(
-                "# local store {} — a cluster's files: curl http://<node>:8080/api/files",
-                cli.data_dir.display()
-            );
-            for hash in store.list_manifests()? {
-                let m = store.get_manifest(&hash)?;
-                println!("{hash}  {} bytes", m.file_size);
+            match open_existing_store(&cli.data_dir)? {
+                Some(store) => {
+                    eprintln!("# local store {}", cli.data_dir.display());
+                    for hash in store.list_manifests()? {
+                        let m = store.get_manifest(&hash)?;
+                        println!("{hash}  {} bytes", m.file_size);
+                    }
+                }
+                None => eprintln!("# no local store at {}", cli.data_dir.display()),
             }
         }
         Cmd::Serve {
@@ -1543,6 +1614,91 @@ async fn fetch_shard(clients: &[PeerClient], hash: &str) -> Option<Vec<u8>> {
 
 /// Loads the available shards (missing/corrupt ones become `None`) and
 /// lets Reed-Solomon rebuild.
+/// Open the local store only if its directory already exists — opening
+/// unconditionally would scatter a fresh ./nauka-data into whatever cwd
+/// the command happens to run from.
+fn open_existing_store(dir: &std::path::Path) -> Result<Option<ShardStore>> {
+    if dir.exists() {
+        Ok(Some(ShardStore::open(dir)?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ClusterFile {
+    hash: String,
+    size: u64,
+    name: Option<String>,
+}
+
+/// The cluster's registry, as any node's HTTP API reports it.
+async fn cluster_files(api: &str) -> Result<Vec<ClusterFile>> {
+    Ok(reqwest::Client::new()
+        .get(format!("{}/api/files", api.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+/// Stream `/f/<hash>` from a node, recomputing BLAKE3 along the way —
+/// content addressing makes the download self-verifying: bytes that hash
+/// back to the requested address are intact by construction, whatever
+/// happened to them in between. Writes to `out` when given (get), or
+/// just counts and hashes (verify). Returns the byte count.
+async fn cluster_fetch_verified(
+    api: &str,
+    file_hash: &str,
+    out: Option<&std::path::Path>,
+) -> Result<u64> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/f/{file_hash}", api.trim_end_matches('/')))
+        .send()
+        .await
+        .with_context(|| format!("no node answering at {api}"))?
+        .error_for_status()
+        .context("the cluster does not serve this hash")?;
+    let mut hasher = blake3::Hasher::new();
+    let mut file = match out {
+        Some(p) => Some(
+            tokio::fs::File::create(p)
+                .await
+                .with_context(|| format!("creating {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let mut stream = resp.bytes_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading the download stream")?;
+        hasher.update(&chunk);
+        if let Some(f) = &mut file {
+            f.write_all(&chunk).await?;
+        }
+        total += chunk.len() as u64;
+    }
+    if let Some(mut f) = file {
+        f.flush().await?;
+    }
+    let got = hasher.finalize().to_hex().to_string();
+    if got != file_hash {
+        // Never leave bytes on disk under a name they do not hash to.
+        if let Some(p) = out {
+            let _ = std::fs::remove_file(p);
+        }
+        bail!(
+            "integrity check FAILED: the node returned {total} bytes hashing to {got}, \
+             not {file_hash} — do not trust this node's read path"
+        );
+    }
+    Ok(total)
+}
+
 fn reconstruct(store: &ShardStore, file_hash: &str) -> Result<Vec<u8>> {
     let manifest = store.get_manifest(file_hash)?;
     let stripes = manifest
