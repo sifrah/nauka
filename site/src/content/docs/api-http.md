@@ -13,7 +13,9 @@ proxy if you need one, until the accounts/quotas layer lands.
 
 ## `POST /api/upload?name=<name>`
 
-Body: the file's raw bytes (`--data-binary` with curl).
+Body: the file's raw bytes. With curl prefer `-T <file>` (streams from
+disk); `--data-binary @file` buffers the WHOLE file in the client's RAM
+first, which kills large uploads on small machines.
 
 The node buffers the stream to disk (`data-dir/tmp`, BLAKE3 hash computed
 on the fly), encodes stripe by stripe, pushes each shard to its HRW owner
@@ -22,7 +24,7 @@ registry (via the leader). Memory stays bounded to a few stripes whatever
 the file's size.
 
 ```
-curl -X POST --data-binary @video.mp4 \
+curl -X POST -T video.mp4 \
   "http://node1:8080/api/upload?name=video.mp4"
 ```
 

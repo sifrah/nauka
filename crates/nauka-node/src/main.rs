@@ -248,13 +248,15 @@ enum Cmd {
         /// Reason recorded in the registry (report reference…).
         #[arg(long, default_value = "report")]
         reason: String,
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// Cluster members to drive the write through.
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
     /// Lift a ban.
     Unban {
         file_hash: String,
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// Cluster members to drive the write through.
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
     /// Show the cluster as this node sees it: members, leader, health,
@@ -1156,8 +1158,15 @@ async fn main() -> Result<()> {
                         // whose registry is still empty, from wiping all.
                         let live: std::collections::BTreeSet<String> =
                             app.app_state().manifests.keys().cloned().collect();
+                        // Member + leader is not enough: a node that lags
+                        // on the log sees a PARTIAL registry, and files it
+                        // has not applied yet would read as orphans. Zero
+                        // apply lag makes the registry view trustworthy.
+                        let raft_metrics = app.raft.metrics().borrow().clone();
                         let registry_ready = app.members().contains_key(&app.id)
-                            && app.raft.metrics().borrow().current_leader.is_some();
+                            && raft_metrics.current_leader.is_some()
+                            && raft_metrics.last_log_index
+                                == raft_metrics.last_applied.map(|l| l.index);
                         match nauka_cluster::healer::purge_deleted(
                             &store_bg,
                             &live,
@@ -1270,6 +1279,27 @@ async fn main() -> Result<()> {
                             }
                             Ok(_) => {}
                             Err(e) => eprintln!("gc failed: {e}"),
+                        }
+                        // Abandoned ingest spools: a client that dies
+                        // mid-upload leaves its spool file in tmp/
+                        // (observed: 97 MB after one aborted curl). Same
+                        // cadence, same grace as orphan shards.
+                        if let Ok(entries) = std::fs::read_dir(data_dir_bg.join("tmp")) {
+                            for entry in entries.flatten() {
+                                let stale =
+                                    entry.file_name().to_string_lossy().starts_with("ingest-")
+                                        && entry
+                                            .metadata()
+                                            .ok()
+                                            .and_then(|m| m.modified().ok())
+                                            .and_then(|t| t.elapsed().ok())
+                                            .is_some_and(|age| {
+                                                age >= nauka_cluster::healer::ORPHAN_GRACE
+                                            });
+                                if stale {
+                                    let _ = std::fs::remove_file(entry.path());
+                                }
+                            }
                         }
                         // Attestation: do the peers really hold what they
                         // claim? (sampled, negligible cost)

@@ -91,7 +91,6 @@ Global options: `--data-dir <dir>` (default `./nauka-data`),
 |---|---|
 | No NAT traversal (hole punching/relays) | nodes with a public IP or a forwarded port; relays to come |
 | `put-remote`/`get-remote` require explicit `--peers` | go through the HTTP API, or read the addresses from `status` |
-| No DELETE/expiry on the API side; orphan-shard GC not implemented | coming along with registry purging |
 | HTTP API with no authentication and no quotas | reverse proxy in the meantime |
 | Cluster key present on every node | offline certificate issuance to come |
 | Unfair bandwidth sharing between concurrent uploads (large streams dominate) | harmless — fair queuing is in the backlog |

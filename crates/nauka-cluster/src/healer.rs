@@ -157,7 +157,9 @@ pub async fn gc_once_geo(
     let mut report = GcReport::default();
     for shard in store.list_shards()? {
         let Some(shard_owners) = owners.get(&shard) else {
-            // Orphan shard (deregistered file?): out of scope for v1.
+            // Unreferenced by the LOCAL manifests: [`purge_deleted`] owns
+            // that case, keyed on the replicated registry and an age
+            // grace. Rebalancing only moves what a manifest still claims.
             continue;
         };
         if shard_owners.iter().any(|o| o == self_id) {
