@@ -29,7 +29,17 @@ use nauka_transport::PeerClient;
 #[derive(Parser)]
 #[command(
     name = "nauka",
-    about = "Nauka — distributed storage engine (erasure coding, self-healing, zero-config)"
+    version,
+    about = "Nauka — a distributed storage engine that heals itself",
+    long_about = "Nauka — a distributed storage engine that heals itself.\n\
+                  Files are split into Reed-Solomon shards (4+2 by default) spread across\n\
+                  the nodes of a cluster; any 2 shards per stripe can vanish and the file\n\
+                  reads back byte-identical.",
+    after_help = "Quickstart:\n  \
+                  curl -sSfL https://sh.getnauka.com | sh   # first machine: founds a cluster\n  \
+                  nauka node add <ip>:7311                  # grows it from that machine\n  \
+                  nauka status                              # who is in, who is alive\n\n\
+                  Docs: https://getnauka.com"
 )]
 struct Cli {
     /// Data directory of the node.
@@ -95,6 +105,10 @@ enum Cmd {
         /// List the local store (./nauka-data) rather than the cluster.
         #[arg(long)]
         local: bool,
+        /// Print full 64-character hashes (short unique prefixes work
+        /// everywhere a hash is expected).
+        #[arg(long)]
+        full: bool,
         /// HTTP API of a cluster node.
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         api: String,
@@ -266,11 +280,17 @@ enum Cmd {
         /// HTTP API address of any node.
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         api: String,
+        /// Print the raw JSON the node reports, for scripts.
+        #[arg(long)]
+        json: bool,
     },
     /// Add or remove cluster nodes.
     #[command(subcommand)]
     Node(NodeCmd),
     /// Encode a file and dispatch its shards across peers (round-robin).
+    /// Niche: the raw shard path, without the HTTP API — kept for
+    /// air-gapped tooling, hidden from the daily surface.
+    #[command(hide = true)]
     PutRemote {
         file: PathBuf,
         /// Cluster node addresses, e.g. 10.0.0.1:7311,10.0.0.2:7311
@@ -281,7 +301,9 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         parity_shards: usize,
     },
-    /// Rebuild a file by reading its shards from peers.
+    /// Rebuild a file by reading its shards from peers. Niche and hidden,
+    /// like put-remote.
+    #[command(hide = true)]
     GetRemote {
         file_hash: String,
         #[arg(long, value_delimiter = ',', required = true)]
@@ -332,9 +354,12 @@ async fn main() -> Result<()> {
         // Straight to stdout and nothing else: pipeable into a secret
         // store. The reminder goes to stderr.
         println!("{}", nauka_transport::generate_token());
-        eprintln!("# every machine joins with: NAUKA_TOKEN=<token> nauka serve");
         eprintln!(
-            "# anyone holding this token is a member of the cluster — treat it like a password"
+            "# the token IS the cluster: anyone holding it is a member — treat it like a password"
+        );
+        eprintln!("# found the first node:   NAUKA_TOKEN=<token> nauka init");
+        eprintln!(
+            "# (or by hand:            NAUKA_TOKEN=<token> nauka serve --advertise <ip>:7311)"
         );
         return Ok(());
     }
@@ -421,9 +446,16 @@ async fn main() -> Result<()> {
         }
         Cmd::Keygen { out } => {
             nauka_transport::generate_cluster_ca(&out)?;
-            println!("cluster key generated in {}", out.display());
             println!(
-                "  copy it to every node, then: serve --keys {}",
+                "{} cluster key generated in {}",
+                console::style("✓").green().bold(),
+                out.display()
+            );
+            println!(
+                "  key files instead of a token — for deployments that keep material on disk.\n  \
+                 Copy the directory to each machine, then on every node:\n    \
+                 nauka --keys {} serve --advertise <ip>:7311\n  \
+                 (the one-string alternative: `nauka token` + `nauka init`)",
                 out.display()
             );
         }
@@ -547,11 +579,16 @@ async fn main() -> Result<()> {
                 }
             }
             store.put_manifest(&manifest)?;
-            println!("stored: {}", manifest.file_hash);
             println!(
-                "  {} bytes, {} stripes, {} shards ({}+{}), tolerates the loss of {} shards/stripe",
-                manifest.file_size,
+                "{} stored: {}",
+                console::style("✓").green().bold(),
+                manifest.file_hash
+            );
+            println!(
+                "  {} · {} stripe{} · {} shards ({}+{}) — survives the loss of any {} shards/stripe",
+                indicatif::HumanBytes(manifest.file_size),
                 manifest.stripes.len(),
+                if manifest.stripes.len() == 1 { "" } else { "s" },
                 shard_count,
                 cfg.data_shards,
                 cfg.parity_shards,
@@ -565,12 +602,15 @@ async fn main() -> Result<()> {
         } => {
             // Local store first — free and offline. Only an EXISTING dir:
             // opening would create ./nauka-data in the cwd for nothing.
-            if let Some(store) = open_existing_store(&cli.data_dir)? {
-                if let Ok(data) = reconstruct(&store, &file_hash) {
+            let store = open_existing_store(&cli.data_dir)?;
+            let file_hash = resolve_hash(&file_hash, store.as_ref(), &api).await?;
+            if let Some(store) = &store {
+                if let Ok(data) = reconstruct(store, &file_hash) {
                     std::fs::write(&output, &data)?;
                     println!(
-                        "reconstructed from the local store: {} bytes → {}",
-                        data.len(),
+                        "{} reconstructed from the local store: {} → {}",
+                        console::style("✓").green().bold(),
+                        indicatif::HumanBytes(data.len() as u64),
                         output.display()
                     );
                     return Ok(());
@@ -585,7 +625,9 @@ async fn main() -> Result<()> {
                     )
                 })?;
             println!(
-                "downloaded from the cluster, BLAKE3 verified: {n} bytes → {}",
+                "{} downloaded from the cluster, BLAKE3 verified: {} → {}",
+                console::style("✓").green().bold(),
+                indicatif::HumanBytes(n),
                 output.display()
             );
         }
@@ -594,8 +636,9 @@ async fn main() -> Result<()> {
             // cluster check — have a node reconstruct and serve it, and
             // verify the bytes hash back to the requested address. Same
             // guarantee, exercised over the real read path.
-            let local =
-                open_existing_store(&cli.data_dir)?.filter(|s| s.get_manifest(&file_hash).is_ok());
+            let store = open_existing_store(&cli.data_dir)?;
+            let file_hash = resolve_hash(&file_hash, store.as_ref(), &api).await?;
+            let local = store.filter(|s| s.get_manifest(&file_hash).is_ok());
             match local {
                 Some(store) => {
                     let manifest = store.get_manifest(&file_hash)?;
@@ -634,15 +677,33 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::List { local, api } => {
+        Cmd::List { local, full, api } => {
+            // Short hashes by default: 16 characters collide on nothing
+            // human-scale, every command accepts them as prefixes, and
+            // the eye finds the NAME instead of drowning in hex. --full
+            // restores the 64 characters for scripts.
+            let cut = |h: &str| {
+                if full {
+                    h.to_string()
+                } else {
+                    h.chars().take(16).collect()
+                }
+            };
             if !local {
                 match cluster_files(&api).await {
                     Ok(files) => {
-                        println!("cluster via {api} — {} file(s)", files.len());
+                        let total: u64 = files.iter().map(|f| f.size).sum();
+                        println!(
+                            "{} — {} file{}, {}",
+                            console::style("cluster").bold(),
+                            files.len(),
+                            if files.len() == 1 { "" } else { "s" },
+                            indicatif::HumanBytes(total),
+                        );
                         for f in &files {
                             println!(
-                                "{}  {:>10}  {}",
-                                f.hash,
+                                "  {}  {:>10}  {}",
+                                console::style(cut(&f.hash)).dim(),
                                 indicatif::HumanBytes(f.size).to_string(),
                                 f.name.as_deref().unwrap_or("—")
                             );
@@ -661,7 +722,11 @@ async fn main() -> Result<()> {
                     eprintln!("# local store {}", cli.data_dir.display());
                     for hash in store.list_manifests()? {
                         let m = store.get_manifest(&hash)?;
-                        println!("{hash}  {} bytes", m.file_size);
+                        println!(
+                            "  {}  {:>10}",
+                            console::style(cut(&hash)).dim(),
+                            indicatif::HumanBytes(m.file_size).to_string()
+                        );
                     }
                 }
                 None => eprintln!("# no local store at {}", cli.data_dir.display()),
@@ -733,6 +798,17 @@ async fn main() -> Result<()> {
                     "warning: advertised address {advertise_addr} is a wildcard — other \
                      nodes cannot reach it; pass --advertise <public-ip>:<port>"
                 );
+            }
+
+            // One aligned block an operator can read at a glance —
+            // journalctl's first screen answers "what is this node and
+            // where does it listen" without grepping.
+            eprintln!("nauka {} — serving", env!("CARGO_PKG_VERSION"));
+            eprintln!("  data      : {}", cli.data_dir.display());
+            eprintln!("  listen    : {listen} (consensus on port+1, UDP)");
+            eprintln!("  advertise : {advertise_addr}");
+            if !no_http {
+                eprintln!("  http      : {http}");
             }
 
             // Telemetry, before any subsystem starts, so nothing that
@@ -1358,7 +1434,10 @@ async fn main() -> Result<()> {
             )
             .await?;
             if resp.ok {
-                println!("banned: {file_hash} ({reason})");
+                println!(
+                    "{} banned: {file_hash} ({reason})",
+                    console::style("✓").green().bold()
+                );
                 println!(
                     "  removed from the registry, refused with 410, shards purged at the next GC"
                 );
@@ -1375,13 +1454,16 @@ async fn main() -> Result<()> {
             )
             .await?;
             if resp.ok {
-                println!("ban lifted: {file_hash}");
+                println!(
+                    "{} ban lifted: {file_hash}",
+                    console::style("✓").green().bold()
+                );
             } else {
                 println!("this hash was not banned");
             }
         }
-        Cmd::Status { api } => {
-            node::status(&api).await?;
+        Cmd::Status { api, json } => {
+            node::status(&api, json).await?;
         }
         Cmd::Node(node_cmd) => match node_cmd {
             NodeCmd::Add {
@@ -1680,6 +1762,44 @@ struct ClusterFile {
     hash: String,
     size: u64,
     name: Option<String>,
+}
+
+/// Git-style unique prefixes wherever a file hash is expected: resolved
+/// against the local store first (offline-friendly), then the cluster's
+/// registry. Full 64-character hashes pass through untouched.
+async fn resolve_hash(prefix: &str, store: Option<&ShardStore>, api: &str) -> Result<String> {
+    if prefix.len() == 64 {
+        return Ok(prefix.to_string());
+    }
+    if prefix.len() < 4 {
+        bail!("'{prefix}' is too short — give at least 4 characters of the hash");
+    }
+    if let Some(store) = store {
+        let hits: Vec<String> = store
+            .list_manifests()?
+            .into_iter()
+            .filter(|h| h.starts_with(prefix))
+            .collect();
+        match hits.len() {
+            0 => {}
+            1 => return Ok(hits.into_iter().next().expect("one hit")),
+            n => bail!("'{prefix}' is ambiguous in the local store — {n} files match"),
+        }
+    }
+    let files = cluster_files(api).await.with_context(|| {
+        format!("'{prefix}' matches nothing locally, and no node answered at {api} to resolve it")
+    })?;
+    let hits: Vec<&ClusterFile> = files
+        .iter()
+        .filter(|f| f.hash.starts_with(prefix))
+        .collect();
+    match hits.len() {
+        0 => bail!("no file matches '{prefix}' — neither the local store nor the cluster"),
+        1 => Ok(hits[0].hash.clone()),
+        n => bail!(
+            "'{prefix}' is ambiguous — {n} cluster files match; add characters (see `nauka list`)"
+        ),
+    }
 }
 
 /// The cluster's registry, as any node's HTTP API reports it.

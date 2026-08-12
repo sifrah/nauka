@@ -624,7 +624,7 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
 /// `nauka status` — the cluster as one node's HTTP API reports it. Plain
 /// HTTP on purpose: works from anywhere that can reach a node, without
 /// the cluster identity, which is exactly what a quick health check needs.
-pub async fn status(api: &str) -> Result<()> {
+pub async fn status(api: &str, json: bool) -> Result<()> {
     #[derive(serde::Deserialize)]
     struct Node {
         addr: String,
@@ -645,16 +645,23 @@ pub async fn status(api: &str) -> Result<()> {
     }
 
     let url = format!("{}/api/status", api.trim_end_matches('/'));
-    let s: Status = reqwest::Client::new()
+    let body = reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_secs(10))
         .send()
         .await
         .with_context(|| format!("no node answering at {url}"))?
         .error_for_status()?
-        .json()
+        .text()
         .await
-        .context("unexpected status payload")?;
+        .context("reading the status payload")?;
+    if json {
+        // Raw passthrough, exactly what the node said: the machine-facing
+        // face of this command must not re-encode what it reports on.
+        println!("{}", body.trim_end());
+        return Ok(());
+    }
+    let s: Status = serde_json::from_str(&body).context("unexpected status payload")?;
 
     let alive = s.nodes.iter().filter(|n| n.is_alive).count();
     let capacity: u64 = s.nodes.iter().map(|n| n.capacity_bytes).sum();
