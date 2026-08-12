@@ -406,14 +406,36 @@ fn draw_nodes(f: &mut Frame, app: &App, area: Rect) {
             }),
             used_a,
         );
-        let data: Vec<u64> = n.history.iter().map(|(_, u)| *u).collect();
-        if data.len() > 1 {
-            f.render_widget(
-                Sparkline::default()
-                    .data(&data)
-                    .style(Style::new().fg(Color::Cyan)),
-                spark_a,
-            );
+        // The sparkline shows VARIATION, rebased on the window minimum:
+        // raw values would render a flat history as full-height blocks
+        // (ratatui scales to the max), which reads as a second gauge. A
+        // flat window draws a quiet baseline instead, and the trend
+        // borrows the rate's color so the two can never be confused
+        // with the capacity gauge below.
+        let raw: Vec<u64> = n.history.iter().map(|(_, u)| *u).collect();
+        if raw.len() > 1 {
+            let lo = *raw.iter().min().expect("non-empty");
+            let hi = *raw.iter().max().expect("non-empty");
+            if hi - lo <= QUIET_BYTES {
+                f.render_widget(
+                    Paragraph::new("▁".repeat(spark_a.width as usize))
+                        .style(Style::new().fg(Color::DarkGray)),
+                    spark_a,
+                );
+            } else {
+                let data: Vec<u64> = raw.iter().map(|v| v - lo).collect();
+                let trend = if raw.last() >= raw.first() {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                };
+                f.render_widget(
+                    Sparkline::default()
+                        .data(&data)
+                        .style(Style::new().fg(trend)),
+                    spark_a,
+                );
+            }
         }
         let (rate_txt, rate_style) = match n.rate() {
             Some(r) if r.abs() >= QUIET_BYTES as f64 / 5.0 => (
