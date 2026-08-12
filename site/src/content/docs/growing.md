@@ -81,6 +81,24 @@ in the view and shards migrate toward it again. Nothing was lost.
 
 ## Removing a machine
 
+Removal now runs a **safety pre-flight**: before it touches the
+membership, it checks — for every file, every stripe — how many shards
+would still live on the nodes that stay (alive, not draining, not the one
+leaving). If any file would drop below `k` shards, it **refuses** and
+names the files at risk:
+
+```text
+✗ removing 49.13.49.101:7311 is UNSAFE: only 2 reliable node(s) would remain
+    01f504f759410e6c mon-fichier.txt — would keep only 2/4 shards
+    … and 586 more file(s)
+```
+
+The remedy it points at: drain the node first (`node disable`, watch it
+empty), or bring any down node back online, so the copies move before the
+node leaves. `--force` overrides the check and accepts the risk. The
+interactive `nauka top` never forces — an unsafe removal is simply
+refused there.
+
 Ids are in `nauka status`. Removal drains rather than amputates:
 
 ```bash

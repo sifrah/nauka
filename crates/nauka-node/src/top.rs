@@ -295,6 +295,32 @@ fn one_line(s: &str) -> String {
     s.lines().next().unwrap_or(s).to_string()
 }
 
+/// Ask a node whether removing `target` is safe. Returns (safe, reason);
+/// None if the check could not be reached (the caller then proceeds — the
+/// membership change itself still can't drop committed data, and refusing
+/// on an unreachable check would strand the operator).
+async fn safety_check(seed_api: &str, target: &str) -> Option<(bool, String)> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        safe: bool,
+        reason: String,
+    }
+    let url = format!(
+        "{}/api/removal-check?target={target}",
+        seed_api.trim_end_matches('/')
+    );
+    let r: Resp = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some((r.safe, r.reason))
+}
+
 fn human(b: u64) -> String {
     indicatif::HumanBytes(b).to_string()
 }
@@ -942,9 +968,21 @@ pub async fn run(api: String, interval_secs: u64, can_admin: bool) -> Result<()>
                                     .await
                                     .map(|_| format!("{addr} back in the placement view")),
                                 Action::Remove => match node_id {
-                                    Some(id) => apply_remove(&peers, id)
-                                        .await
-                                        .map(|_| format!("{addr} removed from the cluster")),
+                                    Some(id) => {
+                                        // The interactive panel never forces:
+                                        // an unsafe removal is refused here,
+                                        // with the reason. To override you
+                                        // must reach for `nauka node remove
+                                        // --force` deliberately.
+                                        match safety_check(&app.seed_api, &addr).await {
+                                            Some((false, reason)) => Err(format!(
+                                                "unsafe — {reason} (use `nauka node remove --force` to override)"
+                                            )),
+                                            _ => apply_remove(&peers, id)
+                                                .await
+                                                .map(|_| format!("{addr} removed from the cluster")),
+                                        }
+                                    }
                                     None => Err("that node has no id yet".into()),
                                 },
                             };

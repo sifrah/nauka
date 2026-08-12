@@ -595,9 +595,124 @@ async fn join_member(peers: &[SocketAddr], id: u64, addr: SocketAddr) -> Result<
         ))
 }
 
+/// The removal-safety verdict from a node's `/api/removal-check`.
+#[derive(serde::Deserialize)]
+pub struct RemovalSafety {
+    pub k: usize,
+    pub reliable_nodes: usize,
+    pub safe: bool,
+    pub at_risk: usize,
+    pub reason: String,
+    pub sample: Vec<RemovalSampleFile>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RemovalSampleFile {
+    pub hash: String,
+    pub name: Option<String>,
+    pub shards_left: usize,
+}
+
+/// Ask a node whether removing/draining `target` would leave any file
+/// unrecoverable. Tries each peer's HTTP API on the conventional 8080.
+/// None means no node could answer — an unknowable verdict the caller
+/// must treat as a reason to stop, not to proceed.
+pub async fn removal_safety(peers: &[SocketAddr], target: SocketAddr) -> Option<RemovalSafety> {
+    let client = reqwest::Client::new();
+    for peer in peers {
+        let url = format!(
+            "http://{}:8080/api/removal-check?target={}",
+            peer.ip(),
+            target
+        );
+        if let Ok(resp) = client
+            .get(&url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            if let Ok(v) = resp.json::<RemovalSafety>().await {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Print the verdict; unless `force`, refuse an unsafe or unverifiable
+/// action. This is the guard that stops a stray removal from deleting the
+/// last copies of a file.
+pub fn guard_removal(
+    action: &str,
+    target: SocketAddr,
+    v: &Option<RemovalSafety>,
+    force: bool,
+) -> Result<()> {
+    match v {
+        Some(s) if s.safe => {
+            eprintln!(
+                "{} safe — every file keeps at least {} shards on {} other reliable node(s)",
+                style("✓").green().bold(),
+                s.k,
+                s.reliable_nodes
+            );
+            Ok(())
+        }
+        Some(s) => {
+            eprintln!(
+                "{} {action} {target} is UNSAFE: {}",
+                style("✗").red().bold(),
+                s.reason
+            );
+            for f in s.sample.iter().take(6) {
+                eprintln!(
+                    "    {} {} — would keep only {}/{} shards",
+                    &f.hash[..f.hash.len().min(16)],
+                    f.name.as_deref().unwrap_or("—"),
+                    f.shards_left,
+                    s.k
+                );
+            }
+            if s.at_risk > s.sample.len() {
+                eprintln!("    … and {} more file(s)", s.at_risk - s.sample.len());
+            }
+            if force {
+                eprintln!(
+                    "{}",
+                    style("  --force: proceeding despite the risk of permanent data loss").red()
+                );
+                Ok(())
+            } else {
+                bail!(
+                    "refused, to protect your data. Drain the node first \
+                     (`nauka node disable {target}`, watch it empty in `nauka top`), bring any \
+                     down node back online, or pass --force to override."
+                )
+            }
+        }
+        None => {
+            if force {
+                eprintln!(
+                    "{}",
+                    style("  could not verify safety (no node answered) — --force, proceeding")
+                        .yellow()
+                );
+                Ok(())
+            } else {
+                bail!(
+                    "could not reach any node to check whether this is safe — retry, or pass \
+                     --force to proceed without the check."
+                )
+            }
+        }
+    }
+}
+
 pub struct RemoveOpts {
     pub node_id: u64,
     pub peers: Vec<SocketAddr>,
+    /// Override the safety pre-flight (data-loss risk accepted).
+    pub force: bool,
 }
 
 /// Drop a node from the voter set. Its shards are re-replicated by the
@@ -607,7 +722,6 @@ pub struct RemoveOpts {
 pub async fn remove(o: RemoveOpts) -> Result<()> {
     use nauka_raft::types::{AdminRequest, AdminResponse};
     let ui = Ui::new();
-    let step = ui.step(&format!("removing node {} from the membership", o.node_id));
     let current = match nauka_raft::admin_via_leader(&o.peers, &AdminRequest::Metrics).await? {
         AdminResponse::Metrics { members, .. } => members,
         other => bail!("metrics: {other:?}"),
@@ -621,6 +735,17 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
     if ids.len() == current.len() {
         bail!("node {} is not a member of the cluster", o.node_id);
     }
+    // Pre-flight: would removing this node leave any file with fewer than
+    // k shards on the nodes that stay? Removal is the destructive one —
+    // the node's copies leave the cluster with it — so this runs before
+    // the membership change, and refuses unless --force.
+    if let Some(addr) = &removed_addr {
+        if let Ok(target) = addr.parse::<SocketAddr>() {
+            let verdict = removal_safety(&o.peers, target).await;
+            guard_removal("removing", target, &verdict, o.force)?;
+        }
+    }
+    let step = ui.step(&format!("removing node {} from the membership", o.node_id));
     match nauka_raft::admin_via_leader(&o.peers, &AdminRequest::ChangeMembership(ids)).await? {
         AdminResponse::Ok(_) => {
             // Don't leave a `disabled` entry behind for an address that is
@@ -810,10 +935,30 @@ pub async fn set_disabled(peers: &[SocketAddr], target: SocketAddr, disabled: bo
         eprintln!(
             "{}",
             style(
-                "It stays a member and keeps serving reads while the others take over                  its shards. Watch it empty in `nauka top`; at 0 B, `nauka node remove`                  is instant and safe."
+                "It stays a member and keeps serving reads while the others take over its \
+                 shards. Watch it empty in `nauka top`; at 0 B of live shards, `nauka node \
+                 remove` is instant and safe."
             )
             .dim()
         );
+        // Draining never loses data on its own — it only releases against
+        // a proof. But it also cannot FINISH if the cluster is too small
+        // to re-host this node's copies: warn so the operator is not left
+        // wondering why it never reaches zero.
+        if let Some(v) = removal_safety(peers, target).await {
+            if !v.safe {
+                eprintln!(
+                    "{} {}",
+                    style("note:").yellow().bold(),
+                    style(format!(
+                        "this node cannot fully drain right now — {} — its last copies of {} \
+                         file(s) will stay until then.",
+                        v.reason, v.at_risk
+                    ))
+                    .yellow()
+                );
+            }
+        }
     } else {
         step.done_as(&format!("{target} is back in the placement view"));
         eprintln!(

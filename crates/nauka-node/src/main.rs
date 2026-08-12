@@ -363,11 +363,17 @@ enum NodeCmd {
         peers: Vec<SocketAddr>,
     },
     /// Remove a node from the cluster (by node-id). Its shards are
-    /// re-replicated by the others; then it can be shut down.
+    /// re-replicated by the others; then it can be shut down. A safety
+    /// pre-flight refuses the removal if it would leave any file with
+    /// fewer than k shards — override with --force.
     Remove {
         node_id: u64,
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
+        /// Remove even if the safety check says a file would become
+        /// unrecoverable (accepts the risk of permanent data loss).
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1546,8 +1552,17 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
-            NodeCmd::Remove { node_id, peers } => {
-                node::remove(node::RemoveOpts { node_id, peers }).await?;
+            NodeCmd::Remove {
+                node_id,
+                peers,
+                force,
+            } => {
+                node::remove(node::RemoveOpts {
+                    node_id,
+                    peers,
+                    force,
+                })
+                .await?;
             }
             NodeCmd::Disable { target, peers } => {
                 node::set_disabled(&peers, target, true).await?;
