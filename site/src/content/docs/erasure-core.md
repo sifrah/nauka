@@ -8,7 +8,9 @@ description: "How a file is cut into Reed-Solomon stripes, what a manifest carri
 ### Splitting into stripes
 
 A file is cut into **stripes** of `data_shards × shard_size` bytes
-(default: 4 × 1 MiB = 4 MiB of data per stripe). Each stripe is encoded
+(default: 4 × 1 MiB = 4 MiB of data per stripe; a file that fits in a
+single stripe gets shards sized to its content instead — an 80 KiB file
+costs 120 KiB on disk, not a full padded stripe). Each stripe is encoded
 independently into `k` data shards + `m` parity shards (Reed-Solomon over
 GF(2⁸), `reed-solomon-erasure` crate with SIMD).
 
