@@ -1197,11 +1197,22 @@ async fn main() -> Result<()> {
                             let Ok(addr) = peer.parse::<SocketAddr>() else {
                                 continue;
                             };
-                            let t0 = std::time::Instant::now();
-                            let ok = match nauka_transport::PeerClient::connect(addr).await {
-                                Ok(c) => c.ping().await.is_ok(),
-                                Err(_) => false,
-                            };
+                            // The MINIMUM of three pings, not one sample:
+                            // a single congested ping yanks this node's
+                            // coordinate by tens of ms, and everything
+                            // downstream re-decides on it. The propagation
+                            // delay — the quantity geography actually
+                            // cares about — is what the minimum estimates.
+                            let mut rtt_ms = f64::MAX;
+                            if let Ok(c) = nauka_transport::PeerClient::connect(addr).await {
+                                for _ in 0..3 {
+                                    let t0 = std::time::Instant::now();
+                                    if c.ping().await.is_ok() {
+                                        rtt_ms = rtt_ms.min(t0.elapsed().as_secs_f64() * 1000.0);
+                                    }
+                                }
+                            }
+                            let ok = rtt_ms < f64::MAX;
                             // Free liveness signal: this loop already pings
                             // everyone for the Vivaldi coordinates.
                             if ok {
@@ -1212,18 +1223,21 @@ async fn main() -> Result<()> {
                             if !ok {
                                 continue;
                             }
-                            let rtt_ms = t0.elapsed().as_secs_f64() * 1000.0;
                             let peer_coord = known.get(peer).copied().unwrap_or_default();
                             my_coord.observe(&peer_coord, rtt_ms);
                         }
+                        // Published SNAPPED and sticky, never raw: the
+                        // replicated coordinates drive shard ownership on
+                        // every node, and millisecond drift in them sets
+                        // the scrubber and the GC chasing each other (see
+                        // Coord::snapped). Between republications the
+                        // placement inputs are bit-identical.
                         let published = known.get(&self_id).copied().unwrap_or_default();
-                        let moved = my_coord.distance(&published) > 2.0
-                            || (my_coord.error - published.error).abs() > 0.1;
-                        if moved {
+                        if my_coord.should_republish(&published) {
                             let _ = app
                                 .write(nauka_raft::types::AppCommand::UpdateNodeCoord {
                                     addr: self_id.clone(),
-                                    coord: my_coord,
+                                    coord: my_coord.snapped(),
                                 })
                                 .await;
                         }

@@ -145,11 +145,149 @@ impl Coord {
     pub fn is_settled(&self) -> bool {
         self.error < 0.5
     }
+
+    /// How far the live position has strayed from another one, in ms of
+    /// PURE movement: Euclidean drift plus the height delta. NOT
+    /// [`Coord::distance`], whose height model ADDS both heights — a
+    /// position compared to itself would read as two milliseconds away
+    /// and never as stationary.
+    pub fn drift_from(&self, other: &Coord) -> f64 {
+        let mut sum = 0.0;
+        for i in 0..DIMS {
+            let d = self.vec[i] - other.vec[i];
+            sum += d * d;
+        }
+        det_sqrt(sum) + (self.height - other.height).abs()
+    }
+
+    /// The position as it enters the replicated state: snapped to
+    /// [`PUBLISH_GRID_MS`]. Placement re-runs on every scrub pass from
+    /// the replicated coordinates, and a raw position drifting by
+    /// fractions of a millisecond re-decides SHARD OWNERSHIP each time —
+    /// the scrubber then pushes what the GC just released, two nodes
+    /// chasing each other for as long as the jitter lasts (observed
+    /// live: a 3-node cluster oscillating by a gigabyte per pass, its
+    /// surplus never draining). Snapped and sticky, the published
+    /// position moves only when the node has genuinely moved — and then
+    /// placement re-decides ONCE.
+    pub fn snapped(&self) -> Coord {
+        let q = |v: f64| (v / PUBLISH_GRID_MS).round() * PUBLISH_GRID_MS;
+        Coord {
+            vec: [q(self.vec[0]), q(self.vec[1])],
+            height: q(self.height).max(MIN_HEIGHT),
+            // Tenths are enough for a confidence figure, and a coarse
+            // error cannot flap `is_settled` on measurement noise.
+            error: (self.error * 10.0).round() / 10.0,
+        }
+    }
+
+    /// Should the live position replace `published` (assumed snapped) in
+    /// the replicated state? Sticky by construction: the live position
+    /// must stray beyond the snap radius FROM THE PUBLISHED POINT — a
+    /// position oscillating on a cell edge stays where it is.
+    pub fn should_republish(&self, published: &Coord) -> bool {
+        self.drift_from(published) > PUBLISH_STICKY_MS || (self.error - published.error).abs() > 0.2
+    }
 }
+
+/// Grid step (ms) of published coordinates. Far below any
+/// inter-datacenter distance, so genuine geography is untouched.
+pub const PUBLISH_GRID_MS: f64 = 5.0;
+
+/// How far (ms) a live position must stray from the published point
+/// before republication. Above half the grid diagonal, so noise around a
+/// cell edge cannot ping-pong between two snaps.
+pub const PUBLISH_STICKY_MS: f64 = 4.0;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapped_is_on_grid_and_idempotent() {
+        let c = Coord {
+            vec: [12.3, -7.8],
+            height: 3.4,
+            error: 0.27,
+        };
+        let s = c.snapped();
+        for v in s.vec {
+            assert_eq!(v % PUBLISH_GRID_MS, 0.0);
+        }
+        assert_eq!(s.height % PUBLISH_GRID_MS, 0.0);
+        assert_eq!(s.snapped(), s, "snapping must be idempotent");
+    }
+
+    #[test]
+    fn jitter_below_sticky_never_republishes() {
+        // The live-churn scenario: the position wobbles by a couple of
+        // ms around its published snap, pass after pass. Not one of
+        // those wobbles may reach the replicated state — replicated
+        // coordinates drive shard ownership, and every publication
+        // re-decides it.
+        let published = Coord {
+            vec: [10.0, 5.0],
+            height: 1.0,
+            error: 0.1,
+        };
+        for i in 0..100 {
+            let j = (i as f64 * 0.37) % 3.0 - 1.5; // ±1.5 ms, deterministic
+            let live = Coord {
+                vec: [10.0 + j, 5.0 - j / 2.0],
+                height: 1.0 + (j.abs() / 2.0),
+                error: 0.1 + (i as f64 % 3.0) * 0.05,
+            };
+            assert!(
+                !live.should_republish(&published),
+                "wobble {i} ({j:+.2} ms) republished"
+            );
+        }
+    }
+
+    #[test]
+    fn cell_edge_oscillation_stays_put() {
+        // A raw position sitting exactly between two grid cells (2.5 ms)
+        // and oscillating across the edge: rounding alone would flip the
+        // snap on every pass; stickiness to the PUBLISHED point holds it.
+        let published = Coord {
+            vec: [0.0, 0.0],
+            height: 1.0,
+            error: 0.1,
+        };
+        for step in 0..50 {
+            let x = if step % 2 == 0 { 2.4 } else { 2.6 };
+            let live = Coord {
+                vec: [x, 0.0],
+                height: 1.0,
+                error: 0.1,
+            };
+            assert!(!live.should_republish(&published));
+        }
+    }
+
+    #[test]
+    fn genuine_move_republishes_once_then_settles() {
+        let published = Coord {
+            vec: [0.0, 0.0],
+            height: 1.0,
+            error: 0.1,
+        };
+        // The node genuinely moved (new route, +12 ms east).
+        let live = Coord {
+            vec: [12.0, 0.0],
+            height: 1.0,
+            error: 0.1,
+        };
+        assert!(live.should_republish(&published));
+        let republished = live.snapped();
+        // Jitter around the NEW position stays quiet again.
+        let wobble = Coord {
+            vec: [13.1, -0.8],
+            height: 1.0,
+            error: 0.1,
+        };
+        assert!(!wobble.should_republish(&republished));
+    }
 
     /// Simulates a real network and checks that the learned coordinates
     /// predict the latencies.
