@@ -417,7 +417,15 @@ async fn main() -> Result<()> {
         Cmd::S3KeyCreate { .. } | Cmd::S3KeyList { .. } | Cmd::S3KeyDelete { .. } => true,
         _ => false,
     };
-    if needs_cluster_identity && cli.token.is_none() && cli.keys.is_none() {
+    // `nauka top` speaks plain HTTP to READ, but its interactive actions
+    // (disable/enable/remove) need the cluster's mTLS. So it WANTS the
+    // identity if one is around — inherited from an initialized machine or
+    // passed explicitly — but never REQUIRES it: absent, top runs
+    // read-only and says so. The load below is fatal only for the commands
+    // that truly need it.
+    let is_top = matches!(&cli.cmd, Cmd::Top { .. });
+    let wants_identity = needs_cluster_identity || is_top;
+    if wants_identity && cli.token.is_none() && cli.keys.is_none() {
         // `nauka init` leaves the cluster identity in /etc/nauka/nauka.env;
         // speaking to the cluster from an initialized machine must not
         // require re-exporting it by hand.
@@ -439,7 +447,7 @@ async fn main() -> Result<()> {
     // A token is sugar over the key directory: derive the key material into
     // a private corner of the data dir, then follow the exact same paths as
     // --keys. One trust model, two spellings.
-    if needs_cluster_identity {
+    if wants_identity {
         if let Some(token) = cli.token.clone() {
             let dir = cli.data_dir.join("token-keys");
             nauka_transport::materialize_token_keys(&token, &dir)
@@ -448,18 +456,29 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Whether `nauka top` may perform admin actions — set once the mTLS
+    // identity is actually installed below.
+    let mut top_can_admin = false;
     // Cluster identity: to be installed before any network use. A node
     // (serve/node-info) uses its persisted key; client commands use an
     // ephemeral identity signed by the same CA.
-    let node_tls = if let Some(keys_dir) = cli.keys.as_ref().filter(|_| needs_cluster_identity) {
+    let node_tls = if let Some(keys_dir) = cli.keys.as_ref().filter(|_| wants_identity) {
         let identity = match &cli.cmd {
             Cmd::Serve { .. } | Cmd::NodeInfo => Some(cli.data_dir.join("node.key")),
             _ => None,
         };
-        let tls = nauka_transport::load_cluster_tls(keys_dir, identity.as_deref())?;
-        let info = (tls.node_id, tls.fingerprint.clone());
-        nauka_transport::set_cluster_tls(tls);
-        Some(info)
+        match nauka_transport::load_cluster_tls(keys_dir, identity.as_deref()) {
+            Ok(tls) => {
+                let info = (tls.node_id, tls.fingerprint.clone());
+                nauka_transport::set_cluster_tls(tls);
+                top_can_admin = true;
+                Some(info)
+            }
+            // A real admin command must fail loudly; `top` just stays
+            // read-only when the identity cannot be loaded.
+            Err(e) if needs_cluster_identity => return Err(e),
+            Err(_) => None,
+        }
     } else {
         None
     };
@@ -1505,7 +1524,7 @@ async fn main() -> Result<()> {
             node::status(&api, json).await?;
         }
         Cmd::Top { api, interval } => {
-            top::run(api, interval).await?;
+            top::run(api, interval, top_can_admin).await?;
         }
         Cmd::Node(node_cmd) => match node_cmd {
             NodeCmd::Add {

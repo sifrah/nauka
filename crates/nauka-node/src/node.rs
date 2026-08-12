@@ -561,7 +561,23 @@ async fn join_member(peers: &[SocketAddr], id: u64, addr: SocketAddr) -> Result<
         match nauka_raft::admin_via_leader(peers, &AdminRequest::ChangeMembership(ids.clone()))
             .await
         {
-            Ok(AdminResponse::Ok(_)) => return Ok(()),
+            Ok(AdminResponse::Ok(_)) => {
+                // Clear any stale `disabled` flag at this address before
+                // the node takes traffic. The flag is keyed by address and
+                // outlives a `node remove`, so a machine returning at an
+                // address someone once drained — or a cloud IP reused by a
+                // new instance — would otherwise rejoin pre-disabled and
+                // silently take no shards. Joining means active.
+                let _ = nauka_raft::write_via_leader(
+                    peers,
+                    nauka_raft::types::AppCommand::SetNodeDisabled {
+                        addr: addr.to_string(),
+                        disabled: false,
+                    },
+                )
+                .await;
+                return Ok(());
+            }
             Ok(other) => bail!("change-membership: {other:?}"),
             Err(e) if e.to_string().contains("configuration change") => {
                 last_err = Some(e);
@@ -596,6 +612,7 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
         AdminResponse::Metrics { members, .. } => members,
         other => bail!("metrics: {other:?}"),
     };
+    let removed_addr = current.get(&o.node_id).cloned();
     let ids: Vec<u64> = current
         .keys()
         .copied()
@@ -606,6 +623,19 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
     }
     match nauka_raft::admin_via_leader(&o.peers, &AdminRequest::ChangeMembership(ids)).await? {
         AdminResponse::Ok(_) => {
+            // Don't leave a `disabled` entry behind for an address that is
+            // no longer a member — it would silently pre-disable whatever
+            // rejoins there (a returning machine, a reused cloud IP).
+            if let Some(addr) = removed_addr {
+                let _ = nauka_raft::write_via_leader(
+                    &o.peers,
+                    nauka_raft::types::AppCommand::SetNodeDisabled {
+                        addr,
+                        disabled: false,
+                    },
+                )
+                .await;
+            }
             step.done_as(&format!("node {} removed", o.node_id));
             eprintln!(
                 "{}",
