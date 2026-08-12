@@ -1,0 +1,610 @@
+//! `nauka top` — the live, full-screen view of a cluster: per-node fill
+//! and migration rates while a rebalance runs, the registry one keypress
+//! away. Read-only by design: this is a dashboard, not a control panel —
+//! destructive acts stay explicit commands.
+//!
+//! Data comes from each member's plain HTTP API (`/api/status` carries
+//! `self_used_bytes`): no cluster identity, works from any laptop that
+//! can reach the nodes. A member whose API does not answer is shown
+//! unreachable rather than dropped — absence of data is data.
+
+use std::collections::{HashMap, VecDeque};
+use std::io::IsTerminal;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Result};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Cell, Gauge, Paragraph, Row, Sparkline, Table};
+use ratatui::Frame;
+
+/// How much per-node history the sparklines and rates look at.
+const HISTORY: usize = 60;
+/// A node is "moving" when its store changed by more than this per tick.
+const QUIET_BYTES: u64 = 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct ApiNode {
+    addr: String,
+    #[serde(default)]
+    id: Option<u64>,
+    capacity_bytes: u64,
+    is_leader: bool,
+    #[serde(default)]
+    is_alive: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ApiStatus {
+    leader: Option<String>,
+    nodes: Vec<ApiNode>,
+    files: usize,
+    total_bytes: u64,
+    /// Absent on pre-0.5.26 nodes — shown as "n/a", never a crash.
+    #[serde(default)]
+    self_used_bytes: Option<u64>,
+    #[serde(default)]
+    self_shard_count: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct ApiFile {
+    hash: String,
+    size: u64,
+    name: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct NodeState {
+    id: Option<u64>,
+    capacity: u64,
+    is_leader: bool,
+    alive_per_seed: bool,
+    reachable: bool,
+    used: Option<u64>,
+    shards: Option<u64>,
+    /// (instant, used bytes) samples, newest last.
+    history: VecDeque<(Instant, u64)>,
+}
+
+impl NodeState {
+    /// Bytes/second over the sampled window; None below two samples.
+    fn rate(&self) -> Option<f64> {
+        let (first, last) = (self.history.front()?, self.history.back()?);
+        let dt = last.0.duration_since(first.0).as_secs_f64();
+        if dt < 1.0 {
+            return None;
+        }
+        Some((last.1 as f64 - first.1 as f64) / dt)
+    }
+
+    fn moving(&self) -> bool {
+        let mut it = self.history.iter().rev();
+        match (it.next(), it.next()) {
+            (Some(a), Some(b)) => a.1.abs_diff(b.1) > QUIET_BYTES,
+            _ => false,
+        }
+    }
+}
+
+struct App {
+    seed_api: String,
+    interval: Duration,
+    paused: bool,
+    tab: Tab,
+    sort: Sort,
+    nodes: HashMap<String, NodeState>,
+    order: Vec<String>,
+    leader: Option<String>,
+    files_count: usize,
+    logical_bytes: u64,
+    files: Vec<ApiFile>,
+    files_filter: String,
+    files_scroll: usize,
+    quiet_since: Option<Instant>,
+    seed_error: Option<String>,
+    started: Instant,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Nodes,
+    Files,
+}
+
+#[derive(Clone, Copy)]
+enum Sort {
+    Used,
+    Rate,
+    Addr,
+    Capacity,
+}
+
+impl Sort {
+    fn next(self) -> Self {
+        match self {
+            Sort::Used => Sort::Rate,
+            Sort::Rate => Sort::Addr,
+            Sort::Addr => Sort::Capacity,
+            Sort::Capacity => Sort::Used,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Sort::Used => "used",
+            Sort::Rate => "rate",
+            Sort::Addr => "addr",
+            Sort::Capacity => "capacity",
+        }
+    }
+}
+
+fn human(b: u64) -> String {
+    indicatif::HumanBytes(b).to_string()
+}
+
+fn human_rate(bps: f64) -> String {
+    let sign = if bps < 0.0 { "−" } else { "+" };
+    let per_min = bps.abs() * 60.0;
+    if per_min < 512.0 * 1024.0 && bps.abs() < QUIET_BYTES as f64 / 5.0 {
+        return "stable".into();
+    }
+    format!("{sign}{}/min", human(per_min as u64))
+}
+
+/// One polling pass: the seed's status names the members; every member's
+/// own API is then asked for its disk usage, concurrently.
+async fn poll(app: &mut App) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("client");
+    let seed = format!("{}/api/status", app.seed_api.trim_end_matches('/'));
+    let status: ApiStatus = match client.get(&seed).send().await {
+        Ok(r) => match r.error_for_status() {
+            Ok(r) => match r.json().await {
+                Ok(s) => s,
+                Err(e) => {
+                    app.seed_error = Some(format!("bad status payload: {e}"));
+                    return;
+                }
+            },
+            Err(e) => {
+                app.seed_error = Some(e.to_string());
+                return;
+            }
+        },
+        Err(e) => {
+            app.seed_error = Some(format!("no node answering at {seed}: {e}"));
+            return;
+        }
+    };
+    app.seed_error = None;
+    app.leader = status.leader.clone();
+    app.files_count = status.files;
+    app.logical_bytes = status.total_bytes;
+
+    // Membership from the seed; usage from each member itself. The HTTP
+    // port is assumed 8080 on every node — the same convention `node add`
+    // provisions and relies on.
+    let mut fetches = Vec::new();
+    for n in &status.nodes {
+        let ip = n.addr.split(':').next().unwrap_or(&n.addr).to_string();
+        let url = format!("http://{ip}:8080/api/status");
+        let client = client.clone();
+        fetches.push(async move {
+            let got: Option<ApiStatus> = match client.get(&url).send().await {
+                Ok(r) => r.json().await.ok(),
+                Err(_) => None,
+            };
+            (url, got)
+        });
+    }
+    let results = futures::future::join_all(fetches).await;
+
+    let now = Instant::now();
+    let mut order = Vec::new();
+    for (n, (_url, got)) in status.nodes.iter().zip(results) {
+        order.push(n.addr.clone());
+        let entry = app.nodes.entry(n.addr.clone()).or_default();
+        entry.id = n.id;
+        entry.capacity = n.capacity_bytes;
+        entry.is_leader = n.is_leader;
+        entry.alive_per_seed = n.is_alive;
+        match got {
+            Some(s) => {
+                entry.reachable = true;
+                entry.used = s.self_used_bytes;
+                entry.shards = s.self_shard_count;
+                if let Some(u) = s.self_used_bytes {
+                    entry.history.push_back((now, u));
+                    while entry.history.len() > HISTORY {
+                        entry.history.pop_front();
+                    }
+                }
+            }
+            None => entry.reachable = false,
+        }
+    }
+    app.nodes.retain(|k, _| order.contains(k));
+    app.order = order;
+
+    if app.nodes.values().any(NodeState::moving) {
+        app.quiet_since = None;
+    } else if app.quiet_since.is_none() {
+        app.quiet_since = Some(now);
+    }
+}
+
+async fn poll_files(app: &mut App) {
+    let url = format!("{}/api/files", app.seed_api.trim_end_matches('/'));
+    if let Ok(r) = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        if let Ok(files) = r.json::<Vec<ApiFile>>().await {
+            app.files = files;
+        }
+    }
+}
+
+fn draw(f: &mut Frame, app: &App) {
+    let [header, body, banner, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
+
+    // ── Header ──────────────────────────────────────────────────────────
+    let alive = app
+        .nodes
+        .values()
+        .filter(|n| n.alive_per_seed || n.reachable)
+        .count();
+    let shard_total: u64 = app.nodes.values().filter_map(|n| n.used).sum();
+    let mut spans = vec![
+        Span::styled(" nauka top ", Style::new().bold().fg(Color::Cyan)),
+        Span::raw(format!("— {} nodes · {} alive · ", app.nodes.len(), alive)),
+        Span::raw(format!(
+            "{} files · {} logical · {} shards on disk",
+            app.files_count,
+            human(app.logical_bytes),
+            human(shard_total)
+        )),
+    ];
+    if let Some(l) = &app.leader {
+        spans.push(Span::raw(format!(" · leader {l}")));
+    } else {
+        spans.push(Span::styled(
+            " · NO LEADER",
+            Style::new().fg(Color::Red).bold(),
+        ));
+    }
+    if let Some(e) = &app.seed_error {
+        spans = vec![Span::styled(
+            format!(" nauka top — {e}"),
+            Style::new().fg(Color::Red),
+        )];
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), header);
+
+    match app.tab {
+        Tab::Nodes => draw_nodes(f, app, body),
+        Tab::Files => draw_files(f, app, body),
+    }
+
+    // ── Rebalance banner ────────────────────────────────────────────────
+    let line = match app.quiet_since {
+        Some(t) if t.duration_since(app.started) > Duration::ZERO || !app.nodes.is_empty() => {
+            let secs = t.elapsed().as_secs();
+            Line::from(vec![
+                Span::styled(" ● ", Style::new().fg(Color::Green)),
+                Span::raw(format!("quiet — no shard movement for {secs}s")),
+            ])
+        }
+        _ => {
+            let moving: f64 = app
+                .nodes
+                .values()
+                .filter_map(|n| n.rate())
+                .map(f64::abs)
+                .sum();
+            Line::from(vec![
+                Span::styled(" ⇄ ", Style::new().fg(Color::Yellow)),
+                Span::raw(format!(
+                    "rebalancing — {} moving across the cluster",
+                    human_rate(moving / 2.0).trim_start_matches(['+', '−'])
+                )),
+            ])
+        }
+    };
+    f.render_widget(Paragraph::new(line), banner);
+
+    // ── Footer ──────────────────────────────────────────────────────────
+    let footer_text = match app.tab {
+        Tab::Nodes => format!(
+            " [1] nodes  [2] files  [s]ort: {}  [p]{}  [+/-] interval {}s  [q]uit",
+            app.sort.label(),
+            if app.paused { "aused" } else { "ause" },
+            app.interval.as_secs()
+        ),
+        Tab::Files => format!(
+            " [1] nodes  [2] files  type to filter: “{}”  [↑↓] scroll  [q]uit",
+            app.files_filter
+        ),
+    };
+    f.render_widget(
+        Paragraph::new(footer_text).style(Style::new().add_modifier(Modifier::DIM)),
+        footer,
+    );
+}
+
+fn draw_nodes(f: &mut Frame, app: &App, area: Rect) {
+    let mut addrs: Vec<&String> = app.order.iter().collect();
+    addrs.sort_by(|a, b| {
+        let (na, nb) = (&app.nodes[*a], &app.nodes[*b]);
+        match app.sort {
+            Sort::Used => nb.used.unwrap_or(0).cmp(&na.used.unwrap_or(0)),
+            Sort::Rate => nb
+                .rate()
+                .unwrap_or(0.0)
+                .abs()
+                .partial_cmp(&na.rate().unwrap_or(0.0).abs())
+                .unwrap_or(std::cmp::Ordering::Equal),
+            Sort::Addr => a.cmp(b),
+            Sort::Capacity => nb.capacity.cmp(&na.capacity),
+        }
+    });
+
+    let rows_area = area;
+    // Each node gets 2 lines: the data row and its fill gauge.
+    let constraints: Vec<Constraint> = addrs.iter().map(|_| Constraint::Length(2)).collect();
+    let node_areas = Layout::vertical(constraints).split(rows_area);
+
+    for (i, addr) in addrs.iter().enumerate() {
+        if i >= node_areas.len() {
+            break;
+        }
+        let n = &app.nodes[*addr];
+        let [row, gauge_row] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(node_areas[i]);
+        let [dot_a, addr_a, role_a, used_a, spark_a, rate_a, shards_a] = Layout::horizontal([
+            Constraint::Length(2),
+            Constraint::Length(23),
+            Constraint::Length(8),
+            Constraint::Length(11),
+            Constraint::Length(14),
+            Constraint::Length(14),
+            Constraint::Min(10),
+        ])
+        .areas(row);
+
+        let dot = if n.reachable && n.alive_per_seed {
+            Span::styled("●", Style::new().fg(Color::Green))
+        } else if n.reachable || n.alive_per_seed {
+            Span::styled("●", Style::new().fg(Color::Yellow))
+        } else {
+            Span::styled("●", Style::new().fg(Color::Red))
+        };
+        f.render_widget(Paragraph::new(Line::from(dot)), dot_a);
+        f.render_widget(Paragraph::new((*addr).clone()).bold(), addr_a);
+        f.render_widget(
+            Paragraph::new(if n.is_leader { "leader" } else { "" })
+                .style(Style::new().fg(Color::Cyan)),
+            role_a,
+        );
+        f.render_widget(
+            Paragraph::new(match n.used {
+                Some(u) => human(u),
+                None => "n/a".into(),
+            }),
+            used_a,
+        );
+        let data: Vec<u64> = n.history.iter().map(|(_, u)| *u).collect();
+        if data.len() > 1 {
+            f.render_widget(
+                Sparkline::default()
+                    .data(&data)
+                    .style(Style::new().fg(Color::Cyan)),
+                spark_a,
+            );
+        }
+        let (rate_txt, rate_style) = match n.rate() {
+            Some(r) if r.abs() >= QUIET_BYTES as f64 / 5.0 => (
+                human_rate(r),
+                if r > 0.0 {
+                    Style::new().fg(Color::Yellow)
+                } else {
+                    Style::new().fg(Color::Green)
+                },
+            ),
+            Some(_) => ("stable".into(), Style::new().add_modifier(Modifier::DIM)),
+            None => ("…".into(), Style::new().add_modifier(Modifier::DIM)),
+        };
+        f.render_widget(Paragraph::new(rate_txt).style(rate_style), rate_a);
+        f.render_widget(
+            Paragraph::new(match n.shards {
+                Some(s) => format!("{s} shards · cap {}", human(n.capacity)),
+                None => format!("cap {}", human(n.capacity)),
+            })
+            .style(Style::new().add_modifier(Modifier::DIM)),
+            shards_a,
+        );
+
+        let ratio = match n.used {
+            Some(u) if n.capacity > 0 => (u as f64 / n.capacity as f64).min(1.0),
+            _ => 0.0,
+        };
+        let color = if ratio > 0.85 {
+            Color::Red
+        } else if ratio > 0.6 {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        };
+        let [_, g] =
+            Layout::horizontal([Constraint::Length(2), Constraint::Min(10)]).areas(gauge_row);
+        f.render_widget(
+            Gauge::default()
+                .gauge_style(Style::new().fg(color).bg(Color::DarkGray))
+                .ratio(ratio)
+                .label(format!("{:.0}% of capacity", ratio * 100.0)),
+            g,
+        );
+    }
+}
+
+fn draw_files(f: &mut Frame, app: &App, area: Rect) {
+    let filter = app.files_filter.to_lowercase();
+    let visible: Vec<&ApiFile> = app
+        .files
+        .iter()
+        .filter(|x| {
+            filter.is_empty()
+                || x.name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&filter)
+                || x.hash.starts_with(&filter)
+        })
+        .collect();
+    let rows: Vec<Row> = visible
+        .iter()
+        .skip(app.files_scroll)
+        .take(area.height.saturating_sub(2) as usize)
+        .map(|x| {
+            Row::new(vec![
+                Cell::from(x.hash.chars().take(16).collect::<String>())
+                    .style(Style::new().add_modifier(Modifier::DIM)),
+                Cell::from(human(x.size)),
+                Cell::from(x.name.clone().unwrap_or_else(|| "—".into())),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(17),
+            Constraint::Length(11),
+            Constraint::Min(20),
+        ],
+    )
+    .header(Row::new(vec!["HASH", "SIZE", "NAME"]).style(Style::new().bold().fg(Color::Cyan)))
+    .block(Block::default().title(format!(
+        " registry — {} file(s){} ",
+        visible.len(),
+        if filter.is_empty() {
+            String::new()
+        } else {
+            format!(" matching “{}”", app.files_filter)
+        }
+    )));
+    f.render_widget(table, area);
+}
+
+pub async fn run(api: String, interval_secs: u64) -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        bail!("`nauka top` is a full-screen terminal view — run it in a tty (or use `nauka status --json` for scripts)");
+    }
+    let mut app = App {
+        seed_api: api,
+        interval: Duration::from_secs(interval_secs.max(1)),
+        paused: false,
+        tab: Tab::Nodes,
+        sort: Sort::Used,
+        nodes: HashMap::new(),
+        order: Vec::new(),
+        leader: None,
+        files_count: 0,
+        logical_bytes: 0,
+        files: Vec::new(),
+        files_filter: String::new(),
+        files_scroll: 0,
+        quiet_since: None,
+        seed_error: None,
+        started: Instant::now(),
+    };
+    poll(&mut app).await;
+    poll_files(&mut app).await;
+
+    // The terminal must come back whole even if we panic mid-frame.
+    let mut terminal = ratatui::init();
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        prev_hook(info);
+    }));
+
+    let mut last_poll = Instant::now();
+    let mut ticks: u64 = 0;
+    let res = loop {
+        if let Err(e) = terminal.draw(|f| draw(f, &app)) {
+            break Err(e.into());
+        }
+        // Key handling with a short poll so redraws stay snappy.
+        if crossterm::event::poll(Duration::from_millis(200))? {
+            if let Event::Key(k) = crossterm::event::read()? {
+                if k.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match (app.tab, k.code) {
+                    (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => break Ok(()),
+                    (_, KeyCode::Char('c')) if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break Ok(());
+                    }
+                    (_, KeyCode::Char('1')) => app.tab = Tab::Nodes,
+                    (_, KeyCode::Char('2')) => {
+                        app.tab = Tab::Files;
+                        poll_files(&mut app).await;
+                    }
+                    (Tab::Nodes, KeyCode::Char('s')) => app.sort = app.sort.next(),
+                    (Tab::Nodes, KeyCode::Char('p')) => app.paused = !app.paused,
+                    (Tab::Nodes, KeyCode::Char('+')) => {
+                        app.interval =
+                            (app.interval + Duration::from_secs(1)).min(Duration::from_secs(60));
+                    }
+                    (Tab::Nodes, KeyCode::Char('-')) => {
+                        app.interval = app
+                            .interval
+                            .saturating_sub(Duration::from_secs(1))
+                            .max(Duration::from_secs(1));
+                    }
+                    (Tab::Files, KeyCode::Backspace) => {
+                        app.files_filter.pop();
+                        app.files_scroll = 0;
+                    }
+                    (Tab::Files, KeyCode::Up) => {
+                        app.files_scroll = app.files_scroll.saturating_sub(1);
+                    }
+                    (Tab::Files, KeyCode::Down) => {
+                        app.files_scroll = (app.files_scroll + 1).min(app.files.len());
+                    }
+                    (Tab::Files, KeyCode::Char(c)) => {
+                        app.files_filter.push(c);
+                        app.files_scroll = 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !app.paused && last_poll.elapsed() >= app.interval {
+            poll(&mut app).await;
+            last_poll = Instant::now();
+            ticks += 1;
+            // The registry moves slowly; refreshing it every 10 ticks is
+            // plenty and keeps the hot loop to one request per member.
+            if app.tab == Tab::Files || ticks.is_multiple_of(10) {
+                poll_files(&mut app).await;
+            }
+        }
+    };
+    ratatui::restore();
+    res
+}

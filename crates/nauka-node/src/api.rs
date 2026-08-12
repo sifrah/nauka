@@ -158,6 +158,11 @@ struct ClusterStatusResponse {
     nodes: Vec<NodeStatus>,
     files: usize,
     total_bytes: u64,
+    /// Shard bytes THIS node holds on disk — each node only knows its own
+    /// store, so a whole-cluster view (`nauka top`) asks every member.
+    self_used_bytes: u64,
+    /// Shard files behind `self_used_bytes`.
+    self_shard_count: u64,
 }
 
 async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusResponse> {
@@ -204,6 +209,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         });
     }
     nodes.sort_by(|a, b| a.addr.cmp(&b.addr).then(a.id.cmp(&b.id)));
+    let (self_used_bytes, self_shard_count) = state.store.disk_usage();
     Json(ClusterStatusResponse {
         self_addr: state.self_id.clone(),
         self_node_id: state.app.id,
@@ -211,6 +217,8 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         nodes,
         files: app_state.manifests.len(),
         total_bytes: app_state.manifests.values().map(|m| m.file_size).sum(),
+        self_used_bytes,
+        self_shard_count,
     })
 }
 

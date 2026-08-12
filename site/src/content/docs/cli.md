@@ -21,6 +21,7 @@ characters, git-style): `nauka get 18445b -o x`.
 | `node remove <id>` | drains a member out of the cluster; shut the machine down after the scrubs settle |
 | `serve` | runs a node in the foreground — what the systemd unit calls. `--listen 0.0.0.0:7311`, `--advertise`, `--join` (wait to be added instead of founding), `--http`, `--metrics`, `--scrub-interval 30`, `--capacity`, [`--egress-quota`, `--cache-size`](/egress-and-cache/). Co-hosted nodes: space `--listen` ports by ≥ 2 |
 | `status` | members, leader, liveness, capacities, stored bytes — plain HTTP, no identity needed. `--api <url>`, `--json` |
+| `top` | the live, full-screen cluster view (htop-style): per-node fill with sparklines, migration rates during a rebalance, the registry one keypress away (`2`, type to filter). Read-only. `--api <url>`, `--interval <s>` |
 
 ```bash
 $ nauka status

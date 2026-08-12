@@ -149,6 +149,34 @@ impl ShardStore {
     }
 
     /// Every shard hash stored locally (walks the fanout).
+    /// Bytes and file count of the shard store on disk. Walks the two-level
+    /// shard directory — a few milliseconds for thousands of shards, cheap
+    /// enough to answer on every status poll rather than carrying a
+    /// counter that could drift from the filesystem's truth.
+    pub fn disk_usage(&self) -> (u64, u64) {
+        let (mut bytes, mut count) = (0u64, 0u64);
+        let Ok(prefixes) = fs::read_dir(self.root.join("shards")) else {
+            return (0, 0);
+        };
+        for prefix in prefixes.flatten() {
+            let Ok(entries) = fs::read_dir(prefix.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".tmp") {
+                    continue;
+                }
+                if let Ok(md) = entry.metadata() {
+                    if md.is_file() {
+                        bytes += md.len();
+                        count += 1;
+                    }
+                }
+            }
+        }
+        (bytes, count)
+    }
+
     pub fn list_shards(&self) -> Result<Vec<ContentHash>, StoreError> {
         let mut out = Vec::new();
         for prefix in fs::read_dir(self.root.join("shards"))? {

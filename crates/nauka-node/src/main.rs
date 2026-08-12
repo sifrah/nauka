@@ -14,6 +14,7 @@ mod node;
 #[cfg(feature = "s3")]
 mod s3;
 mod telemetry;
+mod top;
 mod update;
 
 use std::net::SocketAddr;
@@ -272,6 +273,17 @@ enum Cmd {
         /// Cluster members to drive the write through.
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
+    },
+    /// Live, full-screen cluster view (htop-style): per-node fill and
+    /// migration rates, sparklines, the registry one keypress away.
+    /// Read-only. Plain HTTP — no cluster identity needed.
+    Top {
+        /// HTTP API of any node (the rest are discovered from it).
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        api: String,
+        /// Seconds between refreshes.
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
     },
     /// Show the cluster as this node sees it: members, leader, health,
     /// capacities, stored bytes. Reads the HTTP API — no cluster identity
@@ -1464,6 +1476,9 @@ async fn main() -> Result<()> {
         }
         Cmd::Status { api, json } => {
             node::status(&api, json).await?;
+        }
+        Cmd::Top { api, interval } => {
+            top::run(api, interval).await?;
         }
         Cmd::Node(node_cmd) => match node_cmd {
             NodeCmd::Add {

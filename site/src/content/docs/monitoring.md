@@ -6,7 +6,7 @@ description: "nauka status for humans, /api/status for scripts, Prometheus on 91
 Three faces, same truth: a CLI for humans, JSON for scripts, Prometheus for
 dashboards.
 
-## For humans: `nauka status`
+## For humans: `nauka status` and `nauka top`
 
 ```bash
 nauka status
@@ -20,7 +20,12 @@ cluster — 3 nodes, 3 alive · 353 files, 3.34 GiB stored · 117.79 GiB capacit
 ```
 
 Plain HTTP against the local node's API — no cluster identity needed, works
-from anywhere that can reach a node (`--api http://<node>:8080`). A red `●`
+from anywhere that can reach a node (`--api http://<node>:8080`). For a
+LIVE view — a node joining, a drain, a healing pass — `nauka top` is the
+full-screen version: per-node fill with sparklines and migration rates,
+a "quiet for Xs" convergence marker, and the registry on the `2` key.
+It asks every member for its own disk usage each tick, so a rebalance
+is visible as it happens, not after. A red `●`
 is a member missing liveness probes; a **⚠ shares its address with another
 member** is a stale identity that should be retired (see
 [Growing and shrinking](/growing/)). No leader line means the cluster

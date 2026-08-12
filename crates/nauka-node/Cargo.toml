@@ -48,6 +48,10 @@ hex = "0.4"
 # renders with; depending on it directly keeps one styling vocabulary.
 indicatif = "0.17"
 console = "0.15"
+# `nauka top`: the live full-screen cluster view. ratatui draws, crossterm
+# owns the terminal (raw mode, alternate screen, key events).
+ratatui = "0.29"
+crossterm = "0.28"
 hmac = { version = "0.12", optional = true }
 anyhow.workspace = true
 axum = "0.8"
