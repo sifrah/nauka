@@ -47,6 +47,10 @@ struct ApiStatus {
     self_used_bytes: Option<u64>,
     #[serde(default)]
     self_shard_count: Option<u64>,
+    #[serde(default)]
+    self_net_rx_bytes: Option<u64>,
+    #[serde(default)]
+    self_net_tx_bytes: Option<u64>,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -67,6 +71,9 @@ struct NodeState {
     shards: Option<u64>,
     /// (instant, used bytes) samples, newest last.
     history: VecDeque<(Instant, u64)>,
+    /// (instant, cumulative rx, cumulative tx) — short window: network is
+    /// live traffic, a minute-long average would hide every burst.
+    net: VecDeque<(Instant, u64, u64)>,
 }
 
 impl NodeState {
@@ -78,6 +85,19 @@ impl NodeState {
             return None;
         }
         Some((last.1 as f64 - first.1 as f64) / dt)
+    }
+
+    /// (ingress, egress) in bytes/second over the short network window.
+    fn net_rates(&self) -> Option<(f64, f64)> {
+        let (first, last) = (self.net.front()?, self.net.back()?);
+        let dt = last.0.duration_since(first.0).as_secs_f64();
+        if dt < 0.5 {
+            return None;
+        }
+        Some((
+            last.1.saturating_sub(first.1) as f64 / dt,
+            last.2.saturating_sub(first.2) as f64 / dt,
+        ))
     }
 
     fn moving(&self) -> bool {
@@ -222,6 +242,12 @@ async fn poll(app: &mut App) {
                     entry.history.push_back((now, u));
                     while entry.history.len() > HISTORY {
                         entry.history.pop_front();
+                    }
+                }
+                if let (Some(rx), Some(tx)) = (s.self_net_rx_bytes, s.self_net_tx_bytes) {
+                    entry.net.push_back((now, rx, tx));
+                    while entry.net.len() > 6 {
+                        entry.net.pop_front();
                     }
                 }
             }
@@ -374,16 +400,18 @@ fn draw_nodes(f: &mut Frame, app: &App, area: Rect) {
         let n = &app.nodes[*addr];
         let [row, gauge_row] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(node_areas[i]);
-        let [dot_a, addr_a, role_a, used_a, spark_a, rate_a, shards_a] = Layout::horizontal([
-            Constraint::Length(2),
-            Constraint::Length(23),
-            Constraint::Length(8),
-            Constraint::Length(11),
-            Constraint::Length(14),
-            Constraint::Length(14),
-            Constraint::Min(10),
-        ])
-        .areas(row);
+        let [dot_a, addr_a, role_a, used_a, spark_a, rate_a, net_a, shards_a] =
+            Layout::horizontal([
+                Constraint::Length(2),
+                Constraint::Length(23),
+                Constraint::Length(8),
+                Constraint::Length(11),
+                Constraint::Length(14),
+                Constraint::Length(14),
+                Constraint::Length(24),
+                Constraint::Min(10),
+            ])
+            .areas(row);
 
         let dot = if n.reachable && n.alive_per_seed {
             Span::styled("●", Style::new().fg(Color::Green))
@@ -450,6 +478,20 @@ fn draw_nodes(f: &mut Frame, app: &App, area: Rect) {
             None => ("…".into(), Style::new().add_modifier(Modifier::DIM)),
         };
         f.render_widget(Paragraph::new(rate_txt).style(rate_style), rate_a);
+        // Live network state, machine level: what the bandwidth bill sees.
+        let net_line = match n.net_rates() {
+            Some((rx, tx)) => Line::from(vec![
+                Span::styled("▼", Style::new().fg(Color::Blue)),
+                Span::raw(format!("{}/s ", human(rx as u64))),
+                Span::styled("▲", Style::new().fg(Color::Magenta)),
+                Span::raw(format!("{}/s", human(tx as u64))),
+            ]),
+            None => Line::from(Span::styled(
+                "net …",
+                Style::new().add_modifier(Modifier::DIM),
+            )),
+        };
+        f.render_widget(Paragraph::new(net_line), net_a);
         f.render_widget(
             Paragraph::new(match n.shards {
                 Some(s) => format!("{s} shards · cap {}", human(n.capacity)),

@@ -163,6 +163,35 @@ struct ClusterStatusResponse {
     self_used_bytes: u64,
     /// Shard files behind `self_used_bytes`.
     self_shard_count: u64,
+    /// Cumulative machine-level network counters (bytes received/sent on
+    /// every non-loopback interface, from /proc/net/dev). Machine-level
+    /// on purpose: shards, Raft, HTTP and healing all count — the number
+    /// an operator's bandwidth bill sees. Absent off Linux.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    self_net_rx_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    self_net_tx_bytes: Option<u64>,
+}
+
+/// Sum of (rx, tx) bytes across non-loopback interfaces. Linux only —
+/// which every systemd deployment is; a macOS dev node just omits it.
+fn net_counters() -> Option<(u64, u64)> {
+    let dev = std::fs::read_to_string("/proc/net/dev").ok()?;
+    let (mut rx, mut tx) = (0u64, 0u64);
+    for line in dev.lines().skip(2) {
+        let Some((iface, rest)) = line.split_once(':') else {
+            continue;
+        };
+        if iface.trim() == "lo" {
+            continue;
+        }
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.len() >= 9 {
+            rx += f[0].parse::<u64>().unwrap_or(0);
+            tx += f[8].parse::<u64>().unwrap_or(0);
+        }
+    }
+    Some((rx, tx))
 }
 
 async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusResponse> {
@@ -210,6 +239,10 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
     }
     nodes.sort_by(|a, b| a.addr.cmp(&b.addr).then(a.id.cmp(&b.id)));
     let (self_used_bytes, self_shard_count) = state.store.disk_usage();
+    let (self_net_rx_bytes, self_net_tx_bytes) = match net_counters() {
+        Some((rx, tx)) => (Some(rx), Some(tx)),
+        None => (None, None),
+    };
     Json(ClusterStatusResponse {
         self_addr: state.self_id.clone(),
         self_node_id: state.app.id,
@@ -219,6 +252,8 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<ClusterStatusRespons
         total_bytes: app_state.manifests.values().map(|m| m.file_size).sum(),
         self_used_bytes,
         self_shard_count,
+        self_net_rx_bytes,
+        self_net_tx_bytes,
     })
 }
 
