@@ -111,7 +111,10 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
     // more. A user-facing web interface belongs to a product built on top,
     // not in the engine.
     let router = Router::new()
-        .route("/api/upload", post(upload))
+        // PUT as well as POST: `curl -T file` — the streaming upload every
+        // doc example recommends — sends PUT, and answering it with a 405
+        // was the first thing a reader following the docs would hit.
+        .route("/api/upload", post(upload).put(upload))
         .route("/api/files", get(files))
         .route("/api/status", get(status))
         .route(
@@ -530,16 +533,11 @@ pub(crate) async fn dispatch_file(
     dispatch_core(state, StripeSource::File(f), name, expires_at).await
 }
 
-/// The shared engine, in two phases dictated by one architectural fact:
-/// placement is keyed on the FILE hash, which only exists after the last
-/// byte. So the streaming phase encodes each stripe as soon as it is
-/// complete and parks every shard in the local store — content-addressed,
-/// so a shard is valid wherever it ends up living — and the tail phase,
-/// once the content has a name, computes the owners and ships what is not
-/// ours. On a single node the tail is empty and the whole upload is the
-/// streaming phase. The local copies of foreign shards are released by the
-/// existing rebalancing GC once their owners confirm possession; until
-/// then they serve reads at local-disk speed.
+/// The shared engine, one streaming pass: placement is keyed on each
+/// STRIPE's content hash — known the moment the stripe is encoded — so
+/// shards go onto per-peer send queues while the next stripe is still
+/// arriving. Only the manifest waits for the final file hash, and it is
+/// registered last: a truncated upload never becomes an object.
 async fn dispatch_core(
     state: &Arc<ApiState>,
     mut source: StripeSource,

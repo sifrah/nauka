@@ -33,7 +33,7 @@ Nauka installed. One step left before starting it:
       chown root:nauka /etc/nauka/cluster-ca.* && chmod 640 /etc/nauka/cluster-ca.*
       systemctl enable --now nauka
 
-  Open UDP 7311 and 7312, and TCP 8080 for the web interface.
+  Open UDP 7311 and 7312 (QUIC planes), and TCP 8080 for the HTTP API.
   Docs: https://getnauka.com
 
 MSG

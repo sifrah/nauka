@@ -14,7 +14,7 @@
 //!
 //! Encrypted stream format:
 //! ```text
-//! "YGE1" ‖ nonce_prefix(8)
+//! "NKA1" ‖ nonce_prefix(8)
 //! then per chunk: ct_len u32 LE ‖ flags u8 (1 = last) ‖ ct
 //! ```
 
