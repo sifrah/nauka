@@ -1,15 +1,15 @@
 ---
 title: Distributed storage that heals itself
-description: A distributed storage engine that heals itself — one binary, one key, zero configuration.
+description: A distributed storage engine that heals itself — Reed-Solomon shards across your machines, one binary, two commands to a cluster.
 template: splash
 tableOfContents: false
 hero:
   tagline: |
     Storage that survives a dead node, a rotting disk, or an entire region
-    going dark. One binary. One key. No configuration.
+    going dark. One binary. Two commands to a cluster.
   actions:
-    - text: Install
-      link: /install/
+    - text: Quickstart
+      link: /quickstart/
       icon: right-arrow
     - text: View on GitHub
       link: https://github.com/sifrah/nauka
@@ -27,17 +27,18 @@ Nauka splits every file into Reed-Solomon shards scattered across the nodes of
 a cluster. As long as `k` shards per stripe survive somewhere, the file comes
 back **byte-for-byte identical**.
 
-Nodes find each other on the BitTorrent DHT, elect a founder if the cluster
-does not exist yet, authenticate one another, spread data by disk capacity and
-network distance, then repair and rebalance themselves — continuously, with no
-central server and no configuration file.
+Membership is explicit and yours: the first machine founds the cluster, every
+next one is added with a single command that provisions it over SSH and takes
+it through consensus. No discovery layer, no central server, no side
+infrastructure to keep alive.
 
 ```bash
-nauka token                          # once — prints the cluster token
-NAUKA_TOKEN=nauka1_… nauka serve     # the same command on every machine
-```
+# first machine — installs nauka and founds a systemd-managed cluster
+curl -sSfL https://sh.getnauka.com | sh
 
-That's it. The cluster forms itself.
+# every next machine, run from the first one
+nauka node add <ip>:7311
+```
 
 <CardGrid>
   <Card title="Durable by arithmetic, not by copying" icon="approve-check">
@@ -46,46 +47,45 @@ That's it. The cluster forms itself.
     tolerance. BLAKE3 integrity is checked at every boundary; a corrupted
     shard is caught on read and treated as lost, never served.
   </Card>
-  <Card title="Nothing to configure" icon="setting">
-    A node's identity is derived from its Ed25519 public key. Its address is
-    auto-detected. The cluster is found on the Mainline DHT under a key
-    derived from the cluster key — nothing else to distribute, not even a URL.
+  <Card title="It repairs itself" icon="setting">
+    A scrubber checks every file continuously and regenerates missing shards
+    from the survivors. A node that dies is healed around; a node that comes
+    back is refilled; a node you remove is drained. Nothing to babysit —
+    <a href="/durability/">what survives what</a> is spelled out, not implied.
   </Card>
-  <Card title="Aware of where it stores" icon="puzzle">
-    Placement is weighted by declared disk capacity, so every node fills to
-    the same percentage. Nodes also learn their network positions from
-    measured round-trip times and pull a stripe's shards apart — a file
-    survives losing a region, not merely a machine.
+  <Card title="Built for machines that are far apart" icon="global">
+    Nodes learn their network positions from the round-trip times they
+    measure (no GeoIP database) and pull each stripe's shards apart, so a
+    file survives the loss of a region — not merely of a machine. Metered
+    links get <a href="/egress-and-cache/">monthly egress budgets</a>:
+    exhausted nodes are deprioritized, never refused.
   </Card>
   <Card title="Proofs, not claims" icon="seti:lock">
-    A node can assert it still holds what it quietly lost. Nauka demands
-    `blake3(nonce ‖ bytes)` proofs of possession before giving up any
-    redundancy, and audits its peers continuously by sampling.
+    A node can assert it still holds what it has quietly lost. Nauka demands
+    <code>blake3(nonce ‖ bytes)</code> proofs of possession before it gives
+    up any redundancy, and audits its peers continuously by sampling.
   </Card>
 </CardGrid>
 
 ## How it compares
 
-<div class="compare">
+|  | Nauka | Garage | MinIO | IPFS |
+|---|:---:|:---:|:---:|:---:|
+| Erasure coding (no ×3 replication) | ✅ | ❌ | ✅ | ❌ |
+| Self-healing | ✅ | partial | ✅ | ❌ |
+| Single binary | ✅ | ✅ | ~ | ~ |
+| Capacity-weighted placement | ✅ | ✅ | ❌ | ❌ |
+| Topology-aware placement (learned, not configured) | ✅ | ❌ | ❌ | ❌ |
 
-|                                   | Nauka | Garage  | MinIO | IPFS |
-| --------------------------------- | :---: | :-----: | :---: | :--: |
-| Erasure coding (no ×3 replication) |  ✅   |   ❌    |  ✅   |  ❌  |
-| Self-healing                       |  ✅   | partial |  ✅   |  ❌  |
-| Config-free cluster formation      |  ✅   |   ❌    |  ❌   |  ✅  |
-| Single binary                      |  ✅   |   ✅    |   ~   |  ~   |
-| Capacity-weighted placement        |  ✅   |   ✅    |  ❌   |  ❌  |
-| Topology-aware placement           |  ✅   |   ❌    |  ❌   |  ❌  |
+Nauka is the storage engine, deliberately bare: it exposes an HTTP API and —
+behind an opt-in build flag — an S3-compatible endpoint. User-facing
+applications belong in products built on top, not in the engine.
 
-</div>
+## Where to go
 
-## Status
-
-Young, but serious. The foundation is proven by integration tests that kill
-processes, cut power to the whole cluster, saturate the network and corrupt
-disks on purpose.
-
-What is still missing before production use is spelled out without hedging in
-[Operations](/operations/) and the [Backlog](/backlog/) — chiefly API
-authentication, NAT traversal and an S3 API.
-
+- **[Quickstart](/quickstart/)** — a real cluster in five minutes.
+- **[Durability & consistency](/durability/)** — the contract: what survives
+  what, and how we know.
+- **[Deploy](/deploy/)** — keys, ports, systemd, sizing; the long version.
+- **[CLI reference](/cli/)** — every command, with examples that were run
+  for real.

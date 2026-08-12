@@ -1,338 +1,137 @@
 ---
 title: "Deploy a cluster"
-description: "Generate the cluster token once, paste it on every machine, run the same command everywhere — and open the right UDP ports, which is the step that catches everyone out."
+description: "The long version: identity choices, ports, systemd, co-hosting, sizing — everything the quickstart glossed over."
 ---
 
-import { Aside, Tabs, TabItem, Steps } from "@astrojs/starlight/components";
+import { Aside } from "@astrojs/starlight/components";
 
-A Nauka cluster is formed by running the same command on every machine. There
-is no leader to designate, no seed list to maintain, no configuration file to
-write. The only thing you distribute is one string: the cluster token.
+The [quickstart](/quickstart/) is the short version: install script on the
+first machine, `nauka node add` for every next one. This page is for
+deployments that need to make choices.
 
-## The whole procedure
+## The identity: token or key directory
 
-<Steps>
+A cluster is defined by its key material — everything else (certificates,
+node identities) derives from it.
 
-1. **Generate the cluster token — once, anywhere.**
+**The token** (default, recommended): one string instead of files.
 
-   ```bash
-   nauka token
-   # nauka1_hT9xK2… (50 characters)
-   ```
+```bash
+nauka token
+# nauka1_yHc20GCphnJVTMJN8rib2DxUQuoDws13A_0gHnxOPA8
+```
 
-   The token is 32 random bytes. The cluster's Ed25519 CA — and everything
-   downstream: node certificates, the DHT rendezvous — is derived from it
-   deterministically, so machines that hold the token need to share nothing
-   else. Holding the token *is* membership of the cluster: treat it like a
-   password.
+The Ed25519 cluster CA is derived from it deterministically: every holder
+computes the same key, so machines need to share nothing else. `nauka init`
+generates one for you and stores it in `/etc/nauka/nauka.env`; `node add`
+hands it to each machine it provisions. Prefer the `NAUKA_TOKEN` environment
+variable over `--token` — command lines are visible in `ps`.
 
-2. **Open the ports.** See [the section below](#firewall-the-step-that-catches-everyone-out)
-   — this is where deployments fail.
+**The key directory**: for deployments that keep material in files
+(provisioning systems, vaults mounting secrets on disk).
 
-3. **Run the same command on every machine.**
+```bash
+nauka keygen --out ./nauka-keys        # refuses to overwrite
+# copy to each machine, then on every node:
+nauka --keys /etc/nauka-keys serve --advertise <ip>:7311
+```
 
-   ```bash
-   NAUKA_TOKEN=nauka1_… nauka --data-dir /var/lib/nauka serve
-   ```
+Same trust model, two spellings. Either way:
 
-   Prefer the environment variable (or `EnvironmentFile` under systemd)
-   over the `--token` flag: command lines are visible to every local user
-   in `ps`. Each node derives its identity, detects its public address
-   through the DHT, looks for the cluster, and either joins it or — if no
-   cluster exists yet — stands as a genesis candidate and founds it.
-   Startup order does not matter, and no node is privileged.
-
-4. **Check that the cluster formed.** See [Verifying it works](#verifying-it-works).
-
-</Steps>
-
-<Aside type="note" title="Key files still work">
-  `nauka keygen --out ./nauka-keys` and `--keys /etc/nauka-keys` remain
-  supported: same trust model, spelled as a directory instead of a string.
-  Existing clusters keep working unchanged. A token cannot be mixed with
-  `--keys`, and a cluster created from key files has no token equivalent —
-  the derivation only goes one way.
+<Aside type="caution" title="Back up the cluster identity">
+  Losing the token (or `cluster-ca.key`) does not lose data, but it
+  permanently prevents adding any node or client to that cluster. Back it
+  up off-cluster, before you need it. Each node's `/var/lib/nauka/node.key`
+  is worth keeping too: a reinstalled node without it comes back as a NEW
+  identity — handled cleanly by [convergent `node add`](/growing/), but a
+  kept key avoids the churn.
 </Aside>
 
-## Firewall: the step that catches everyone out
+## Ports and firewall
 
-<Aside type="danger" title="Open the listen port AND the next one, over UDP">
+| Port | Protocol | What | Exposure |
+|---|---|---|---|
+| 7311 | **UDP** | QUIC data plane (`--listen`) | open between nodes and to clients of the native protocol |
+| 7312 | **UDP** | consensus plane (always `listen + 1`) | open between nodes |
+| 8080 | TCP | HTTP API (`--http`) | as public as you want your files — **there is no auth yet** |
+| 9100 | TCP | Prometheus (`--metrics`) | loopback by default; widen only onto a private scrape network |
+| 8333 | TCP | S3 endpoint (only with the `s3` build feature) | like 8080 |
 
-Every node needs **two consecutive UDP ports** open:
+All inter-node traffic is QUIC, hence UDP — the firewall step that catches
+everyone out. The consensus plane serves only Raft; a port collision fails
+loudly at bind time, **before** anything is written to disk.
 
-| Port | Protocol | Carries |
-| --- | --- | --- |
-| `7311` | **UDP** | QUIC data plane — shards, manifests, admin RPCs |
-| `7312` | **UDP** | QUIC consensus plane — Raft RPCs only |
-| `8080` | TCP | HTTP API and web interface |
+## The systemd deployment
 
-All inter-node traffic is QUIC, and **QUIC runs over UDP**. A firewall that
-only opens TCP lets nothing through. The second port is not optional: Raft
-runs on a dedicated plane at `listen port + 1` so that heartbeats never queue
-behind megabytes of shard traffic. Open `7311/udp` and forget `7312/udp` and
-the cluster will look almost alive — nodes reach each other, no leader is
-ever elected.
+`nauka init` (and `node add`, for the machines it provisions) installs the
+same layout the `.deb`/`.rpm` packages use:
 
-</Aside>
+| Path | Contents |
+|---|---|
+| `/etc/nauka/nauka.env` | `NAUKA_TOKEN=…` and `NAUKA_ARGS=--advertise <ip>:7311 [--join]` — the one file to edit, then `systemctl restart nauka` |
+| `/var/lib/nauka` | shards, manifests, Raft log, node.key — owned by the dedicated `nauka` user |
+| `/etc/systemd/system/nauka.service` | hardened unit: `Restart=always`, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, 64k file descriptors |
 
-<Tabs>
-  <TabItem label="ufw">
+Knobs like [`NAUKA_EGRESS_QUOTA` and `NAUKA_CACHE_SIZE`](/egress-and-cache/)
+go in `nauka.env` too. Logs: `journalctl -u nauka` — startup prints an
+aligned banner (version, data dir, listen, advertise, http).
 
-```bash
-sudo ufw allow 7311/udp
-sudo ufw allow 7312/udp
-sudo ufw allow 8080/tcp
-```
+## Founding rules — why there is no race
 
-  </TabItem>
-  <TabItem label="firewalld">
+The first `serve` on a **blank data dir** founds a single-node cluster;
+with `--join` it waits to be added instead (what `node add` configures on
+its targets); a data dir with existing Raft state just resumes. There is no
+discovery and therefore nobody to race: a fork cannot happen because
+founding is a local, deliberate act. `serve` probes every socket it needs
+**before** founding — a busy port fails with nothing written.
 
-```bash
-sudo firewall-cmd --permanent --add-port=7311/udp
-sudo firewall-cmd --permanent --add-port=7312/udp
-sudo firewall-cmd --permanent --add-port=8080/tcp
-sudo firewall-cmd --reload
-```
+## Co-hosting several nodes
 
-  </TabItem>
-  <TabItem label="nftables">
-
-```
-udp dport { 7311, 7312 } accept
-tcp dport 8080 accept
-```
-
-  </TabItem>
-</Tabs>
-
-If you changed `--listen`, adjust both numbers: the consensus plane always
-sits at `port + 1`, and it refuses every non-Raft request, so a collision can
-never quietly turn it into a second data plane.
-
-There is no NAT traversal yet. Every node needs a public address or a
-forwarded port. On a multi-homed host, or behind a NAT where auto-detection
-picks the wrong address, set it explicitly:
+For tests on one machine: space the `--listen` ports by **at least 2**
+(consensus lives on port+1) and give each node its own data dir and HTTP
+port:
 
 ```bash
-nauka --keys /etc/nauka-keys serve --advertise 203.0.113.10:7311
+nauka --data-dir ./n1 serve --listen 0.0.0.0:7311 --http 0.0.0.0:8081
+nauka --data-dir ./n2 serve --listen 0.0.0.0:7313 --http 0.0.0.0:8082
 ```
 
-### Several nodes on one host
-
-Space the listen ports by at least **2**, since each node claims `port` and
-`port + 1`:
-
-```bash
-nauka --data-dir ./n1 --keys ./nauka-keys serve --listen 0.0.0.0:7311 --http 0.0.0.0:8080
-nauka --data-dir ./n2 --keys ./nauka-keys serve --listen 0.0.0.0:7313 --http 0.0.0.0:8081
-nauka --data-dir ./n3 --keys ./nauka-keys serve --listen 0.0.0.0:7315 --http 0.0.0.0:8082
-```
-
-Use `7311, 7313, 7315`, never `7311, 7312, 7313` — the second node would bind
-the first one's consensus port.
+`7311, 7313, 7315` — never `7311, 7312, 7313`, where the second node would
+collide with the first one's consensus port.
 
 ## How many nodes do you need?
 
-With the default **4+2** profile, every stripe becomes 6 shards (4 data + 2
-parity) and survives losing any 2 of them. What that buys you depends
-entirely on how those 6 shards are spread:
+With the default 4+2 profile every stripe becomes 6 shards that survive
+losing any 2. What that means in machines:
 
-| Nodes | Shards per node, per stripe | Survives losing one machine? |
-| --- | --- | --- |
-| 1 | 6 | No — that machine *is* the cluster |
-| 2 | 3 | **No** — 3 lost shards exceeds `m = 2` |
-| 3 | 2 | **Yes** — exactly `m = 2` lost, still recoverable |
-| 4–5 | 2 | Yes |
-| 6 or more | 1 | Yes, and survives losing two machines |
+| Nodes | Shards per node | Survives |
+|---|---|---|
+| 1 | 6 | disk corruption only (2 shards/stripe) |
+| 2 | 3 | corruption; **not** a node loss (3 > 2) — but healing + upload spillover have kept real files alive through single-node wipes |
+| 3 | 2 | **one node down or destroyed** — the sweet spot to start |
+| 6+ | 1 | any two nodes at once; capacity weighting starts to bite |
 
-**Three nodes is the practical minimum.** At three, placement enforces a
-strict 2/2/2 split of every stripe regardless of declared capacities —
-durability outranks capacity balancing, so a large disk is never allowed to
-concentrate more than `m` shards of one stripe and become a single point of
-failure. Raft agrees on the same number: 3 voters tolerate 1 failure, 2
-voters tolerate none.
+Below 6 nodes, every node carries a slice of every stripe, so **the
+smallest disk paces the cluster** — prefer roughly comparable capacities,
+or accept that the small machine fills first. The full arithmetic lives in
+[Durability & consistency](/durability/).
 
-Below three nodes, Nauka still works and still detects corruption — you just
-have no machine-loss tolerance, which is the point of running it at all.
+## Multi-region, multi-provider
 
-<Aside type="note" title="Capacity, not free space">
-  A node's placement weight is its **declared total capacity** (by default the
-  size of its data directory's filesystem, or `--capacity <bytes>`). The
-  equilibrium the cluster converges to is "every node filled to the same
-  percentage", not "every node holding the same number of bytes". Mixing a
-  4 TB machine with 500 GB machines is fine and expected.
-</Aside>
+Nothing to configure: nodes learn their network positions from measured
+RTTs and placement pulls each stripe's shards toward distant nodes
+([how](/cluster/)). A 3-node cluster spanning two providers is a real,
+tested configuration — give metered nodes an
+[egress budget](/egress-and-cache/) and front distant readers with the
+stripe cache.
 
-## Running it as a service
-
-The `.deb` and `.rpm` packages install a hardened systemd unit at
-`/usr/lib/systemd/system/nauka.service`, running as an unprivileged `nauka`
-user with `ProtectSystem=strict` and write access to nothing but
-`/var/lib/nauka`.
-
-<Steps>
-
-1. **Install the cluster token** in `/etc/nauka/nauka.env`, which the
-   systemd unit reads (the package created `/etc/nauka` with mode 0750,
-   owned by `root:nauka`):
-
-   ```bash
-   sudo sh -c 'echo "NAUKA_TOKEN=nauka1_…" >> /etc/nauka/nauka.env'
-   sudo chmod 640 /etc/nauka/nauka.env
-   ```
-
-   The same line on every machine of the cluster. (File-based deployments
-   put `cluster-ca.key`/`cluster-ca.pem` in `/etc/nauka` instead and pass
-   `--keys /etc/nauka`.)
-
-2. **Adjust the configuration**, if the defaults are not right. The unit reads
-   `/etc/nauka/nauka.env`, which the package seeds from
-   [`nauka.env.example`](https://github.com/sifrah/nauka/blob/main/packaging/nauka.env.example):
-
-   ```ini
-   # /etc/nauka/nauka.env
-   NAUKA_ARGS=--listen 0.0.0.0:7311 --http 0.0.0.0:8080
-   #NAUKA_DATA_DIR=/var/lib/nauka
-   #NAUKA_KEYS_DIR=/etc/nauka
-   ```
-
-   `NAUKA_ARGS` is appended to `nauka serve` verbatim — that is where
-   `--advertise`, `--capacity`, `--no-discover` and `--scrub-interval` go.
-
-3. **Start it:**
-
-   ```bash
-   sudo systemctl enable --now nauka
-   sudo systemctl status nauka
-   ```
-
-</Steps>
-
-The unit restarts the node automatically on failure. Rebuilding shards after
-a restart is normal and healthy — that is the scrubber catching up, not an
-error.
-
-<Aside type="caution" title="Back up the cluster key">
-  Losing `cluster-ca.key` does not lose your data, but it permanently
-  prevents adding any new node or client machine to that cluster. Back it up
-  off-cluster, before you need to. Backing up each node's
-  `/var/lib/nauka/node.key` is worthwhile too: a reinstalled node without it
-  takes on a new identity, and the old one has to be retired with
-  `nauka node remove`.
-</Aside>
-
-## Verifying it works
-
-### Ask a node for the cluster state
+## Updating a live cluster
 
 ```bash
-nauka status --api http://10.0.0.1:8080
+# on each node, one at a time:
+nauka update && systemctl restart nauka
 ```
 
-```
-cluster — 3 nodes, 3 alive · 12 files, 4.20 GiB stored · 1.41 TiB capacity
-  ● 10.0.0.1:7311  leader  480.00 GiB  5140831482304991211
-  member 2 @ 10.0.0.2:7311 — capacity 480.0 GB
-  member 3 @ 10.0.0.3:7311 — capacity 960.0 GB
-```
-
-Three things must be true: a leader is elected (`leader: Some(...)`, not
-`None`), every machine you started appears in the member list, and the
-applied log index moves forward between two invocations. A `leader: None`
-that persists is almost always the missing `port + 1` UDP rule.
-
-### Open the web interface
-
-Point a browser at `http://<any-node>:8080`. Any node is a complete entry
-point — upload, download and listing return the same result everywhere. The
-Cluster view shows live membership and per-node fill.
-
-<Aside type="caution" title="Do not expose port 8080 publicly yet">
-  The HTTP API has no authentication and no quotas in v1. Put it behind a
-  reverse proxy with your own access control, or bind it to a private
-  interface, until the accounts layer lands. See
-  [Operations](/operations/#known-limitations-v1).
-</Aside>
-
-### Read the logs
-
-```bash
-journalctl -u nauka -f
-```
-
-On a healthy first startup you should see, in roughly this order:
-
-```
-identity: node-id 5140831482304991211 (fingerprint 47533dcbe0b1a2f4)
-public IP detected through the DHT: 203.0.113.10 — advertised address
-  203.0.113.10:7311 (port 7311 and port 7312 must be reachable over UDP)
-no cluster on the DHT — standing as genesis candidate
-genesis: candidacy uncontested — cluster founded
-HTTP API on http://0.0.0.0:8080
-web UI served from the binary
-seeds published on the DHT: 1 address(es)
-```
-
-On the nodes that join afterwards:
-
-```
-cluster discovered on the DHT: [203.0.113.10:7311] — joining…
-join succeeded — voting member of the cluster
-```
-
-Then, on every background pass:
-
-| Log line | What it means |
-| --- | --- |
-| `scrub: X checked, Y healed, Z unrecoverable` | `Y > 0` is a real repair. A `Z` that persists means too many nodes are down to rebuild those stripes. |
-| `gc: N shards released` | Rebalancing after a membership or capacity change. Only ever released once every current owner has *proved* it holds its copy. |
-| `audit: 6/6 possessions proved, 0 missing` | Sampled proof-of-possession against peers. Persistent `missing` is an alert; any `FAILED` is serious. |
-| `peer <id> unreachable` | Usually a firewall rule, a dead node, or an `--advertise` address the others cannot route to. |
-
-### Prove it heals
-
-The demonstration is worth running once on a test cluster:
-
-```bash
-# upload something, note the hash
-curl -X POST --data-binary @video.mp4 "http://10.0.0.1:8080/api/upload?name=video.mp4"
-
-# destroy one node's entire shard store
-ssh vps2 'rm -rf /var/lib/nauka/shards'
-
-# wait a scrub interval (30 s by default), then download it anyway
-curl -o out.mp4 http://10.0.0.3:8080/f/<hash>
-sha256sum video.mp4 out.mp4    # identical
-```
-
-The audit report goes from `6/6 proved` to `3/6 proved, 3 missing` and back
-to `6/6` once the scrubber has regenerated everything from parity.
-
-## Growing and shrinking
-
-In discovery mode, joining is automatic: start a new node with the cluster
-key and it becomes a learner, then a voter. Rebalancing follows over the next
-scrub and GC cycles, and only the shards that must migrate move at all.
-
-To remove a node, drain it first — it keeps serving reads while the others
-re-replicate its share:
-
-```bash
-# on any member (the node ids are in `nauka status`):
-nauka node remove 5140831482304991211
-# wait for the scrub reports to settle, then shut the machine down
-```
-
-Do not wipe more than `m` nodes at a time. With 4+2, that means one at a time
-on a 3-node cluster, and you should wait for `scrub` to report a clean pass
-between each.
-
-## Where to go next
-
-- [Operations](/operations/) — the full CLI reference, diagnostics, backup
-  and restore, and the known limitations of v1.
-- [Cluster](/cluster/) — how placement, healing, attestation and
-  topology-aware spreading actually work.
-- [HTTP API](/api-http/) — upload, download, deletion, expiry and banning.
-- [End-to-end encryption](/encryption/) — encrypting on the client, so the
-  nodes store bytes they cannot read.
+Checksum-verified, atomic binary replacement; the cluster keeps quorum
+through a rolling restart. `nauka update --check` in a cron makes a fine
+notifier — the engine never self-restarts on its own.

@@ -1,6 +1,6 @@
 ---
 title: "Architecture"
-description: "The crate layering, the invariants that hold the system together, and the upload, download and self-healing flows end to end."
+description: "The crate layering, the invariants that hold the system together, and the upload and download flows end to end."
 ---
 
 ## The crates
@@ -12,80 +12,98 @@ ones below it:
 |---|---|---|
 | `nauka-erasure` | Pure core (zero I/O): Reed-Solomon encoding by stripes, reconstruction, BLAKE3 integrity | — |
 | `nauka-store` | On-disk storage for one node: content-addressed shards, JSON manifests | nauka-erasure |
-| `nauka-transport` | Inter-node QUIC (quinn): shard/manifest/Raft protocol, mTLS, throughput tuning | nauka-erasure, nauka-store |
-| `nauka-raft` | openraft consensus: replicated file registry + membership, durable redb storage | nauka-erasure, nauka-transport |
-| `nauka-cluster` | Cluster logic: rendezvous-hash placement, self-healing, rebalancing GC | nauka-erasure, nauka-store, nauka-transport |
-| `nauka-discovery` | Mainline DHT rendezvous (pkarr): publishing/resolving seeds, public IP detection | — (pkarr, mainline) |
+| `nauka-transport` | Inter-node QUIC (quinn): shard/manifest/Raft protocol, mTLS, the two network planes | nauka-erasure, nauka-store |
+| `nauka-cluster` | Placement (weighted rendezvous + Vivaldi coordinates), healing, liveness, attestation | nauka-erasure, nauka-store, nauka-transport |
+| `nauka-raft` | openraft consensus: the replicated registry, durable redb log | nauka-erasure, nauka-transport, nauka-cluster, nauka-s3 |
+| `nauka-crypto` | Client-side end-to-end encryption (AES-256-GCM STREAM, magic `NKA1`) | — |
+| `nauka-s3` | S3 data model (buckets, credentials, naming rules), replicated by Raft; the endpoint is behind the `s3` cargo feature | nauka-erasure |
 | `nauka-node` | The binary: CLI, server, HTTP API, orchestration of everything above | all of them |
 
 ## System invariants
 
 1. **Integrity is verified at every boundary.** Every shard has a BLAKE3
    hash; every file has a global hash. A shard is re-verified on every disk
-   read and discarded if it does not match (treated as lost, never used
-   silently), and the reconstructed file is re-checked against the
-   manifest's hash before being handed back.
-2. **Placement is a pure function.** "Who should hold shard i of stripe s
-   of file f?" is computed from (file hash, indices, sorted member list) —
-   same answer on every node, with zero coordination. All cluster
+   read and treated as lost if it does not match — never served silently —
+   and the reconstructed file is re-checked against the manifest's hash
+   before being handed back.
+2. **Placement is a pure function.** "Who owns shard i of stripe s?" is
+   computed from (stripe content hash, indices, member list with weights
+   and coordinates) — same answer on every node, zero coordination. All
    convergence (healing, GC, rebalancing) falls out of this invariant.
 3. **Consensus carries metadata only.** The Raft log replicates the
-   manifest registry and the membership — never shard bytes, which travel
-   directly over QUIC. Consensus stays lightweight no matter how much data
-   is stored.
-4. **Content is the address.** A shard is stored under its own hash
-   (content-addressed): idempotent writes, dedup for free, safe to resend.
-5. **Discovery ≠ admission.** The public DHT hands out addresses; mTLS with
-   the cluster key decides who gets in. A stranger can find the cluster,
-   not join it.
-6. **Identity is proven.** The Raft node-id is derived from the node's
-   Ed25519 public key (first 8 bytes of blake3(pubkey)) — not declared by a
-   CLI flag.
+   registry — never shard bytes, which travel directly over QUIC.
+   Consensus stays lightweight no matter how much data is stored.
+4. **Content is the address.** A shard is stored under its own hash:
+   idempotent writes, dedup for free, safe to resend.
+5. **Identity is proven.** The Raft node-id is derived from the node's
+   Ed25519 public key (first 8 bytes of blake3(pubkey)) — not declared by
+   a flag. Admission is mTLS with the cluster CA, nothing else.
+
+## The two network planes
+
+Every node opens two QUIC endpoints: the data plane on `--listen`
+(default 7311/udp) for shards, manifests and admin RPCs, and a consensus
+plane on port+1 that serves only Raft. Details and the reason for the
+split are in [Transport](/transport/).
 
 ## Upload flow (`POST /api/upload` on any node)
 
+Encoding is overlapped with reception — it starts on the first complete
+stripe, not after the last byte:
+
 ```
 client ──POST /api/upload──▶ node N (any of them)
-  1. N buffers the stream into data-dir/tmp, hashing as it goes
-     (placement is keyed on the file's final hash)
-  2. N reads the buffer back stripe by stripe (4 MiB of data by default):
-       encode_stripe → k=4 data shards + m=2 parity shards (1 MiB each)
-       for each shard: owner = HRW(file_hash, stripe, index, members)
-         owner == N     → local write
-         owner == other → put_shard over QUIC to it (retried, idempotent)
-  3. N writes the manifest locally, then records it in the Raft
-     registry (local write if leader, otherwise forwarded to the leader)
-  4. response: { hash, size, name, link: "/f/<hash>" }
+  0. quorum gate: if the manifest provably cannot be committed,
+     refuse NOW ("no quorum") — before any encoding work is spent
+  1. the body streams into an elastic buffer (bounded RAM window from a
+     global pool; a disk spool absorbs what the encoder cannot drain)
+  2. per complete stripe (4 MiB of data): encode_stripe → 4 data + 2
+     parity shards. Placement is keyed on the stripe's content, so the
+     owners are known the moment it is encoded:
+       owner == N     → local write
+       owner == other → onto that peer's bounded send queue
+     A busy peer backpressures the encoder; a FAILED peer trips a
+     breaker and its shards are parked locally (degraded, not lost —
+     the scrubber completes them later)
+  3. after the last byte: any stripe with fewer than k=4 shards placed
+     aborts the upload — parked-on-one-node is not durability
+  4. the manifest is registered LAST, in the Raft registry (written
+     locally first, so the file is readable here right away)
+  5. response: { hash, size, stripes, …, degraded_shards, link }
+     degraded_shards = 0 means every shard reached its owner
 ```
 
 ## Download flow (`GET /f/{hash}` on any node)
 
 ```
 client ──GET /f/<hash>──▶ node N
-  1. manifest: local store, otherwise the in-memory replicated registry
-  2. for each stripe (streamed, one stripe in memory at a time):
-       for each shard: local? otherwise get_shard from each member
-       (timeouts; an unreachable peer is remembered and not retried)
-       decode_stripe: ≥ k valid shards are enough — missing and corrupted
-       ones are rebuilt by Reed-Solomon
-  3. global hash recomputed on the fly, compared against the manifest
+  1. manifest: local store, else the replicated registry
+  2. the FIRST stripe is reconstructed before any status is sent: a file
+     with too many shards gone gets an honest 503, not a truncated 200
+  3. per stripe (streamed, one stripe in memory at a time):
+       the k data shards are fetched in parallel — local store first,
+       then peers; parity is requested only if a data shard is missing.
+       On a healthy cluster not one parity byte crosses the wire.
+       decode_stripe: any k valid shards out of 6 are enough
+       (a peer that fails once is written off for this request)
+  4. global BLAKE3 recomputed on the fly, compared to the manifest
 ```
 
-## A node's background loop (consensus mode)
+Decoded stripes that crossed the cluster land in the optional per-node
+cache (`--cache-size`) — content-addressed, so never stale. Range
+requests fetch only the stripes covering the range.
 
-Every `--scrub-interval` seconds (default 30 s):
+## Where state lives
 
-1. **Materialization**: manifests present in the Raft registry but absent
-   from the local store are written to it (a node that missed an upload
-   catches up).
-2. **Scrub (acquisition)**: for every shard this node owns according to
-   placement — missing or corrupted? → gather ≥ k shards of the stripe from
-   the cluster, decode, re-encode, verify the hash, store.
-3. **GC (release)**: for every local shard this node no longer owns (the
-   view changed) — deleted only once ALL current owners have confirmed they
-   hold their copy.
+| State | Where | Authority |
+|---|---|---|
+| Registry: manifests, capacities, coordinates, egress ledgers, bans, S3 view | Raft state machine, replicated on every node | **the truth** |
+| Shards | each node's `data-dir/shards`, content-addressed | placement says who *should* hold what |
+| Local manifests | `data-dir/manifests` | a cache of the registry, materialized by the scrubber |
 
-These three steps make any topology change automatic: node dies → its
-shards are regenerated elsewhere; node added → it acquires its share and
-the others release theirs; node removed → the cluster absorbs the load
-again.
+Every `--scrub-interval` (30 s) each node converges toward that truth:
+manifests in the registry but missing locally are materialized; shards
+this node owns but lacks are regenerated from any k; shards it no longer
+owns are released — only after the real owner has proven possession with
+a `blake3(nonce ‖ bytes)` challenge. Node dies, node added, node removed:
+the same three steps absorb all of it. See [Cluster](/cluster/).

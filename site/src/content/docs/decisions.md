@@ -40,18 +40,31 @@ anti-affinity wins over capacity when the two conflict (small cluster) — a
 big node concentrating more than m shards of a stripe would become a single
 point of failure.
 
-**Mainline DHT + pkarr rather than IPFS for the rendezvous.** The ChainRage
-inheritance without its stack: kubo is written in Go (not embeddable),
-rust-ipfs is dead, and IPFS is wildly oversized for publishing ~200 bytes
-of addresses. The BitTorrent DHT is older, bigger and more reliable — and
-pkarr puts Ed25519-signed DNS records on it. The DHT keypair is **derived
-from the cluster key**: nothing extra to distribute, not even a URL.
+**Mainline DHT + pkarr for the rendezvous — later removed.** Early
+versions had nodes discover each other on the BitTorrent DHT. The
+technology choice inside that feature was sound: kubo is written in Go
+(not embeddable), rust-ipfs is dead, and IPFS is wildly oversized for
+publishing ~200 bytes of addresses — the Mainline DHT is older, bigger and
+more reliable, and pkarr puts Ed25519-signed DNS records on it, keyed by a
+pair derived from the cluster key (nothing extra to distribute). What did
+not survive was the premise. Once membership became an explicit CLI act —
+`nauka node add` provisions the machine over SSH and takes it through
+consensus — a background rendezvous was a second, weaker authority on who
+is in the cluster, always one step behind the Raft membership it tried to
+anticipate. The discovery layer we removed taught us the real lesson:
+membership is a decision, not an observation, and a storage engine should
+have exactly one source of truth about it.
 
-**Genesis election rather than a `--bootstrap` flag.** No designated node:
-signed candidacies on the DHT, the lowest node-id founds the cluster after
-12 s unchallenged, and a dead candidate is replaced after 45 s. The same
-command everywhere is a product decision ("turnkey") as much as a technical
-one.
+**Genesis election — removed with discovery.** No designated node: signed
+candidacies on the DHT, the lowest node-id founded the cluster after 12 s
+unchallenged, a dead candidate was replaced after 45 s. It existed to make
+"the same command on every machine" true, which was the pitch of that era.
+It also made cluster birth a 12-second distributed race whose failure
+modes (a partition during genesis, two founders) had to be reasoned about
+forever after. Today birth is deterministic: the first `serve` on a blank
+data dir founds a single-node cluster, `--join` waits to be added instead,
+and `node add` grows from there. Two ways to create a cluster is one too
+many; an explicit act beats an elegant election.
 
 **The node-id is derived from the public key.** `u64 = blake3(pubkey)[..8]`.
 An identity that is proven (mTLS) and computed, instead of an integer
@@ -98,8 +111,39 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
 9. **Failures must be loud.** Explicit keep-alive + idle timeout
    everywhere: a connection that lingers is worse than a dead one, because
    idempotent retries know how to handle the latter.
+10. **Liveness keyed by address masks a phantom voter.** A wiped and
+    reinstalled machine comes back with a fresh node id at its old
+    address. The old id stayed a voter; the pinger, keyed by address, saw
+    the address answering and read both identities as alive — but quorum
+    math counts ids. Three machines, four voters, two sharing one address:
+    one more real failure freezes writes while `status` reads green.
+    Liveness measures machines; membership counts keys — the two must
+    never be joined on the address. Fixes: `/api/status` reports one row
+    per member id (and `status` warns when two share an address), and
+    `node add` became convergent — the same membership change that admits
+    the returning machine's new identity evicts the stale one at that
+    address, so the phantom cannot outlive the reinstall.
+11. **Stabilize inputs, not comparisons.** Vivaldi coordinates drift a
+    little on every RTT sample; placement is a pure function of them, so
+    every wiggle re-ranked stripe owners and scrub and GC chased each
+    other, moving the same shards back and forth. Tolerance at the
+    comparison site cannot fix this: each node would be tolerating around
+    a different local value, and two nodes that rank differently fight
+    (the same reason the WRH `ln` is hand-rolled). The fix belongs at the
+    source: coordinates are published into the Raft state snapped to a
+    5 ms grid and sticky — republished only after more than 4 ms of real
+    drift, fed by min-of-3 pings. Every node computes from identical
+    inputs, and ownership stopped flapping.
+12. **The doors first, the cluster second.** `serve` used to found a
+    single-node cluster on a blank data dir and only then bind its
+    sockets. A busy port aborted the start — after the founding was on
+    disk. The retry, on a no-longer-blank data dir, came up as an
+    already-founded, unreachable cluster instead of failing. Now `serve`
+    pre-binds every socket before founding anything: a busy port fails
+    loudly with nothing written. Never persist a commitment you are not
+    yet able to serve.
 
 ## Accepted debt
 
-Consolidated and prioritized in the [Backlog](/backlog/), alongside the
+Spelled out bluntly in [Known limitations](/operations/#known-limitations-v1), alongside the
 lines of innovation.

@@ -1,85 +1,110 @@
 ---
 title: "Consensus"
-description: "What the Raft log replicates and what it deliberately does not, how it is persisted, and how writes and administration flow through the leader."
+description: "What the Raft log replicates, how membership changes and cluster birth work, and how writes behave when quorum is lost."
 ---
 
 ## What Raft replicates (and what it does not)
 
-The replicated state machine holds **metadata only**:
+The replicated state machine is the cluster's registry — **metadata
+only**:
 
-- the **file registry**: `file_hash → FileManifest` (`RegisterManifest` /
-  `UnregisterManifest` commands);
-- the cluster **membership** (handled natively by openraft).
+| Entry | Content | Why replicated |
+|---|---|---|
+| Manifests | `file_hash → FileManifest` | the truth about what the cluster stores; local manifests are a cache of it |
+| Capacities | declared disk capacity per node | the weight for weighted placement — every node must place identically |
+| Coordinates | Vivaldi network coordinates per node | geo-aware placement, same argument |
+| Egress ledgers | bytes served per node, per month | a mid-month restart must not reset the budget |
+| Bans | `hash → reason` | banned content must be refused by every node, not just one |
+| S3 view | buckets, credentials, in-flight uploads (`s3` feature) | any node answers S3 requests |
 
-Shard bytes **never** go through the consensus log — they travel directly
-over the QUIC data plane. A manifest weighs a few KiB whatever the file's
-size: consensus stays lightweight at any storage scale.
+Shard bytes **never** go through the consensus log — they travel over
+the QUIC data plane. A manifest weighs a few KiB whatever the file's
+size: consensus stays lightweight at any storage scale. Raft RPCs ride
+their own QUIC endpoint on **port+1** — see [Transport](/transport/).
 
-The replicated registry is the **source of truth**: every node
-materializes the manifests it discovers there, then its scrubber goes and
-fetches the shards it owns. A node that missed an upload converges on its
-own.
-
-## openraft parameters
-
-```
-heartbeat_interval        500 ms
-election_timeout          1.5 – 3 s
-snapshot_policy           LogsSinceLast(256)
-max_in_snapshot_log_to_keep  64
-```
-
-Network: RPCs (`append_entries`, `vote`, `install_snapshot`) ride on our
-own QUIC, over the **dedicated consensus plane (port+1)** — see
-[Transport](/transport/).
+openraft parameters: heartbeat 500 ms, election timeout 1.5–3 s,
+snapshot every 256 log entries, 64 entries kept behind the snapshot so a
+lagging follower catches up from the log instead of a full transfer.
 
 ## Persistence (data-dir/raft/)
 
 | Item | Backing | Durability |
 |---|---|---|
-| Log + vote + committed + last_purged | `raft-log.redb` (redb) | **fsync before the ack** — a Raft correctness requirement: an acknowledged vote or entry must survive a crash |
-| State machine (registry) | memory | rebuilt at startup: snapshot + log replay by openraft — **no fsync on the apply path** |
+| Log + vote | `raft-log.redb` (redb) | **fsync before the ack** — an acknowledged vote or entry must survive a crash |
+| State machine | memory | rebuilt at startup: snapshot + log replay — no fsync on the apply path |
 | Snapshot | `snapshot.bin` | atomic write (tmp + fsync + rename) |
 
-The redb log stays bounded: a snapshot every 256 entries, then a purge
-(keeping 64 entries of slack so that lagging followers can catch up from
-the log rather than from a full snapshot).
+## Founding a cluster
 
-Scenarios covered by the tests:
+Cluster birth is explicit — there is no discovery, so there is nobody to
+race:
 
-- **Leader crash under live traffic** → re-election in ~2 s, writes resume,
-  zero loss of anything already committed.
-- **Resurrection from empty state** (disk lost) → full catch-up from the
-  leader (snapshot + log).
-- **Total cluster outage** (all n nodes down, `kill -9` included) →
-  restart from the data-dirs, registry intact, cluster writable again.
-  Tested both as a pure log replay AND as snapshot + purge + leftovers.
+- `serve` on a **blank data dir founds a single-node cluster**. Before
+  founding, it **pre-binds every socket** it will need (data plane,
+  consensus plane, HTTP) and releases them: founding writes a cluster's
+  birth into the Raft log irreversibly, so a busy port must fail with
+  nothing written — founding first and failing to bind after would leave
+  a 1-node fork behind for a later start to resurrect.
+- `serve --join` does not found: it starts, advertises itself, and
+  **waits to be added** by `nauka node add` from a member (a reminder is
+  logged every 30 s). This is what `node add` provisions on the target.
+- A node with existing Raft state neither founds nor waits — it resumes.
 
-## Writes and administration
+## Membership changes
 
-Every write goes through the leader. Two paths:
+`nauka node add <ip>` provisions the machine over SSH, then performs one
+join path: **AddLearner** (the node catches up without voting), then
+**ChangeMembership** promotes it to voter once the learner entry has
+committed. The command is **convergent** — it describes a desired state
+rather than an action:
 
-- **Node side**: `RaftApp::write(cmd)` — local `client_write` if leader,
-  otherwise forwarded to the leader over the transport (used by the HTTP
-  API).
-- **CLI client side**: `admin_via_leader(peers, req)` — tries each peer,
-  follows `ForwardTo` redirects, retries across leader changes.
+- already a healthy member → re-affirmed, idempotently;
+- an unjoined node waiting with `--join` → provisioned in place;
+- a **wiped machine returning under a fresh id** (reinstall regenerates
+  `node.key`) → the old identity at the same address is **evicted in the
+  same membership change**. Keeping it would inflate quorum with a
+  phantom voter forever — one that even reads as alive, since liveness
+  is probed per address and the new node answers there;
+- state from **another cluster** → refused (`--force` wipes it first).
 
-Admin RPCs (carried by `RaftRpc::Admin`):
+`nauka node remove <id>` drains: the node keeps serving while the others
+re-replicate its shards, then it can be shut down. Ids are visible in
+`nauka status`, which also warns when two members share an address.
+
+## Quorum and write refusal
+
+Every registry write goes through the leader (a follower forwards).
+Quorum is a majority of voters — but waiting out a 4 s commit timeout to
+learn the cluster is down is a bad answer, so writes are **refused fast**
+instead:
+
+- Peers ping each other on the data plane every 5 s (min-of-3); a member
+  missing ~15 s of probes reads as down. This map feeds **placement
+  only** — membership, votes and identity are untouched by it.
+- Before an upload encodes a single stripe, the `can_commit_write` gate
+  checks: leader known, and a majority of members alive on that map. If
+  not, the client gets **"no quorum"** immediately — no work is wasted
+  on any node for a manifest that provably cannot commit.
+- The gate is optimistic: an unprobed peer counts as alive, so it never
+  manufactures a false refusal on a healthy cluster. Quorum lost
+  mid-flight still surfaces as a commit timeout — an availability
+  failure, reported as one.
+
+## Admin RPCs
+
+Carried as `RaftRpc::Admin` on the consensus plane; the CLI reaches any
+node and follows leader redirects across elections:
 
 ```
-Init(members)                  cluster initialization (once)
+Init(members)                  cluster birth (once, on one node)
 AddLearner { id, addr }        add as learner (catches up without voting)
 ChangeMembership([ids])        change the set of voters
 Write(cmd)                     write to the registry
-Metrics                        id, leader, members, applied index
+Metrics                        id, leader, members, capacities, applied index
 ListManifests                  registry keys
 ```
 
-## Measured performance
-
-- ~1,300–1,500 registry writes/s (32 concurrent writers, debug build,
-  before redb persistence — the durable version pays one fsync per append
-  batch, amortized by openraft's batching).
-- 500 concurrent writes converged across 3 nodes: see
-  `nauka-raft/tests/stress.rs`.
+Covered by tests (`nauka-raft/tests/`): leader crash under live traffic
+(re-election ~2 s, nothing committed is lost), resurrection from an
+empty disk (snapshot + log catch-up), and full-cluster `kill -9` with
+restart from the data dirs — registry intact, cluster writable again.

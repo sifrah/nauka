@@ -28,8 +28,19 @@ export default defineConfig({
         {
           label: "Start here",
           items: [
+            { label: "Quickstart", slug: "quickstart" },
             { label: "Install", slug: "install" },
+            { label: "Durability & consistency", slug: "durability" },
+          ],
+        },
+        {
+          label: "Operate",
+          items: [
             { label: "Deploy a cluster", slug: "deploy" },
+            { label: "Growing and shrinking", slug: "growing" },
+            { label: "Monitoring & metrics", slug: "monitoring" },
+            { label: "Egress budgets & cache", slug: "egress-and-cache" },
+            { label: "Operations", slug: "operations" },
           ],
         },
         {
@@ -37,25 +48,19 @@ export default defineConfig({
           items: [
             { label: "Architecture", slug: "architecture" },
             { label: "Erasure coding and storage", slug: "erasure-core" },
+            { label: "Placement and healing", slug: "cluster" },
             { label: "Transport", slug: "transport" },
             { label: "Consensus", slug: "consensus" },
-            { label: "Cluster", slug: "cluster" },
-            { label: "Identity and discovery", slug: "identity-and-discovery" },
+            { label: "Identity and membership", slug: "identity" },
           ],
         },
         {
-          label: "Using it",
+          label: "Reference",
           items: [
+            { label: "CLI reference", slug: "cli" },
             { label: "HTTP API", slug: "api-http" },
             { label: "End-to-end encryption", slug: "encryption" },
-            { label: "Operations", slug: "operations" },
-          ],
-        },
-        {
-          label: "Project",
-          items: [
             { label: "Design decisions", slug: "decisions" },
-            { label: "Backlog", slug: "backlog" },
           ],
         },
       ],

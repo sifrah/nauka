@@ -5,10 +5,10 @@ description: "Install Nauka with the one-line script, from a .deb or .rpm packag
 
 import { Aside, Tabs, TabItem, Steps } from "@astrojs/starlight/components";
 
-Nauka is a single binary called `nauka`. It has no runtime dependencies, no
-configuration file and no database to provision: everything a node needs
-lives in its data directory. The web interface is compiled into the binary,
-so installing the binary installs the UI too.
+Nauka is a single binary called `nauka` (~18 MB). It has no runtime
+dependencies, no configuration file and no database to provision:
+everything a node needs lives in its data directory. The engine serves an
+HTTP API and nothing else — there is no bundled web interface.
 
 ## The install script
 
@@ -21,6 +21,33 @@ downloads the matching tarball, verifies its SHA256 checksum against the
 `SHA256SUMS.txt` published with the release, and moves the binary into
 `/usr/local/bin` (escalating with `sudo` only if that directory is not
 already writable).
+
+Then, **on a systemd Linux run as root, it finishes the job**: it runs
+`nauka init`, which creates a dedicated `nauka` user, writes the cluster
+identity into `/etc/nauka/nauka.env`, installs a hardened systemd unit and
+starts it. The machine is the first node of a new cluster, back after
+every reboot, restarted on failure. That is why the canonical flow is two
+commands:
+
+```bash
+# first machine — installs nauka AND founds the cluster:
+curl -sSfL https://sh.getnauka.com | sh
+
+# grow it from that machine — provisions the target over SSH and joins it:
+nauka node add <ip>:7311
+```
+
+Set `NAUKA_NO_INIT=1` to keep the script to the binary alone. Without
+root, without systemd, or on macOS, the script installs the binary and
+stops there — found the cluster yourself when you are ready:
+
+```bash
+sudo nauka init
+```
+
+A machine that already runs the service is never re-founded: the script
+replaces the binary and tells you to `systemctl restart nauka` to pick it
+up.
 
 Check that it worked:
 
@@ -39,7 +66,8 @@ nauka update --check   # only tell whether one exists
 
 `update` queries the latest release, downloads the tarball for the current
 platform, verifies its SHA256 against the published `SHA256SUMS.txt` and
-swaps the binary atomically. A running node keeps executing the old
+swaps the binary atomically (written next to it, then renamed over — the
+running process keeps its inode). A running node keeps executing the old
 version until it restarts — on a systemd deployment, follow with
 `systemctl restart nauka`. If the binary lives in a root-owned directory,
 run `sudo nauka update`.
@@ -50,17 +78,18 @@ runner.
 
 ### Environment variables
 
-The script reads three variables, all optional:
+The script reads four variables, all optional:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `VERSION` | latest release | Install a specific tag, e.g. `VERSION=v0.1.0`. Also the escape hatch when the GitHub API is unreachable. |
+| `VERSION` | latest release | Install a specific tag, e.g. `VERSION=v0.5.24`. Also the escape hatch when the GitHub API is unreachable. |
 | `INSTALL_DIR` | `/usr/local/bin` | Where the binary is placed. |
 | `NO_SUDO` | unset | Set to `1` to never escalate. If the target directory is not writable, the binary falls back to `~/.local/bin`. |
+| `NAUKA_NO_INIT` | unset | Set to `1` to only install the binary — the script then never runs `nauka init`, even as root on a systemd Linux. |
 
 ```bash
-# Pin a version and install for the current user only
-curl -sSfL https://sh.getnauka.com | VERSION=v0.1.0 NO_SUDO=1 sh
+# Pin a version, install for the current user only, do not found anything
+curl -sSfL https://sh.getnauka.com | VERSION=v0.5.24 NO_SUDO=1 NAUKA_NO_INIT=1 sh
 ```
 
 <Aside type="tip" title="Reading the script before running it">
@@ -74,46 +103,47 @@ curl -sSfL https://sh.getnauka.com | VERSION=v0.1.0 NO_SUDO=1 sh
 ## Packages
 
 Linux packages are attached to every GitHub release, for `x86_64` and
-`aarch64`. They install the binary in `/usr/bin/nauka`, add a systemd unit,
-create an unprivileged `nauka` system user, and prepare `/etc/nauka` for the
-cluster key and `/var/lib/nauka` for the data.
+`aarch64`. They install the binary in `/usr/bin/nauka`, add the systemd
+unit, create an unprivileged `nauka` system user, and prepare `/etc/nauka`
+for the cluster identity and `/var/lib/nauka` for the data.
 
 <Tabs>
   <TabItem label="Debian / Ubuntu">
 
 ```bash
 # Download the .deb for your architecture from the releases page
-curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka_0.1.0-1_amd64.deb
+curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka_0.5.24-1_amd64.deb
 
 # apt resolves dependencies; dpkg -i also works
-sudo apt install ./nauka_0.1.0-1_amd64.deb
+sudo apt install ./nauka_0.5.24-1_amd64.deb
 ```
 
   </TabItem>
   <TabItem label="Fedora / RHEL">
 
 ```bash
-curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka-0.1.0-1.x86_64.rpm
+curl -fsSLO https://github.com/sifrah/nauka/releases/latest/download/nauka-0.5.24-1.x86_64.rpm
 
-sudo dnf install ./nauka-0.1.0-1.x86_64.rpm
+sudo dnf install ./nauka-0.5.24-1.x86_64.rpm
 ```
 
   </TabItem>
 </Tabs>
 
-The package does **not** start the service: a node with no cluster key would
-run unauthenticated. Install the key first, then enable the unit — see
-[Deploy a cluster](/deploy/).
+The package installs but does **not** found a cluster and does not start
+the service: a node with no cluster identity would run unauthenticated.
+Give it one first — put a token (`nauka token`) in `/etc/nauka/nauka.env`
+as `NAUKA_TOKEN=`, or copy the cluster's key files into `/etc/nauka` —
+then `systemctl enable --now nauka`. The full flow is on
+[Deploy a cluster](/deploy/). Machines added with `nauka node add` need
+none of this: provisioning installs the binary, the unit and the identity
+in one go.
 
 ## From source
 
-Building from source additionally requires Node, because the web interface
-is compiled into the binary. Skip the `webui` step and you still get a
-working node, just without a UI.
-
 <Steps>
 
-1. Install [Rust](https://rustup.rs) (stable) and Node 22 or newer.
+1. Install [Rust](https://rustup.rs) (stable).
 
 2. Clone the repository:
 
@@ -122,13 +152,7 @@ working node, just without a UI.
    cd nauka
    ```
 
-3. Build the web interface, so that `cargo` has something to embed:
-
-   ```bash
-   cd webui && npm ci && npm run build && cd ..
-   ```
-
-4. Build the binary:
+3. Build the binary:
 
    ```bash
    cargo build --release
@@ -137,9 +161,15 @@ working node, just without a UI.
    It lands in `target/release/nauka`. Copy it wherever you keep local
    binaries.
 
-5. Optionally, run the test suite — it spins up real QUIC clusters on
-   loopback, kills nodes, corrupts shards and runs an in-process DHT
-   testnet:
+   The S3-compatible endpoint is a compile-time feature, off by default —
+   the released binaries do not carry it. If you want it:
+
+   ```bash
+   cargo build --release --features s3
+   ```
+
+4. Optionally, run the test suite — it spins up real QUIC clusters on
+   loopback, kills nodes and corrupts shards:
 
    ```bash
    cargo test --workspace
@@ -162,7 +192,7 @@ release workflow. It ties the file you hold to the exact workflow run and
 the exact commit that built it:
 
 ```bash
-gh attestation verify nauka-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+gh attestation verify nauka-0.5.24-x86_64-unknown-linux-gnu.tar.gz \
   --repo sifrah/nauka
 ```
 
@@ -193,10 +223,12 @@ for a file built elsewhere.
 Linux builds are produced on Ubuntu 22.04, which sets the oldest glibc
 supported. There is no musl build yet, so Alpine and other musl
 distributions need a source build. Windows is not supported; build from
-source under WSL if you need it.
+source under WSL if you need it. `nauka init` needs a systemd Linux —
+elsewhere it refuses and tells you so; macOS machines can still run every
+client command and `serve` by hand.
 
 ## Next
 
 Installing a binary is not deploying a cluster: the interesting part is the
-cluster key, the ports, and how many machines you need before losing one
-stops mattering. That is [Deploy a cluster](/deploy/).
+cluster identity, the ports, and how many machines you need before losing
+one stops mattering. That is [Deploy a cluster](/deploy/).

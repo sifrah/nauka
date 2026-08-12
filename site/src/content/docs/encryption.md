@@ -12,11 +12,11 @@ default) even the file name.
 
 ```
 # encrypt locally, then upload — prints the complete link:
-nauka-node upload plans.pdf --api http://node1:8080
+nauka upload plans.pdf --api http://node1:8080
 → http://node1:8080/f/4fae2bb2…#RO_5yMPbAwtIn0kl1UVHQeG…
 
 # download + decrypt + verify (the complete link, with the #…):
-nauka-node download "http://node3:8080/f/4fae2bb2…#RO_5yMPb…" -o plans.pdf
+nauka download "http://node3:8080/f/4fae2bb2…#RO_5yMPb…" -o plans.pdf
 ```
 
 The link works from **any node** (swap the host, the hash and the key stay
@@ -39,9 +39,10 @@ model popularized by Mega and Firefox Send.
   truncation, reordering and appended data are all detected — not just
   flipped bytes.
 - **Why AES-GCM and not XChaCha20**: it is the only AEAD native to
-  WebCrypto — the future web UI can decrypt in the browser with no wasm
-  library. (AES-NI / ARMv8-crypto make it fast everywhere.)
-- Formats: header `"YGE1" ‖ prefix(8)`, then per chunk
+  WebCrypto — a browser client (a product built on the engine; the engine
+  itself ships no web interface) can decrypt with no wasm library.
+  (AES-NI / ARMv8-crypto make it fast everywhere.)
+- Formats: header `"NKA1" ‖ prefix(8)`, then per chunk
   `u32 little-endian length ‖ u8 flags ‖ ciphertext(+16 B tag)`.
   Total overhead: ~16 B/MiB + a 12 B header (~0.002%).
 
@@ -71,7 +72,8 @@ in `Content-Disposition`) — by default, nothing.
 - Size and access patterns remain observable (padding and cover traffic are
   out of scope).
 - `curl` can still upload cleartext through the raw API — encryption is
-  client-side by nature; the web UI applies it systematically.
+  client-side by nature. `nauka upload` always applies it; the raw
+  `POST /api/upload` stores whatever bytes it is given.
 
 ## Legal requests: what the operator can hand over
 
@@ -80,7 +82,7 @@ in `Content-Disposition`) — by default, nothing.
 | the ciphertexts (reconstructed encrypted files) | the cleartext content |
 | hashes, sizes, timestamps | decryption keys |
 | network logs, if the operator keeps any | — |
-| deletion / blocking of a hash (see backlog item A) | — |
+| deletion / blocking of a hash (`DELETE /f/{hash}`, `nauka ban`) | — |
 
 The key never transited to the server (it lives in the URL fragment, which
 HTTP does not send): there is **nothing to seize** on the nodes that would
@@ -88,9 +90,11 @@ allow decryption. Authorities obtain the content through the **complete
 link** — the uploader's or a recipient's device, the messaging app it
 travelled through — and not from the hosting provider.
 
-Corollary for the operator: document this design, provide an abuse contact
-point, and implement deletion + blocking by hash (backlog item A)
-**before any public launch**. Key-disclosure obligations target whoever
+Corollary for the operator: document this design and provide an abuse
+contact point. Deletion and blocking by hash exist —
+[`DELETE /f/{hash}` and `nauka ban`](/api-http/#expiry-and-banning) —
+so a takedown can be honored without ever reading the content.
+Key-disclosure obligations target whoever
 holds the key — the user, not the host. This is not legal advice: have it
 reviewed by a lawyer according to your country and your status (host vs.
 publisher).

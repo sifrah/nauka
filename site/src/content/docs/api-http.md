@@ -1,32 +1,34 @@
 ---
 title: "HTTP API"
-description: "Upload, download, listing, deletion, expiry and banning over HTTP, plus range requests, the web interface and the encrypted media player."
+description: "Upload, download, listing, deletion, expiry and banning over HTTP, plus range requests and the exact status schema."
 ---
 
-Every node in consensus mode exposes the API (default `0.0.0.0:8080`,
-tunable with `--http <addr>`, disabled with `--no-http`). **Any node is a
-complete entry point** — upload, download and listing give the same result
+Every node exposes the API (default `0.0.0.0:8080`, tunable with
+`--http <addr>`, disabled with `--no-http`). **Any node is a complete
+entry point** — upload, download and listing give the same result
 everywhere.
 
-The API currently has **no authentication** (v1): put it behind a reverse
-proxy if you need one, until the accounts/quotas layer lands.
+The API has **no authentication** (v1). A public API means public files:
+anyone who can reach port 8080 can upload, list and download. Put it
+behind a reverse proxy if you need access control, until the
+accounts/quotas layer lands. Content confidentiality is a separate,
+already-solved problem: [end-to-end encryption](/encryption/) keeps the
+nodes blind to what they store.
 
-## `POST /api/upload?name=<name>`
+## `POST /api/upload?name=<name>&ttl=<seconds>`
 
-Body: the file's raw bytes. With curl prefer `-T <file>` (streams from
-disk); `--data-binary @file` buffers the WHOLE file in the client's RAM
-first, which kills large uploads on small machines.
-
-The node buffers the stream to disk (`data-dir/tmp`, BLAKE3 hash computed
-on the fly), encodes stripe by stripe, pushes each shard to its HRW owner
-(itself included), writes the manifest locally, then records it in the Raft
-registry (via the leader). Memory stays bounded to a few stripes whatever
-the file's size.
+Body: the file's raw bytes. With curl use `-T <file>`:
 
 ```
-curl -X POST -T video.mp4 \
-  "http://node1:8080/api/upload?name=video.mp4"
+curl -T video.mp4 "http://node1:8080/api/upload?name=video.mp4"
 ```
+
+`-T` streams from disk. `--data-binary @file` also works but buffers the
+**whole file in the client's RAM** before sending a byte — a 1 GiB upload
+kills the client on a small machine before the server sees anything. The
+server side is streaming either way: the node encodes stripe by stripe as
+the body arrives and pushes each shard to its owner (itself included),
+memory bounded to a few stripes whatever the file's size.
 
 `200` response:
 
@@ -38,38 +40,149 @@ curl -X POST -T video.mp4 \
   "stripes": 8,
   "data_shards": 4,
   "parity_shards": 2,
-  "link": "/f/988f6e61…"
+  "link": "/f/988f6e61…",
+  "degraded_shards": 0
 }
 ```
 
-Errors: `500` with a text message (empty file, shard undeliverable after
-retries, registry unreachable, …).
+`hash` is the BLAKE3 of the whole file — the file's permanent address.
+`degraded_shards` counts the shards that could not be delivered to their
+owner node during the upload: `0` means the write is fully replicated;
+anything above means a node was down or slow, the missing redundancy is
+parked on the ingesting node, and the scrubber completes it in the
+background. The upload is aborted, never silently under-protected, if a
+stripe cannot reach at least k placed shards.
+
+Errors:
+
+- `415 Unsupported Media Type` — the body was a multipart form. This
+  endpoint takes raw bytes; accepting multipart would store the form
+  framing, boundary and headers included, verbatim as the object.
+- `400 Bad Request` — empty body (a typoed curl, a missing file).
+- `503 Service Unavailable` — the registry cannot commit the write right
+  now (no leader, no quorum). Transient: retry.
+- `500` — this upload genuinely failed.
+
+**Name semantics.** The name is a per-hash slot in the registry, not part
+of the content's identity. Re-uploading existing content with `?name=`
+sets the name; re-uploading it **without** `?name=` preserves the existing
+one — the second uploader rarely means "unname it".
+
+`ttl=<seconds>` gives the file an expiry; see
+[expiry](#ttl--post-apiuploadttlseconds) below.
 
 ## `GET /f/{hash}`
 
-Downloads the file, rebuilt in a **streaming** fashion (one stripe in
-memory at a time) from the whole cluster: local shards first, then fetched
-from the other members. k valid shards per stripe are enough — dead nodes
-and corrupted shards are compensated by Reed-Solomon, invisibly to the
-client.
-
-- `Content-Length`: the file's exact size.
-- `Content-Disposition: attachment; filename="<name>"` if a name was
-  supplied at upload time.
-- Integrity: the global hash is recomputed during the stream; an
-  unreachable peer is remembered for the duration of the request (3 s
-  connection timeout, 20 s transfer timeout) and is not contacted again for
-  every shard.
-- `404` if the hash is unknown to the registry.
+Reconstructs the file and serves it, **streaming** (one stripe in memory
+at a time), from the whole cluster: local shards first, then fetched from
+the other members. k valid shards per stripe are enough — dead nodes and
+corrupted shards are compensated by Reed-Solomon, invisibly to the client.
 
 ```
 curl -o video.mp4 http://node3:8080/f/988f6e61…
 ```
 
+- `Content-Length`: the file's exact size.
+- `Content-Disposition: attachment; filename="<name>"` if the file has a
+  name in the registry.
+- Integrity: the global hash is recomputed during the stream; an
+  unreachable peer is written off for the duration of the request (3 s
+  connection timeout, 20 s per shard) instead of being retried for every
+  shard.
+- The first stripe is reconstructed **before** the status line is sent:
+  a file that is currently unrecoverable answers an honest
+  `503 Service Unavailable` rather than a `200` followed by a truncated
+  body. A stripe failing later in the stream still truncates — nothing
+  better exists mid-stream.
+
+Status codes:
+
+| Code | Meaning |
+|---|---|
+| `200` / `206` | served (whole file / requested range) |
+| `404` | hash unknown to the registry |
+| `410 Gone` + `content removed: <reason>` | banned (`nauka ban`) |
+| `410 Gone` + `file expired` | TTL elapsed |
+| `410 Gone` + `file deleted` | removed from the registry |
+| `416` | requested range outside the file (`Content-Range: bytes */<size>` attached) |
+| `503` | too many shards currently missing to reconstruct |
+
+`HEAD /f/{hash}` answers the same headers (`Content-Length`,
+`Accept-Ranges: bytes`) without a body, and the same `410`s.
+
+### Partial requests (Range)
+
+`GET /f/{hash}` accepts `Range: bytes=…` and answers `206 Partial Content`
+with `Content-Range`. Suffix ranges work (`bytes=-500` = the last 500
+bytes); an end past the file is clamped; a range that starts past the end
+is `416`. Only the stripes intersecting the range are fetched from the
+cluster and decoded — reading 64 bytes in the middle of an 81 MB file
+costs a single round trip, not the file.
+
+Useful for resuming downloads and for media playback.
+
+## `DELETE /f/{hash}`
+
+Removes the file from the replicated registry — `204 No Content`, or
+`404` if the hash is unknown. The shards are not erased synchronously:
+each node's GC purges what became orphaned on its following pass. From the
+client's point of view the file is gone at the `204`; `GET` answers
+`410 Gone` with `file deleted`.
+
+Like everything else on this API, deletion is unauthenticated in v1 —
+one more reason for the reverse proxy.
+
+## `GET /api/status`
+
+The cluster as this node sees it. This is what `nauka status` reads — no
+cluster identity needed, plain HTTP:
+
+```json
+{
+  "self_addr": "10.0.0.1:7311",
+  "self_node_id": 13816319000459994208,
+  "leader": "10.0.0.1:7311",
+  "nodes": [
+    {
+      "addr": "10.0.0.1:7311",
+      "id": 13816319000459994208,
+      "capacity_bytes": 197586380800,
+      "is_leader": true,
+      "is_self": true,
+      "is_alive": true
+    },
+    {
+      "addr": "10.0.0.2:7311",
+      "id": 4443749509604496789,
+      "capacity_bytes": 98793190400,
+      "is_leader": false,
+      "is_self": false,
+      "is_alive": false
+    }
+  ],
+  "files": 12,
+  "total_bytes": 3210987654
+}
+```
+
+- `id` is the member's Raft id — the value `nauka node remove <id>`
+  takes. It is exposed here precisely so it can be read over plain HTTP.
+  There is one row **per member**, not per address: two members can share
+  an address (a replaced machine whose stale identity lingers), and rows
+  keyed by address would collapse them into an indistinguishable
+  duplicate.
+- `is_alive` is **this node's** view from its own pinger, not a
+  cluster-wide verdict: `false` once the peer has missed ~15 s of probes.
+  A member reads as down for placement — it takes no new shards — but
+  stays a full member; membership only changes through
+  `node add`/`node remove`. The map is optimistic: a peer nobody has
+  probed yet reads alive.
+- `files` / `total_bytes` come from the replicated registry.
+
 ## `GET /api/files`
 
-The replicated registry (the node's local state, possibly a few hundred ms
-behind the leader):
+The replicated registry (this node's local copy, possibly a few hundred
+ms behind the leader). Expired files are filtered out:
 
 ```json
 [
@@ -78,91 +191,36 @@ behind the leader):
 ]
 ```
 
-## What does not exist yet (v1)
-
-- `DELETE` / file expiry (`UnregisterManifest` already exists on the Raft
-  side; what is missing is orphan-shard cleanup).
-- Authentication, quotas, rate limiting.
-- Multipart uploads / resuming an interrupted upload.
-
-## Web interface
-
-Every node serves the webui (if `webui/dist` exists, or via
-`--webui <dir>`): Files (drag-and-drop encrypted upload, local key ring,
-share links), Cluster (live status via `GET /api/status`), and
-`/d/{hash}#key` (download + decryption in the browser).
-
-The interface derives from the **ZeroFS** webui
-([Barre/ZeroFS](https://github.com/Barre/ZeroFS), AGPL-3.0) — see
-[`webui/ATTRIBUTION.md`](https://github.com/sifrah/nauka/blob/main/webui/ATTRIBUTION.md).
-Browser-side encryption (WebCrypto AES-256-GCM) is bit-for-bit compatible
-with `nauka-crypto`: a file uploaded from the CLI decrypts in the browser
-and vice versa.
-
-Build it with `cd webui && npm install && npm run build`.
-
-### Partial requests (Range)
-
-`GET /f/{hash}` accepts `Range: bytes=…` and answers `206 Partial Content`
-with `Content-Range` (`416` if the range falls outside the file;
-`Accept-Ranges: bytes` advertised everywhere, `HEAD` included). Only the
-stripes intersecting the range are fetched from the cluster and decoded —
-reading 64 bytes in the middle of an 81 MB file costs a single round trip
-(measured: ~400 ms on a local cluster, instead of the entire file).
-
-Useful for resuming downloads and for media playback.
-
-### Encrypted media player (`/w/{hash}#key`)
-
-**Nominal mode — streaming.** A Service Worker serves `/stream/{hash}` in
-cleartext from the ciphertext: for every range the `<video>` element asks
-for, only the relevant AES-GCM chunks are pulled from the cluster (a Range
-request over the ciphertext), decrypted and handed back. **Nothing is
-loaded ahead of time** — playback starts immediately and a seek costs a
-single round trip, whatever the file's size. The key reaches the worker
-through IndexedDB, never over the network.
-
-Two traps we hit and fixed, worth knowing before touching
-`webui/public/sw-stream.js`:
-
-- a Service Worker's in-memory state is **volatile** (the browser stops it
-  between events) — hence IndexedDB rather than a `Map`;
-- a worker that streams one response for tens of seconds gets **killed**
-  (the player receives a 503) — hence responses capped at 4 MiB, returned
-  as 206, which the player stitches together.
-
-**Fallback.** If playback has not started after 6 s (worker unavailable,
-restrictive browser), the player silently switches to full in-memory
-decryption + a Blob URL: robust, but it has to wait for the entire file, so
-it is capped at 600 MB. A "streaming" badge in the interface shows which
-mode is active.
-
-## Deletion, expiry and banning
-
-### `DELETE /f/{hash}`
-Removes the file from the replicated registry (`204 No Content`, `404` if
-it is unknown). Every node then purges the manifests and shards that have
-become orphans on its next background pass. Measured: 6/6/6 shards →
-0/0/0 in a single cycle on a 3-node cluster.
+## Expiry and banning
 
 ### TTL — `POST /api/upload?ttl=<seconds>`
-The manifest carries an `expires_at`. The **leader** removes expired files
-from the registry (once for the whole cluster), and the purge follows
-everywhere. Expired files vanish from the listing and are no longer served.
+
+The manifest carries an `expires_at`. Past it the file disappears from
+`/api/files`, `GET` answers `410 Gone` with `file expired`, and the purge
+reclaims the shards cluster-wide.
 
 ### Banning — `nauka ban <hash> --reason "…"`
+
 To honor a takedown notice or a legal order **without ever reading the
 content**: the hash is banned in the Raft state, the file leaves the
-registry, `GET` answers **`410 Gone` with the reason**, the shards are
-purged, and **re-uploading the same content is refused** (the registry
-rejects the manifest). `nauka-node unban <hash>` lifts the measure.
+registry, `GET` answers `410 Gone` with `content removed: <reason>`, the
+shards are purged, and **re-uploading the same content is refused** (the
+registry rejects the manifest, and the upload fails). `nauka unban <hash>`
+lifts the measure.
 
 Accepted structural limitation: a ban targets that content byte for byte
 only — a re-upload encrypted under a different key yields a different hash.
 See [End-to-end encryption](/encryption/#legal-requests-what-the-operator-can-hand-over).
 
 ### Purge safety
-A node purges **only** if its registry is trustworthy (member of the
-cluster, leader known): a freshly started node whose registry is still
-empty erases nothing — otherwise it would destroy the cluster. A shard
-referenced by another live file is never deleted (tested).
+
+A node purges **only** when its registry is trustworthy (member of the
+cluster, leader known, replication caught up): a freshly started node
+whose registry is still empty erases nothing — otherwise it would destroy
+the cluster. A shard referenced by another live file is never deleted.
+
+## What does not exist yet (v1)
+
+- Authentication, quotas, rate limiting — the reverse proxy is the
+  interim answer.
+- Multipart uploads / resuming an interrupted upload.
