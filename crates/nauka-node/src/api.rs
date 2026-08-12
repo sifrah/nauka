@@ -118,6 +118,7 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
         .route("/api/files", get(files))
         .route("/api/status", get(status))
         .route("/api/removal-check", get(removal_check))
+        .route("/api/shard-inventory", get(shard_inventory))
         .route(
             "/f/{hash}",
             get(download).head(download_head).delete(delete_file),
@@ -288,8 +289,14 @@ struct RemovalCheckResponse {
     reliable_nodes: usize,
     /// True when every file keeps at least k shards on those nodes.
     safe: bool,
-    /// Total files that would drop below recoverable.
+    /// Total files that would drop below recoverable BECAUSE of this
+    /// removal (they are fine today, counting every reachable copy).
     at_risk: usize,
+    /// Files below k shards no matter what — already unrecoverable before
+    /// this removal, even counting the target's own disk. They do not
+    /// block the removal (their fate is sealed either way); they are
+    /// surfaced so the operator learns about them HERE, not later.
+    already_lost: usize,
     /// The worst case seen across all stripes (min shards left).
     worst_shards_left: usize,
     /// A sample of at-risk files (capped), for the operator to see.
@@ -298,14 +305,28 @@ struct RemovalCheckResponse {
     reason: String,
 }
 
+/// GET /api/shard-inventory — the shard hashes physically present in this
+/// node's store, one flat JSON array. The removal pre-flight sums these
+/// across the surviving nodes: placement says where shards SHOULD be, and
+/// during an active rebalance reality lags it (a pre-flight built on
+/// placement blessed a removal while a file was already below k — found
+/// the hard way on 2026-08-12).
+async fn shard_inventory(State(state): State<Arc<ApiState>>) -> Json<Vec<String>> {
+    Json(state.store.list_shards().unwrap_or_default())
+}
+
 /// GET /api/removal-check?target=<addr> — would removing (or fully
 /// draining) `target` leave any file unrecoverable? For every stripe it
-/// counts how many shards would still live on RELIABLE nodes (alive, not
-/// already draining, not the target), using the placement function as the
-/// map of where shards are. A stripe is safe while ≥ k of its 6 shards
-/// survive there; the file is at risk the moment any of its stripes drops
-/// below k. Plain HTTP, no identity — the pre-flight `node remove` and
-/// `node disable` run before they touch anything.
+/// counts how many shards are PHYSICALLY present on RELIABLE nodes
+/// (alive, not already draining, not the target), by summing the actual
+/// shard inventories of those nodes. Placement is deliberately not
+/// consulted: it says where shards should be, and during an active
+/// rebalance reality lags it — a placement-based pre-flight once blessed
+/// a removal while a file already sat below k on disk. A stripe is safe
+/// while ≥ k of its 6 shards exist on surviving disks; the file is at
+/// risk the moment any of its stripes drops below k. Plain HTTP, no
+/// identity — the pre-flight `node remove` and `node disable` run before
+/// they touch anything.
 async fn removal_check(
     State(state): State<Arc<ApiState>>,
     Query(p): Query<RemovalCheckParams>,
@@ -316,58 +337,97 @@ async fn removal_check(
     let disabled = &app_state.disabled;
     let liveness = state.health.snapshot();
 
-    // Where shards live now: placement over the current effective view
-    // (members minus those already draining), weighted by capacity.
-    let view = state.view();
-    let view_refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
-    let coords = state.app.coords();
-
     // A node still counted on after the removal: not the target, not
     // already draining, and currently answering the liveness pinger. A
     // down node cannot be relied on to hold the surviving copy.
     let reliable = |addr: &str| {
         addr != p.target && !disabled.contains(addr) && liveness.get(addr).copied().unwrap_or(true)
     };
-    let reliable_nodes = members
-        .values()
-        .filter(|a| reliable(a))
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    let member_addrs: std::collections::BTreeSet<String> = members.values().cloned().collect();
+    let reliable_nodes = member_addrs.iter().filter(|a| reliable(a)).count();
+
+    // The physical truth: which shard hashes exist on which disks, asked
+    // to every member (5 s each, one round). `surviving` counts only the
+    // reliable nodes; `anywhere` also counts the target and the draining
+    // or unreachable-but-answering ones — the difference separates "this
+    // removal would lose it" from "it was already gone".
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("static client config");
+    let mut surviving: std::collections::BTreeSet<String> = Default::default();
+    let mut anywhere: std::collections::BTreeSet<String> = Default::default();
+    let mut unanswered = 0usize;
+    for addr in &member_addrs {
+        let inventory: Option<Vec<String>> = if *addr == state.self_id {
+            state.store.list_shards().ok()
+        } else {
+            let ip = addr.split(':').next().unwrap_or_default();
+            match client
+                .get(format!("http://{ip}:8080/api/shard-inventory"))
+                .send()
+                .await
+            {
+                Ok(r) => r.json().await.ok(),
+                Err(_) => None,
+            }
+        };
+        match inventory {
+            Some(hashes) => {
+                if reliable(addr) {
+                    surviving.extend(hashes.iter().cloned());
+                }
+                anywhere.extend(hashes);
+            }
+            // An unreachable inventory contributes nothing to `surviving`:
+            // shards we cannot see are shards we must not count on. The
+            // check fails towards "unsafe", never towards data loss.
+            None => unanswered += 1,
+        }
+    }
 
     let mut at_risk: Vec<AtRiskFile> = Vec::new();
+    let mut already_lost = 0usize;
     let mut worst = k.max(1);
     for (fh, m) in &app_state.manifests {
-        let mut file_min = usize::MAX;
-        for (si, stripe) in m.stripes.iter().enumerate() {
-            let owners = nauka_cluster::placement::stripe_owners_geo(
-                nauka_cluster::placement::stripe_key_of(stripe),
-                si,
-                stripe.shard_hashes.len(),
-                &view_refs,
-                &coords,
-            );
-            // How many of THIS stripe's shard positions land on a node we
-            // can still rely on. Positions owned by the target (or a down
-            // or draining node) do not count — those copies are leaving.
-            let left = owners.iter().filter(|o| reliable(o)).count();
-            file_min = file_min.min(left);
+        let mut surviving_min = usize::MAX;
+        let mut anywhere_min = usize::MAX;
+        for stripe in m.stripes.iter() {
+            let on_survivors = stripe
+                .shard_hashes
+                .iter()
+                .filter(|h| surviving.contains(*h))
+                .count();
+            let on_any = stripe
+                .shard_hashes
+                .iter()
+                .filter(|h| anywhere.contains(*h))
+                .count();
+            surviving_min = surviving_min.min(on_survivors);
+            anywhere_min = anywhere_min.min(on_any);
         }
-        if file_min == usize::MAX {
+        if surviving_min == usize::MAX {
             continue; // a file with no stripes; nothing to lose
         }
-        worst = worst.min(file_min);
-        if file_min < k {
+        if anywhere_min < k {
+            // Below k even counting every reachable disk, target included:
+            // this removal changes nothing for it. Reported, not blocking.
+            already_lost += 1;
+            continue;
+        }
+        worst = worst.min(surviving_min);
+        if surviving_min < k {
             if at_risk.len() < 20 {
                 at_risk.push(AtRiskFile {
                     hash: fh.clone(),
                     name: m.name.clone(),
-                    shards_left: file_min,
+                    shards_left: surviving_min,
                 });
             } else {
                 at_risk.push(AtRiskFile {
                     hash: String::new(),
                     name: None,
-                    shards_left: file_min,
+                    shards_left: surviving_min,
                 }); // counted, not sampled
             }
         }
@@ -375,7 +435,7 @@ async fn removal_check(
     let at_risk_count = at_risk.len();
     let sample: Vec<AtRiskFile> = at_risk.into_iter().filter(|f| !f.hash.is_empty()).collect();
     let safe = at_risk_count == 0;
-    let reason = if safe {
+    let mut reason = if safe {
         String::new()
     } else if reliable_nodes < k {
         format!(
@@ -384,10 +444,17 @@ async fn removal_check(
         )
     } else {
         format!(
-            "{at_risk_count} file(s) would drop below {k} shards — bring every node back \
-             online first, or drain this node so its copies move before it leaves"
+            "{at_risk_count} file(s) would drop below {k} shards on the remaining disks — \
+             bring every node back online first, or drain this node so its copies move \
+             before it leaves"
         )
     };
+    if !safe && unanswered > 0 {
+        reason.push_str(&format!(
+            " ({unanswered} node(s) did not answer the inventory call; \
+             their shards are not counted)"
+        ));
+    }
 
     Json(RemovalCheckResponse {
         target: p.target,
@@ -395,6 +462,7 @@ async fn removal_check(
         reliable_nodes,
         safe,
         at_risk: at_risk_count,
+        already_lost,
         worst_shards_left: worst,
         sample,
         reason,

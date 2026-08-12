@@ -602,6 +602,11 @@ pub struct RemovalSafety {
     pub reliable_nodes: usize,
     pub safe: bool,
     pub at_risk: usize,
+    /// Files below k shards even counting every reachable disk — dead
+    /// before this removal, not because of it. Default keeps the client
+    /// compatible with a node that predates the field.
+    #[serde(default)]
+    pub already_lost: usize,
     pub reason: String,
     pub sample: Vec<RemovalSampleFile>,
 }
@@ -656,6 +661,17 @@ pub fn guard_removal(
                 s.k,
                 s.reliable_nodes
             );
+            if s.already_lost > 0 {
+                eprintln!(
+                    "{}",
+                    style(format!(
+                        "  note: {} file(s) are already unrecoverable on every disk — \
+                         not because of this removal. `nauka rm` them to clear the alarm.",
+                        s.already_lost
+                    ))
+                    .yellow()
+                );
+            }
             Ok(())
         }
         Some(s) => {

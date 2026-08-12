@@ -83,9 +83,11 @@ in the view and shards migrate toward it again. Nothing was lost.
 
 Removal now runs a **safety pre-flight**: before it touches the
 membership, it checks — for every file, every stripe — how many shards
-would still live on the nodes that stay (alive, not draining, not the one
-leaving). If any file would drop below `k` shards, it **refuses** and
-names the files at risk:
+**physically exist** on the disks of the nodes that stay (alive, not
+draining, not the one leaving). It counts real shard inventories, not
+what placement says should be there: during an active rebalance the two
+can differ, and only the disks tell the truth. If any file would drop
+below `k` shards, it **refuses** and names the files at risk:
 
 ```text
 ✗ removing 49.13.49.101:7311 is UNSAFE: only 2 reliable node(s) would remain
