@@ -71,6 +71,23 @@ impl ErasureConfig {
     pub fn stripe_data_len(&self) -> usize {
         self.data_shards * self.shard_size
     }
+
+    /// The config for a payload that fits in ONE stripe: shards sized to
+    /// the content instead of [`DEFAULT_SHARD_SIZE`]. Shards are
+    /// zero-padded to `shard_size`, so a fixed size makes every small
+    /// file cost a full stripe on disk — measured on a live cluster: 340
+    /// sub-4-MiB files paying 6 MiB each, 1.9 GiB of pure padding on
+    /// 3.3 GiB of data. The manifest already carries `shard_size` and
+    /// the decoder already honours it, so densifying is free of any
+    /// format change; it only applies to single-stripe files because the
+    /// size is per-manifest, not per-stripe.
+    pub fn densified_for(&self, single_stripe_len: usize) -> ErasureConfig {
+        debug_assert!(single_stripe_len <= self.stripe_data_len());
+        ErasureConfig {
+            shard_size: single_stripe_len.div_ceil(self.data_shards).max(1),
+            ..*self
+        }
+    }
 }
 
 /// Content identifier: BLAKE3 hash, hex-encoded.
@@ -296,6 +313,44 @@ mod tests {
 
     fn to_slots(shards: &[Shard]) -> Vec<Option<Vec<u8>>> {
         shards.iter().map(|s| Some(s.data.clone())).collect()
+    }
+
+    #[test]
+    fn densified_shards_track_the_content() {
+        let cfg = cfg_small(); // shard_size 1024, stripe 4096
+                               // 300 bytes → shards of ceil(300/4) = 75 bytes, not 1024.
+        let dense = cfg.densified_for(300);
+        assert_eq!(dense.shard_size, 75);
+        assert_eq!(dense.data_shards, cfg.data_shards);
+        let data = random_bytes(300, 7);
+        let (manifest, stripes) = encode_file(&data, &dense).unwrap();
+        assert_eq!(stripes.len(), 1);
+        let on_disk: usize = stripes[0].iter().map(|s| s.data.len()).sum();
+        assert_eq!(on_disk, 6 * 75, "6 shards of 75 bytes, no fixed padding");
+        // Loss of any 2 shards still reconstructs byte-for-byte.
+        let mut slots = to_slots(&stripes[0]);
+        slots[0] = None;
+        slots[4] = None;
+        assert_eq!(decode_file(&manifest, vec![slots]).unwrap(), data);
+    }
+
+    #[test]
+    fn densified_edges_hold() {
+        let cfg = cfg_small();
+        // A 1-byte payload still yields a valid config (shard_size ≥ 1).
+        assert_eq!(cfg.densified_for(1).shard_size, 1);
+        cfg.densified_for(1).validate().unwrap();
+        let data = random_bytes(1, 9);
+        let (manifest, stripes) = encode_file(&data, &cfg.densified_for(1)).unwrap();
+        assert_eq!(
+            decode_file(&manifest, vec![to_slots(&stripes[0])]).unwrap(),
+            data
+        );
+        // An exactly-full stripe densifies to the same size — a no-op.
+        assert_eq!(
+            cfg.densified_for(cfg.stripe_data_len()).shard_size,
+            cfg.shard_size
+        );
     }
 
     #[test]

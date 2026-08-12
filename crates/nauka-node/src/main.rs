@@ -527,11 +527,17 @@ async fn main() -> Result<()> {
             let store = ShardStore::open(&cli.data_dir)?;
             let data =
                 std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let cfg = ErasureConfig {
+            let mut cfg = ErasureConfig {
                 data_shards,
                 parity_shards,
                 ..ErasureConfig::default()
             };
+            // A file that fits in one stripe gets shards sized to its
+            // content — padding them to the fixed stripe size made every
+            // small file cost a full stripe on disk.
+            if !data.is_empty() && data.len() < cfg.stripe_data_len() {
+                cfg = cfg.densified_for(data.len());
+            }
             let (manifest, stripes) = encode_file(&data, &cfg)?;
             let mut shard_count = 0;
             for stripe in &stripes {

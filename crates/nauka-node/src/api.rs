@@ -554,7 +554,20 @@ async fn dispatch_core(
     if !state.can_commit_write() {
         return Err(DispatchError::Unavailable(NO_QUORUM));
     }
-    let cfg = state.config;
+    let mut cfg = state.config;
+
+    // The first read decides the shard density. `next_stripe` is short
+    // only at EOF, so a short FIRST stripe means the whole file is
+    // already in hand — encode it with shards sized to the content
+    // instead of padding them to the fixed stripe size (a 80 KiB PDF
+    // used to cost 6 MiB on disk). Multi-stripe files keep the fixed
+    // size: `shard_size` is per-manifest, and their last-stripe padding
+    // is bounded by one stripe per FILE, which large files amortize.
+    let first = source.next_stripe(cfg.stripe_data_len()).await?;
+    if !first.is_empty() && first.len() < cfg.stripe_data_len() {
+        cfg = cfg.densified_for(first.len());
+    }
+    let mut pending = Some(first);
 
     // One streaming pass: placement is keyed on stripe content, so the
     // owners of a stripe are known the moment it is encoded — its shards
@@ -584,7 +597,10 @@ async fn dispatch_core(
     let mut local_placed: Vec<usize> = Vec::new();
     let mut size: u64 = 0;
     loop {
-        let stripe = source.next_stripe(cfg.stripe_data_len()).await?;
+        let stripe = match pending.take() {
+            Some(first) => first,
+            None => source.next_stripe(cfg.stripe_data_len()).await?,
+        };
         if stripe.is_empty() {
             break;
         }
