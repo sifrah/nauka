@@ -2,9 +2,9 @@
 //! (the newcomer acquires, the old ones release), then a node is removed and
 //! the cluster re-replicates without it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use nauka_cluster::healer::{gc_once, scrub_once};
@@ -13,12 +13,15 @@ use nauka_erasure::{encode_file, ErasureConfig};
 use nauka_raft::types::{AdminRequest, AdminResponse, AppCommand};
 use nauka_raft::{admin_via_leader, write_via_leader, RaftApp};
 use nauka_store::ShardStore;
-use nauka_transport::server::{make_endpoint_pair, serve_consensus_endpoint, serve_endpoint};
+use nauka_transport::server::{
+    make_endpoint_pair, serve_consensus_endpoint, serve_endpoint_owned, OwnershipView,
+};
 
 struct Node {
     addr: SocketAddr,
     app: Arc<RaftApp>,
     store: Arc<ShardStore>,
+    claims: Arc<RwLock<BTreeSet<String>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -29,12 +32,19 @@ async fn spawn(id: u64) -> Node {
     let addr = data.local_addr().unwrap();
     let app = RaftApp::start(id, &dir.path().join("raft")).await.unwrap();
     let handler: Arc<dyn nauka_transport::server::RaftHandler> = app.clone();
-    tokio::spawn(serve_endpoint(store.clone(), data, Some(handler.clone())));
+    let claims: Arc<RwLock<BTreeSet<String>>> = Arc::new(Default::default());
+    tokio::spawn(serve_endpoint_owned(
+        store.clone(),
+        data,
+        Some(handler.clone()),
+        Some(claims.clone() as Arc<dyn OwnershipView>),
+    ));
     tokio::spawn(serve_consensus_endpoint(consensus, handler));
     Node {
         addr,
         app,
         store,
+        claims,
         _dir: dir,
     }
 }
@@ -48,7 +58,10 @@ fn view_of(members: &BTreeMap<u64, String>) -> Vec<(String, u64)> {
 
 /// Syncs manifests + scrub + gc on each listed node (one pass of the
 /// background loop, run synchronously so the test stays deterministic).
+/// Like production, each node publishes its claim set BEFORE anyone gcs:
+/// the release of a shard requires its owner's claim on top of the proof.
 async fn converge(nodes: &[&Node], view: &[(String, u64)]) {
+    let refs: Vec<(&str, u64)> = view.iter().map(|(n, w)| (n.as_str(), *w)).collect();
     for n in nodes {
         for manifest in n.app.app_state().manifests.values() {
             if n.store.get_manifest(&manifest.file_hash).is_err() {
@@ -57,10 +70,19 @@ async fn converge(nodes: &[&Node], view: &[(String, u64)]) {
         }
         let id = n.addr.to_string();
         scrub_once(&n.store, &id, view).await.unwrap();
+        let mut owned: BTreeSet<String> = Default::default();
+        for fh in n.store.list_manifests().unwrap() {
+            let m = n.store.get_manifest(&fh).unwrap();
+            for (_, _, h) in shards_owned_by(&m, &id, &refs) {
+                owned.insert(h.to_string());
+            }
+        }
+        *n.claims.write().unwrap() = owned;
     }
     for n in nodes {
         let id = n.addr.to_string();
-        gc_once(&n.store, &id, view).await.unwrap();
+        let claimed = n.claims.read().unwrap().clone();
+        gc_once(&n.store, &id, view, &claimed).await.unwrap();
     }
 }
 

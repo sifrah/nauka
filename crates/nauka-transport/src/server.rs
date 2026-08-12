@@ -19,12 +19,30 @@ pub trait RaftHandler: Send + Sync {
     async fn handle(&self, rpc: RaftRpc) -> Result<Vec<u8>, String>;
 }
 
+/// Extension point: who answers "do you claim ownership of this shard?"
+/// (see [`Request::ProveShardOwned`]). The placement layer lives above the
+/// transport, so the node injects its current claim set here the same way
+/// the consensus layer injects [`RaftHandler`]. Absent view → every claim
+/// is `false`, which callers treat as "do not release" — the safe default.
+pub trait OwnershipView: Send + Sync {
+    fn claims(&self, shard_hash: &str) -> bool;
+}
+
+/// The canonical implementation: the node refreshes this set once per
+/// maintenance pass with the shards placement assigns to it.
+impl OwnershipView for std::sync::RwLock<std::collections::BTreeSet<String>> {
+    fn claims(&self, shard_hash: &str) -> bool {
+        self.read().map(|s| s.contains(shard_hash)).unwrap_or(false)
+    }
+}
+
 /// Starts the QUIC server and serves requests until the process stops.
 /// With consensus enabled, also opens the dedicated plane on port+1.
 pub async fn serve(
     store: Arc<ShardStore>,
     listen: SocketAddr,
     raft: Option<Arc<dyn RaftHandler>>,
+    ownership: Option<Arc<dyn OwnershipView>>,
 ) -> Result<()> {
     match raft {
         Some(handler) => {
@@ -35,31 +53,44 @@ pub async fn serve(
                 consensus.local_addr()?
             );
             tokio::spawn(serve_consensus_endpoint(consensus, handler.clone()));
-            serve_endpoint(store, data, Some(handler)).await
+            serve_endpoint_owned(store, data, Some(handler), ownership).await
         }
         None => {
             let endpoint = make_endpoint(listen)?;
             info!("node listening on {}", endpoint.local_addr()?);
-            serve_endpoint(store, endpoint, None).await
+            serve_endpoint_owned(store, endpoint, None, ownership).await
         }
     }
 }
 
 /// Accept loop over an already-built endpoint (lets tests learn the effective
-/// address before blocking).
+/// address before blocking). Without an [`OwnershipView`]: every ownership
+/// claim answers `false`.
 pub async fn serve_endpoint(
     store: Arc<ShardStore>,
     endpoint: quinn::Endpoint,
     raft: Option<Arc<dyn RaftHandler>>,
 ) -> Result<()> {
+    serve_endpoint_owned(store, endpoint, raft, None).await
+}
+
+/// [`serve_endpoint`] with an [`OwnershipView`] answering the ownership
+/// claims of [`Request::ProveShardOwned`].
+pub async fn serve_endpoint_owned(
+    store: Arc<ShardStore>,
+    endpoint: quinn::Endpoint,
+    raft: Option<Arc<dyn RaftHandler>>,
+    ownership: Option<Arc<dyn OwnershipView>>,
+) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let store = store.clone();
         let raft = raft.clone();
+        let ownership = ownership.clone();
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(Some(store), raft, conn).await
+                    handle_connection(Some(store), raft, ownership, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -84,7 +115,7 @@ pub async fn serve_consensus_endpoint(
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(None, Some(handler), conn).await
+                    handle_connection(None, Some(handler), None, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -174,6 +205,7 @@ fn make_endpoint_buf(listen: SocketAddr, buf: usize) -> Result<quinn::Endpoint> 
 pub async fn handle_connection(
     store: Option<Arc<ShardStore>>,
     raft: Option<Arc<dyn RaftHandler>>,
+    ownership: Option<Arc<dyn OwnershipView>>,
     conn: quinn::Connection,
 ) {
     debug!("connection from {}", conn.remote_address());
@@ -206,6 +238,7 @@ pub async fn handle_connection(
         };
         let store = store.clone();
         let raft = raft.clone();
+        let ownership = ownership.clone();
         tokio::spawn(async move {
             let response = match read_message::<Request>(&mut recv).await {
                 Ok(Request::Raft(rpc)) => match &raft {
@@ -216,7 +249,7 @@ pub async fn handle_connection(
                     None => Response::Error("consensus is not enabled on this node".into()),
                 },
                 Ok(req) => match &store {
-                    Some(s) => handle_request(s, req),
+                    Some(s) => handle_request(s, ownership.as_deref(), req),
                     None => {
                         Response::Error("consensus plane: only Raft RPCs are accepted here".into())
                     }
@@ -238,9 +271,13 @@ pub async fn handle_connection(
 /// in [`handle_connection`], and the consensus plane carries its own
 /// instrumentation — counting it twice under two different names would only
 /// make the two disagree.
-fn handle_request(store: &ShardStore, req: Request) -> Response {
+fn handle_request(
+    store: &ShardStore,
+    ownership: Option<&dyn OwnershipView>,
+    req: Request,
+) -> Response {
     let op = telemetry::op(&req);
-    let response = dispatch(store, req);
+    let response = dispatch(store, ownership, req);
     telemetry::record_request(
         telemetry::IN,
         op,
@@ -252,7 +289,7 @@ fn handle_request(store: &ShardStore, req: Request) -> Response {
     response
 }
 
-fn dispatch(store: &ShardStore, req: Request) -> Response {
+fn dispatch(store: &ShardStore, ownership: Option<&dyn OwnershipView>, req: Request) -> Response {
     match req {
         Request::Raft(_) => unreachable!("handled upstream"),
         Request::Ping => Response::Pong,
@@ -279,5 +316,17 @@ fn dispatch(store: &ShardStore, req: Request) -> Response {
             Err(e) => Response::Error(e.to_string()),
         },
         Request::GetManifest(hash) => Response::Manifest(store.get_manifest(&hash).ok()),
+        // Same proof as ProveShard, plus the ownership claim. No injected
+        // view → `owner: false`: this node cannot vouch for placement, and
+        // the caller must keep its copy.
+        Request::ProveShardOwned { hash, nonce } => Response::ProofOwned {
+            proof: store.get_shard(&hash).ok().map(|data| {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(&nonce);
+                hasher.update(&data);
+                *hasher.finalize().as_bytes()
+            }),
+            owner: ownership.map(|o| o.claims(&hash)).unwrap_or(false),
+        },
     }
 }

@@ -75,6 +75,7 @@ pub fn op(req: &Request) -> &'static str {
         Request::PutManifest(_) => "put_manifest",
         Request::GetManifest(_) => "get_manifest",
         Request::Raft(_) => "raft",
+        Request::ProveShardOwned { .. } => "prove_shard_owned",
     }
 }
 
@@ -199,6 +200,13 @@ mod tests {
             (
                 Request::Raft(crate::protocol::RaftRpc::Vote(Vec::new())),
                 "raft",
+            ),
+            (
+                Request::ProveShardOwned {
+                    hash: "deadbeef".into(),
+                    nonce: [0u8; 32],
+                },
+                "prove_shard_owned",
             ),
         ];
         for (req, want) in cases {

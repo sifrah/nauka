@@ -18,6 +18,10 @@ pub struct HealReport {
     pub shards_checked: usize,
     pub shards_healed: usize,
     pub shards_unrecoverable: usize,
+    /// File hashes with at least one unrecoverable shard this pass. The
+    /// counter alone hid a dead file for a whole day (every node counted
+    /// it, none named it); operators need the name in the log line.
+    pub unrecoverable_files: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -112,15 +116,26 @@ pub fn purge_deleted(
 /// Maximum caution: a shard is deleted only if ALL of its current owners
 /// (a shard may be referenced by several manifests) supply a PROOF of
 /// possession — `blake3(nonce ‖ bytes)`, checked against our local copy —
-/// and not a mere `has_shard` claim. An unreachable owner, or one without
-/// a proof → we keep the shard. Shards unknown to the local manifests are
-/// never touched.
+/// AND claim ownership of it under their own view. The proof alone is a
+/// snapshot in time: during a rebalance, two holders whose placement views
+/// crossed (coords drifting, weights moving) can each see the other as the
+/// owner, prove to each other in the same window, and both delete — zero
+/// copies left. That exact race destroyed 4 of a live file's 6 shards on
+/// 2026-08-12. The ownership claim breaks the symmetry: `claimed` is the
+/// set this node advertises (refreshed by the caller each pass, served to
+/// peers via the transport's `OwnershipView`), and nothing in it is ever
+/// released here — so a peer whose claim we relied on cannot be releasing
+/// that same shard on its side. Views may disagree; then everyone keeps,
+/// and disk is reclaimed once they converge. An unreachable owner, one
+/// without a proof, or one that does not claim the shard → we keep it.
+/// Shards unknown to the local manifests are never touched.
 pub async fn gc_once(
     store: &Arc<ShardStore>,
     self_id: &str,
     all_nodes: &[(String, u64)],
+    claimed: &std::collections::BTreeSet<String>,
 ) -> Result<GcReport> {
-    gc_once_geo(store, self_id, all_nodes, &Default::default()).await
+    gc_once_geo(store, self_id, all_nodes, &Default::default(), claimed).await
 }
 
 /// Geo-aware variant (see [`crate::placement::stripe_owners_geo`]).
@@ -129,6 +144,7 @@ pub async fn gc_once_geo(
     self_id: &str,
     all_nodes: &[(String, u64)],
     coords: &crate::placement::CoordMap,
+    claimed: &std::collections::BTreeSet<String>,
 ) -> Result<GcReport> {
     let node_refs: Vec<(&str, u64)> = all_nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
 
@@ -165,6 +181,15 @@ pub async fn gc_once_geo(
         if shard_owners.iter().any(|o| o == self_id) {
             continue; // still ours, nothing to do
         }
+        // Advertised as ours to the peers this pass: releasing it now
+        // would falsify the claim another node may be relying on to
+        // release ITS copy. The fresh view above may already disagree
+        // with the published set; the published set wins until the next
+        // refresh.
+        if claimed.contains(&shard) {
+            report.shards_kept += 1;
+            continue;
+        }
         // We still hold the bytes, so we can DEMAND a proof of possession
         // before releasing them.
         let Ok(local_data) = store.get_shard(&shard) else {
@@ -176,9 +201,9 @@ pub async fn gc_once_geo(
             let proved = match client {
                 Some(c) => {
                     let nonce: [u8; 32] = rand::random();
-                    match c.prove_shard(&shard, nonce).await {
-                        Ok(Some(proof)) => {
-                            proof == crate::audit::expected_proof(&nonce, &local_data)
+                    match c.prove_shard_owned(&shard, nonce).await {
+                        Ok(Some((proof, owner_ack))) => {
+                            owner_ack && proof == crate::audit::expected_proof(&nonce, &local_data)
                         }
                         _ => false,
                     }
@@ -253,6 +278,7 @@ pub async fn scrub_once_geo(
                         "unrecoverable for now: {e}"
                     );
                     report.shards_unrecoverable += 1;
+                    report.unrecoverable_files.insert(file_hash.clone());
                 }
             }
         }

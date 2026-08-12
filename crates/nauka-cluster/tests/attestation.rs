@@ -3,19 +3,23 @@
 //! - the GC demands a PROOF of possession before releasing its copy;
 //! - the nonce proof is neither replayable nor forgeable.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
 
 use nauka_cluster::audit::{audit_once, expected_proof};
 use nauka_cluster::healer::gc_once;
 use nauka_cluster::placement::shards_owned_by;
 use nauka_erasure::{encode_file, ErasureConfig};
 use nauka_store::ShardStore;
-use nauka_transport::server::{make_endpoint, serve_endpoint};
+use nauka_transport::server::{make_endpoint, serve_endpoint_owned, OwnershipView};
 use nauka_transport::PeerClient;
 
 struct Node {
     id: String,
     store: Arc<ShardStore>,
+    /// What this node advertises as its own to peers — the ownership half
+    /// of `ProveShardOwned` answers from here.
+    claims: Arc<RwLock<BTreeSet<String>>>,
     dir: tempfile::TempDir,
 }
 
@@ -24,8 +28,19 @@ async fn spawn_node() -> Node {
     let store = Arc::new(ShardStore::open(dir.path()).unwrap());
     let endpoint = make_endpoint("127.0.0.1:0".parse().unwrap()).unwrap();
     let id = endpoint.local_addr().unwrap().to_string();
-    tokio::spawn(serve_endpoint(store.clone(), endpoint, None));
-    Node { id, store, dir }
+    let claims: Arc<RwLock<BTreeSet<String>>> = Arc::new(Default::default());
+    tokio::spawn(serve_endpoint_owned(
+        store.clone(),
+        endpoint,
+        None,
+        Some(claims.clone() as Arc<dyn OwnershipView>),
+    ));
+    Node {
+        id,
+        store,
+        claims,
+        dir,
+    }
 }
 
 fn view(nodes: &[&Node]) -> Vec<(String, u64)> {
@@ -146,10 +161,15 @@ async fn gc_requires_proof_before_releasing() {
         peer.store.put_shard(&stripes[si][sj].data).unwrap();
     }
 
+    // The peer advertises everything it holds as its own — proof AND claim.
+    *peer.claims.write().unwrap() = peer.store.list_shards().unwrap().into_iter().collect();
+
     let before = holder.store.list_shards().unwrap().len();
     assert!(before > 0);
-    let g = gc_once(&holder.store, &holder.id, &solo).await.unwrap();
-    assert_eq!(g.shards_released, before, "proof supplied → release");
+    let g = gc_once(&holder.store, &holder.id, &solo, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(g.shards_released, before, "proof + claim → release");
     assert_eq!(holder.store.list_shards().unwrap().len(), 0);
 
     // ── Opposite case: the peer does NOT hold the bytes → no proof, so the
@@ -158,16 +178,95 @@ async fn gc_requires_proof_before_releasing() {
     let empty_peer = spawn_node().await;
     let pair2 = [&holder2, &empty_peer];
     seed_cluster(&pair2, 0x22);
-    // The peer is emptied: it can prove nothing.
+    // The peer is emptied: it can prove nothing (even while claiming).
+    *empty_peer.claims.write().unwrap() = empty_peer
+        .store
+        .list_shards()
+        .unwrap()
+        .into_iter()
+        .collect();
     for h in empty_peer.store.list_shards().unwrap() {
         empty_peer.store.delete_shard(&h).unwrap();
     }
     let solo2 = vec![(empty_peer.id.clone(), 1u64)];
     let kept_before = holder2.store.list_shards().unwrap().len();
-    let g = gc_once(&holder2.store, &holder2.id, &solo2).await.unwrap();
+    let g = gc_once(&holder2.store, &holder2.id, &solo2, &Default::default())
+        .await
+        .unwrap();
     assert_eq!(g.shards_released, 0, "without a proof, nothing is released");
     assert_eq!(g.shards_kept, kept_before);
     assert_eq!(holder2.store.list_shards().unwrap().len(), kept_before);
+}
+
+#[tokio::test]
+async fn gc_survives_crossed_ownership_views() {
+    // The 2026-08-12 data-loss race, replayed deterministically. Two nodes
+    // both hold every shard; their placement views CROSSED mid-rebalance:
+    // each sees the OTHER as the owner, and neither claims the shards as
+    // its own. Under proof-only GC both sides get a valid proof and both
+    // delete — the cluster ends with ZERO copies. The ownership claim must
+    // make both keep everything instead.
+    let a = spawn_node().await;
+    let b = spawn_node().await;
+    let both = [&a, &b];
+    let manifest = seed_cluster(&both, 0x3c);
+
+    // Both hold the full set (mid-rebalance duplication).
+    let cfg = manifest.config;
+    let data: Vec<u8> = (0..cfg.stripe_data_len() * 3)
+        .map(|i| (i as u8) ^ 0x3c)
+        .collect();
+    let (_, stripes) = encode_file(&data, &cfg).unwrap();
+    for node in &both {
+        for stripe in &stripes {
+            for shard in stripe {
+                node.store.put_shard(&shard.data).unwrap();
+            }
+        }
+    }
+    let total = a.store.list_shards().unwrap().len();
+    assert!(total > 0);
+
+    // Crossed views: A believes everything belongs to B, B believes
+    // everything belongs to A. Nobody claims anything (each one's claim
+    // set reflects its own view, which assigns it nothing). Sequential
+    // gc runs are enough: the second run still sees the first holder's
+    // bytes gone only if the first released — the race needs no timing.
+    let view_b_owns = vec![(b.id.clone(), 1u64)];
+    let view_a_owns = vec![(a.id.clone(), 1u64)];
+    let ga = gc_once(&a.store, &a.id, &view_b_owns, &Default::default())
+        .await
+        .unwrap();
+    let gb = gc_once(&b.store, &b.id, &view_a_owns, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        (ga.shards_released, gb.shards_released),
+        (0, 0),
+        "no ownership claim anywhere → nobody may release"
+    );
+    assert_eq!(a.store.list_shards().unwrap().len(), total);
+    assert_eq!(b.store.list_shards().unwrap().len(), total);
+
+    // Convergence: B now claims the shards (its view agrees it owns them).
+    // A may release; B, claiming, still keeps — at least one copy of every
+    // shard survives at every instant, by construction.
+    *b.claims.write().unwrap() = b.store.list_shards().unwrap().into_iter().collect();
+    let b_claims: BTreeSet<String> = b.claims.read().unwrap().clone();
+    let ga = gc_once(&a.store, &a.id, &view_b_owns, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(ga.shards_released, total, "claimed elsewhere → A releases");
+    assert_eq!(a.store.list_shards().unwrap().len(), 0);
+    let gb = gc_once(&b.store, &b.id, &view_a_owns, &b_claims)
+        .await
+        .unwrap();
+    assert_eq!(
+        gb.shards_released, 0,
+        "B advertises the shards as its own: it must not release them, \
+         whatever its fresh view says"
+    );
+    assert_eq!(b.store.list_shards().unwrap().len(), total);
 }
 
 #[tokio::test]

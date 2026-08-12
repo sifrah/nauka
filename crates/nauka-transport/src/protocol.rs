@@ -33,6 +33,24 @@ pub enum Request {
     GetManifest(String),
     /// Raft (openraft) message: bincode payload, opaque to the transport.
     Raft(RaftRpc),
+    // ── APPEND-ONLY BELOW ── bincode is positional: inserting a variant
+    // above this line breaks the wire protocol between mixed versions
+    // during a rolling deploy. An old peer answers an unknown variant with
+    // `Error("unreadable request")`, which callers must treat as a refusal.
+    /// Proof of possession PLUS an ownership claim: the proof is the same
+    /// `blake3(nonce ‖ bytes)` as [`Request::ProveShard`], and `owner` in
+    /// the response says whether the peer considers itself an owner of the
+    /// shard under ITS OWN current placement view. The rebalancing GC
+    /// requires both: a bare proof is a snapshot in time, and two holders
+    /// with crossed views can each prove to the other and both delete —
+    /// zero copies left (lost a live file to exactly that race on
+    /// 2026-08-12). A node that claims ownership never releases the shard
+    /// in the same pass, so requiring the claim makes mutual deletion
+    /// impossible by construction.
+    ProveShardOwned {
+        hash: String,
+        nonce: [u8; 32],
+    },
 }
 
 /// Consensus RPCs, carried as-is; only the nauka-raft layer knows how to
@@ -63,6 +81,14 @@ pub enum Response {
     Raft(Vec<u8>),
     /// Application-level error on the server side.
     Error(String),
+    // ── APPEND-ONLY BELOW ── same positional-bincode rule as `Request`.
+    /// Answer to [`Request::ProveShardOwned`]: the proof (`None` if the
+    /// shard is missing or corrupt) and whether the peer claims ownership
+    /// of it under its own view.
+    ProofOwned {
+        proof: Option<[u8; 32]>,
+        owner: bool,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

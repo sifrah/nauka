@@ -820,6 +820,15 @@ async fn main() -> Result<()> {
             };
             let store = Arc::new(ShardStore::open(&cli.data_dir)?);
             let interval = std::time::Duration::from_secs(scrub_interval);
+            // The shards this node currently claims ownership of, under its
+            // own placement view — refreshed once per maintenance pass,
+            // served to peers through the transport's `OwnershipView` so
+            // their rebalancing GC can demand an ownership claim on top of
+            // the proof of possession. Empty until the first pass: every
+            // claim answers `false`, and peers keep their copies — the safe
+            // direction.
+            let claimed_shards: Arc<std::sync::RwLock<std::collections::BTreeSet<String>>> =
+                Arc::new(Default::default());
             // Assigned once, below, now that consensus is the only mode.
             let raft_handler: Option<Arc<dyn nauka_transport::server::RaftHandler>>;
 
@@ -1109,6 +1118,7 @@ async fn main() -> Result<()> {
                 let meter_bg = api_state.egress.clone();
                 let cache_bg = api_state.cache.clone();
                 let staged_bg = api_state.staged_bytes.clone();
+                let claimed_bg = claimed_shards.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
@@ -1410,6 +1420,36 @@ async fn main() -> Result<()> {
                         // liveness flap must never be a reason to release
                         // a shard.
                         let nodes_live = health_bg.filter_view(nodes.clone());
+                        // Refresh the advertised claim set BEFORE scrub and
+                        // gc: the peers' rebalancing GC releases a shard
+                        // only against a proof + ownership claim served
+                        // from this set, and our own gc below never
+                        // releases anything in it. One snapshot per pass —
+                        // the claim answered to a peer and the skip
+                        // decision made locally must come from the same
+                        // view, or the mutual-release race reopens.
+                        let claimed_now: std::collections::BTreeSet<String> = {
+                            let refs: Vec<(&str, u64)> =
+                                nodes.iter().map(|(n, w)| (n.as_str(), *w)).collect();
+                            let mut owned = std::collections::BTreeSet::new();
+                            if let Ok(hashes) = store_bg.list_manifests() {
+                                for fh in hashes {
+                                    if let Ok(m) = store_bg.get_manifest(&fh) {
+                                        for (_, _, h) in
+                                            nauka_cluster::placement::shards_owned_by_geo(
+                                                &m, &self_id, &refs, &coords,
+                                            )
+                                        {
+                                            owned.insert(h.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            owned
+                        };
+                        if let Ok(mut published) = claimed_bg.write() {
+                            *published = claimed_now.clone();
+                        }
                         match nauka_cluster::healer::scrub_once_geo(
                             &store_bg,
                             &self_id,
@@ -1423,14 +1463,30 @@ async fn main() -> Result<()> {
                                     "scrub: {} checked, {} regenerated, {} unrecoverable",
                                     r.shards_checked, r.shards_healed, r.shards_unrecoverable
                                 );
+                                // The counter alone hid a dead file for a
+                                // day; the operator needs names.
+                                for f in r.unrecoverable_files.iter().take(5) {
+                                    eprintln!("scrub: UNRECOVERABLE file {f}");
+                                }
+                                if r.unrecoverable_files.len() > 5 {
+                                    eprintln!(
+                                        "scrub: … and {} more unrecoverable file(s)",
+                                        r.unrecoverable_files.len() - 5
+                                    );
+                                }
                             }
                             Ok(_) => {}
                             Err(e) => eprintln!("scrub failed: {e}"),
                         }
                         // Rebalancing: release what no longer belongs to
-                        // us (once the owner has confirmed it holds it).
+                        // us (once the owner has confirmed it holds it AND
+                        // claims it under its own view).
                         match nauka_cluster::healer::gc_once_geo(
-                            &store_bg, &self_id, &nodes, &coords,
+                            &store_bg,
+                            &self_id,
+                            &nodes,
+                            &coords,
+                            &claimed_now,
                         )
                         .await
                         {
@@ -1482,7 +1538,13 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            nauka_transport::serve(store, listen, raft_handler).await?;
+            nauka_transport::serve(
+                store,
+                listen,
+                raft_handler,
+                Some(claimed_shards as Arc<dyn nauka_transport::server::OwnershipView>),
+            )
+            .await?;
         }
         Cmd::Ban {
             file_hash,

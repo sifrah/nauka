@@ -164,6 +164,29 @@ impl PeerClient {
         }
     }
 
+    /// Proof of possession plus ownership claim (see
+    /// [`Request::ProveShardOwned`]). `None` means "no usable proof": shard
+    /// missing or corrupt on the peer, or the peer predates the request
+    /// (a mixed-version cluster mid-deploy answers `Error`) — in every
+    /// case the caller must keep its copy.
+    pub async fn prove_shard_owned(
+        &self,
+        hash: &str,
+        nonce: [u8; 32],
+    ) -> Result<Option<([u8; 32], bool)>> {
+        match self
+            .call(Request::ProveShardOwned {
+                hash: hash.to_string(),
+                nonce,
+            })
+            .await?
+        {
+            Response::ProofOwned { proof, owner } => Ok(proof.map(|p| (p, owner))),
+            Response::Error(_) => Ok(None),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn put_manifest(&self, manifest: &FileManifest) -> Result<()> {
         match self.call(Request::PutManifest(manifest.clone())).await? {
             Response::PutManifestOk => Ok(()),
