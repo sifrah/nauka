@@ -299,6 +299,16 @@ enum Cmd {
     /// Add or remove cluster nodes.
     #[command(subcommand)]
     Node(NodeCmd),
+    /// Manage organisations — the engine's clients. An organisation is an
+    /// APPLICATION (a file-sharing product, a gateway…), never an end
+    /// user; its record is replicated to every node.
+    #[command(subcommand)]
+    Org(OrgCmd),
+    /// Manage storage spaces within an organisation (`org/name`). Each
+    /// space carries its own policies; keep them to dozens per org —
+    /// split by usage, never one per end user.
+    #[command(subcommand)]
+    Space(SpaceCmd),
     /// Encode a file and dispatch its shards across peers (round-robin).
     /// Niche: the raw shard path, without the HTTP API — kept for
     /// air-gapped tooling, hidden from the daily surface.
@@ -322,6 +332,80 @@ enum Cmd {
         peers: Vec<SocketAddr>,
         #[arg(short, long)]
         output: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrgCmd {
+    /// Create an organisation.
+    Create {
+        /// Lowercase letters, digits and dashes (1–32 chars).
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// List organisations and their spaces.
+    List {
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Suspend an organisation: every space under it goes dark on every
+    /// node — reads and writes refused — until `org resume`.
+    Suspend {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Lift a suspension.
+    Resume {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Delete an organisation. Refused while it still has spaces.
+    Rm {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpaceCmd {
+    /// Create a space, e.g. `nauka space create yogfile/uploads`.
+    Create {
+        /// Full path `org/name` (each part: lowercase, digits, dashes).
+        name: String,
+        /// Serve this space's files bare, without a signed link (direct
+        /// links). Default: private.
+        #[arg(long)]
+        public: bool,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// List spaces (optionally of one organisation).
+    List {
+        org: Option<String>,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Suspend a space: reads and writes refused cluster-wide.
+    Suspend {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Lift a suspension.
+    Resume {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Delete a space.
+    Rm {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
     },
 }
 
@@ -415,6 +499,8 @@ async fn main() -> Result<()> {
         Cmd::Serve { .. }
         | Cmd::NodeInfo
         | Cmd::Node(_)
+        | Cmd::Org(_)
+        | Cmd::Space(_)
         | Cmd::Ban { .. }
         | Cmd::Unban { .. }
         | Cmd::PutRemote { .. }
@@ -1632,6 +1718,28 @@ async fn main() -> Result<()> {
             NodeCmd::Enable { target, peers } => {
                 node::set_disabled(&peers, target, false).await?;
             }
+        },
+        Cmd::Org(cmd) => match cmd {
+            OrgCmd::Create { name, peers } => node::org_create(&peers, &name).await?,
+            OrgCmd::List { peers } => node::org_list(&peers, None).await?,
+            OrgCmd::Suspend { name, peers } => node::org_set_suspended(&peers, &name, true).await?,
+            OrgCmd::Resume { name, peers } => node::org_set_suspended(&peers, &name, false).await?,
+            OrgCmd::Rm { name, peers } => node::org_delete(&peers, &name).await?,
+        },
+        Cmd::Space(cmd) => match cmd {
+            SpaceCmd::Create {
+                name,
+                public,
+                peers,
+            } => node::space_create(&peers, &name, public).await?,
+            SpaceCmd::List { org, peers } => node::org_list(&peers, org.as_deref()).await?,
+            SpaceCmd::Suspend { name, peers } => {
+                node::space_set_suspended(&peers, &name, true).await?
+            }
+            SpaceCmd::Resume { name, peers } => {
+                node::space_set_suspended(&peers, &name, false).await?
+            }
+            SpaceCmd::Rm { name, peers } => node::space_delete(&peers, &name).await?,
         },
         Cmd::PutRemote {
             file,

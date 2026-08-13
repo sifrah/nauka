@@ -407,6 +407,82 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                     info: None,
                                 }
                             }
+                            AppCommand::UpsertOrg { name, record } => {
+                                inner.state.orgs.insert(name, record);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
+                            AppCommand::DeleteOrg { name } => {
+                                // Enforced in the state machine, not the CLI:
+                                // every replica refuses identically, whatever
+                                // client sent the command.
+                                let in_use = inner.state.spaces.values().any(|s| s.org == name);
+                                if in_use {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!(
+                                            "organisation {name} still has spaces — \
+                                             delete them first"
+                                        )),
+                                    }
+                                } else if inner.state.orgs.remove(&name).is_none() {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!("no organisation named {name}")),
+                                    }
+                                } else {
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                            }
+                            AppCommand::UpsertSpace { name, record } => {
+                                // The key must be exactly `<org>/<one segment>`,
+                                // with the org matching the record's.
+                                let well_formed = name
+                                    .strip_prefix(&format!("{}/", record.org))
+                                    .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
+                                if !inner.state.orgs.contains_key(&record.org) {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!(
+                                            "no organisation named {} — create it first",
+                                            record.org
+                                        )),
+                                    }
+                                } else if !well_formed {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!(
+                                            "space name {name} does not match its \
+                                             organisation {} (expected {}/<name>)",
+                                            record.org, record.org
+                                        )),
+                                    }
+                                } else {
+                                    inner.state.spaces.insert(name, record);
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                            }
+                            AppCommand::DeleteSpace { name } => {
+                                if inner.state.spaces.remove(&name).is_none() {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!("no space named {name}")),
+                                    }
+                                } else {
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                            }
                             AppCommand::UpdateNodeEgress { addr, egress } => {
                                 inner.state.node_egress.insert(addr, egress);
                                 AppResponse {

@@ -119,6 +119,7 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
         .route("/api/status", get(status))
         .route("/api/removal-check", get(removal_check))
         .route("/api/shard-inventory", get(shard_inventory))
+        .route("/api/orgs", get(orgs_view))
         .route(
             "/f/{hash}",
             get(download).head(download_head).delete(delete_file),
@@ -313,6 +314,16 @@ struct RemovalCheckResponse {
 /// the hard way on 2026-08-12).
 async fn shard_inventory(State(state): State<Arc<ApiState>>) -> Json<Vec<String>> {
     Json(state.store.list_shards().unwrap_or_default())
+}
+
+/// GET /api/orgs — the replicated organisation/space registry, as the CLI
+/// (`nauka org list`) reads it. Names and policies only, never keys.
+/// NOTE: public for now like the rest of the read API; AUTH-4's
+/// private-by-default switch will decide what this endpoint exposes to
+/// whom.
+async fn orgs_view(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
+    let s = state.app.app_state();
+    Json(serde_json::json!({ "orgs": s.orgs, "spaces": s.spaces }))
 }
 
 /// GET /api/removal-check?target=<addr> — would removing (or fully

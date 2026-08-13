@@ -1180,3 +1180,235 @@ pub async fn init(o: InitOpts) -> Result<()> {
     println!("  nauka node add <ip>:7311");
     Ok(())
 }
+
+// ── Organisations and spaces ─────────────────────────────────────────
+// The engine's multi-tenant registry (see AUTH series). All writes go
+// through the Raft leader like every other admin command; reads go
+// through any node's HTTP API. An organisation is an APPLICATION — its
+// end users never appear here.
+
+/// Lowercase letters, digits, dashes, 1–32 chars: names end up in URLs
+/// and in the replicated state, so they are locked down from day one.
+fn validate_slug(kind: &str, s: &str) -> Result<()> {
+    let ok = !s.is_empty()
+        && s.len() <= 32
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !s.starts_with('-')
+        && !s.ends_with('-');
+    if !ok {
+        bail!("invalid {kind} name {s:?}: lowercase letters, digits and dashes, 1-32 chars");
+    }
+    Ok(())
+}
+
+/// Splits and validates a full `org/name` space path.
+fn split_space_path(name: &str) -> Result<(&str, &str)> {
+    let (org, space) = name
+        .split_once('/')
+        .with_context(|| format!("expected org/name, got {name:?} (e.g. yogfile/uploads)"))?;
+    validate_slug("organisation", org)?;
+    validate_slug("space", space)?;
+    Ok((org, space))
+}
+
+/// The `/api/orgs` view: both maps, exactly as replicated.
+#[derive(serde::Deserialize)]
+struct OrgsView {
+    orgs: std::collections::BTreeMap<String, nauka_raft::types::OrgRecord>,
+    spaces: std::collections::BTreeMap<String, nauka_raft::types::SpaceRecord>,
+}
+
+/// Reads the replicated org/space registry from the first peer whose
+/// HTTP API answers.
+async fn fetch_orgs(peers: &[SocketAddr]) -> Result<OrgsView> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    for peer in peers {
+        let url = format!("http://{}:8080/api/orgs", peer.ip());
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(view) = resp.json::<OrgsView>().await {
+                return Ok(view);
+            }
+        }
+    }
+    bail!("no node answered /api/orgs (tried {} peer(s))", peers.len());
+}
+
+async fn write_command(
+    peers: &[SocketAddr],
+    cmd: nauka_raft::types::AppCommand,
+) -> Result<nauka_raft::types::AppResponse> {
+    let resp = nauka_raft::write_via_leader(peers, cmd).await?;
+    if !resp.ok {
+        bail!(
+            "{}",
+            resp.info
+                .as_deref()
+                .unwrap_or("the cluster refused the change")
+        );
+    }
+    Ok(resp)
+}
+
+pub async fn org_create(peers: &[SocketAddr], name: &str) -> Result<()> {
+    validate_slug("organisation", name)?;
+    let view = fetch_orgs(peers).await?;
+    if view.orgs.contains_key(name) {
+        bail!("organisation {name} already exists");
+    }
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertOrg {
+            name: name.to_string(),
+            record: Default::default(),
+        },
+    )
+    .await?;
+    println!("organisation {name} created");
+    println!("  next: nauka space create {name}/<space>");
+    Ok(())
+}
+
+pub async fn org_set_suspended(peers: &[SocketAddr], name: &str, suspended: bool) -> Result<()> {
+    let view = fetch_orgs(peers).await?;
+    let mut record = view
+        .orgs
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no organisation named {name}"))?;
+    record.suspended = suspended;
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertOrg {
+            name: name.to_string(),
+            record,
+        },
+    )
+    .await?;
+    if suspended {
+        println!("organisation {name} SUSPENDED — all its spaces are dark cluster-wide");
+    } else {
+        println!("organisation {name} active again");
+    }
+    Ok(())
+}
+
+pub async fn org_delete(peers: &[SocketAddr], name: &str) -> Result<()> {
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::DeleteOrg {
+            name: name.to_string(),
+        },
+    )
+    .await?;
+    println!("organisation {name} deleted");
+    Ok(())
+}
+
+pub async fn space_create(peers: &[SocketAddr], name: &str, public: bool) -> Result<()> {
+    let (org, _) = split_space_path(name)?;
+    let view = fetch_orgs(peers).await?;
+    if view.spaces.contains_key(name) {
+        bail!("space {name} already exists");
+    }
+    if !view.orgs.contains_key(org) {
+        bail!("no organisation named {org} — create it first: nauka org create {org}");
+    }
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertSpace {
+            name: name.to_string(),
+            record: nauka_raft::types::SpaceRecord {
+                org: org.to_string(),
+                public_read: public,
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    let visibility = if public { "public-read" } else { "private" };
+    println!("space {name} created ({visibility})");
+    Ok(())
+}
+
+pub async fn space_set_suspended(peers: &[SocketAddr], name: &str, suspended: bool) -> Result<()> {
+    let view = fetch_orgs(peers).await?;
+    let mut record = view
+        .spaces
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no space named {name}"))?;
+    record.suspended = suspended;
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertSpace {
+            name: name.to_string(),
+            record,
+        },
+    )
+    .await?;
+    if suspended {
+        println!("space {name} SUSPENDED cluster-wide");
+    } else {
+        println!("space {name} active again");
+    }
+    Ok(())
+}
+
+pub async fn space_delete(peers: &[SocketAddr], name: &str) -> Result<()> {
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::DeleteSpace {
+            name: name.to_string(),
+        },
+    )
+    .await?;
+    println!("space {name} deleted");
+    Ok(())
+}
+
+/// `org list` and `space list`: one tree, orgs then their spaces —
+/// filtered to one org when asked.
+pub async fn org_list(peers: &[SocketAddr], only_org: Option<&str>) -> Result<()> {
+    let view = fetch_orgs(peers).await?;
+    let orgs: Vec<(&String, &nauka_raft::types::OrgRecord)> = view
+        .orgs
+        .iter()
+        .filter(|(name, _)| only_org.is_none_or(|o| o == name.as_str()))
+        .collect();
+    if orgs.is_empty() {
+        match only_org {
+            Some(o) => println!("no organisation named {o}"),
+            None => println!("no organisations yet — nauka org create <name>"),
+        }
+        return Ok(());
+    }
+    for (name, org) in orgs {
+        let status = if org.suspended {
+            style("SUSPENDED").red().bold().to_string()
+        } else {
+            style("active").green().to_string()
+        };
+        println!("{} — {status}", style(name).bold());
+        let mut any = false;
+        for (path, s) in view.spaces.iter().filter(|(_, s)| s.org == *name) {
+            any = true;
+            let mut tags: Vec<&str> = Vec::new();
+            if s.suspended {
+                tags.push("SUSPENDED");
+            }
+            tags.push(if s.public_read {
+                "public-read"
+            } else {
+                "private"
+            });
+            println!("  {path}  [{}]", tags.join(", "));
+        }
+        if !any {
+            println!("  (no spaces)");
+        }
+    }
+    Ok(())
+}

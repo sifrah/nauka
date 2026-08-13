@@ -149,6 +149,65 @@ pub enum AppCommand {
     /// store drains to zero while the cluster never dips below full
     /// redundancy; `node remove` is then instant and safe.
     SetNodeDisabled { addr: String, disabled: bool },
+    /// Creates or replaces an organisation — the engine's unit of
+    /// contract: a client APPLICATION (never an end user), suspendable as
+    /// a whole. Replicated so every node can check it locally.
+    UpsertOrg { name: String, record: OrgRecord },
+    /// Removes an organisation. Refused while any space still belongs to
+    /// it — deleting a customer must be an explicit, space-by-space act.
+    DeleteOrg { name: String },
+    /// Creates or replaces a storage space within an organisation. The
+    /// name is the full `org/space` path; the record carries the space's
+    /// own policies. Refused if the organisation does not exist.
+    UpsertSpace { name: String, record: SpaceRecord },
+    /// Removes a space.
+    DeleteSpace { name: String },
+}
+
+/// An organisation: the engine's client. Applications (a file-sharing
+/// product, a WebDAV gateway…) are organisations; their own end users
+/// never appear in the engine — that boundary is what keeps this state
+/// small enough to replicate everywhere. Keyed by name in
+/// [`AppState::orgs`].
+///
+/// APPEND-ONLY: this struct is embedded in bincode snapshots — new fields
+/// go last, and each growth mints a legacy loader shape in `types.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct OrgRecord {
+    /// A suspended org answers nothing: every space under it goes dark on
+    /// every node within one replication round-trip.
+    pub suspended: bool,
+    /// Optional cap on the sum of its spaces' logical bytes. `None` =
+    /// uncapped.
+    pub quota_bytes: Option<u64>,
+}
+
+/// A storage space: the operational unit inside an organisation, keyed by
+/// its full `org/name` path in [`AppState::spaces`]. Spaces are counted in
+/// DOZENS per org (split by usage: uploads, thumbnails, archives…), never
+/// one per end user — anything that scales with the client's customer
+/// base belongs in the client's database, not in this replicated state.
+///
+/// APPEND-ONLY: same snapshot rule as [`OrgRecord`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SpaceRecord {
+    /// The owning organisation (also the prefix of the map key; kept in
+    /// the record so a space is self-describing).
+    pub org: String,
+    /// A suspended space refuses reads and writes; its signed links die
+    /// cluster-wide.
+    pub suspended: bool,
+    /// `true` = files referenced by this space are served bare, no
+    /// signature (direct links). Default: private.
+    pub public_read: bool,
+    /// Storage cap in logical bytes (sum of referenced file sizes).
+    pub quota_bytes: Option<u64>,
+    /// Monthly egress cap in bytes; past it, reads are throttled hard
+    /// rather than cut.
+    pub egress_quota_bytes: Option<u64>,
+    /// Default per-connection read rate in bytes/s (applies where a
+    /// signed link does not carry its own).
+    pub rate_default: Option<u64>,
 }
 
 /// One node's egress ledger for one calendar month, self-declared and
@@ -204,6 +263,12 @@ pub struct AppState {
     /// address.
     #[serde(default)]
     pub disabled: std::collections::BTreeSet<String>,
+    /// Organisations — the engine's clients (name → record).
+    #[serde(default)]
+    pub orgs: BTreeMap<String, OrgRecord>,
+    /// Storage spaces (`org/name` → record).
+    #[serde(default)]
+    pub spaces: BTreeMap<String, SpaceRecord>,
 }
 
 /// The AppState shape BEFORE `disabled` was appended — every field of
@@ -226,26 +291,58 @@ pub struct AppStateLegacyV0 {
     pub s3: nauka_s3::S3State,
 }
 
+/// The AppState shape BEFORE `orgs`/`spaces` were appended (i.e. with
+/// `disabled` as the last field) — what every v0.5.2x binary persisted.
+#[derive(Deserialize)]
+pub struct AppStateLegacyV1 {
+    pub manifests: BTreeMap<String, FileManifest>,
+    #[serde(default)]
+    pub node_capacities: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+    #[serde(default)]
+    pub node_egress: BTreeMap<String, NodeEgress>,
+    #[serde(default)]
+    pub banned: BTreeMap<String, String>,
+    #[serde(default)]
+    pub s3: nauka_s3::S3State,
+    #[serde(default)]
+    pub disabled: std::collections::BTreeSet<String>,
+}
+
 impl AppState {
-    /// Deserialize a bincode snapshot, tolerating the pre-`disabled`
-    /// format: try the current shape first, fall back to the legacy one
-    /// and fill the new fields with their defaults.
+    /// Deserialize a bincode snapshot, tolerating every previous shape:
+    /// try the current one first, then each legacy shape from newest to
+    /// oldest, filling the missing trailing fields with their defaults.
     pub fn from_snapshot_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
-        match bincode::deserialize::<AppState>(data) {
-            Ok(s) => Ok(s),
-            Err(_) => {
-                let v0: AppStateLegacyV0 = bincode::deserialize(data)?;
-                Ok(AppState {
-                    manifests: v0.manifests,
-                    node_capacities: v0.node_capacities,
-                    node_coords: v0.node_coords,
-                    node_egress: v0.node_egress,
-                    banned: v0.banned,
-                    s3: v0.s3,
-                    disabled: Default::default(),
-                })
-            }
+        if let Ok(s) = bincode::deserialize::<AppState>(data) {
+            return Ok(s);
         }
+        if let Ok(v1) = bincode::deserialize::<AppStateLegacyV1>(data) {
+            return Ok(AppState {
+                manifests: v1.manifests,
+                node_capacities: v1.node_capacities,
+                node_coords: v1.node_coords,
+                node_egress: v1.node_egress,
+                banned: v1.banned,
+                s3: v1.s3,
+                disabled: v1.disabled,
+                orgs: Default::default(),
+                spaces: Default::default(),
+            });
+        }
+        let v0: AppStateLegacyV0 = bincode::deserialize(data)?;
+        Ok(AppState {
+            manifests: v0.manifests,
+            node_capacities: v0.node_capacities,
+            node_coords: v0.node_coords,
+            node_egress: v0.node_egress,
+            banned: v0.banned,
+            s3: v0.s3,
+            disabled: Default::default(),
+            orgs: Default::default(),
+            spaces: Default::default(),
+        })
     }
 }
 
@@ -324,6 +421,8 @@ mod snapshot_compat_tests {
             banned: legacy.banned.clone(),
             s3: legacy.s3.clone(),
             disabled: Default::default(),
+            orgs: Default::default(),
+            spaces: Default::default(),
         };
         // Truncate the trailing empty-BTreeSet length prefix to simulate a
         // snapshot that predates the field entirely.
@@ -373,5 +472,74 @@ mod snapshot_compat_tests {
             banned: &s.banned,
             s3: &s.s3,
         }
+    }
+
+    // A snapshot written by a v0.5.2x binary (`disabled` present, no
+    // orgs/spaces) must load with empty org and space maps.
+    #[test]
+    fn v1_snapshot_loads_with_empty_orgs() {
+        let mut s = AppState::default();
+        s.disabled.insert("2.2.2.2:7311".into());
+        s.node_capacities.insert("10.0.0.1:7311".into(), 7);
+        let v1_bytes = bincode::serialize(&LegacyBytesV1 {
+            manifests: &s.manifests,
+            node_capacities: &s.node_capacities,
+            node_coords: &s.node_coords,
+            node_egress: &s.node_egress,
+            banned: &s.banned,
+            s3: &s.s3,
+            disabled: &s.disabled,
+        })
+        .unwrap();
+        assert!(v1_bytes.len() < bincode::serialize(&s).unwrap().len());
+
+        let loaded = AppState::from_snapshot_bytes(&v1_bytes).unwrap();
+        assert!(loaded.disabled.contains("2.2.2.2:7311"));
+        assert_eq!(loaded.node_capacities.get("10.0.0.1:7311"), Some(&7));
+        assert!(loaded.orgs.is_empty());
+        assert!(loaded.spaces.is_empty());
+    }
+
+    // A current snapshot carrying orgs and spaces round-trips intact.
+    #[test]
+    fn orgs_and_spaces_round_trip() {
+        let mut s = AppState::default();
+        s.orgs.insert(
+            "yogfile".into(),
+            OrgRecord {
+                suspended: false,
+                quota_bytes: Some(1 << 40),
+            },
+        );
+        s.spaces.insert(
+            "yogfile/uploads".into(),
+            SpaceRecord {
+                org: "yogfile".into(),
+                suspended: false,
+                public_read: false,
+                quota_bytes: None,
+                egress_quota_bytes: Some(1 << 42),
+                rate_default: None,
+            },
+        );
+        let bytes = bincode::serialize(&s).unwrap();
+        let back = AppState::from_snapshot_bytes(&bytes).unwrap();
+        assert_eq!(back.orgs.get("yogfile"), s.orgs.get("yogfile"));
+        assert_eq!(
+            back.spaces.get("yogfile/uploads"),
+            s.spaces.get("yogfile/uploads")
+        );
+    }
+
+    // Helper: the exact field set a v0.5.2x binary serialized.
+    #[derive(serde::Serialize)]
+    struct LegacyBytesV1<'a> {
+        manifests: &'a BTreeMap<String, FileManifest>,
+        node_capacities: &'a BTreeMap<String, u64>,
+        node_coords: &'a BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+        node_egress: &'a BTreeMap<String, NodeEgress>,
+        banned: &'a BTreeMap<String, String>,
+        s3: &'a nauka_s3::S3State,
+        disabled: &'a std::collections::BTreeSet<String>,
     }
 }
