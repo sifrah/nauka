@@ -71,28 +71,59 @@ cluster — 2 nodes, 2 alive · 0 files, 0 B stored · 43.02 GiB capacity
   ● 51.158.64.90:7311               7.98 GiB  6618550476704767285
 ```
 
-## 3. Store and read a file
+## 3. Create your space (once)
+
+Files belong to [spaces](/multi-tenant/). Thirty seconds of setup, once:
 
 ```bash
-curl -T report.pdf "http://163.172.181.194:8080/api/upload?name=report.pdf"
+nauka org create myapp
+nauka space create myapp/files
+nauka space key add myapp/files --role admin --name main
+```
+
+```text
+key main (admin) registered on myapp/files
+  public : e61b3e9a…
+  private: nsk_9f2c…
+  ^ shown ONCE and stored NOWHERE — put it in your secret store now.
+```
+
+The private key stays on YOUR machine — the cluster only ever holds the
+public half.
+
+## 4. Store and read a file
+
+Sign the upload (offline — no server round-trip) and send it:
+
+```bash
+nauka space sign myapp/files --key nsk_9f2c…
+# prints the X-Nauka-* headers and a ready-to-paste curl:
+curl -T report.pdf 'http://163.172.181.194:8080/api/upload' \
+  -H 'X-Nauka-Space: myapp/files' -H 'X-Nauka-Key: e61b…' \
+  -H 'X-Nauka-Timestamp: 1755…' -H 'X-Nauka-Signature: 74d1…'
 ```
 
 ```json
 {"hash":"adc885d25a8c5694…","size":81920,"stripes":1,"data_shards":4,
- "parity_shards":2,"link":"/f/adc885d25a8c5694…","degraded_shards":0}
+ "parity_shards":2,"link":"/f/adc885d25a8c5694…","degraded_shards":0,
+ "space":"myapp/files"}
 ```
 
-`degraded_shards: 0` means every shard reached its owner — the write is fully
-replicated. Read it back from **any** node, by hash:
+`degraded_shards: 0` means every shard reached its owner — the write is
+fully replicated. Reading takes a **signed link** (your file is private
+by default), valid on **any** node:
 
 ```bash
-curl -O http://51.158.64.90:8080/f/adc885d25a8c5694…
+nauka space link myapp/files adc885d25a8c5694… --key nsk_9f2c… --ttl 3600
+curl -O "http://51.158.64.90:8080/f/adc885d25a8c5694…?space=myapp/files&exp=…&sig=…"
 ```
 
-The read is verified by construction: content is addressed by BLAKE3, so
-bytes that come back are bytes that hash back.
+Want a permanent public URL instead? Reference the file from a
+public-read space — see [direct links](/multi-tenant/#direct-links-publish-without-re-uploading).
+The read is verified by construction either way: content is addressed
+by BLAKE3, so bytes that come back are bytes that hash back.
 
-## 4. Kill a node, read the file anyway
+## 5. Kill a node, read the file anyway
 
 Stop one node — unplug it, `systemctl stop nauka`, whatever you like:
 
@@ -116,6 +147,6 @@ refills it; nothing to do.
 - [Durability & consistency](/durability/) — exactly what survives what.
 - [Deploy](/deploy/) — ports, keys-instead-of-token, sizing, the long version.
 - [Growing and shrinking](/growing/) — replacing machines, retiring them.
-- [HTTP API](/api-http/) — upload options, ranges, TTLs. Note: **no
-  authentication yet** — treat every stored file as public, or front the
-  API with a reverse proxy.
+- [Organisations & spaces](/multi-tenant/) — keys, signed links, direct
+  links, rate limits, quotas: the whole multi-tenant model.
+- [HTTP API](/api-http/) — upload options, ranges, TTLs, signatures.

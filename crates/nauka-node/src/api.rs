@@ -133,7 +133,11 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("HTTP API on http://{listen}");
-    axum::serve(listener, router).await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -764,10 +768,18 @@ fn authorize_read(
 ) -> Result<ReadGrant, Box<Response>> {
     let s = state.app.app_state();
     let Some(refs) = s.file_refs.get(hash).filter(|r| !r.is_empty()) else {
-        return Ok(ReadGrant {
-            rate: None,
-            billed_space: None,
-        }); // legacy, unowned — no policy applies
+        // The 0.6 flip: an unowned file is served to NOBODY (except the
+        // node's own loopback, handled by the caller). Pre-flip files
+        // become readable again the moment a space adopts them.
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                "this file belongs to no space. Adopt it \
+                 (`nauka space publish <org>/<space> <hash> --key nsk_…`) and read it \
+                 through that space",
+            )
+                .into_response(),
+        ));
     };
     let active = |space: &str| {
         s.spaces
@@ -857,12 +869,15 @@ async fn download_head(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
     Query(link): Query<ReadLinkParams>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Response {
     if let Some(resp) = unavailable(&state, &hash) {
         return resp;
     }
-    if let Err(resp) = authorize_read(&state, &hash, &link) {
-        return *resp;
+    if !peer.ip().is_loopback() {
+        if let Err(resp) = authorize_read(&state, &hash, &link) {
+            return *resp;
+        }
     }
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
@@ -922,6 +937,7 @@ const REGISTRY_LAG_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 async fn delete_file(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if !state.app.app_state().manifests.contains_key(&hash) {
@@ -975,6 +991,16 @@ async fn delete_file(
                          DELETE --path /f/{hash}`)",
                         refs.join(", ")
                     ),
+                )
+                    .into_response());
+            }
+            // Unowned leftovers from before the 0.6 flip: only the node's
+            // operator (loopback) may clear them unsigned.
+            if !peer.ip().is_loopback() {
+                return Ok((
+                    StatusCode::UNAUTHORIZED,
+                    "unsigned deletion is operator-only (loopback). Adopt the file into \
+                     a space and sign the DELETE, or run this on a node",
                 )
                     .into_response());
             }
@@ -1200,13 +1226,27 @@ async fn upload(
     request: Request,
 ) -> Result<Json<UploadResponse>, ApiError> {
     // Space authentication first, before a single body byte is spooled:
-    // an unauthorized writer costs one signature check, not disk.
+    // an unauthorized writer costs one signature check, not disk. Since
+    // the 0.6 flip, EVERY upload belongs to a space — the anonymous era
+    // is over, and the error is the onboarding.
     let write_auth = verify_space_write(
         &state,
         request.headers(),
         request.method().as_str(),
         "/api/upload",
-    )?;
+    )?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            anyhow!(
+                "uploads belong to a space. Create one and sign the request:\n  \
+                 nauka org create <org>\n  \
+                 nauka space create <org>/<space>\n  \
+                 nauka space key add <org>/<space> --role admin\n  \
+                 nauka space sign <org>/<space> --key nsk_…   # prints these headers"
+            ),
+        )
+    })?;
     // A multipart form is a client mistake this endpoint must not absorb:
     // the framing would be stored verbatim as the object, boundary and
     // headers included. Refuse it with the remedy instead of storing junk.
@@ -1296,7 +1336,8 @@ async fn upload(
     // legitimately references (or that pre-existed). Only an unreferenced
     // hash is unregistered.
     let discard_safe = |file_hash: &str| !state.app.app_state().file_refs.contains_key(file_hash);
-    if let Some(auth) = &write_auth {
+    {
+        let auth = &write_auth;
         if let Some(claimed) = &auth.claimed_hash {
             if !claimed.eq_ignore_ascii_case(&manifest.file_hash) {
                 if discard_safe(&manifest.file_hash) {
@@ -1380,7 +1421,7 @@ async fn upload(
         parity_shards: manifest.config.parity_shards,
         link: format!("/f/{}", manifest.file_hash),
         degraded_shards,
-        space: write_auth.as_ref().map(|a| a.space.clone()),
+        space: Some(write_auth.space.clone()),
     }))
 }
 
@@ -2083,14 +2124,26 @@ async fn download(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
     Query(link): Query<ReadLinkParams>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(resp) = unavailable(&state, &hash) {
         return Ok(resp);
     }
-    let grant = match authorize_read(&state, &hash, &link) {
-        Ok(g) => g,
-        Err(resp) => return Ok(*resp),
+    // The node's operator reads anything locally — whoever holds a shell
+    // on the machine holds the disk anyway, and `nauka verify` needs the
+    // real read path. Loopback bypasses the gate for READS only; writes
+    // stay strict everywhere.
+    let grant = if peer.ip().is_loopback() {
+        ReadGrant {
+            rate: None,
+            billed_space: None,
+        }
+    } else {
+        match authorize_read(&state, &hash, &link) {
+            Ok(g) => g,
+            Err(resp) => return Ok(*resp),
+        }
     };
     // Egress quota: past the space's monthly cap, reads slow to a crawl
     // instead of dying — a throttled link hurts less than a dead one on

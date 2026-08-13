@@ -8,15 +8,14 @@ Every node exposes the API (default `0.0.0.0:8080`, tunable with
 entry point** — upload, download and listing give the same result
 everywhere.
 
-Authentication is arriving in stages with the
-[multi-tenant layer](/multi-tenant/). Today: **writes can be signed
-per-space** with Ed25519 keys (see below) — and during the transition,
-unsigned uploads and open reads are still accepted. The flip to
-private-by-default will be its own explicit, documented change. Until
-then, put the API behind a reverse proxy if you need access control
-today. Content confidentiality is a separate, already-solved problem:
-[end-to-end encryption](/encryption/) keeps the nodes blind to what
-they store.
+The API is authenticated by the
+[multi-tenant layer](/multi-tenant/): **every upload is signed for a
+space** (Ed25519, no shared secrets server-side), owned files are
+served through signed links or public-read spaces, and a node's own
+loopback reads everything (operator tooling). No reverse proxy
+required for access control any more. Content confidentiality is a
+separate, already-solved problem: [end-to-end encryption](/encryption/)
+keeps the nodes blind to what they store.
 
 ## `POST /api/upload?name=<name>&ttl=<seconds>`
 
@@ -33,7 +32,7 @@ server side is streaming either way: the node encodes stripe by stripe as
 the body arrives and pushes each shard to its owner (itself included),
 memory bounded to a few stripes whatever the file's size.
 
-To upload **into a space**, attach the four signature headers
+Uploads REQUIRE the four signature headers of a space
 (`X-Nauka-Space`, `X-Nauka-Key`, `X-Nauka-Timestamp`,
 `X-Nauka-Signature`, plus `X-Nauka-Content-Hash` to bind the exact
 bytes) — `nauka space sign` prints them, and the
@@ -100,8 +99,8 @@ file referenced by private spaces only takes a **signed link** —
 `nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate|-}`, minted offline by
 the space's backend (or `nauka space link`). Bare public reads obey
 the space's `rate_default`. `403` otherwise, with the remedy.
-Unowned pre-tenant files are still served bare during the transition.
-`HEAD` obeys the same gate.
+Unowned files (pre-0.6 leftovers) are served to nobody until adopted.
+`HEAD` obeys the same gate; loopback bypasses it (operator reads).
 
 Reconstructs the file and serves it, **streaming** (one stripe in memory
 at a time), from the whole cluster: local shards first, then fetched from
@@ -162,9 +161,8 @@ disappears with its **last** reference — then the registry entry drops
 and each node's GC purges the orphaned shards on its following passes.
 An unsigned DELETE on an owned file gets `403` naming the owners.
 
-A legacy file (no references) keeps the open pre-tenant behavior:
-unsigned `DELETE` → `204`, `404` if the hash is unknown, and `GET`
-answers `410 Gone` after.
+Unsigned `DELETE` of an unowned (pre-0.6) file is operator-only:
+accepted from the node's loopback, `401` from anywhere else.
 
 ## `GET /api/status`
 
@@ -272,9 +270,4 @@ role and name — private halves never exist server-side). This is what
 
 ## What does not exist yet (v1)
 
-- Read-side authentication: signed read links, public spaces,
-  private-by-default — the next stages of the
-  [multi-tenant layer](/multi-tenant/). Write-side signing exists today.
-- Quotas and rate limiting (per-space, also part of that series) — the
-  reverse proxy is the interim answer.
 - Multipart uploads / resuming an interrupted upload.

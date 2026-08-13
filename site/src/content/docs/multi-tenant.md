@@ -185,10 +185,12 @@ Who can read what, today:
 | referenced by an active **public-read** space | ✅ served (direct link) | ✅ |
 | referenced by private spaces only | ❌ 403 | ✅ |
 | suspended (space or org) | ❌ 403 | ❌ 403 |
-| pre-tenant legacy (no references) | ✅ still open | — |
+| unowned (no references) | ❌ 403 — adopt it | — |
 
-Legacy stays open until anonymous uploads are retired — that final
-flip closes the era, and it will be its own explicit change.
+One deliberate exception: **a node's own loopback reads everything** —
+whoever holds a shell on a node holds its disk anyway, and operator
+tooling (`nauka verify`) exercises the real read path. Writes stay
+strict everywhere, loopback included.
 
 ## Direct links: publish without re-uploading
 
@@ -238,13 +240,18 @@ whichever node takes the request, from the replicated registry:
 consumption against the caps. This ledger is also the shape of the
 future bill.
 
-## The transition, honestly
+## The 0.6 flip: no more anonymous anything
 
-Uploads **without** `X-Nauka-Space` are still accepted, and the files
-they create (unowned, no references) are still served bare. Owned
-files, on the other hand, are now private: signed links or a
-public-read space. The remaining flip — retiring anonymous uploads and
-closing legacy reads — will be its own explicit, documented change,
-once the quickstart path is fully re-anchored on spaces. Coming next:
-public-space direct-link polish, per-link rate limits, and per-space
-quotas.
+Since 0.6.0, **every upload belongs to a space** — a request without
+valid `X-Nauka-*` signature headers answers `401` with the four
+commands that fix it. Files left over from the anonymous era are served
+to nobody (loopback aside) until a space **adopts** them:
+
+```bash
+nauka space publish <org>/<space> <hash> --key nsk_…
+```
+
+Adoption is instant, moves no bytes, and the file follows its space's
+rules from then on. Unsigned deletion is operator-only (loopback, and
+only for unowned files); everything else about deletion follows
+ownership, as above.
