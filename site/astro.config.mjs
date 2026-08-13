@@ -38,6 +38,7 @@ export default defineConfig({
           items: [
             { label: "Deploy a cluster", slug: "deploy" },
             { label: "Growing and shrinking", slug: "growing" },
+            { label: "Organisations & spaces", slug: "multi-tenant" },
             { label: "Monitoring & metrics", slug: "monitoring" },
             { label: "Egress budgets & cache", slug: "egress-and-cache" },
             { label: "Operations", slug: "operations" },

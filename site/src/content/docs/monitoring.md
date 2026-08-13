@@ -31,6 +31,15 @@ member** is a stale identity that should be retired (see
 [Growing and shrinking](/growing/)). No leader line means the cluster
 cannot commit writes right now.
 
+`nauka top` is also a control panel: `↑`/`↓` (or `j`/`k`) select a
+node, `Enter` opens its menu, `d`/`e`/`r` drain, re-enable or remove it
+— always behind a `y/n` confirmation, with the footer showing what is
+available for the selected node. Removal runs the same
+[safety pre-flight](/growing/) as the CLI and an unsafe removal is
+simply refused there — the interactive path never forces. Actions need
+the cluster identity (run it on a member); without it, `top` is
+read-only.
+
 ## For scripts: `--json` and the API
 
 ```bash

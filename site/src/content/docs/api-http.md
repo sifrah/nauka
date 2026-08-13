@@ -8,12 +8,15 @@ Every node exposes the API (default `0.0.0.0:8080`, tunable with
 entry point** — upload, download and listing give the same result
 everywhere.
 
-The API has **no authentication** (v1). A public API means public files:
-anyone who can reach port 8080 can upload, list and download. Put it
-behind a reverse proxy if you need access control, until the
-accounts/quotas layer lands. Content confidentiality is a separate,
-already-solved problem: [end-to-end encryption](/encryption/) keeps the
-nodes blind to what they store.
+Authentication is arriving in stages with the
+[multi-tenant layer](/multi-tenant/). Today: **writes can be signed
+per-space** with Ed25519 keys (see below) — and during the transition,
+unsigned uploads and open reads are still accepted. The flip to
+private-by-default will be its own explicit, documented change. Until
+then, put the API behind a reverse proxy if you need access control
+today. Content confidentiality is a separate, already-solved problem:
+[end-to-end encryption](/encryption/) keeps the nodes blind to what
+they store.
 
 ## `POST /api/upload?name=<name>&ttl=<seconds>`
 
@@ -29,6 +32,14 @@ kills the client on a small machine before the server sees anything. The
 server side is streaming either way: the node encodes stripe by stripe as
 the body arrives and pushes each shard to its owner (itself included),
 memory bounded to a few stripes whatever the file's size.
+
+To upload **into a space**, attach the four signature headers
+(`X-Nauka-Space`, `X-Nauka-Key`, `X-Nauka-Timestamp`,
+`X-Nauka-Signature`, plus `X-Nauka-Content-Hash` to bind the exact
+bytes) — `nauka space sign` prints them, and the
+[multi-tenant page](/multi-tenant/#signed-writes) specifies the exact
+canonical string for implementing it in your own backend. An `admin`
+key is required; `401`/`403` answers carry the reason and the remedy.
 
 `200` response:
 
@@ -219,8 +230,18 @@ cluster, leader known, replication caught up): a freshly started node
 whose registry is still empty erases nothing — otherwise it would destroy
 the cluster. A shard referenced by another live file is never deleted.
 
+## `GET /api/orgs`
+
+The replicated [organisation/space registry](/multi-tenant/): orgs,
+spaces and their policies, and each space's **public** keys (hex, with
+role and name — private halves never exist server-side). This is what
+`nauka org list` and `nauka space key ls` read.
+
 ## What does not exist yet (v1)
 
-- Authentication, quotas, rate limiting — the reverse proxy is the
-  interim answer.
+- Read-side authentication: signed read links, public spaces,
+  private-by-default — the next stages of the
+  [multi-tenant layer](/multi-tenant/). Write-side signing exists today.
+- Quotas and rate limiting (per-space, also part of that series) — the
+  reverse proxy is the interim answer.
 - Multipart uploads / resuming an interrupted upload.

@@ -57,6 +57,24 @@ $ nauka get 18445b -o screenshot.png
 ✓ downloaded from the cluster, BLAKE3 verified: 4.51 MiB → screenshot.png
 ```
 
+## Organisations & spaces
+
+The [multi-tenant layer](/multi-tenant/): organisations are the
+engine's clients, spaces their storage units, keys what signs their
+requests.
+
+| Command | What it does |
+|---|---|
+| `org create <name>` | creates an organisation (lowercase, digits, dashes) |
+| `org list` | organisations and their spaces, with status |
+| `org suspend <name>` / `org resume <name>` | cuts / restores everything under the org, cluster-wide |
+| `org rm <name>` | deletes the org — refused while it still has spaces |
+| `space create <org>/<name>` | creates a space; `--public` serves its files bare (direct links) |
+| `space list [org]` / `space suspend` / `space resume` / `space rm` | same verbs, space-scoped |
+| `space key add <org>/<name> --role admin\|signer` | generates a keypair locally, registers the public half; prints the private key ONCE. `--name` for rotation handles, `--public-key <hex>` to register an externally-generated key |
+| `space key ls` / `space key rm <space> <name-or-prefix>` | list keys / revoke one — its signatures die cluster-wide |
+| `space sign <space> --key nsk_…` | signs a write offline and prints the `X-Nauka-*` headers plus a ready-to-paste curl. `--method`, `--path`, `--content-hash` to bind the exact bytes |
+
 ## Moderation
 
 | Command | What it does |
