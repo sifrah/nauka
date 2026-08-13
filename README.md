@@ -2,7 +2,7 @@
 
 # Nauka
 
-**Storage that heals itself. Links that carry their own permissions.**
+**A modern file storage engine, safe and complete: Reed-Solomon durability, Ed25519 signed links, quotas. One binary. Rust, AGPL-3.0.**
 
 [![Release](https://img.shields.io/github/v/release/sifrah/nauka)](https://github.com/sifrah/nauka/releases/latest)
 [![CI](https://github.com/sifrah/nauka/actions/workflows/ci.yml/badge.svg)](https://github.com/sifrah/nauka/actions/workflows/ci.yml)
@@ -142,7 +142,7 @@ permission check local to the node that receives the request.
 
 Placement is rendezvous hashing weighted by declared capacity, stretched
 by network distance so the shards of one stripe land far apart: a file
-survives the loss of a region, not merely of a machine. Scrubbers heal
+survives the loss of a region, not merely of a machine. Scrubbers rebuild
 missing shards continuously; drained or removed nodes hand their data
 over with proof-gated transfers.
 
