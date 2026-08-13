@@ -180,7 +180,16 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
     cache gates on estimated distance alone; the false-neighbor window
     of a fresh cluster costs one round-trip per stripe and closes
     itself as coordinates diverge.
-17. **Domain-separate every signature from day one.** Write requests
+17. **One coordinate model, two different questions.** Vivaldi's
+    `distance` ADDS both endpoints' heights — the right pessimism for
+    routing, but as a NEIGHBOR test it reads a young same-datacenter
+    pair as ~29 ms apart while they sit at the same position, so the
+    cooperative-cache neighbor flickered in and out of a 30 ms
+    threshold (observed live: zero cooperation between two Singapore
+    siblings). "Are we in the same place?" is a position question:
+    `drift_from` (Euclidean plus the height DELTA) reads ~0 for them
+    and stays huge across continents.
+18. **Domain-separate every signature from day one.** Write requests
     and read links are both Ed25519 under the same space keys; without
     a domain prefix, a signing oracle for one could mint the other.
     `nauka-write-v1\n…` and `nauka-link-v1\n…` disagree on their first
