@@ -16,6 +16,7 @@ mod node;
 mod s3;
 mod spaceauth;
 mod telemetry;
+mod tls;
 mod top;
 mod update;
 
@@ -252,11 +253,17 @@ enum Cmd {
         /// no recorder has been installed.
         #[arg(long)]
         no_metrics: bool,
-        /// Disable the built-in geo-DNS front door (also NAUKA_NO_DNS=1).
-        /// On by default: delegate a name to a few nodes and the cluster
-        /// answers with the closest living members.
-        #[arg(long)]
+        /// Disable the built-in geo-DNS front door (env
+        /// NAUKA_NO_DNS=true|false). On by default: delegate a name to a
+        /// few nodes and the cluster answers with the closest living
+        /// members.
+        #[arg(long, env = "NAUKA_NO_DNS")]
         no_dns: bool,
+        /// Serve the API over TLS on :443 for this domain, with a
+        /// Let's Encrypt certificate the node obtains and renews by
+        /// itself through the cluster's own DNS. Unset = HTTP only.
+        #[arg(long, env = "NAUKA_HTTPS_DOMAIN")]
+        https_domain: Option<String>,
         /// Do not found a cluster on a blank data dir: wait to be added
         /// by a member. This is what `nauka node add` passes to the
         /// machines it provisions.
@@ -623,6 +630,11 @@ enum NodeCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The dependency graph carries two rustls crypto backends (quinn
+    // brings ring, instant-acme brings aws-lc-rs); rustls refuses to
+    // guess between them and panics on first use inside whichever task
+    // touches TLS first. Pick one for the whole process, up front.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -1053,6 +1065,7 @@ async fn main() -> Result<()> {
             metrics: metrics_addr,
             no_metrics,
             no_dns,
+            https_domain,
             join,
         } => {
             // The monthly egress budget: refuse to start on a value we
@@ -1362,6 +1375,11 @@ async fn main() -> Result<()> {
                         .and_then(|ip| ip.parse().ok())
                         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                     tokio::spawn(dns::serve(geodns, bind_ip, 53));
+                }
+                if let Some(domain) = https_domain.clone() {
+                    // HTTPS with self-obtained certificates: the ACME
+                    // challenges ride the cluster's own DNS.
+                    tokio::spawn(tls::run(api_state.clone(), domain, cli.data_dir.clone()));
                 }
                 tracing::info!(
                     "upload buffer pool: {} MiB (fixed at startup)",

@@ -118,6 +118,14 @@ impl RaftApp {
                 heartbeat_interval: 500,
                 election_timeout_min: 1500,
                 election_timeout_max: 3000,
+                // openraft's default is 200ms — enough to ship a snapshot
+                // across a rack, not across an ocean. A fresh or lagging
+                // member on a far continent receives the whole snapshot in
+                // one RPC; under the default it times out on every attempt,
+                // the follower never catches up, its election timer fires,
+                // and the stale candidate storms the cluster with term
+                // inflation forever. Give the transfer a real budget.
+                install_snapshot_timeout: 60_000,
                 // Snapshot regularly to bound the redb log; keep a margin of
                 // entries so slightly lagging followers catch up from the log
                 // rather than from a full snapshot.

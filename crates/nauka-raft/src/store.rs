@@ -543,6 +543,34 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 info: None,
                             }
                         }
+                        AppCommand::SetAcmeTxt {
+                            name,
+                            node_addr,
+                            value,
+                        } => {
+                            inner
+                                .state
+                                .acme_txt
+                                .entry(name)
+                                .or_default()
+                                .insert(node_addr, value);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::ClearAcmeTxt { name, node_addr } => {
+                            if let Some(rows) = inner.state.acme_txt.get_mut(&name) {
+                                rows.remove(&node_addr);
+                                if rows.is_empty() {
+                                    inner.state.acme_txt.remove(&name);
+                                }
+                            }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
                         AppCommand::RemoveFileRef { file_hash, space } => {
                             let removed = inner
                                 .state

@@ -119,10 +119,25 @@ impl ApiState {
 
 pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> {
     tokio::fs::create_dir_all(&state.tmp_dir).await?;
+    let router = router(state);
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    tracing::info!("HTTP API on http://{listen}");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The full public API router — served plain on :8080 and, when a
+/// domain is configured, over TLS by the HTTPS front (same routes,
+/// same handlers, one truth).
+pub fn router(state: Arc<ApiState>) -> Router {
     // Nauka is the storage engine: it serves its HTTP API and nothing
     // more. A user-facing web interface belongs to a product built on top,
     // not in the engine.
-    let router = Router::new()
+    Router::new()
         // PUT as well as POST: `curl -T file` — the streaming upload every
         // doc example recommends — sends PUT, and answering it with a 405
         // was the first thing a reader following the docs would hit.
@@ -137,15 +152,7 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
             get(download).head(download_head).delete(delete_file),
         )
         .route("/f/{hash}/refs", axum::routing::post(ref_add))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    tracing::info!("HTTP API on http://{listen}");
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
-    Ok(())
+        .with_state(state)
 }
 
 #[derive(serde::Serialize)]

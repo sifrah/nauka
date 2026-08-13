@@ -202,6 +202,22 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
     `nauka-write-v1\n…` and `nauka-link-v1\n…` disagree on their first
     bytes by construction — retrofitted while the integrator count was
     still zero, which is the only cheap moment.
+20. **A spawned task that panics dies in silence.** The first HTTPS
+    rollout logged one line and went quiet forever: two rustls crypto
+    backends had entered the dependency graph (quinn brings `ring`,
+    the ACME client brings `aws-lc-rs`), rustls refused to guess, and
+    the panic evaporated inside `tokio::spawn`. The process-level
+    provider is now installed explicitly on the first line of `main`
+    — and "no log lines after the first" is worth treating as a crash,
+    not as slowness.
+21. **Defaults are sized for someone else's datacenter.** openraft
+    ships a 200 ms snapshot-transfer timeout — fine across a rack,
+    fatal across an ocean. Two US members could never receive the
+    380 KB snapshot inside the budget, never caught up, and their
+    stale-log election timers inflated the term by a thousand in an
+    afternoon while the cluster kept serving between flaps. One
+    config line (60 s) ended a four-hour storm; the lesson is to
+    read every timeout a library defaults for you.
 
 ## Accepted debt
 

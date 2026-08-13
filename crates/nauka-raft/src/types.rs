@@ -190,6 +190,19 @@ pub enum AppCommand {
         space: String,
         egress: NodeEgress,
     },
+    /// Publishes an ACME DNS-01 challenge value under a name. The
+    /// built-in DNS answers TXT queries from these rows, so a node
+    /// proves domain control to the CA through its own cluster: it
+    /// writes the token here, the NS nodes serve it, Let's Encrypt
+    /// reads it. Rows are per-node (several nodes may be validating
+    /// the same name concurrently — multiple TXT values are legal).
+    SetAcmeTxt {
+        name: String,
+        node_addr: String,
+        value: String,
+    },
+    /// Clears a node's challenge row once its certificate is issued.
+    ClearAcmeTxt { name: String, node_addr: String },
 }
 
 /// What a space key is allowed to do. bincode is positional: new roles
@@ -345,6 +358,11 @@ pub struct AppState {
     /// current month.
     #[serde(default)]
     pub space_egress: BTreeMap<String, BTreeMap<String, NodeEgress>>,
+    /// Live ACME DNS-01 challenges (name → node → TXT value), served by
+    /// the built-in DNS. Transient by nature: written at issuance,
+    /// cleared right after.
+    #[serde(default)]
+    pub acme_txt: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// The AppState shape BEFORE `disabled` was appended — every field of
@@ -461,6 +479,35 @@ pub struct AppStateLegacyV4 {
     pub file_refs: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
+/// The AppState shape BEFORE `acme_txt` was appended (space_egress
+/// present) — what the AUTH-7..NAUKA-DNS builds persisted.
+#[derive(Deserialize)]
+pub struct AppStateLegacyV5 {
+    pub manifests: BTreeMap<String, FileManifest>,
+    #[serde(default)]
+    pub node_capacities: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+    #[serde(default)]
+    pub node_egress: BTreeMap<String, NodeEgress>,
+    #[serde(default)]
+    pub banned: BTreeMap<String, String>,
+    #[serde(default)]
+    pub s3: nauka_s3::S3State,
+    #[serde(default)]
+    pub disabled: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub orgs: BTreeMap<String, OrgRecord>,
+    #[serde(default)]
+    pub spaces: BTreeMap<String, SpaceRecord>,
+    #[serde(default)]
+    pub space_keys: BTreeMap<String, Vec<SpaceKey>>,
+    #[serde(default)]
+    pub file_refs: BTreeMap<String, std::collections::BTreeSet<String>>,
+    #[serde(default)]
+    pub space_egress: BTreeMap<String, BTreeMap<String, NodeEgress>>,
+}
+
 impl AppState {
     /// Deserialize a bincode snapshot, tolerating every previous shape:
     /// try the current one first, then each legacy shape from newest to
@@ -468,6 +515,23 @@ impl AppState {
     pub fn from_snapshot_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
         if let Ok(s) = bincode::deserialize::<AppState>(data) {
             return Ok(s);
+        }
+        if let Ok(v5) = bincode::deserialize::<AppStateLegacyV5>(data) {
+            return Ok(AppState {
+                manifests: v5.manifests,
+                node_capacities: v5.node_capacities,
+                node_coords: v5.node_coords,
+                node_egress: v5.node_egress,
+                banned: v5.banned,
+                s3: v5.s3,
+                disabled: v5.disabled,
+                orgs: v5.orgs,
+                spaces: v5.spaces,
+                space_keys: v5.space_keys,
+                file_refs: v5.file_refs,
+                space_egress: v5.space_egress,
+                acme_txt: Default::default(),
+            });
         }
         if let Ok(v4) = bincode::deserialize::<AppStateLegacyV4>(data) {
             return Ok(AppState {
@@ -483,6 +547,7 @@ impl AppState {
                 space_keys: v4.space_keys,
                 file_refs: v4.file_refs,
                 space_egress: Default::default(),
+                acme_txt: Default::default(),
             });
         }
         if let Ok(v3) = bincode::deserialize::<AppStateLegacyV3>(data) {
@@ -499,6 +564,7 @@ impl AppState {
                 space_keys: v3.space_keys,
                 file_refs: Default::default(),
                 space_egress: Default::default(),
+                acme_txt: Default::default(),
             });
         }
         if let Ok(v2) = bincode::deserialize::<AppStateLegacyV2>(data) {
@@ -515,6 +581,7 @@ impl AppState {
                 space_keys: Default::default(),
                 file_refs: Default::default(),
                 space_egress: Default::default(),
+                acme_txt: Default::default(),
             });
         }
         if let Ok(v1) = bincode::deserialize::<AppStateLegacyV1>(data) {
@@ -531,6 +598,7 @@ impl AppState {
                 space_keys: Default::default(),
                 file_refs: Default::default(),
                 space_egress: Default::default(),
+                acme_txt: Default::default(),
             });
         }
         let v0: AppStateLegacyV0 = bincode::deserialize(data)?;
@@ -547,6 +615,7 @@ impl AppState {
             space_keys: Default::default(),
             file_refs: Default::default(),
             space_egress: Default::default(),
+            acme_txt: Default::default(),
         })
     }
 }
@@ -631,6 +700,7 @@ mod snapshot_compat_tests {
             space_keys: Default::default(),
             file_refs: Default::default(),
             space_egress: Default::default(),
+            acme_txt: Default::default(),
         };
         // Truncate the trailing empty-BTreeSet length prefix to simulate a
         // snapshot that predates the field entirely.
@@ -896,6 +966,53 @@ mod snapshot_compat_tests {
         let loaded = AppState::from_snapshot_bytes(&v4_bytes).unwrap();
         assert!(loaded.file_refs.contains_key("abcd"));
         assert!(loaded.space_egress.is_empty());
+    }
+
+    // A snapshot written by an AUTH-7-era build (space_egress present,
+    // no acme_txt) must load with an empty challenge map.
+    #[test]
+    fn v5_snapshot_loads_with_empty_acme() {
+        let mut s = AppState::default();
+        s.space_egress
+            .entry("yogfile/files".into())
+            .or_default()
+            .insert("1.2.3.4:7311".into(), NodeEgress::default());
+        let v5_bytes = bincode::serialize(&LegacyBytesV5 {
+            manifests: &s.manifests,
+            node_capacities: &s.node_capacities,
+            node_coords: &s.node_coords,
+            node_egress: &s.node_egress,
+            banned: &s.banned,
+            s3: &s.s3,
+            disabled: &s.disabled,
+            orgs: &s.orgs,
+            spaces: &s.spaces,
+            space_keys: &s.space_keys,
+            file_refs: &s.file_refs,
+            space_egress: &s.space_egress,
+        })
+        .unwrap();
+        assert!(v5_bytes.len() < bincode::serialize(&s).unwrap().len());
+        let loaded = AppState::from_snapshot_bytes(&v5_bytes).unwrap();
+        assert!(loaded.space_egress.contains_key("yogfile/files"));
+        assert!(loaded.acme_txt.is_empty());
+    }
+
+    // Helper: the exact field set the AUTH-7-era builds serialized.
+    #[derive(serde::Serialize)]
+    struct LegacyBytesV5<'a> {
+        manifests: &'a BTreeMap<String, FileManifest>,
+        node_capacities: &'a BTreeMap<String, u64>,
+        node_coords: &'a BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+        node_egress: &'a BTreeMap<String, NodeEgress>,
+        banned: &'a BTreeMap<String, String>,
+        s3: &'a nauka_s3::S3State,
+        disabled: &'a std::collections::BTreeSet<String>,
+        orgs: &'a BTreeMap<String, OrgRecord>,
+        spaces: &'a BTreeMap<String, SpaceRecord>,
+        space_keys: &'a BTreeMap<String, Vec<SpaceKey>>,
+        file_refs: &'a BTreeMap<String, std::collections::BTreeSet<String>>,
+        space_egress: &'a BTreeMap<String, BTreeMap<String, NodeEgress>>,
     }
 
     // Helper: the exact field set the AUTH-3..6 builds serialized.

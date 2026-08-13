@@ -74,6 +74,9 @@ tracing-subscriber.workspace = true
 hickory-server = "0.26.1"
 maxminddb = "0.30.0"
 hickory-proto = "0.26.1"
+instant-acme = "0.8.5"
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 # ── Debian package (cargo-deb) ────────────────────────────────────────────
 [package.metadata.deb]

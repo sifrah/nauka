@@ -226,6 +226,29 @@ impl RequestHandler for GeoDns {
                     _ => Vec::new(),
                 }
             }
+            RecordType::TXT => {
+                // ACME DNS-01: challenge values live in the replicated
+                // state — a node writes its token, every NS serves it,
+                // the CA reads it. The cluster is its own CA plumbing.
+                let key = name.to_utf8().trim_end_matches('.').to_ascii_lowercase();
+                self.state
+                    .app
+                    .app_state()
+                    .acme_txt
+                    .get(&key)
+                    .map(|rows| {
+                        rows.values()
+                            .map(|v| {
+                                Record::from_rdata(
+                                    name.clone(),
+                                    DNS_TTL,
+                                    RData::TXT(rdata::TXT::new(vec![v.clone()])),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
             // AAAA and the rest: authoritative empty answer. The nodes
             // are IPv4-advertised today; an empty NOERROR tells the
             // resolver not to retry elsewhere.
