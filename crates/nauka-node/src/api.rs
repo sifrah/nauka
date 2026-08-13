@@ -2095,6 +2095,48 @@ pub(crate) async fn fetch_stripe_slots(
     (slots, remote_used)
 }
 
+/// Peers further than this Vivaldi estimate are not neighbors: asking
+/// them for cached stripes would cost the very round-trips the
+/// cooperative cache exists to avoid.
+const NEIGHBOR_MAX_MS: f64 = 30.0;
+/// Ceiling on one neighbor-cache lookup; past it, reconstruct as usual.
+const NEIGHBOR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Cooperative regional cache: ask the closest neighbor for the decoded
+/// stripe before paying k shard fetches from far owners. One neighbor,
+/// one short timeout, cache-only on the far side (a miss never triggers
+/// a reconstruction over there) — and the bytes are VERIFIED by
+/// re-encoding them against the manifest's shard hashes: the transport
+/// authenticates the peer, never the content.
+async fn neighbor_cached_stripe(
+    fetcher: &Arc<Fetcher>,
+    stripe: &StripeMeta,
+    stripe_idx: usize,
+    m: &FileManifest,
+) -> Option<Vec<u8>> {
+    let addr = fetcher.neighbor().await?;
+    let client = fetcher.client_for(&addr).await?;
+    let data = tokio::time::timeout(
+        NEIGHBOR_TIMEOUT,
+        client.get_cached_stripe(&m.file_hash, stripe_idx),
+    )
+    .await
+    .ok()?
+    .ok()??;
+    let shards = nauka_erasure::encode_stripe(&data, &m.config).ok()?;
+    let genuine = shards.len() == stripe.shard_hashes.len()
+        && shards
+            .iter()
+            .zip(&stripe.shard_hashes)
+            .all(|(s, h)| s.hash == *h);
+    if !genuine {
+        metrics::counter!("nauka_coop_cache_rejected_total").increment(1);
+        return None;
+    }
+    metrics::counter!("nauka_coop_cache_hits_total").increment(1);
+    Some(data)
+}
+
 pub(crate) async fn reconstruct_stripe(
     fetcher: &Arc<Fetcher>,
     stripe: &StripeMeta,
@@ -2107,6 +2149,13 @@ pub(crate) async fn reconstruct_stripe(
         if let Some(data) = cache.get(&m.file_hash, stripe_idx) {
             return Ok(data);
         }
+    }
+    // Then the neighbor's cache: one local transfer beats k far ones.
+    if let Some(data) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
+        if let Some(cache) = &fetcher.state.cache {
+            cache.put(&m.file_hash, stripe_idx, &data);
+        }
+        return Ok(data);
     }
     let (slots, remote_used) = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
     let data = decode_stripe(slots, stripe, &m.config)?;
@@ -2459,6 +2508,10 @@ pub(crate) struct Fetcher {
     state: Arc<ApiState>,
     view: Vec<(String, u64)>,
     clients: tokio::sync::Mutex<HashMap<String, Option<PeerClient>>>,
+    /// Closest settled Vivaldi neighbor (cooperative cache), resolved
+    /// once per fetcher. None = nobody close enough, or coords not
+    /// settled yet — then the cooperative path stays off for this read.
+    neighbor: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl Fetcher {
@@ -2468,7 +2521,41 @@ impl Fetcher {
             state,
             view,
             clients: tokio::sync::Mutex::new(HashMap::new()),
+            neighbor: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The nearest peer by Vivaldi estimate, if it is close enough to be
+    /// called a neighbor (same metro/region). Deliberately NOT gated on
+    /// `is_settled`: inside one datacenter a coordinate never settles
+    /// (sub-ms RTTs keep the error above the threshold — the telemetry
+    /// tests guard the same lesson), and that is precisely where
+    /// neighbors live. The residual risk is a fresh multi-region cluster
+    /// whose nodes all still sit at the origin and briefly look adjacent:
+    /// a false neighbor then costs one extra round-trip per stripe at
+    /// worst (the lookup is cache-only on the far side), and the window
+    /// closes by itself as the first cross-region pings pull the
+    /// coordinates apart.
+    async fn neighbor(&self) -> Option<String> {
+        self.neighbor
+            .get_or_init(|| async {
+                let coords = self.state.app.coords();
+                let me = coords.get(&self.state.self_id)?;
+                self.state
+                    .app
+                    .members()
+                    .values()
+                    .filter(|addr| **addr != self.state.self_id)
+                    .filter_map(|addr| {
+                        let c = coords.get(addr)?;
+                        let d = me.distance(c);
+                        (d <= NEIGHBOR_MAX_MS).then_some((addr.clone(), d))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(addr, _)| addr)
+            })
+            .await
+            .clone()
     }
 
     /// A client towards `node`, created on first need. `None` = already

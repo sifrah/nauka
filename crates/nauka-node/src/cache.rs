@@ -243,6 +243,14 @@ impl StripeCache {
     }
 }
 
+/// Served to cluster peers over the authenticated transport — the
+/// cooperative regional cache reads THIS node's entries.
+impl nauka_transport::server::CacheView for StripeCache {
+    fn stripe(&self, file_hash: &str, stripe_idx: usize) -> Option<Vec<u8>> {
+        self.get(file_hash, stripe_idx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

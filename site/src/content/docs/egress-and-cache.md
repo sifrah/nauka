@@ -60,6 +60,19 @@ The pattern it serves: reconstruct once per region, serve many times
 locally. A node fronting readers in one geography pulls each hot stripe
 across the WAN a single time; every following read is local disk.
 
+**And the caches cooperate.** Before paying `k` shard fetches from far
+owners, a node asks its closest neighbor (by network coordinates, under
+30 ms) whether it already holds the decoded stripe: one local transfer
+instead of four distant ones. The lookup rides the authenticated
+inter-node transport (a decoded stripe is content, and content has
+owners — it is never exposed over public HTTP), answers from cache only
+(a miss never triggers a reconstruction on the neighbor), and the bytes
+are verified by re-encoding them against the manifest's shard hashes —
+the transport authenticates the peer, never the content. Net effect:
+only one node per region ever pays the cold read; measured on a
+tri-region cluster, the second node of a region reads a file its
+sibling holds at 77 MB/s where a lone node reconstructs at 20.
+
 ## Using both together
 
 A metered node with a cache is the intended combination: the cache slashes

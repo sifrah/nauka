@@ -36,6 +36,13 @@ impl OwnershipView for std::sync::RwLock<std::collections::BTreeSet<String>> {
     }
 }
 
+/// Extension point: the node's stripe cache, served to CLUSTER PEERS over
+/// the authenticated transport (cooperative regional cache). Never exposed
+/// over public HTTP: a decoded stripe is content, and content has owners.
+pub trait CacheView: Send + Sync {
+    fn stripe(&self, file_hash: &str, stripe_idx: usize) -> Option<Vec<u8>>;
+}
+
 /// Starts the QUIC server and serves requests until the process stops.
 /// With consensus enabled, also opens the dedicated plane on port+1.
 pub async fn serve(
@@ -43,6 +50,7 @@ pub async fn serve(
     listen: SocketAddr,
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
+    cache: Option<Arc<dyn CacheView>>,
 ) -> Result<()> {
     match raft {
         Some(handler) => {
@@ -53,12 +61,12 @@ pub async fn serve(
                 consensus.local_addr()?
             );
             tokio::spawn(serve_consensus_endpoint(consensus, handler.clone()));
-            serve_endpoint_owned(store, data, Some(handler), ownership).await
+            serve_endpoint_owned(store, data, Some(handler), ownership, cache).await
         }
         None => {
             let endpoint = make_endpoint(listen)?;
             info!("node listening on {}", endpoint.local_addr()?);
-            serve_endpoint_owned(store, endpoint, None, ownership).await
+            serve_endpoint_owned(store, endpoint, None, ownership, cache).await
         }
     }
 }
@@ -71,26 +79,29 @@ pub async fn serve_endpoint(
     endpoint: quinn::Endpoint,
     raft: Option<Arc<dyn RaftHandler>>,
 ) -> Result<()> {
-    serve_endpoint_owned(store, endpoint, raft, None).await
+    serve_endpoint_owned(store, endpoint, raft, None, None).await
 }
 
 /// [`serve_endpoint`] with an [`OwnershipView`] answering the ownership
-/// claims of [`Request::ProveShardOwned`].
+/// claims of [`Request::ProveShardOwned`] and a [`CacheView`] answering
+/// [`Request::GetCachedStripe`].
 pub async fn serve_endpoint_owned(
     store: Arc<ShardStore>,
     endpoint: quinn::Endpoint,
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
+    cache: Option<Arc<dyn CacheView>>,
 ) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let store = store.clone();
         let raft = raft.clone();
         let ownership = ownership.clone();
+        let cache = cache.clone();
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(Some(store), raft, ownership, conn).await
+                    handle_connection(Some(store), raft, ownership, cache, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -115,7 +126,7 @@ pub async fn serve_consensus_endpoint(
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(None, Some(handler), None, conn).await
+                    handle_connection(None, Some(handler), None, None, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -206,6 +217,7 @@ pub async fn handle_connection(
     store: Option<Arc<ShardStore>>,
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
+    cache: Option<Arc<dyn CacheView>>,
     conn: quinn::Connection,
 ) {
     debug!("connection from {}", conn.remote_address());
@@ -239,6 +251,7 @@ pub async fn handle_connection(
         let store = store.clone();
         let raft = raft.clone();
         let ownership = ownership.clone();
+        let cache = cache.clone();
         tokio::spawn(async move {
             let response = match read_message::<Request>(&mut recv).await {
                 Ok(Request::Raft(rpc)) => match &raft {
@@ -249,7 +262,7 @@ pub async fn handle_connection(
                     None => Response::Error("consensus is not enabled on this node".into()),
                 },
                 Ok(req) => match &store {
-                    Some(s) => handle_request(s, ownership.as_deref(), req),
+                    Some(s) => handle_request(s, ownership.as_deref(), cache.as_deref(), req),
                     None => {
                         Response::Error("consensus plane: only Raft RPCs are accepted here".into())
                     }
@@ -274,10 +287,11 @@ pub async fn handle_connection(
 fn handle_request(
     store: &ShardStore,
     ownership: Option<&dyn OwnershipView>,
+    cache: Option<&dyn CacheView>,
     req: Request,
 ) -> Response {
     let op = telemetry::op(&req);
-    let response = dispatch(store, ownership, req);
+    let response = dispatch(store, ownership, cache, req);
     telemetry::record_request(
         telemetry::IN,
         op,
@@ -289,7 +303,12 @@ fn handle_request(
     response
 }
 
-fn dispatch(store: &ShardStore, ownership: Option<&dyn OwnershipView>, req: Request) -> Response {
+fn dispatch(
+    store: &ShardStore,
+    ownership: Option<&dyn OwnershipView>,
+    cache: Option<&dyn CacheView>,
+    req: Request,
+) -> Response {
     match req {
         Request::Raft(_) => unreachable!("handled upstream"),
         Request::Ping => Response::Pong,
@@ -328,5 +347,11 @@ fn dispatch(store: &ShardStore, ownership: Option<&dyn OwnershipView>, req: Requ
             }),
             owner: ownership.map(|o| o.claims(&hash)).unwrap_or(false),
         },
+        // Cache only, never a reconstruction on the asker's behalf: a
+        // miss answers None and the asker falls back to its own fetch.
+        Request::GetCachedStripe {
+            file_hash,
+            stripe_idx,
+        } => Response::CachedStripe(cache.and_then(|c| c.stripe(&file_hash, stripe_idx as usize))),
     }
 }

@@ -38,6 +38,7 @@ async fn spawn(id: u64) -> Node {
         data,
         Some(handler.clone()),
         Some(claims.clone() as Arc<dyn OwnershipView>),
+        None,
     ));
     tokio::spawn(serve_consensus_endpoint(consensus, handler));
     Node {

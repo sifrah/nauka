@@ -76,6 +76,7 @@ pub fn op(req: &Request) -> &'static str {
         Request::GetManifest(_) => "get_manifest",
         Request::Raft(_) => "raft",
         Request::ProveShardOwned { .. } => "prove_shard_owned",
+        Request::GetCachedStripe { .. } => "get_cached_stripe",
     }
 }
 
@@ -207,6 +208,13 @@ mod tests {
                     nonce: [0u8; 32],
                 },
                 "prove_shard_owned",
+            ),
+            (
+                Request::GetCachedStripe {
+                    file_hash: "deadbeef".into(),
+                    stripe_idx: 0,
+                },
+                "get_cached_stripe",
             ),
         ];
         for (req, want) in cases {

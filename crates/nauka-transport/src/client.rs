@@ -187,6 +187,26 @@ impl PeerClient {
         }
     }
 
+    /// A decoded stripe from the peer's cache, or None on a miss (or a
+    /// peer too old to know the request — mixed-version safe).
+    pub async fn get_cached_stripe(
+        &self,
+        file_hash: &str,
+        stripe_idx: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        match self
+            .call(Request::GetCachedStripe {
+                file_hash: file_hash.to_string(),
+                stripe_idx: stripe_idx as u32,
+            })
+            .await?
+        {
+            Response::CachedStripe(data) => Ok(data),
+            Response::Error(_) => Ok(None),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn put_manifest(&self, manifest: &FileManifest) -> Result<()> {
         match self.call(Request::PutManifest(manifest.clone())).await? {
             Response::PutManifestOk => Ok(()),

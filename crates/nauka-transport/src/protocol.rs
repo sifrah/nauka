@@ -51,6 +51,15 @@ pub enum Request {
         hash: String,
         nonce: [u8; 32],
     },
+    /// Asks a peer for a DECODED stripe from its local cache (cooperative
+    /// regional cache: one transfer from a close neighbor instead of k
+    /// shard fetches from far owners). Answered from cache only — a miss
+    /// is a miss, the peer never reconstructs on the asker's behalf
+    /// (that would let one busy region chain-drag another).
+    GetCachedStripe {
+        file_hash: String,
+        stripe_idx: u32,
+    },
 }
 
 /// Consensus RPCs, carried as-is; only the nauka-raft layer knows how to
@@ -89,6 +98,10 @@ pub enum Response {
         proof: Option<[u8; 32]>,
         owner: bool,
     },
+    /// The cached stripe, or None on a cache miss. The caller MUST verify
+    /// integrity (re-encode and match the manifest's shard hashes): the
+    /// transport authenticates the peer, not the bytes.
+    CachedStripe(Option<Vec<u8>>),
 }
 
 #[derive(Debug, thiserror::Error)]

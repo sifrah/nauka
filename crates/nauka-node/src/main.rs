@@ -1087,6 +1087,13 @@ async fn main() -> Result<()> {
                     }
                 }
             };
+            let stripe_cache = match cache_budget {
+                Some(budget) => Some(Arc::new(
+                    cache::StripeCache::open(cli.data_dir.join("cache"), budget)
+                        .context("opening the stripe cache")?,
+                )),
+                None => None,
+            };
             let store = Arc::new(ShardStore::open(&cli.data_dir)?);
             let interval = std::time::Duration::from_secs(scrub_interval);
             // The shards this node currently claims ownership of, under its
@@ -1310,13 +1317,7 @@ async fn main() -> Result<()> {
                     tmp_dir,
                     health: health.clone(),
                     egress: Arc::new(egress::EgressMeter::new(egress_quota, now_secs)),
-                    cache: match cache_budget {
-                        Some(budget) => Some(Arc::new(
-                            cache::StripeCache::open(cli.data_dir.join("cache"), budget)
-                                .context("opening the stripe cache")?,
-                        )),
-                        None => None,
-                    },
+                    cache: stripe_cache.clone(),
                     // An eighth of the machine for upload buffering,
                     // decided now: what uploads may hold in RAM must not
                     // depend on what happens to be free later.
@@ -1855,6 +1856,9 @@ async fn main() -> Result<()> {
                 listen,
                 raft_handler,
                 Some(claimed_shards as Arc<dyn nauka_transport::server::OwnershipView>),
+                stripe_cache
+                    .clone()
+                    .map(|c| c as Arc<dyn nauka_transport::server::CacheView>),
             )
             .await?;
         }
