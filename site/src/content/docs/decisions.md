@@ -189,7 +189,14 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
     siblings). "Are we in the same place?" is a position question:
     `drift_from` (Euclidean plus the height DELTA) reads ~0 for them
     and stays huge across continents.
-18. **Domain-separate every signature from day one.** Write requests
+18. **A DNS answer is a SET, not a ranking.** The first real-world test
+    of the built-in GeoDNS returned Singapore, Singapore, Helsinki to a
+    Thai client — carefully sorted — and curl picked Helsinki: client
+    OSes reorder A records at will (RFC 6724 address selection). Every
+    address returned must therefore be a GOOD answer on its own: only
+    the closest member's neighborhood (within 2000 km of it) makes the
+    cut, and a far "filler" never does.
+19. **Domain-separate every signature from day one.** Write requests
     and read links are both Ed25519 under the same space keys; without
     a domain prefix, a signing oracle for one could mint the other.
     `nauka-write-v1\n…` and `nauka-link-v1\n…` disagree on their first

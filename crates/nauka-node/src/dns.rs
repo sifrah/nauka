@@ -37,8 +37,12 @@ use crate::api::ApiState;
 /// Answer TTL: short enough that a dead node leaves the world's caches
 /// within a minute, long enough that resolvers do the caching work.
 const DNS_TTL: u32 = 60;
-/// How many of the closest members one answer carries.
+/// How many of the closest members one answer carries, at most.
 const ANSWER_NODES: usize = 3;
+/// A member joins the answer only within this many kilometres of the
+/// CLOSEST one: clients pick any returned address at random, so a far
+/// filler would get real traffic.
+const NEIGHBORHOOD_KM: f64 = 2000.0;
 /// The database is refreshed once it is older than this many days
 /// (DB-IP publishes monthly).
 const MMDB_MAX_AGE_DAYS: u64 = 40;
@@ -80,8 +84,13 @@ impl GeoDns {
         pos
     }
 
-    /// The closest living members to `client`, by great-circle distance;
-    /// members the database cannot place go last, in stable order. With
+    /// The closest living members to `client`, by great-circle distance
+    /// — but ONLY the closest one's neighborhood. Resolvers and client
+    /// OSes reorder A records at will (RFC 6724 address selection beat
+    /// our carefully sorted answer on the very first real-world test:
+    /// curl picked Helsinki over Singapore from Thailand), so every
+    /// returned address must be a GOOD answer, not a ranked list: nodes
+    /// further than the closest plus [`NEIGHBORHOOD_KM`] stay out. With
     /// no database or an unplaceable client: the first living members.
     fn best_nodes(&self, client: IpAddr) -> Vec<IpAddr> {
         let members = self.state.app.members();
@@ -93,17 +102,26 @@ impl GeoDns {
         alive.sort(); // stable base order
         let client_pos = self.lookup(client);
         if let Some((clat, clon)) = client_pos {
-            alive.sort_by(|a, b| {
-                let da = self
-                    .member_position(a)
-                    .map(|(lat, lon)| haversine_km(clat, clon, lat, lon))
-                    .unwrap_or(f64::MAX);
-                let db = self
-                    .member_position(b)
-                    .map(|(lat, lon)| haversine_km(clat, clon, lat, lon))
-                    .unwrap_or(f64::MAX);
-                da.total_cmp(&db)
-            });
+            let mut ranked: Vec<(&String, f64)> = alive
+                .iter()
+                .map(|a| {
+                    let d = self
+                        .member_position(a)
+                        .map(|(lat, lon)| haversine_km(clat, clon, lat, lon))
+                        .unwrap_or(f64::MAX);
+                    (*a, d)
+                })
+                .collect();
+            ranked.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some(&(_, closest)) = ranked.first() {
+                let cutoff = closest + NEIGHBORHOOD_KM;
+                return ranked
+                    .into_iter()
+                    .filter(|(_, d)| *d <= cutoff)
+                    .filter_map(|(a, _)| a.split(':').next()?.parse().ok())
+                    .take(ANSWER_NODES)
+                    .collect();
+            }
         }
         alive
             .into_iter()
