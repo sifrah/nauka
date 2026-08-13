@@ -1308,11 +1308,14 @@ async fn main() -> Result<()> {
                 // too, and PUTs fail with a bare ENOENT without it.
                 let tmp_dir = cli.data_dir.join("tmp");
                 std::fs::create_dir_all(&tmp_dir).context("creating the upload tmp dir")?;
+                let (warm_tx, warm_rx) = tokio::sync::mpsc::channel::<String>(8);
                 let api_state = Arc::new(api::ApiState {
                     store: store.clone(),
                     app: app.clone(),
                     self_id: self_id.clone(),
                     space_egress_local: Arc::new(Default::default()),
+                    warm_tx: stripe_cache.as_ref().map(|_| warm_tx.clone()),
+                    hot_reads: Default::default(),
                     config: ErasureConfig::default(),
                     tmp_dir,
                     health: health.clone(),
@@ -1327,6 +1330,13 @@ async fn main() -> Result<()> {
                 // Uploads this node acked locally but had not finished
                 // dispersing when it stopped: finish them before serving.
                 tokio::spawn(api::recover_staged_uploads(api_state.clone()));
+                if stripe_cache.is_some() {
+                    // The signal-driven warmer: publishes into public
+                    // spaces and hot partial reads queue files here.
+                    tokio::spawn(api::warmer_loop(api_state.clone(), warm_rx));
+                } else {
+                    drop(warm_rx);
+                }
                 tracing::info!(
                     "upload buffer pool: {} MiB (fixed at startup)",
                     api_state.ingest_pool.capacity() >> 20

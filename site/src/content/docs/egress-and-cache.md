@@ -73,6 +73,18 @@ only one node per region ever pays the cold read; measured on a
 tri-region cluster, the second node of a region reads a file its
 sibling holds at 77 MB/s where a lone node reconstructs at 20.
 
+**And the cache listens for intent.** Two signals queue a background
+warm of the whole file, at low priority (two stripes in flight, never
+competing with a paying read) and bounded (a file bigger than a
+quarter of the cache budget is skipped): publishing into a public-read
+space warms the node that took the publish — that gesture says "this
+is about to be served" — and three partial reads of the same file
+within fifteen minutes warm it fully, because seeks are how players
+and download managers announce the rest of their plans. Measured: a
+publish left the node serving the bare URL at 1.25 GB/s before the
+first visitor; three 1 MB range reads turned the next full GET into
+888 MB/s of local disk.
+
 ## Using both together
 
 A metered node with a cache is the intended combination: the cache slashes

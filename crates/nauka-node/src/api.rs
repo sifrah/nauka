@@ -54,6 +54,13 @@ pub struct ApiState {
     /// folds it into `AppState::space_egress` under this node's row.
     pub space_egress_local:
         Arc<std::sync::Mutex<std::collections::BTreeMap<String, (String, u64)>>>,
+    /// Queue of files to pre-warm into the stripe cache (None when the
+    /// cache is disabled). Best-effort by design: a full queue drops the
+    /// signal, never blocks the request that emitted it.
+    pub warm_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    /// Partial-read counters feeding the hot-file warming signal
+    /// (file hash → count within the current window).
+    pub hot_reads: std::sync::Mutex<HashMap<String, (u32, std::time::Instant)>>,
 }
 
 impl ApiState {
@@ -695,6 +702,7 @@ async fn ref_add(
         )
             .into_response());
     }
+    let target_public = target.public_read;
     let refs = s.file_refs.get(&hash);
     let owned = refs.is_some_and(|r| !r.is_empty());
     if owned {
@@ -737,6 +745,14 @@ async fn ref_add(
             resp.info.unwrap_or_else(|| "the cluster refused".into()),
         )
             .into_response());
+    }
+    // Publishing to a public-read space says "this is about to be
+    // served": the node that took the publish warms itself in the
+    // background, best-effort.
+    if target_public {
+        if let Some(tx) = &state.warm_tx {
+            let _ = tx.try_send(hash.clone());
+        }
     }
     Ok(Json(serde_json::json!({ "hash": hash, "space": p.to })).into_response())
 }
@@ -2243,6 +2259,7 @@ async fn download(
         if let Some(billed) = &grant.billed_space {
             record_space_egress(&state, billed, end - start + 1);
         }
+        note_hot_read(&state, &manifest.file_hash);
         return serve_range(state, manifest, start, end, rate, throttled_by_quota).await;
     }
 
@@ -2393,6 +2410,80 @@ fn paced(
         }
     });
     out
+}
+
+/// Reads that repeat on the same file within this window count towards
+/// the hot-file warming signal.
+const HOT_WINDOW: std::time::Duration = std::time::Duration::from_secs(900);
+/// Partial reads of one file before it is warmed whole.
+const HOT_THRESHOLD: u32 = 3;
+/// Warming reconstructs this many stripes concurrently — deliberately
+/// below READ_AHEAD_STRIPES: background comfort must not compete with a
+/// paying read.
+const WARM_CONCURRENCY: usize = 2;
+
+/// The background warmer: drains the queue and pulls whole files into
+/// the local stripe cache, at low concurrency, skipping what is already
+/// cached (reconstruct_stripe checks the cache first) and anything too
+/// big to fit without evicting half the LRU.
+pub(crate) async fn warmer_loop(state: Arc<ApiState>, mut rx: tokio::sync::mpsc::Receiver<String>) {
+    while let Some(file_hash) = rx.recv().await {
+        let Some(manifest) = state.app.app_state().manifests.get(&file_hash).cloned() else {
+            continue;
+        };
+        let Some(cache) = &state.cache else { continue };
+        // A single file may not monopolize the cache: past a quarter of
+        // the budget, warming it whole would evict more value than it
+        // adds.
+        if manifest.file_size > cache.budget() / 4 {
+            continue;
+        }
+        use futures::StreamExt as _;
+        let fetcher = Arc::new(Fetcher::new(state.clone()));
+        let m = Arc::new(manifest);
+        let warmed = futures::stream::iter((0..m.stripes.len()).map(|i| {
+            let fetcher = fetcher.clone();
+            let m = m.clone();
+            async move {
+                reconstruct_stripe(&fetcher, &m.stripes[i], i, &m)
+                    .await
+                    .is_ok()
+            }
+        }))
+        .buffered(WARM_CONCURRENCY)
+        .filter(|ok| std::future::ready(*ok))
+        .count()
+        .await;
+        metrics::counter!("nauka_warm_files_total").increment(1);
+        metrics::counter!("nauka_warm_stripes_total").increment(warmed as u64);
+    }
+}
+
+/// Bumps the partial-read counter for `hash`; at the threshold, queues a
+/// full background warm and resets. Full GETs warm the cache by reading;
+/// only ranges need the signal.
+fn note_hot_read(state: &ApiState, hash: &str) {
+    let Some(tx) = &state.warm_tx else { return };
+    let now = std::time::Instant::now();
+    let mut hot = match state.hot_reads.lock() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    // Sweep the map opportunistically: stale windows and, if it somehow
+    // still grows, everything — a heuristic table never justifies
+    // unbounded memory.
+    if hot.len() > 4096 {
+        hot.clear();
+    }
+    let entry = hot.entry(hash.to_string()).or_insert((0, now));
+    if now.duration_since(entry.1) > HOT_WINDOW {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+    if entry.0 >= HOT_THRESHOLD {
+        let _ = tx.try_send(hash.to_string());
+        hot.remove(hash);
+    }
 }
 
 async fn serve_range(
