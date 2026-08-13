@@ -181,6 +181,30 @@ Who can read what, today:
 Legacy stays open until anonymous uploads are retired — that final
 flip closes the era, and it will be its own explicit change.
 
+## Direct links: publish without re-uploading
+
+"Making a file public" is adding a **reference from a public-read
+space** — the bytes never move:
+
+```bash
+nauka space publish myapp/uploads <hash> --to myapp/cdn --key nsk_…
+```
+
+Behind it: `POST /f/<hash>/refs?to=<space>`, signed by an admin key of
+a space that **already references** the file (the signature covers the
+full path including `?to=`, so a captured request cannot be aimed at
+another target). References never cross organisations — no space can
+annex another tenant's content. The bare URL `/f/<hash>` then serves
+worldwide; **revoking** it is a signed DELETE of the public space's
+reference (the private reference survives, the file goes dark for the
+world), or suspending the public space, or removing it — each
+cluster-wide in one round-trip.
+
+The same endpoint handles **adoption**: an unowned pre-tenant file can
+be claimed by the signing space itself (`space publish <space> <hash>
+--key …`, no `--to`) — the migration path that turns legacy files into
+owned ones before the final flip.
+
 ## The transition, honestly
 
 Uploads **without** `X-Nauka-Space` are still accepted, and the files

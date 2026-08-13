@@ -420,6 +420,26 @@ enum SpaceCmd {
     /// the public half.
     #[command(subcommand)]
     Key(SpaceKeyCmd),
+    /// Reference an existing file from another space of the SAME org —
+    /// no re-upload, the bytes never move. Publish a private file by
+    /// targeting a public-read space; adopt an unowned legacy file by
+    /// targeting the signing space itself.
+    Publish {
+        /// The signing space (must already reference the file — or be
+        /// the target itself, for adoption).
+        space: String,
+        /// The file's full BLAKE3 hash.
+        hash: String,
+        /// Target space receiving the reference (default: the signing
+        /// space — adoption).
+        #[arg(long)]
+        to: Option<String>,
+        /// An admin private key (`nsk_…`) of the signing space.
+        #[arg(long)]
+        key: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
     /// Mint a signed READ link for a file the space references — offline,
     /// no cluster round-trip. Works with `signer` and `admin` keys; the
     /// link carries its own expiry and dies with it (or with the key, or
@@ -1868,6 +1888,13 @@ async fn main() -> Result<()> {
                 ttl,
                 exp,
             } => node::space_link(&space, &hash, &key, ttl, exp)?,
+            SpaceCmd::Publish {
+                space,
+                hash,
+                to,
+                key,
+                peers,
+            } => node::space_publish(&peers, &space, &hash, to.as_deref(), &key).await?,
         },
         Cmd::PutRemote {
             file,

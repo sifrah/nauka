@@ -1679,3 +1679,58 @@ pub fn space_link(space: &str, hash: &str, secret: &str, ttl: u64, exp: Option<u
     );
     Ok(())
 }
+
+/// `space publish`: sign a ref-add and POST it — the "make it public
+/// without re-uploading" gesture (and, with `to` = the signing space,
+/// the adoption of an unowned legacy file).
+pub async fn space_publish(
+    peers: &[SocketAddr],
+    space: &str,
+    hash: &str,
+    to: Option<&str>,
+    secret: &str,
+) -> Result<()> {
+    split_space_path(space)?;
+    let to = to.unwrap_or(space);
+    split_space_path(to)?;
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("expected the file's FULL 64-hex BLAKE3 hash");
+    }
+    let sk = crate::spaceauth::parse_secret(secret)?;
+    let public = hex::encode(sk.verifying_key().to_bytes());
+    let timestamp = crate::spaceauth::unix_now();
+    let signed_path = format!("/f/{hash}/refs?to={to}");
+    let canonical = crate::spaceauth::canonical_write("POST", &signed_path, space, timestamp, None);
+    let signature = crate::spaceauth::sign(&sk, &canonical);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    for peer in peers {
+        let url = format!("http://{}:8080{signed_path}", peer.ip());
+        let resp = client
+            .post(&url)
+            .header("X-Nauka-Space", space)
+            .header("X-Nauka-Key", &public)
+            .header("X-Nauka-Timestamp", timestamp)
+            .header("X-Nauka-Signature", &signature)
+            .send()
+            .await;
+        let Ok(resp) = resp else { continue };
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            if to == space {
+                println!("{} now references {}", to, &hash[..16]);
+            } else {
+                println!(
+                    "{} now references {} (shared from {space})",
+                    to,
+                    &hash[..16]
+                );
+            }
+            return Ok(());
+        }
+        bail!("{status}: {body}");
+    }
+    bail!("no node answered (tried {} peer(s))", peers.len());
+}

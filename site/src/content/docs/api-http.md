@@ -247,6 +247,16 @@ cluster, leader known, replication caught up): a freshly started node
 whose registry is still empty erases nothing — otherwise it would destroy
 the cluster. A shard referenced by another live file is never deleted.
 
+## `POST /f/{hash}/refs?to=<org/space>`
+
+Adds a space's [reference](/multi-tenant/#direct-links-publish-without-re-uploading)
+to an existing file — publish to a public-read space, or adopt an
+unowned legacy file (`to` = the signing space). Signed (`X-Nauka-*`
+headers, admin key; the canonical path includes the `?to=` query).
+Chain of custody enforced: the signer must already reference the file,
+and the target must belong to the same organisation. Revocation is the
+signed `DELETE /f/{hash}` of that reference.
+
 ## `GET /api/orgs`
 
 The replicated [organisation/space registry](/multi-tenant/): orgs,

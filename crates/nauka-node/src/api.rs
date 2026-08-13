@@ -124,6 +124,7 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
             "/f/{hash}",
             get(download).head(download_head).delete(delete_file),
         )
+        .route("/f/{hash}/refs", axum::routing::post(ref_add))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("HTTP API on http://{listen}");
@@ -501,6 +502,112 @@ async fn removal_check(
         sample,
         reason,
     })
+}
+
+#[derive(serde::Deserialize)]
+struct RefAddParams {
+    /// Target space receiving the reference.
+    to: String,
+}
+
+/// POST /f/{hash}/refs?to=<org/space> — reference an EXISTING file from
+/// another space, without re-uploading a byte. The "make it public"
+/// gesture: publish a private file by referencing it from a public-read
+/// space; revoke by signed-DELETEing that reference.
+///
+/// The signature covers the full path INCLUDING `?to=` (a captured
+/// request cannot be replayed towards a different target), and the
+/// chain of custody is enforced: the signing space must already
+/// reference the file, and the target must belong to the SAME
+/// organisation — no space can annex another tenant's content. The one
+/// exception is adoption: an unowned pre-tenant file can be claimed by
+/// the signing space itself (`to` = the signer), which is the migration
+/// path out of the legacy era.
+async fn ref_add(
+    State(state): State<Arc<ApiState>>,
+    Path(hash): Path<String>,
+    Query(p): Query<RefAddParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    let signed_path = format!("/f/{hash}/refs?to={}", p.to);
+    let auth = verify_space_write(&state, &headers, "POST", &signed_path)?.ok_or_else(|| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            anyhow!("adding a reference requires an admin signature (X-Nauka-* headers)"),
+        )
+    })?;
+    let s = state.app.app_state();
+    if !s.manifests.contains_key(&hash) {
+        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
+    }
+    let target = s.spaces.get(&p.to).ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            anyhow!("no space named {} on this cluster", p.to),
+        )
+    })?;
+    let signer_org = s
+        .spaces
+        .get(&auth.space)
+        .map(|r| r.org.clone())
+        .unwrap_or_default();
+    if target.org != signer_org {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} belongs to another organisation — references never cross orgs",
+                p.to
+            ),
+        )
+            .into_response());
+    }
+    if target.suspended {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            format!("space {} is suspended", p.to),
+        )
+            .into_response());
+    }
+    let refs = s.file_refs.get(&hash);
+    let owned = refs.is_some_and(|r| !r.is_empty());
+    if owned {
+        if !refs.is_some_and(|r| r.contains(&auth.space)) {
+            return Ok((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "{} does not reference this file — only a space that holds it may \
+                     share it",
+                    auth.space
+                ),
+            )
+                .into_response());
+        }
+    } else if p.to != auth.space {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            "an unowned file can only be ADOPTED by the signing space itself \
+             (?to=<your own space>)"
+                .to_string(),
+        )
+            .into_response());
+    }
+    drop(s);
+    let resp = state
+        .app
+        .write(nauka_raft::types::AppCommand::AddFileRef {
+            file_hash: hash.clone(),
+            space: p.to.clone(),
+        })
+        .await
+        .context("recording the reference")?;
+    if !resp.ok {
+        return Ok((
+            StatusCode::CONFLICT,
+            resp.info.unwrap_or_else(|| "the cluster refused".into()),
+        )
+            .into_response());
+    }
+    Ok(Json(serde_json::json!({ "hash": hash, "space": p.to })).into_response())
 }
 
 /// The `?space=&exp=&sig=` triplet of a signed read link.
