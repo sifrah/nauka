@@ -1,6 +1,6 @@
 <div align="center">
 
-# Nauka
+<img src="assets/brand/png/github-banner-1280x640.png" alt="Nauka: a modern distributed file storage engine. One binary, one key, zero configuration." width="100%">
 
 **A modern file storage engine, safe and complete: Reed-Solomon durability, Ed25519 signed links, quotas. One binary. Rust, AGPL-3.0.**
 

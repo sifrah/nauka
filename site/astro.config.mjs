@@ -9,7 +9,18 @@ export default defineConfig({
       title: "Nauka",
       titleDelimiter: "·",
       description:
-        "A distributed storage engine that heals itself — one binary, one key, zero configuration.",
+        "A modern file storage engine, safe and complete: Reed-Solomon durability, Ed25519 signed links, quotas. One binary.",
+      favicon: "/favicon.svg",
+      head: [
+        {
+          tag: "link",
+          attrs: { rel: "icon", href: "/favicon-32.png", sizes: "32x32" },
+        },
+        {
+          tag: "link",
+          attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon-180.png" },
+        },
+      ],
       social: [
         {
           icon: "github",
