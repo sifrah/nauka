@@ -157,6 +157,36 @@ crash, on the other hand, is exactly what the scrubber knows how to repair
     migrates the format with zero downtime. A regression test now loads
     a pre-feature snapshot into the current state.
 
+14. **A proof of possession is a snapshot; releasing redundancy needs a
+    claim.** The rebalancing GC deleted a shard once ALL its owners
+    proved possession. Two holders with crossed placement views proved
+    to each other inside the same pass and both deleted: 4 of a live
+    file's 6 shards gone — the only file this engine ever lost. The fix
+    is asymmetry: the prover must also CLAIM the shard under its own
+    view, and a node never releases what it currently claims. Mutual
+    deletion became impossible by construction, and the race is
+    replayed deterministically in the test suite.
+15. **Placement says where shards should be; only disks say where they
+    are.** The removal pre-flight blessed a removal from the placement
+    map while a file already sat below k on the actual disks — during
+    an active rebalance the map lags reality. The check now sums
+    physical shard inventories from the surviving nodes, and a node
+    that does not answer counts as holding nothing: the check fails
+    towards refusal, never towards loss.
+16. **A Vivaldi coordinate never settles inside one datacenter.**
+    Sub-millisecond RTTs keep the error estimate above any settling
+    threshold forever — so gating a same-region feature on
+    `is_settled` disables it exactly where it matters. The cooperative
+    cache gates on estimated distance alone; the false-neighbor window
+    of a fresh cluster costs one round-trip per stripe and closes
+    itself as coordinates diverge.
+17. **Domain-separate every signature from day one.** Write requests
+    and read links are both Ed25519 under the same space keys; without
+    a domain prefix, a signing oracle for one could mint the other.
+    `nauka-write-v1\n…` and `nauka-link-v1\n…` disagree on their first
+    bytes by construction — retrofitted while the integrator count was
+    still zero, which is the only cheap moment.
+
 ## Accepted debt
 
 Spelled out bluntly in [Known limitations](/operations/#known-limitations-v1), alongside the

@@ -80,18 +80,23 @@ client ──GET /f/<hash>──▶ node N
   1. manifest: local store, else the replicated registry
   2. the FIRST stripe is reconstructed before any status is sent: a file
      with too many shards gone gets an honest 503, not a truncated 200
-  3. per stripe (streamed, one stripe in memory at a time):
-       the k data shards are fetched in parallel — local store first,
-       then peers; parity is requested only if a data shard is missing.
-       On a healthy cluster not one parity byte crosses the wire.
-       decode_stripe: any k valid shards out of 6 are enough
-       (a peer that fails once is written off for this request)
-  4. global BLAKE3 recomputed on the fly, compared to the manifest
+  3. stripes are reconstructed through an ordered READ-AHEAD pipeline
+     (6 in flight): per stripe, the local cache is consulted, then the
+     closest neighbor's cache (one local transfer beats k far ones),
+     then the k data shards are fetched in parallel — local store
+     first, then peers; parity is requested only if a data shard is
+     missing. On a healthy cluster not one parity byte crosses the
+     wire. decode_stripe: any k valid shards out of 6 are enough
+     (a peer that fails once is written off for this request)
+  4. global BLAKE3 recomputed on the fly, compared to the manifest —
+     the pipeline yields strictly in order, so the check is unchanged
 ```
 
-Decoded stripes that crossed the cluster land in the optional per-node
-cache (`--cache-size`) — content-addressed, so never stale. Range
-requests fetch only the stripes covering the range.
+Decoded stripes that crossed the cluster land in the per-node cache —
+on by default, sized to the free disk, content-addressed so never
+stale — and neighbors [cooperate](/egress-and-cache/): only one node
+per region pays a cold read. Range requests fetch only the stripes
+covering the range, through the same pipeline.
 
 ## Where state lives
 

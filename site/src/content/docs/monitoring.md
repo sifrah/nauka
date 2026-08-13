@@ -71,6 +71,10 @@ The families that matter:
 | `nauka_gc_orphans_purged_total` | reclaimed shards of deleted/expired/banned files |
 | `nauka_staged_bytes` | locally-acked upload bytes not yet dispersed |
 | `nauka_egress_served_bytes` / `nauka_egress_quota_bytes` | the monthly ledger vs its budget, per node |
+| `nauka_cache_budget_bytes` | the stripe cache's disk budget (auto-sized by default) |
+| `nauka_coop_cache_hits_total` / `nauka_coop_cache_rejected_total` | stripes served by a neighbor's cache / neighbor bytes that failed re-encoding verification (should stay 0) |
+| `nauka_warm_files_total` / `nauka_warm_stripes_total` | background warms triggered by publishes and hot partial reads |
+| `nauka_peer_rtt_seconds` | Vivaldi-estimated distance to each peer — what placement and the cooperative cache decide on |
 
 ## The four alerts worth having
 
