@@ -71,6 +71,9 @@ tokio.workspace = true
 tokio-stream = "0.1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+hickory-server = "0.26.1"
+maxminddb = "0.30.0"
+hickory-proto = "0.26.1"
 
 # ── Debian package (cargo-deb) ────────────────────────────────────────────
 [package.metadata.deb]

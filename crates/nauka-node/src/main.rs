@@ -7,6 +7,7 @@
 
 mod api;
 mod cache;
+mod dns;
 mod e2e;
 mod egress;
 mod ingest;
@@ -251,6 +252,11 @@ enum Cmd {
         /// no recorder has been installed.
         #[arg(long)]
         no_metrics: bool,
+        /// Disable the built-in geo-DNS front door (also NAUKA_NO_DNS=1).
+        /// On by default: delegate a name to a few nodes and the cluster
+        /// answers with the closest living members.
+        #[arg(long)]
+        no_dns: bool,
         /// Do not found a cluster on a blank data dir: wait to be added
         /// by a member. This is what `nauka node add` passes to the
         /// machines it provisions.
@@ -1046,6 +1052,7 @@ async fn main() -> Result<()> {
             no_http,
             metrics: metrics_addr,
             no_metrics,
+            no_dns,
             join,
         } => {
             // The monthly egress budget: refuse to start on a value we
@@ -1340,6 +1347,21 @@ async fn main() -> Result<()> {
                     tokio::spawn(api::warmer_loop(api_state.clone(), warm_rx));
                 } else {
                     drop(warm_rx);
+                }
+                let no_dns = no_dns
+                    || std::env::var("NAUKA_NO_DNS").is_ok_and(|v| !v.is_empty() && v != "0");
+                if !no_dns {
+                    // The geo-DNS front door: on by default, a bind
+                    // failure only warns (nodes without the capability
+                    // keep serving storage).
+                    let geodns = dns::GeoDns::new(api_state.clone());
+                    tokio::spawn(dns::mmdb_keeper(geodns.clone(), cli.data_dir.clone()));
+                    let bind_ip = self_id
+                        .split(':')
+                        .next()
+                        .and_then(|ip| ip.parse().ok())
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                    tokio::spawn(dns::serve(geodns, bind_ip, 53));
                 }
                 tracing::info!(
                     "upload buffer pool: {} MiB (fixed at startup)",

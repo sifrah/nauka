@@ -135,3 +135,31 @@ nauka update && systemctl restart nauka
 Checksum-verified, atomic binary replacement; the cluster keeps quorum
 through a rolling restart. `nauka update --check` in a cron makes a fine
 notifier — the engine never self-restarts on its own.
+
+
+## The DNS front door
+
+Every node answers authoritative DNS on `:53` (disable with `--no-dns`
+or `NAUKA_NO_DNS=true`). Delegate any name to a few nodes — `NS`
+records plus glue `A` records at your registrar, nothing else — and the
+cluster becomes its own GeoDNS: each query is answered with the three
+closest LIVING members to the asker, straight from the live membership.
+A node that joins enters the answers within a minute; one that dies or
+is removed leaves them just as fast. Geography comes from a free
+monthly database (DB-IP Lite) the nodes fetch themselves; before it is
+ready, answers degrade to the first living members — reachable beats
+optimal.
+
+```text
+; at your registrar, once:
+cdn.example.com.      NS   ns1.cdn.example.com.
+cdn.example.com.      NS   ns2.cdn.example.com.
+cdn.example.com.      NS   ns3.cdn.example.com.
+ns1.cdn.example.com.  A    <node on continent 1>
+ns2.cdn.example.com.  A    <node on continent 2>
+ns3.cdn.example.com.  A    <node on continent 3>
+```
+
+Signed links never bind the host, so the same link works whichever
+node the DNS hands out. The responder is authoritative-only — no
+recursion, no zone transfers, small answers.
