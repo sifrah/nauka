@@ -88,6 +88,22 @@ impl ErasureConfig {
             ..*self
         }
     }
+
+    /// The config for a SMALL payload: replication instead of striping.
+    /// `data_shards = 1` turns Reed-Solomon into n-copies-any-one-wins
+    /// with zero new machinery — placement, scrubbing, GC, proofs and
+    /// verification all see ordinary shards. A 4 KiB file in 4+2 was six
+    /// micro-shards and k round-trips per read; as 1+2 it is three full
+    /// copies and ONE round-trip. The 3x overhead is capped by the
+    /// caller's threshold, and the loss tolerance (any 2 of 3) matches
+    /// the wide config's.
+    pub fn replicated_for(&self, len: usize) -> ErasureConfig {
+        ErasureConfig {
+            data_shards: 1,
+            parity_shards: self.parity_shards,
+            shard_size: len.max(1),
+        }
+    }
 }
 
 /// Content identifier: BLAKE3 hash, hex-encoded.

@@ -862,7 +862,11 @@ async fn main() -> Result<()> {
             // content — padding them to the fixed stripe size made every
             // small file cost a full stripe on disk.
             if !data.is_empty() && data.len() < cfg.stripe_data_len() {
-                cfg = cfg.densified_for(data.len());
+                cfg = if data.len() <= 128 * 1024 {
+                    cfg.replicated_for(data.len())
+                } else {
+                    cfg.densified_for(data.len())
+                };
             }
             let (manifest, stripes) = encode_file(&data, &cfg)?;
             let mut shard_count = 0;

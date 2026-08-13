@@ -1528,7 +1528,12 @@ async fn dispatch_core(
     // is bounded by one stripe per FILE, which large files amortize.
     let first = source.next_stripe(cfg.stripe_data_len()).await?;
     if !first.is_empty() && first.len() < cfg.stripe_data_len() {
-        cfg = cfg.densified_for(first.len());
+        cfg = if first.len() <= small_file_threshold() {
+            // Below the threshold, striping is all overhead: replicate.
+            cfg.replicated_for(first.len())
+        } else {
+            cfg.densified_for(first.len())
+        };
     }
     let mut pending = Some(first);
 
@@ -2094,18 +2099,65 @@ pub(crate) async fn fetch_stripe_slots(
     let mut slots: Vec<Option<Vec<u8>>> = vec![None; total];
     let mut remote_used = false;
     let cut = k.min(total);
-    for round in [&order[..cut], &order[cut..]] {
-        if slots.iter().filter(|s| s.is_some()).count() >= k {
-            break;
-        }
-        let fetches = round.iter().map(|&i| {
+    // Hedged race instead of two joined rounds: the k best slots start
+    // immediately; parity joins the race when the hedge timer fires or a
+    // fetch FAILS — whichever comes first — and the first k valid shards
+    // win. MDS makes the extra fetches free redundancy, and a peer that
+    // is merely slow (the old join waited for it) now just loses the
+    // race. Dropping the set cancels whatever is still in flight.
+    {
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let spawn_fetch = |i: usize| {
             let f = fetcher.clone();
             let h = stripe.shard_hashes[i].clone();
-            async move { f.fetch(h).await.map(|d| (i, d)) }
-        });
-        for (i, (d, remote)) in futures_join_all(fetches).await.into_iter().flatten() {
-            remote_used |= remote;
-            slots[i] = Some(d);
+            async move {
+                let t0 = std::time::Instant::now();
+                let out = f.clone().fetch(h).await;
+                if out.is_some() {
+                    f.note_fetch_latency(t0.elapsed());
+                }
+                (i, out)
+            }
+        };
+        let mut inflight: FuturesUnordered<_> =
+            order[..cut].iter().map(|&i| spawn_fetch(i)).collect();
+        let mut hedged = false;
+        let hedge = tokio::time::sleep(fetcher.hedge_delay());
+        tokio::pin!(hedge);
+        let mut have = 0usize;
+        while have < k {
+            tokio::select! {
+                biased;
+                res = inflight.next(), if !inflight.is_empty() => {
+                    let Some((i, out)) = res else { break };
+                    match out {
+                        Some((d, remote)) => {
+                            remote_used |= remote;
+                            if slots[i].is_none() {
+                                slots[i] = Some(d);
+                                have += 1;
+                            }
+                        }
+                        None if !hedged => {
+                            // A failed fetch is the loudest reason to hedge.
+                            hedged = true;
+                            metrics::counter!("nauka_read_hedges_total").increment(1);
+                            for &j in &order[cut..] {
+                                inflight.push(spawn_fetch(j));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                _ = &mut hedge, if !hedged => {
+                    hedged = true;
+                    metrics::counter!("nauka_read_hedges_total").increment(1);
+                    for &j in &order[cut..] {
+                        inflight.push(spawn_fetch(j));
+                    }
+                }
+                else => break,
+            }
         }
     }
     (slots, remote_used)
@@ -2490,6 +2542,71 @@ fn note_hot_read(state: &ApiState, hash: &str) {
     }
 }
 
+/// One stripe's byte window for a range read, by the cheapest honest
+/// route: local cache slice → neighbor's cached stripe → PARTIAL fetch
+/// of only the covering data shards (the layout is contiguous, so a
+/// small seek lives in one or two shards — no reason to move k MiB for
+/// 100 KiB) → full reconstruction. Every partial shard is BLAKE3-checked
+/// against the manifest before a byte is believed.
+async fn read_stripe_window(
+    fetcher: &Arc<Fetcher>,
+    m: &FileManifest,
+    stripe_idx: usize,
+    off: u64,
+    start: u64,
+    end: u64,
+) -> Result<Vec<u8>> {
+    let stripe = &m.stripes[stripe_idx];
+    let stripe_len = stripe.data_len as u64;
+    let from = start.saturating_sub(off) as usize;
+    let to = ((end - off + 1).min(stripe_len)) as usize;
+    if from >= to {
+        return Ok(Vec::new());
+    }
+    if let Some(cache) = &fetcher.state.cache {
+        if let Some(d) = cache.get(&m.file_hash, stripe_idx) {
+            if to <= d.len() {
+                return Ok(d[from..to].to_vec());
+            }
+        }
+    }
+    if let Some(d) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
+        if let Some(cache) = &fetcher.state.cache {
+            cache.put(&m.file_hash, stripe_idx, &d);
+        }
+        if to <= d.len() {
+            return Ok(d[from..to].to_vec());
+        }
+    }
+    let ssz = m.config.shard_size;
+    let s0 = from / ssz;
+    let s1 = (to - 1) / ssz;
+    if ssz > 0 && s1 < m.config.data_shards && s1 - s0 + 1 < m.config.data_shards {
+        let mut span: Vec<u8> = Vec::with_capacity((s1 - s0 + 1) * ssz);
+        let mut complete = true;
+        for i in s0..=s1 {
+            match fetcher.clone().fetch(stripe.shard_hashes[i].clone()).await {
+                Some((d, _)) if nauka_erasure::hash_bytes(&d) == stripe.shard_hashes[i] => {
+                    span.extend_from_slice(&d)
+                }
+                _ => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            metrics::counter!("nauka_partial_range_reads_total").increment(1);
+            let a = from - s0 * ssz;
+            return Ok(span[a..a + (to - from)].to_vec());
+        }
+        // A covering shard is missing: the stripe is degraded, pay the
+        // full reconstruction (which can use parity).
+    }
+    let d = reconstruct_stripe(fetcher, stripe, stripe_idx, m).await?;
+    Ok(d[from..to.min(d.len())].to_vec())
+}
+
 async fn serve_range(
     state: Arc<ApiState>,
     manifest: FileManifest,
@@ -2523,16 +2640,12 @@ async fn serve_range(
         let mut pipeline = futures::stream::iter(plan.into_iter().map(|(stripe_idx, off)| {
             let fetcher = fetcher.clone();
             let m = m.clone();
-            async move {
-                let res =
-                    reconstruct_stripe(&fetcher, &m.stripes[stripe_idx], stripe_idx, &m).await;
-                (stripe_idx, off, res)
-            }
+            async move { read_stripe_window(&fetcher, &m, stripe_idx, off, start, end).await }
         }))
         .buffered(READ_AHEAD_STRIPES);
-        while let Some((stripe_idx, off, res)) = pipeline.next().await {
-            let data = match res {
-                Ok(d) => d,
+        while let Some(res) = pipeline.next().await {
+            let window = match res {
+                Ok(w) => w,
                 Err(e) => {
                     let _ = tx
                         .send(Err(std::io::Error::other(format!(
@@ -2542,17 +2655,7 @@ async fn serve_range(
                     return;
                 }
             };
-            // Cut out the useful portion of this stripe.
-            let stripe_len = m.stripes[stripe_idx].data_len as u64;
-            let from = start.saturating_sub(off) as usize;
-            let to = ((end - off + 1).min(stripe_len)) as usize;
-            if from < to
-                && to <= data.len()
-                && tx
-                    .send(Ok(bytes::Bytes::from(data[from..to].to_vec())))
-                    .await
-                    .is_err()
-            {
+            if !window.is_empty() && tx.send(Ok(bytes::Bytes::from(window))).await.is_err() {
                 return; // client gone
             }
         }
@@ -2582,20 +2685,6 @@ async fn serve_range(
         .map_err(anyhow::Error::from)?)
 }
 
-/// Hand-rolled `join_all` (order preserved) — saves one more dependency.
-async fn futures_join_all<F, T>(futures: impl Iterator<Item = F>) -> Vec<Option<T>>
-where
-    F: std::future::Future<Output = Option<T>> + Send + 'static,
-    T: Send + 'static,
-{
-    let handles: Vec<_> = futures.map(tokio::spawn).collect();
-    let mut out = Vec::with_capacity(handles.len());
-    for h in handles {
-        out.push(h.await.ok().flatten());
-    }
-    out
-}
-
 /// Shard fetcher shared across one download request: a connection cache
 /// (failures are memoized — a dead node is contacted only once per
 /// request) usable from parallel fetches.
@@ -2607,6 +2696,10 @@ pub(crate) struct Fetcher {
     /// once per fetcher. None = nobody close enough, or coords not
     /// settled yet — then the cooperative path stays off for this read.
     neighbor: tokio::sync::OnceCell<Option<String>>,
+    /// EWMA of successful shard-fetch latencies, microseconds. Feeds the
+    /// hedge timer: what "abnormally slow" means is learned per
+    /// download, not configured.
+    fetch_ewma_us: std::sync::atomic::AtomicU64,
 }
 
 impl Fetcher {
@@ -2617,7 +2710,36 @@ impl Fetcher {
             view,
             clients: tokio::sync::Mutex::new(HashMap::new()),
             neighbor: tokio::sync::OnceCell::new(),
+            fetch_ewma_us: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Records one successful shard fetch into the latency EWMA
+    /// (7/8 old + 1/8 new — jumpy enough to follow a route change,
+    /// stable enough to ignore one outlier).
+    fn note_fetch_latency(&self, elapsed: std::time::Duration) {
+        use std::sync::atomic::Ordering;
+        let new = elapsed.as_micros() as u64;
+        let old = self.fetch_ewma_us.load(Ordering::Relaxed);
+        let next = if old == 0 {
+            new
+        } else {
+            old - old / 8 + new / 8
+        };
+        self.fetch_ewma_us.store(next, Ordering::Relaxed);
+    }
+
+    /// How long a shard fetch may lag its peers before parity is raced
+    /// against it: three times the learned typical latency, clamped to
+    /// [100 ms, 2 s]. Before any sample: 500 ms.
+    fn hedge_delay(&self) -> std::time::Duration {
+        let ewma = self
+            .fetch_ewma_us
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ewma == 0 {
+            return std::time::Duration::from_millis(500);
+        }
+        std::time::Duration::from_micros((ewma * 3).clamp(100_000, 2_000_000))
     }
 
     /// The nearest peer by Vivaldi estimate, if it is close enough to be
@@ -2743,6 +2865,20 @@ pub(crate) fn describe_metrics() {
 /// Read speed once a space is past its monthly egress quota: slow
 /// enough to stop the bleeding, alive enough not to break pages.
 const EGRESS_CRAWL: u64 = 64 * 1024;
+
+/// Files at or under this many bytes are REPLICATED (1+m copies, one
+/// round-trip reads) instead of striped — striping a 4 KiB file into
+/// micro-shards costs k round-trips and padding for nothing. Override
+/// with NAUKA_SMALL_THRESHOLD (bytes, 0 disables replication).
+fn small_file_threshold() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("NAUKA_SMALL_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128 * 1024)
+    })
+}
 
 /// Stripes reconstructed in parallel ahead of the client on the read
 /// path. One stripe at a time serialized a WAN round-trip per 4 MiB —

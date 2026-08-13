@@ -86,3 +86,16 @@ Properties:
   precious, stay fsynced.
 - **Verified on every read**: `get_shard` recomputes the hash; disk
   corruption (bit rot) yields `CorruptShard`, never wrong bytes.
+
+
+## Small files: replication, not striping
+
+Striping a 4 KiB file into 4+2 means six micro-shards, k round-trips
+per read and padding for nothing — no code fixes that, only the layout
+choice does. At or under `NAUKA_SMALL_THRESHOLD` (128 KiB by default) a
+file is stored as **1+m: full copies, any one of which serves alone** —
+same Reed-Solomon machinery, same loss tolerance (any m of 1+m may
+vanish), same placement, scrubbing, proofs and GC, but reads cost one
+round-trip. The 3x overhead is capped by the threshold: it never costs
+more than a few hundred KiB per file, on the files where striping saved
+nothing anyway.

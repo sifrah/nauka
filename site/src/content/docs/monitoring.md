@@ -75,6 +75,8 @@ The families that matter:
 | `nauka_coop_cache_hits_total` / `nauka_coop_cache_rejected_total` | stripes served by a neighbor's cache / neighbor bytes that failed re-encoding verification (should stay 0) |
 | `nauka_warm_files_total` / `nauka_warm_stripes_total` | background warms triggered by publishes and hot partial reads |
 | `nauka_peer_rtt_seconds` | Vivaldi-estimated distance to each peer — what placement and the cooperative cache decide on |
+| `nauka_read_hedges_total` | stripe reads where parity was raced against a slow or failed data fetch |
+| `nauka_partial_range_reads_total` | range windows served from covering shards alone, no reconstruction |
 
 ## The four alerts worth having
 

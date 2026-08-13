@@ -83,11 +83,15 @@ client ──GET /f/<hash>──▶ node N
   3. stripes are reconstructed through an ordered READ-AHEAD pipeline
      (6 in flight): per stripe, the local cache is consulted, then the
      closest neighbor's cache (one local transfer beats k far ones),
-     then the k data shards are fetched in parallel — local store
-     first, then peers; parity is requested only if a data shard is
-     missing. On a healthy cluster not one parity byte crosses the
-     wire. decode_stripe: any k valid shards out of 6 are enough
-     (a peer that fails once is written off for this request)
+     then the k data shards are fetched as a HEDGED race — parity
+     joins after an adaptive delay (3x the learned fetch latency) or on
+     the first failure, and the first k valid shards win, so a slow
+     peer loses the race instead of stalling it. On a healthy cluster
+     not one parity byte crosses the wire. decode_stripe: any k valid
+     shards out of 6 are enough. Range reads take a cheaper door when
+     the window fits in a subset of data shards (the layout is
+     contiguous): only the covering shards are fetched, BLAKE3-checked,
+     no reconstruction at all
   4. global BLAKE3 recomputed on the fly, compared to the manifest —
      the pipeline yields strictly in order, so the check is unchanged
 ```
