@@ -1412,3 +1412,180 @@ pub async fn org_list(peers: &[SocketAddr], only_org: Option<&str>) -> Result<()
     }
     Ok(())
 }
+
+// ── Space keys ───────────────────────────────────────────────────────
+
+/// One key as `/api/orgs` serves it (public material only).
+#[derive(serde::Deserialize)]
+struct KeyView {
+    public_key: String,
+    role: String,
+    name: String,
+}
+
+/// The `/api/orgs` view including keys (additive to [`OrgsView`]; kept
+/// separate so old nodes' answers still parse for the org commands).
+#[derive(serde::Deserialize)]
+struct OrgsKeysView {
+    #[serde(default)]
+    space_keys: std::collections::BTreeMap<String, Vec<KeyView>>,
+}
+
+async fn fetch_space_keys(
+    peers: &[SocketAddr],
+) -> Result<std::collections::BTreeMap<String, Vec<KeyView>>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    for peer in peers {
+        let url = format!("http://{}:8080/api/orgs", peer.ip());
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(view) = resp.json::<OrgsKeysView>().await {
+                return Ok(view.space_keys);
+            }
+        }
+    }
+    bail!("no node answered /api/orgs (tried {} peer(s))", peers.len());
+}
+
+fn parse_role(role: &str) -> Result<nauka_raft::types::SpaceKeyRole> {
+    match role {
+        "signer" => Ok(nauka_raft::types::SpaceKeyRole::Signer),
+        "admin" => Ok(nauka_raft::types::SpaceKeyRole::Admin),
+        other => bail!("unknown role {other:?}: use `signer` (read links only) or `admin`"),
+    }
+}
+
+pub async fn space_key_add(
+    peers: &[SocketAddr],
+    space: &str,
+    role: &str,
+    name: Option<&str>,
+    public_key_hex: Option<&str>,
+) -> Result<()> {
+    split_space_path(space)?;
+    let role_parsed = parse_role(role)?;
+    let (secret, public) = match public_key_hex {
+        Some(hex_str) => (None, crate::spaceauth::parse_public_hex(hex_str)?),
+        None => {
+            let (secret, public) = crate::spaceauth::generate();
+            (Some(secret), public)
+        }
+    };
+    let name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{role}-{}", &hex::encode(public)[..6]));
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::AddSpaceKey {
+            space: space.to_string(),
+            key: nauka_raft::types::SpaceKey {
+                public_key: public,
+                role: role_parsed,
+                name: name.clone(),
+            },
+        },
+    )
+    .await?;
+    println!("key {name} ({role}) registered on {space}");
+    println!("  public : {}", hex::encode(public));
+    if let Some(secret) = secret {
+        println!("  private: {secret}");
+        println!(
+            "{}",
+            style(
+                "  ^ shown ONCE and stored NOWHERE — put it in your application's secret \
+                 store now. Lost = rotate: `space key add` a new one, `space key rm` this \
+                 one."
+            )
+            .yellow()
+        );
+    }
+    Ok(())
+}
+
+pub async fn space_key_ls(peers: &[SocketAddr], space: &str) -> Result<()> {
+    split_space_path(space)?;
+    let all = fetch_space_keys(peers).await?;
+    match all.get(space) {
+        None => println!("no keys on {space} — nauka space key add {space} --role admin"),
+        Some(keys) => {
+            for k in keys {
+                println!("{}  {}  {}", k.public_key, k.role, k.name);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn space_key_rm(peers: &[SocketAddr], space: &str, selector: &str) -> Result<()> {
+    split_space_path(space)?;
+    let all = fetch_space_keys(peers).await?;
+    let keys = all
+        .get(space)
+        .with_context(|| format!("no keys on space {space}"))?;
+    let matches: Vec<&KeyView> = keys
+        .iter()
+        .filter(|k| k.name == selector || k.public_key.starts_with(&selector.to_lowercase()))
+        .collect();
+    let key = match matches.as_slice() {
+        [one] => one,
+        [] => bail!("no key on {space} matches {selector:?} (see `space key ls {space}`)"),
+        _ => bail!("{selector:?} is ambiguous on {space} — use the full name or a longer prefix"),
+    };
+    let public = crate::spaceauth::parse_public_hex(&key.public_key)?;
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::RemoveSpaceKey {
+            space: space.to_string(),
+            public_key: public,
+        },
+    )
+    .await?;
+    println!(
+        "key {} removed from {space} — its signatures are dead cluster-wide",
+        key.name
+    );
+    Ok(())
+}
+
+/// Offline signing: no peers, no network. What Yogfile's backend does in
+/// code, expressed as a command for scripts and humans.
+pub fn space_sign(
+    space: &str,
+    secret: &str,
+    method: &str,
+    path: &str,
+    content_hash: Option<&str>,
+) -> Result<()> {
+    split_space_path(space)?;
+    let sk = crate::spaceauth::parse_secret(secret)?;
+    let public = hex::encode(sk.verifying_key().to_bytes());
+    let timestamp = crate::spaceauth::unix_now();
+    let canonical = crate::spaceauth::canonical_write(method, path, space, timestamp, content_hash);
+    let signature = crate::spaceauth::sign(&sk, &canonical);
+    println!("X-Nauka-Space: {space}");
+    println!("X-Nauka-Key: {public}");
+    println!("X-Nauka-Timestamp: {timestamp}");
+    if let Some(h) = content_hash {
+        println!("X-Nauka-Content-Hash: {h}");
+    }
+    println!("X-Nauka-Signature: {signature}");
+    eprintln!();
+    let hash_flag = content_hash
+        .map(|h| format!(" -H 'X-Nauka-Content-Hash: {h}'"))
+        .unwrap_or_default();
+    eprintln!(
+        "{}",
+        style(format!(
+            "# valid {}s — example:\n\
+             curl -T <file> 'http://<node>:8080{path}' \\\n\
+            \x20 -H 'X-Nauka-Space: {space}' -H 'X-Nauka-Key: {public}' \\\n\
+            \x20 -H 'X-Nauka-Timestamp: {timestamp}'{hash_flag} \\\n\
+            \x20 -H 'X-Nauka-Signature: {signature}'",
+            crate::spaceauth::MAX_CLOCK_SKEW
+        ))
+        .dim()
+    );
+    Ok(())
+}

@@ -13,6 +13,7 @@ mod ingest;
 mod node;
 #[cfg(feature = "s3")]
 mod s3;
+mod spaceauth;
 mod telemetry;
 mod top;
 mod update;
@@ -404,6 +405,68 @@ enum SpaceCmd {
     /// Delete a space.
     Rm {
         name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Manage a space's Ed25519 keys. The private key is generated on
+    /// YOUR machine and never transmitted — the cluster only ever holds
+    /// the public half.
+    #[command(subcommand)]
+    Key(SpaceKeyCmd),
+    /// Sign a write request offline with a space's private key; prints
+    /// the headers to attach (and a ready-to-paste curl). No network, no
+    /// cluster round-trip — signing IS the permission.
+    Sign {
+        /// The space, e.g. yogfile/uploads.
+        space: String,
+        /// The private key (`nsk_…`) printed once by `space key add`.
+        #[arg(long)]
+        key: String,
+        #[arg(long, default_value = "PUT")]
+        method: String,
+        #[arg(long, default_value = "/api/upload")]
+        path: String,
+        /// BLAKE3 of the exact bytes about to be uploaded. Binds the
+        /// signature to the content; without it the signature only
+        /// covers method/path/space/time.
+        #[arg(long)]
+        content_hash: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpaceKeyCmd {
+    /// Generate a keypair (or register a provided public key) on a space.
+    /// Prints the private key ONCE — it is never stored anywhere.
+    Add {
+        /// The space, e.g. yogfile/uploads.
+        space: String,
+        /// `admin` (writes + everything) or `signer` (read links only —
+        /// the role for exposed frontends).
+        #[arg(long)]
+        role: String,
+        /// Handle for rotation (default: the role plus a random suffix).
+        #[arg(long)]
+        name: Option<String>,
+        /// Register an externally-generated Ed25519 public key (64 hex
+        /// chars) instead of generating here.
+        #[arg(long)]
+        public_key: Option<String>,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// List a space's keys.
+    Ls {
+        space: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Remove a key (by name or public-key prefix). Signatures made with
+    /// it die cluster-wide within one replication round-trip.
+    Rm {
+        space: String,
+        /// The key's name, or a unique prefix of its public key.
+        selector: String,
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
@@ -1740,6 +1803,37 @@ async fn main() -> Result<()> {
                 node::space_set_suspended(&peers, &name, false).await?
             }
             SpaceCmd::Rm { name, peers } => node::space_delete(&peers, &name).await?,
+            SpaceCmd::Key(cmd) => match cmd {
+                SpaceKeyCmd::Add {
+                    space,
+                    role,
+                    name,
+                    public_key,
+                    peers,
+                } => {
+                    node::space_key_add(
+                        &peers,
+                        &space,
+                        &role,
+                        name.as_deref(),
+                        public_key.as_deref(),
+                    )
+                    .await?
+                }
+                SpaceKeyCmd::Ls { space, peers } => node::space_key_ls(&peers, &space).await?,
+                SpaceKeyCmd::Rm {
+                    space,
+                    selector,
+                    peers,
+                } => node::space_key_rm(&peers, &space, &selector).await?,
+            },
+            SpaceCmd::Sign {
+                space,
+                key,
+                method,
+                path,
+                content_hash,
+            } => node::space_sign(&space, &key, &method, &path, content_hash.as_deref())?,
         },
         Cmd::PutRemote {
             file,

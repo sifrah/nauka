@@ -354,413 +354,355 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                     replies.push(AppResponse::default());
                 }
                 EntryPayload::Normal(cmd) => {
-                    let reply =
-                        match cmd {
-                            AppCommand::RegisterManifest(manifest) => {
-                                let hash = manifest.file_hash.clone();
-                                if inner.state.banned.contains_key(&hash) {
-                                    // Re-upload of banned content: flatly refused.
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some("banned".into()),
-                                    }
-                                } else {
-                                    inner.state.manifests.insert(hash.clone(), manifest);
-                                    AppResponse {
-                                        ok: true,
-                                        info: Some(hash),
-                                    }
-                                }
-                            }
-                            AppCommand::UnregisterManifest { file_hash } => {
-                                let removed = inner.state.manifests.remove(&file_hash).is_some();
+                    let reply = match cmd {
+                        AppCommand::RegisterManifest(manifest) => {
+                            let hash = manifest.file_hash.clone();
+                            if inner.state.banned.contains_key(&hash) {
+                                // Re-upload of banned content: flatly refused.
                                 AppResponse {
-                                    ok: removed,
-                                    info: Some(file_hash),
+                                    ok: false,
+                                    info: Some("banned".into()),
                                 }
-                            }
-                            AppCommand::UpdateNodeStats {
-                                addr,
-                                capacity_bytes,
-                            } => {
-                                inner.state.node_capacities.insert(addr, capacity_bytes);
+                            } else {
+                                inner.state.manifests.insert(hash.clone(), manifest);
                                 AppResponse {
                                     ok: true,
-                                    info: None,
+                                    info: Some(hash),
                                 }
                             }
-                            AppCommand::UpdateNodeCoord { addr, coord } => {
-                                inner.state.node_coords.insert(addr, coord);
+                        }
+                        AppCommand::UnregisterManifest { file_hash } => {
+                            let removed = inner.state.manifests.remove(&file_hash).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(file_hash),
+                            }
+                        }
+                        AppCommand::UpdateNodeStats {
+                            addr,
+                            capacity_bytes,
+                        } => {
+                            inner.state.node_capacities.insert(addr, capacity_bytes);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::UpdateNodeCoord { addr, coord } => {
+                            inner.state.node_coords.insert(addr, coord);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::SetNodeDisabled { addr, disabled } => {
+                            if disabled {
+                                inner.state.disabled.insert(addr);
+                            } else {
+                                inner.state.disabled.remove(&addr);
+                            }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::UpsertOrg { name, record } => {
+                            inner.state.orgs.insert(name, record);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::DeleteOrg { name } => {
+                            // Enforced in the state machine, not the CLI:
+                            // every replica refuses identically, whatever
+                            // client sent the command.
+                            let in_use = inner.state.spaces.values().any(|s| s.org == name);
+                            if in_use {
                                 AppResponse {
-                                    ok: true,
-                                    info: None,
-                                }
-                            }
-                            AppCommand::SetNodeDisabled { addr, disabled } => {
-                                if disabled {
-                                    inner.state.disabled.insert(addr);
-                                } else {
-                                    inner.state.disabled.remove(&addr);
-                                }
-                                AppResponse {
-                                    ok: true,
-                                    info: None,
-                                }
-                            }
-                            AppCommand::UpsertOrg { name, record } => {
-                                inner.state.orgs.insert(name, record);
-                                AppResponse {
-                                    ok: true,
-                                    info: None,
-                                }
-                            }
-                            AppCommand::DeleteOrg { name } => {
-                                // Enforced in the state machine, not the CLI:
-                                // every replica refuses identically, whatever
-                                // client sent the command.
-                                let in_use = inner.state.spaces.values().any(|s| s.org == name);
-                                if in_use {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some(format!(
-                                            "organisation {name} still has spaces — \
+                                    ok: false,
+                                    info: Some(format!(
+                                        "organisation {name} still has spaces — \
                                              delete them first"
-                                        )),
-                                    }
-                                } else if inner.state.orgs.remove(&name).is_none() {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some(format!("no organisation named {name}")),
-                                    }
-                                } else {
-                                    AppResponse {
-                                        ok: true,
-                                        info: None,
-                                    }
+                                    )),
                                 }
-                            }
-                            AppCommand::UpsertSpace { name, record } => {
-                                // The key must be exactly `<org>/<one segment>`,
-                                // with the org matching the record's.
-                                let well_formed = name
-                                    .strip_prefix(&format!("{}/", record.org))
-                                    .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
-                                if !inner.state.orgs.contains_key(&record.org) {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some(format!(
-                                            "no organisation named {} — create it first",
-                                            record.org
-                                        )),
-                                    }
-                                } else if !well_formed {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some(format!(
-                                            "space name {name} does not match its \
-                                             organisation {} (expected {}/<name>)",
-                                            record.org, record.org
-                                        )),
-                                    }
-                                } else {
-                                    inner.state.spaces.insert(name, record);
-                                    AppResponse {
-                                        ok: true,
-                                        info: None,
-                                    }
+                            } else if inner.state.orgs.remove(&name).is_none() {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("no organisation named {name}")),
                                 }
-                            }
-                            AppCommand::DeleteSpace { name } => {
-                                if inner.state.spaces.remove(&name).is_none() {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some(format!("no space named {name}")),
-                                    }
-                                } else {
-                                    AppResponse {
-                                        ok: true,
-                                        info: None,
-                                    }
-                                }
-                            }
-                            AppCommand::UpdateNodeEgress { addr, egress } => {
-                                inner.state.node_egress.insert(addr, egress);
+                            } else {
                                 AppResponse {
                                     ok: true,
                                     info: None,
                                 }
                             }
-                            AppCommand::BanHash { file_hash, reason } => {
-                                // Banning also removes from the registry: the file
-                                // becomes unreachable AND its shards become
-                                // orphans, hence purgeable by the GC.
-                                inner.state.manifests.remove(&file_hash);
-                                inner.state.banned.insert(file_hash.clone(), reason);
+                        }
+                        AppCommand::UpsertSpace { name, record } => {
+                            // The key must be exactly `<org>/<one segment>`,
+                            // with the org matching the record's.
+                            let well_formed = name
+                                .strip_prefix(&format!("{}/", record.org))
+                                .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
+                            if !inner.state.orgs.contains_key(&record.org) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!(
+                                        "no organisation named {} — create it first",
+                                        record.org
+                                    )),
+                                }
+                            } else if !well_formed {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!(
+                                        "space name {name} does not match its \
+                                             organisation {} (expected {}/<name>)",
+                                        record.org, record.org
+                                    )),
+                                }
+                            } else {
+                                inner.state.spaces.insert(name, record);
                                 AppResponse {
                                     ok: true,
-                                    info: Some(file_hash),
+                                    info: None,
                                 }
                             }
-                            AppCommand::UnbanHash { file_hash } => {
-                                let removed = inner.state.banned.remove(&file_hash).is_some();
+                        }
+                        AppCommand::DeleteSpace { name } => {
+                            if inner.state.spaces.remove(&name).is_none() {
                                 AppResponse {
-                                    ok: removed,
-                                    info: Some(file_hash),
+                                    ok: false,
+                                    info: Some(format!("no space named {name}")),
                                 }
-                            }
-
-                            // ── S3 ────────────────────────────────────────
-                            AppCommand::PutCredential(cred) => {
-                                let id = cred.access_key_id.clone();
-                                inner.state.s3.credentials.insert(id.clone(), cred);
+                            } else {
+                                // Keys die with their space: a future
+                                // space reusing the name must not
+                                // inherit someone else's signers.
+                                inner.state.space_keys.remove(&name);
                                 AppResponse {
                                     ok: true,
-                                    info: Some(id),
+                                    info: None,
                                 }
                             }
-                            AppCommand::DeleteCredential { access_key_id } => {
-                                let removed =
-                                    inner.state.s3.credentials.remove(&access_key_id).is_some();
+                        }
+                        AppCommand::AddSpaceKey { space, key } => {
+                            if !inner.state.spaces.contains_key(&space) {
                                 AppResponse {
-                                    ok: removed,
-                                    info: Some(access_key_id),
+                                    ok: false,
+                                    info: Some(format!("no space named {space}")),
                                 }
-                            }
-                            AppCommand::CreateBucket { name, bucket } => {
-                                // S3 refuses to recreate an existing bucket
-                                // (BucketAlreadyOwnedByYou / AlreadyExists); the
-                                // check belongs here, where it is serialized by
-                                // the log, not in the HTTP layer where two
-                                // concurrent creates could both pass.
-                                if inner.state.s3.buckets.contains_key(&name) {
+                            } else {
+                                let keys = inner.state.space_keys.entry(space).or_default();
+                                if keys.iter().any(|k| k.public_key == key.public_key) {
                                     AppResponse {
                                         ok: false,
-                                        info: Some("bucket exists".into()),
+                                        info: Some("this public key is already registered".into()),
+                                    }
+                                } else if keys.iter().any(|k| k.name == key.name) {
+                                    AppResponse {
+                                        ok: false,
+                                        info: Some(format!(
+                                            "a key named {:?} already exists on this \
+                                                 space — pick another --name",
+                                            key.name
+                                        )),
                                     }
                                 } else {
-                                    inner.state.s3.buckets.insert(name.clone(), *bucket);
+                                    keys.push(key);
                                     AppResponse {
                                         ok: true,
-                                        info: Some(name),
+                                        info: None,
                                     }
                                 }
                             }
-                            AppCommand::UpdateBucket { name, bucket } => {
-                                let exists = inner.state.s3.buckets.contains_key(&name);
-                                if exists {
-                                    inner.state.s3.buckets.insert(name.clone(), *bucket);
+                        }
+                        AppCommand::RemoveSpaceKey { space, public_key } => {
+                            let removed = match inner.state.space_keys.get_mut(&space) {
+                                Some(keys) => {
+                                    let before = keys.len();
+                                    keys.retain(|k| k.public_key != public_key);
+                                    if keys.is_empty() {
+                                        inner.state.space_keys.remove(&space);
+                                    }
+                                    before
+                                        != inner.state.space_keys.get(&space).map_or(0, |k| k.len())
                                 }
+                                None => false,
+                            };
+                            if removed {
                                 AppResponse {
-                                    ok: exists,
+                                    ok: true,
+                                    info: None,
+                                }
+                            } else {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("no such key on space {space}")),
+                                }
+                            }
+                        }
+                        AppCommand::UpdateNodeEgress { addr, egress } => {
+                            inner.state.node_egress.insert(addr, egress);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::BanHash { file_hash, reason } => {
+                            // Banning also removes from the registry: the file
+                            // becomes unreachable AND its shards become
+                            // orphans, hence purgeable by the GC.
+                            inner.state.manifests.remove(&file_hash);
+                            inner.state.banned.insert(file_hash.clone(), reason);
+                            AppResponse {
+                                ok: true,
+                                info: Some(file_hash),
+                            }
+                        }
+                        AppCommand::UnbanHash { file_hash } => {
+                            let removed = inner.state.banned.remove(&file_hash).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(file_hash),
+                            }
+                        }
+
+                        // ── S3 ────────────────────────────────────────
+                        AppCommand::PutCredential(cred) => {
+                            let id = cred.access_key_id.clone();
+                            inner.state.s3.credentials.insert(id.clone(), cred);
+                            AppResponse {
+                                ok: true,
+                                info: Some(id),
+                            }
+                        }
+                        AppCommand::DeleteCredential { access_key_id } => {
+                            let removed =
+                                inner.state.s3.credentials.remove(&access_key_id).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(access_key_id),
+                            }
+                        }
+                        AppCommand::CreateBucket { name, bucket } => {
+                            // S3 refuses to recreate an existing bucket
+                            // (BucketAlreadyOwnedByYou / AlreadyExists); the
+                            // check belongs here, where it is serialized by
+                            // the log, not in the HTTP layer where two
+                            // concurrent creates could both pass.
+                            if inner.state.s3.buckets.contains_key(&name) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some("bucket exists".into()),
+                                }
+                            } else {
+                                inner.state.s3.buckets.insert(name.clone(), *bucket);
+                                AppResponse {
+                                    ok: true,
                                     info: Some(name),
                                 }
                             }
-                            AppCommand::DeleteBucket { name } => {
-                                // Only an empty bucket may go, as S3 requires.
-                                let has_objects =
-                                    inner.state.s3.objects.keys().any(|(b, _)| *b == name);
-                                if has_objects {
-                                    AppResponse {
-                                        ok: false,
-                                        info: Some("bucket not empty".into()),
-                                    }
-                                } else {
-                                    let removed = inner.state.s3.buckets.remove(&name).is_some();
-                                    AppResponse {
-                                        ok: removed,
-                                        info: Some(name),
-                                    }
-                                }
+                        }
+                        AppCommand::UpdateBucket { name, bucket } => {
+                            let exists = inner.state.s3.buckets.contains_key(&name);
+                            if exists {
+                                inner.state.s3.buckets.insert(name.clone(), *bucket);
                             }
-                            AppCommand::PutObjectVersion {
-                                bucket,
-                                key,
-                                version,
-                            } => {
-                                let versioned = inner
-                                    .state
-                                    .s3
-                                    .buckets
-                                    .get(&bucket)
-                                    .map(|b| b.versioning == nauka_s3::VersioningState::Enabled)
-                                    .unwrap_or(false);
-                                let entry =
-                                    inner.state.s3.objects.entry((bucket, key)).or_default();
-                                if versioned {
-                                    // Newest first: history is preserved.
-                                    entry.versions.insert(0, *version);
-                                } else {
-                                    // Unversioned (or suspended): a single
-                                    // "null" version, replaced in place.
-                                    entry
-                                        .versions
-                                        .retain(|v| v.version_id != version.version_id);
-                                    entry.versions.insert(0, *version);
-                                }
+                            AppResponse {
+                                ok: exists,
+                                info: Some(name),
+                            }
+                        }
+                        AppCommand::DeleteBucket { name } => {
+                            // Only an empty bucket may go, as S3 requires.
+                            let has_objects =
+                                inner.state.s3.objects.keys().any(|(b, _)| *b == name);
+                            if has_objects {
                                 AppResponse {
-                                    ok: true,
-                                    info: None,
+                                    ok: false,
+                                    info: Some("bucket not empty".into()),
                                 }
-                            }
-                            AppCommand::DeleteObjectVersion {
-                                bucket,
-                                key,
-                                version_id,
-                            } => {
-                                let k = (bucket, key);
-                                let mut removed = false;
-                                if let Some(entry) = inner.state.s3.objects.get_mut(&k) {
-                                    let before = entry.versions.len();
-                                    entry.versions.retain(|v| v.version_id != version_id);
-                                    removed = entry.versions.len() != before;
-                                    // An entry with no versions left is gone:
-                                    // `objects` never holds an empty history.
-                                    if entry.versions.is_empty() {
-                                        inner.state.s3.objects.remove(&k);
-                                    }
-                                }
+                            } else {
+                                let removed = inner.state.s3.buckets.remove(&name).is_some();
                                 AppResponse {
                                     ok: removed,
-                                    info: None,
+                                    info: Some(name),
                                 }
                             }
-                            AppCommand::SetObjectTags {
-                                bucket,
-                                key,
-                                version_id,
-                                tags,
-                            } => {
-                                let found =
-                                    inner.state.s3.objects.get_mut(&(bucket, key)).and_then(
-                                        |entry| match &version_id {
-                                            Some(id) => entry
-                                                .versions
-                                                .iter_mut()
-                                                .find(|v| v.version_id == *id),
-                                            None => entry.versions.first_mut(),
-                                        },
-                                    );
-                                match found {
-                                    Some(v) => {
-                                        v.tags = tags;
-                                        AppResponse {
-                                            ok: true,
-                                            info: None,
-                                        }
-                                    }
-                                    None => AppResponse {
-                                        ok: false,
-                                        info: Some("no such object".into()),
-                                    },
+                        }
+                        AppCommand::PutObjectVersion {
+                            bucket,
+                            key,
+                            version,
+                        } => {
+                            let versioned = inner
+                                .state
+                                .s3
+                                .buckets
+                                .get(&bucket)
+                                .map(|b| b.versioning == nauka_s3::VersioningState::Enabled)
+                                .unwrap_or(false);
+                            let entry = inner.state.s3.objects.entry((bucket, key)).or_default();
+                            if versioned {
+                                // Newest first: history is preserved.
+                                entry.versions.insert(0, *version);
+                            } else {
+                                // Unversioned (or suspended): a single
+                                // "null" version, replaced in place.
+                                entry
+                                    .versions
+                                    .retain(|v| v.version_id != version.version_id);
+                                entry.versions.insert(0, *version);
+                            }
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
+                        AppCommand::DeleteObjectVersion {
+                            bucket,
+                            key,
+                            version_id,
+                        } => {
+                            let k = (bucket, key);
+                            let mut removed = false;
+                            if let Some(entry) = inner.state.s3.objects.get_mut(&k) {
+                                let before = entry.versions.len();
+                                entry.versions.retain(|v| v.version_id != version_id);
+                                removed = entry.versions.len() != before;
+                                // An entry with no versions left is gone:
+                                // `objects` never holds an empty history.
+                                if entry.versions.is_empty() {
+                                    inner.state.s3.objects.remove(&k);
                                 }
                             }
-                            AppCommand::SetObjectAcl {
-                                bucket,
-                                key,
-                                version_id,
-                                acl,
-                            } => {
-                                let found =
-                                    inner.state.s3.objects.get_mut(&(bucket, key)).and_then(
-                                        |entry| match &version_id {
-                                            Some(id) => entry
-                                                .versions
-                                                .iter_mut()
-                                                .find(|v| v.version_id == *id),
-                                            None => entry.versions.first_mut(),
-                                        },
-                                    );
-                                match found {
-                                    Some(v) => {
-                                        v.acl = acl;
-                                        AppResponse {
-                                            ok: true,
-                                            info: None,
-                                        }
-                                    }
-                                    None => AppResponse {
-                                        ok: false,
-                                        info: Some("no such object".into()),
-                                    },
-                                }
+                            AppResponse {
+                                ok: removed,
+                                info: None,
                             }
-                            AppCommand::SetObjectRetention {
-                                bucket,
-                                key,
-                                version_id,
-                                retention,
-                            } => {
-                                let found = inner
+                        }
+                        AppCommand::SetObjectTags {
+                            bucket,
+                            key,
+                            version_id,
+                            tags,
+                        } => {
+                            let found =
+                                inner
                                     .state
                                     .s3
                                     .objects
                                     .get_mut(&(bucket, key))
-                                    .and_then(|e| match &version_id {
+                                    .and_then(|entry| match &version_id {
                                         Some(id) => {
-                                            e.versions.iter_mut().find(|v| v.version_id == *id)
+                                            entry.versions.iter_mut().find(|v| v.version_id == *id)
                                         }
-                                        None => e.versions.first_mut(),
+                                        None => entry.versions.first_mut(),
                                     });
-                                match found {
-                                    Some(v) => {
-                                        v.retention = retention;
-                                        AppResponse {
-                                            ok: true,
-                                            info: None,
-                                        }
-                                    }
-                                    None => AppResponse {
-                                        ok: false,
-                                        info: Some("no such object".into()),
-                                    },
-                                }
-                            }
-                            AppCommand::SetObjectLegalHold {
-                                bucket,
-                                key,
-                                version_id,
-                                on,
-                            } => {
-                                let found = inner
-                                    .state
-                                    .s3
-                                    .objects
-                                    .get_mut(&(bucket, key))
-                                    .and_then(|e| match &version_id {
-                                        Some(id) => {
-                                            e.versions.iter_mut().find(|v| v.version_id == *id)
-                                        }
-                                        None => e.versions.first_mut(),
-                                    });
-                                match found {
-                                    Some(v) => {
-                                        v.legal_hold = on;
-                                        AppResponse {
-                                            ok: true,
-                                            info: None,
-                                        }
-                                    }
-                                    None => AppResponse {
-                                        ok: false,
-                                        info: Some("no such object".into()),
-                                    },
-                                }
-                            }
-                            AppCommand::PutUpload(upload) => {
-                                let id = upload.upload_id.clone();
-                                inner.state.s3.uploads.insert(id.clone(), *upload);
-                                AppResponse {
-                                    ok: true,
-                                    info: Some(id),
-                                }
-                            }
-                            AppCommand::PutUploadPart {
-                                upload_id,
-                                part_number,
-                                part,
-                            } => match inner.state.s3.uploads.get_mut(&upload_id) {
-                                Some(upload) => {
-                                    upload.parts.insert(part_number, *part);
+                            match found {
+                                Some(v) => {
+                                    v.tags = tags;
                                     AppResponse {
                                         ok: true,
                                         info: None,
@@ -768,17 +710,139 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 }
                                 None => AppResponse {
                                     ok: false,
-                                    info: Some("no such upload".into()),
+                                    info: Some("no such object".into()),
                                 },
-                            },
-                            AppCommand::DeleteUpload { upload_id } => {
-                                let removed = inner.state.s3.uploads.remove(&upload_id).is_some();
+                            }
+                        }
+                        AppCommand::SetObjectAcl {
+                            bucket,
+                            key,
+                            version_id,
+                            acl,
+                        } => {
+                            let found =
+                                inner
+                                    .state
+                                    .s3
+                                    .objects
+                                    .get_mut(&(bucket, key))
+                                    .and_then(|entry| match &version_id {
+                                        Some(id) => {
+                                            entry.versions.iter_mut().find(|v| v.version_id == *id)
+                                        }
+                                        None => entry.versions.first_mut(),
+                                    });
+                            match found {
+                                Some(v) => {
+                                    v.acl = acl;
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                                None => AppResponse {
+                                    ok: false,
+                                    info: Some("no such object".into()),
+                                },
+                            }
+                        }
+                        AppCommand::SetObjectRetention {
+                            bucket,
+                            key,
+                            version_id,
+                            retention,
+                        } => {
+                            let found =
+                                inner
+                                    .state
+                                    .s3
+                                    .objects
+                                    .get_mut(&(bucket, key))
+                                    .and_then(|e| match &version_id {
+                                        Some(id) => {
+                                            e.versions.iter_mut().find(|v| v.version_id == *id)
+                                        }
+                                        None => e.versions.first_mut(),
+                                    });
+                            match found {
+                                Some(v) => {
+                                    v.retention = retention;
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                                None => AppResponse {
+                                    ok: false,
+                                    info: Some("no such object".into()),
+                                },
+                            }
+                        }
+                        AppCommand::SetObjectLegalHold {
+                            bucket,
+                            key,
+                            version_id,
+                            on,
+                        } => {
+                            let found =
+                                inner
+                                    .state
+                                    .s3
+                                    .objects
+                                    .get_mut(&(bucket, key))
+                                    .and_then(|e| match &version_id {
+                                        Some(id) => {
+                                            e.versions.iter_mut().find(|v| v.version_id == *id)
+                                        }
+                                        None => e.versions.first_mut(),
+                                    });
+                            match found {
+                                Some(v) => {
+                                    v.legal_hold = on;
+                                    AppResponse {
+                                        ok: true,
+                                        info: None,
+                                    }
+                                }
+                                None => AppResponse {
+                                    ok: false,
+                                    info: Some("no such object".into()),
+                                },
+                            }
+                        }
+                        AppCommand::PutUpload(upload) => {
+                            let id = upload.upload_id.clone();
+                            inner.state.s3.uploads.insert(id.clone(), *upload);
+                            AppResponse {
+                                ok: true,
+                                info: Some(id),
+                            }
+                        }
+                        AppCommand::PutUploadPart {
+                            upload_id,
+                            part_number,
+                            part,
+                        } => match inner.state.s3.uploads.get_mut(&upload_id) {
+                            Some(upload) => {
+                                upload.parts.insert(part_number, *part);
                                 AppResponse {
-                                    ok: removed,
-                                    info: Some(upload_id),
+                                    ok: true,
+                                    info: None,
                                 }
                             }
-                        };
+                            None => AppResponse {
+                                ok: false,
+                                info: Some("no such upload".into()),
+                            },
+                        },
+                        AppCommand::DeleteUpload { upload_id } => {
+                            let removed = inner.state.s3.uploads.remove(&upload_id).is_some();
+                            AppResponse {
+                                ok: removed,
+                                info: Some(upload_id),
+                            }
+                        }
+                    };
                     replies.push(reply);
                 }
             }

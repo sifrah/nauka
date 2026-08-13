@@ -323,7 +323,30 @@ async fn shard_inventory(State(state): State<Arc<ApiState>>) -> Json<Vec<String>
 /// whom.
 async fn orgs_view(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
     let s = state.app.app_state();
-    Json(serde_json::json!({ "orgs": s.orgs, "spaces": s.spaces }))
+    // Keys go out hex-encoded (they are PUBLIC verification material —
+    // the private halves never exist server-side).
+    let keys: std::collections::BTreeMap<&String, Vec<serde_json::Value>> = s
+        .space_keys
+        .iter()
+        .map(|(space, keys)| {
+            (
+                space,
+                keys.iter()
+                    .map(|k| {
+                        serde_json::json!({
+                            "public_key": hex::encode(k.public_key),
+                            "role": match k.role {
+                                nauka_raft::types::SpaceKeyRole::Signer => "signer",
+                                nauka_raft::types::SpaceKeyRole::Admin => "admin",
+                            },
+                            "name": k.name,
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    Json(serde_json::json!({ "orgs": s.orgs, "spaces": s.spaces, "space_keys": keys }))
 }
 
 /// GET /api/removal-check?target=<addr> — would removing (or fully
@@ -646,11 +669,131 @@ struct UploadResponse {
     degraded_shards: usize,
 }
 
+/// A write authenticated for a space (`X-Nauka-Space` was present and
+/// its signature checked out).
+struct SpaceWriteAuth {
+    space: String,
+    /// BLAKE3 the client bound into its signature, if any — verified
+    /// against the actual upload once it is fully hashed.
+    claimed_hash: Option<String>,
+}
+
+fn auth_header<'h>(headers: &'h axum::http::HeaderMap, name: &str) -> Option<&'h str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// Checks the Ed25519 write signature carried by a request, against the
+/// replicated space registry. `Ok(None)` = no `X-Nauka-Space` header: a
+/// legacy anonymous write, still accepted until the private-by-default
+/// switch flips. `Ok(Some(_))` = a valid ADMIN signature for the space.
+/// Everything else is a 401/403 with the remedy in the message.
+fn verify_space_write(
+    state: &ApiState,
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    path: &str,
+) -> Result<Option<SpaceWriteAuth>, ApiError> {
+    let Some(space) = auth_header(headers, "x-nauka-space") else {
+        return Ok(None);
+    };
+    let deny = |code: StatusCode, msg: String| ApiError(code, anyhow!(msg));
+    let key_hex = auth_header(headers, "x-nauka-key").ok_or_else(|| {
+        deny(
+            StatusCode::UNAUTHORIZED,
+            "signed write: missing x-nauka-key (generate the headers with `nauka space sign`)"
+                .into(),
+        )
+    })?;
+    let timestamp: u64 = auth_header(headers, "x-nauka-timestamp")
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| {
+            deny(
+                StatusCode::UNAUTHORIZED,
+                "signed write: missing or non-numeric x-nauka-timestamp".into(),
+            )
+        })?;
+    let signature = auth_header(headers, "x-nauka-signature").ok_or_else(|| {
+        deny(
+            StatusCode::UNAUTHORIZED,
+            "signed write: missing x-nauka-signature".into(),
+        )
+    })?;
+    let claimed_hash = auth_header(headers, "x-nauka-content-hash").map(str::to_string);
+
+    let s = state.app.app_state();
+    let record = s.spaces.get(space).ok_or_else(|| {
+        deny(
+            StatusCode::UNAUTHORIZED,
+            format!("no space named {space} on this cluster"),
+        )
+    })?;
+    let org_suspended = s.orgs.get(&record.org).is_none_or(|o| o.suspended);
+    if record.suspended || org_suspended {
+        return Err(deny(
+            StatusCode::FORBIDDEN,
+            format!("space {space} is suspended"),
+        ));
+    }
+    let key = s
+        .space_keys
+        .get(space)
+        .and_then(|keys| {
+            keys.iter()
+                .find(|k| hex::encode(k.public_key) == key_hex.to_lowercase())
+        })
+        .ok_or_else(|| {
+            deny(
+                StatusCode::UNAUTHORIZED,
+                format!("this key is not registered on {space}"),
+            )
+        })?;
+    if key.role != nauka_raft::types::SpaceKeyRole::Admin {
+        return Err(deny(
+            StatusCode::FORBIDDEN,
+            format!(
+                "key {:?} is a signer key — writes require an admin key of {space}",
+                key.name
+            ),
+        ));
+    }
+    if !crate::spaceauth::timestamp_fresh(timestamp, crate::spaceauth::unix_now()) {
+        return Err(deny(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "signature timestamp outside the ±{}s window — re-sign and retry",
+                crate::spaceauth::MAX_CLOCK_SKEW
+            ),
+        ));
+    }
+    let canonical =
+        crate::spaceauth::canonical_write(method, path, space, timestamp, claimed_hash.as_deref());
+    if !crate::spaceauth::verify(&key.public_key, &canonical, signature) {
+        return Err(deny(
+            StatusCode::UNAUTHORIZED,
+            "invalid signature (method, path, space, timestamp and content-hash must match \
+             what was signed)"
+                .into(),
+        ));
+    }
+    Ok(Some(SpaceWriteAuth {
+        space: space.to_string(),
+        claimed_hash,
+    }))
+}
+
 async fn upload(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<UploadParams>,
     request: Request,
 ) -> Result<Json<UploadResponse>, ApiError> {
+    // Space authentication first, before a single body byte is spooled:
+    // an unauthorized writer costs one signature check, not disk.
+    let write_auth = verify_space_write(
+        &state,
+        request.headers(),
+        request.method().as_str(),
+        "/api/upload",
+    )?;
     // A multipart form is a client mistake this endpoint must not absorb:
     // the framing would be stored verbatim as the object, boundary and
     // headers included. Refuse it with the remedy instead of storing junk.
@@ -729,6 +872,34 @@ async fn upload(
         .await
         .map_err(|e| ApiError::from(anyhow!("dispatch task: {e}")))??;
     debug_assert_eq!(size, manifest.file_size);
+
+    // When the signature bound a content hash, the uploaded bytes must
+    // BE that content — otherwise a captured signature could push
+    // arbitrary bytes into the space within the timestamp window. The
+    // file registered before we could hash it, so a lie is unregistered
+    // again (the GC reclaims the shards).
+    if let Some(auth) = &write_auth {
+        if let Some(claimed) = &auth.claimed_hash {
+            if !claimed.eq_ignore_ascii_case(&manifest.file_hash) {
+                let _ = state
+                    .app
+                    .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                        file_hash: manifest.file_hash.clone(),
+                    })
+                    .await;
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    anyhow!(
+                        "content hash mismatch for space {}: the signature binds {}, the \
+                         body hashes to {} — upload discarded",
+                        auth.space,
+                        claimed,
+                        manifest.file_hash
+                    ),
+                ));
+            }
+        }
+    }
 
     Ok(Json(UploadResponse {
         hash: manifest.file_hash.clone(),

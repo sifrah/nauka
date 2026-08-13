@@ -39,6 +39,7 @@ futures = "0.3"
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }
 rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
