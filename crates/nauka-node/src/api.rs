@@ -2204,7 +2204,7 @@ async fn download(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
     let expected_hash = manifest.file_hash.clone();
-    let m = manifest.clone();
+    let m = Arc::new(manifest.clone());
 
     // Reconstruct the FIRST stripe before committing to a status. Once the
     // 200 and its Content-Length are on the wire the only way to signal
@@ -2226,19 +2226,31 @@ async fn download(
     let first = first.and_then(|r| r.ok());
 
     tokio::spawn(async move {
+        use futures::StreamExt as _;
         let mut hasher = blake3::Hasher::new();
-        let mut prefetched = first;
-        for (stripe_idx, stripe) in m.stripes.iter().enumerate() {
-            if let Some(data) = prefetched.take() {
-                hasher.update(&data);
-                if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
-                    return;
-                }
-                continue;
+        // Stripe 0 was already reconstructed by the pre-flight above.
+        if let Some(data) = first {
+            hasher.update(&data);
+            if tx.send(Ok(bytes::Bytes::from(data))).await.is_err() {
+                return;
             }
-            // Budget-aware slot selection + stripe cache, shared with
-            // every other read path.
-            let data = match reconstruct_stripe(&fetcher, stripe, stripe_idx, &m).await {
+        }
+        // Read-ahead pipeline: up to READ_AHEAD_STRIPES reconstructions
+        // in flight (budget-aware slot selection + stripe cache, shared
+        // with every other read path), consumed strictly in order.
+        let mut pipeline =
+            futures::stream::iter(
+                (1..m.stripes.len()).map(|stripe_idx| {
+                    let fetcher = fetcher.clone();
+                    let m = m.clone();
+                    async move {
+                        reconstruct_stripe(&fetcher, &m.stripes[stripe_idx], stripe_idx, &m).await
+                    }
+                }),
+            )
+            .buffered(READ_AHEAD_STRIPES);
+        while let Some(res) = pipeline.next().await {
+            let data = match res {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
@@ -2254,6 +2266,7 @@ async fn download(
                 return; // client gone
             }
         }
+        drop(pipeline);
         if hasher.finalize().to_hex().to_string() != expected_hash {
             let _ = tx
                 .send(Err(std::io::Error::other("integrity violated")))
@@ -2343,21 +2356,38 @@ async fn serve_range(
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
-    let m = manifest.clone();
+    let m = Arc::new(manifest.clone());
     tokio::spawn(async move {
-        let mut offset: u64 = 0; // start of the current stripe in the file
+        use futures::StreamExt as _;
+        // Offsets are loop-carried over variable stripe lengths: plan the
+        // covered stripes first, pipeline the reconstructions after.
+        let mut plan: Vec<(usize, u64)> = Vec::new();
+        let mut offset: u64 = 0;
         for (stripe_idx, stripe) in m.stripes.iter().enumerate() {
-            let stripe_len = stripe.data_len as u64;
-            let stripe_end = offset + stripe_len; // exclusive
-                                                  // Stripe entirely before/after the range: nothing to do.
-            if stripe_end <= start {
-                offset = stripe_end;
-                continue;
+            let stripe_end = offset + stripe.data_len as u64; // exclusive
+            if stripe_end > start && offset <= end {
+                plan.push((stripe_idx, offset));
             }
+            offset = stripe_end;
             if offset > end {
                 break;
             }
-            let data = match reconstruct_stripe(&fetcher, stripe, stripe_idx, &m).await {
+        }
+        // Same read-ahead as the full download: media players issue long
+        // range reads, and a seek far from the shards deserves the same
+        // pipelining as a plain GET.
+        let mut pipeline = futures::stream::iter(plan.into_iter().map(|(stripe_idx, off)| {
+            let fetcher = fetcher.clone();
+            let m = m.clone();
+            async move {
+                let res =
+                    reconstruct_stripe(&fetcher, &m.stripes[stripe_idx], stripe_idx, &m).await;
+                (stripe_idx, off, res)
+            }
+        }))
+        .buffered(READ_AHEAD_STRIPES);
+        while let Some((stripe_idx, off, res)) = pipeline.next().await {
+            let data = match res {
                 Ok(d) => d,
                 Err(e) => {
                     let _ = tx
@@ -2369,8 +2399,9 @@ async fn serve_range(
                 }
             };
             // Cut out the useful portion of this stripe.
-            let from = start.saturating_sub(offset) as usize;
-            let to = ((end - offset + 1).min(stripe_len)) as usize;
+            let stripe_len = m.stripes[stripe_idx].data_len as u64;
+            let from = start.saturating_sub(off) as usize;
+            let to = ((end - off + 1).min(stripe_len)) as usize;
             if from < to
                 && to <= data.len()
                 && tx
@@ -2380,7 +2411,6 @@ async fn serve_range(
             {
                 return; // client gone
             }
-            offset = stripe_end;
         }
     });
 
@@ -2531,6 +2561,15 @@ pub(crate) fn describe_metrics() {
 /// Read speed once a space is past its monthly egress quota: slow
 /// enough to stop the bleeding, alive enough not to break pages.
 const EGRESS_CRAWL: u64 = 64 * 1024;
+
+/// Stripes reconstructed in parallel ahead of the client on the read
+/// path. One stripe at a time serialized a WAN round-trip per 4 MiB —
+/// measured at 1.5 MB/s from a node 200 ms away from the shards, with
+/// the client's own link idle. The pipeline multiplies cold-read
+/// throughput by its depth on high-RTT paths; the price is bounded
+/// memory (depth × one stripe) per in-flight download. Results are
+/// consumed IN ORDER: the client and the end-to-end hash both need it.
+const READ_AHEAD_STRIPES: usize = 6;
 
 /// Delay past which a peer is considered unreachable.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
