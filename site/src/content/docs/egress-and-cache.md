@@ -40,11 +40,17 @@ Reading a file reconstructs its stripes from shards that may live an ocean
 away. The stripe cache keeps decoded stripes on local disk after they
 crossed the cluster once:
 
+The cache is **on by default**, sized automatically at 10% of the free
+disk at startup (floor 1GB, cap 50GB; a nearly-full disk gets none —
+the shard store always has priority). Override or disable it
+explicitly:
+
 ```bash
-NAUKA_CACHE_SIZE=10GB nauka serve …       # or --cache-size 10GB
+NAUKA_CACHE_SIZE=10GB nauka serve …       # fixed budget (or --cache-size)
+NAUKA_CACHE_SIZE=0 nauka serve …          # cache disabled
 ```
 
-Unset means disabled. The property that makes it safe is content
+The property that makes an always-on cache safe is content
 addressing: a stripe is cached under the hash of its content, so a cache
 entry **cannot go stale** — there is no invalidation protocol because there
 is nothing to invalidate. Entries of deleted content age out by LRU and are

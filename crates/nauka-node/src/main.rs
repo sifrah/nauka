@@ -221,7 +221,8 @@ enum Cmd {
         /// Disk budget for the stripe cache — decoded stripes that
         /// crossed the cluster once are then served from local disk.
         /// Content-addressed, so entries never go stale; LRU eviction.
-        /// Unset = cache disabled.
+        /// Unset = AUTOMATIC: 10% of the free disk at startup, floored at
+        /// 1GB and capped at 50GB. `0` disables the cache entirely.
         #[arg(long, env = "NAUKA_CACHE_SIZE")]
         cache_size: Option<String>,
         /// Address of the public HTTP API (upload/download).
@@ -1052,10 +1053,39 @@ async fn main() -> Result<()> {
                 None => None,
             };
             let cache_budget = match &cache_size {
-                Some(raw) => Some(egress::parse_size(raw).with_context(|| {
-                    format!("unreadable cache size {raw:?} (try \"10GB\", \"512MiB\")")
-                })?),
-                None => None,
+                Some(raw) => match egress::parse_size(raw).with_context(|| {
+                    format!("unreadable cache size {raw:?} (try \"10GB\", \"512MiB\", \"0\")")
+                })? {
+                    // `0` is the explicit off-switch now that the default
+                    // is on: a knob that can only enable needs a way out.
+                    0 => None,
+                    n => Some(n),
+                },
+                // The cache pays for itself the first time a stripe is
+                // read twice, and content addressing means it can never
+                // serve stale bytes — there is no reason to make every
+                // operator discover an env var. Auto: 10% of the free
+                // disk at startup, floor 1GB (below that it thrashes),
+                // cap 50GB (beyond that LRU churn outgrows the benefit).
+                // The shard store stays the priority: the cache only
+                // takes a slice of what is FREE after it.
+                None => {
+                    let free = crate::ingest::fs_available(&cli.data_dir);
+                    let auto = (free / 10).clamp(1_000_000_000, 50_000_000_000);
+                    if free < 2_000_000_000 {
+                        // A nearly-full disk gets no cache at all rather
+                        // than a starved one fighting the shards for
+                        // space.
+                        None
+                    } else {
+                        eprintln!(
+                            "stripe cache: auto {:.1} GB (10% of free disk — override with \
+                             NAUKA_CACHE_SIZE, 0 disables)",
+                            auto as f64 / 1e9
+                        );
+                        Some(auto)
+                    }
+                }
             };
             let store = Arc::new(ShardStore::open(&cli.data_dir)?);
             let interval = std::time::Duration::from_secs(scrub_interval);

@@ -159,9 +159,9 @@ and refuses to leave any file below `k`, naming the files at risk.
 
 Nodes on metered links declare an egress budget
 (`NAUKA_EGRESS_QUOTA=20TB`): past it they are deprioritized for reads,
-never refused. A per-node stripe cache (`NAUKA_CACHE_SIZE=10GB`) serves
-repeat reads from local disk; content addressing means it can never go
-stale.
+never refused. A per-node stripe cache serves repeat reads from local
+disk, on by default and sized to 10% of the free disk; content
+addressing means it can never go stale.
 
 ## Documentation
 

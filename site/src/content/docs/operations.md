@@ -70,7 +70,7 @@ git-style), resolved against the local store first, then the cluster.
 | `--capacity` | size of the data-dir's filesystem | weight for weighted placement, in bytes |
 | `--join` | off | wait to be added by a member instead of founding a cluster on a blank data dir (what `node add` passes to provisioned machines) |
 | `--egress-quota` | unmetered | monthly egress budget (env `NAUKA_EGRESS_QUOTA`; human sizes like `500GB`, `20TB`; deprioritized past it, never refused) |
-| `--cache-size` | disabled | disk budget of the local stripe cache (env `NAUKA_CACHE_SIZE`; content-addressed so never stale, LRU) |
+| `--cache-size` | auto: 10% of free disk (1GB floor, 50GB cap) | disk budget of the local stripe cache (env `NAUKA_CACHE_SIZE`; `0` disables; content-addressed so never stale, LRU) |
 
 `serve` pre-binds every socket before founding anything: a busy port fails
 loudly with nothing written to the data dir. On a blank data dir the first
