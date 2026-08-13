@@ -470,7 +470,24 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                             }
                         }
                         AppCommand::DeleteSpace { name } => {
-                            if inner.state.spaces.remove(&name).is_none() {
+                            let refs = inner
+                                .state
+                                .file_refs
+                                .values()
+                                .filter(|spaces| spaces.contains(&name))
+                                .count();
+                            if refs > 0 {
+                                // Same shape as org deletion: emptying a
+                                // space is a deliberate, file-by-file act,
+                                // never a side effect of `space rm`.
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!(
+                                        "space {name} still references {refs} file(s) — \
+                                         release them first"
+                                    )),
+                                }
+                            } else if inner.state.spaces.remove(&name).is_none() {
                                 AppResponse {
                                     ok: false,
                                     info: Some(format!("no space named {name}")),
@@ -480,6 +497,64 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 // space reusing the name must not
                                 // inherit someone else's signers.
                                 inner.state.space_keys.remove(&name);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
+                        }
+                        AppCommand::AddFileRef { file_hash, space } => {
+                            if !inner.state.spaces.contains_key(&space) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("no space named {space}")),
+                                }
+                            } else if !inner.state.manifests.contains_key(&file_hash) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("no file {file_hash} in the registry")),
+                                }
+                            } else {
+                                inner
+                                    .state
+                                    .file_refs
+                                    .entry(file_hash)
+                                    .or_default()
+                                    .insert(space);
+                                AppResponse {
+                                    ok: true,
+                                    info: None,
+                                }
+                            }
+                        }
+                        AppCommand::RemoveFileRef { file_hash, space } => {
+                            let removed = inner
+                                .state
+                                .file_refs
+                                .get_mut(&file_hash)
+                                .is_some_and(|spaces| spaces.remove(&space));
+                            if !removed {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("{space} does not reference {file_hash}")),
+                                }
+                            } else if inner
+                                .state
+                                .file_refs
+                                .get(&file_hash)
+                                .is_some_and(|s| s.is_empty())
+                            {
+                                // Last reference gone: the file dies in the
+                                // SAME apply — every replica reaches the
+                                // identical registry, and the GC reclaims
+                                // the shards on its following passes.
+                                inner.state.file_refs.remove(&file_hash);
+                                inner.state.manifests.remove(&file_hash);
+                                AppResponse {
+                                    ok: true,
+                                    info: Some("last reference — file unregistered".into()),
+                                }
+                            } else {
                                 AppResponse {
                                     ok: true,
                                     info: None,

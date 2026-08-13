@@ -40,6 +40,10 @@ bytes) — `nauka space sign` prints them, and the
 [multi-tenant page](/multi-tenant/#signed-writes) specifies the exact
 canonical string for implementing it in your own backend. An `admin`
 key is required; `401`/`403` answers carry the reason and the remedy.
+A signed upload records the space's [reference](/multi-tenant/#files-belong-to-spaces-references)
+on the file (the response then carries `"space"`), and `GET /api/files`
+lists each file's `spaces` — same bytes uploaded by two spaces = one
+set of shards, two references.
 
 `200` response:
 
@@ -134,14 +138,18 @@ Useful for resuming downloads and for media playback.
 
 ## `DELETE /f/{hash}`
 
-Removes the file from the replicated registry — `204 No Content`, or
-`404` if the hash is unknown. The shards are not erased synchronously:
-each node's GC purges what became orphaned on its following pass. From the
-client's point of view the file is gone at the `204`; `GET` answers
-`410 Gone` with `file deleted`.
+Deletion follows [ownership](/multi-tenant/#files-belong-to-spaces-references).
+A file **referenced by spaces** requires a signed DELETE from one of
+them (the same `X-Nauka-*` headers, method `DELETE`, path `/f/<hash>` —
+`nauka space sign --method DELETE --path /f/<hash>` prints them): it
+releases *that space's reference*, `204`. The content itself only
+disappears with its **last** reference — then the registry entry drops
+and each node's GC purges the orphaned shards on its following passes.
+An unsigned DELETE on an owned file gets `403` naming the owners.
 
-Like everything else on this API, deletion is unauthenticated in v1 —
-one more reason for the reverse proxy.
+A legacy file (no references) keeps the open pre-tenant behavior:
+unsigned `DELETE` → `204`, `404` if the hash is unknown, and `GET`
+answers `410 Gone` after.
 
 ## `GET /api/status`
 

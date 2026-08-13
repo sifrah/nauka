@@ -112,6 +112,32 @@ remedy; a forged signature, a stale timestamp or a revoked key get
 `401`; a suspended space gets `403`. Every check is answered locally by
 whichever node received the request, from the replicated registry.
 
+## Files belong to spaces: references
+
+A signed upload does two things: stores the content (if new) and
+records that **your space references this hash**. References are the
+ownership model, and they compose with content addressing:
+
+- **Deduplication stays global.** Two spaces uploading the same bytes
+  share one set of shards — the second upload writes a reference and
+  nothing else. Your storage bill (coming with quotas) counts *your
+  references*, the disk stores each content once.
+- **A file dies with its last reference.** `DELETE /f/<hash>` signed by
+  a space releases *that space's* reference; the content disappears
+  from the cluster only when no space references it any more — then the
+  registry entry drops and the GC reclaims the shards.
+- **Deletion is scoped by ownership.** A file referenced by spaces can
+  only be released by a signed DELETE from one of them
+  (`nauka space sign --method DELETE --path /f/<hash>`); an unsigned
+  DELETE on it gets `403` naming the owners. Pre-tenant legacy files
+  (no references) keep the open behavior until the private-by-default
+  flip.
+- **A space with references cannot be `space rm`'d** — emptying a
+  space is a deliberate act, like deleting an organisation.
+
+`nauka space files <org>/<name>` lists what a space references;
+`GET /api/files` now carries each file's `spaces`.
+
 ## The transition, honestly
 
 Uploads **without** `X-Nauka-Space` are still accepted, and reads are
@@ -119,6 +145,5 @@ still open (`GET /f/<hash>` serves anyone who knows the hash). This is
 deliberate: the engine is mid-transition to multi-tenant, and the
 switch to private-by-default will be its own explicit, documented flip
 — not a surprise buried in a minor release. Coming next, in order:
-file↔space references (deduplicated storage with per-space ownership),
 signed read links, public spaces with revocable direct links, per-link
 rate limits, and per-space quotas.

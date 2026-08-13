@@ -408,6 +408,13 @@ enum SpaceCmd {
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
+    /// List the files a space references.
+    Files {
+        /// The space, e.g. yogfile/uploads.
+        space: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
     /// Manage a space's Ed25519 keys. The private key is generated on
     /// YOUR machine and never transmitted — the cluster only ever holds
     /// the public half.
@@ -1803,6 +1810,7 @@ async fn main() -> Result<()> {
                 node::space_set_suspended(&peers, &name, false).await?
             }
             SpaceCmd::Rm { name, peers } => node::space_delete(&peers, &name).await?,
+            SpaceCmd::Files { space, peers } => node::space_files(&peers, &space).await?,
             SpaceCmd::Key(cmd) => match cmd {
                 SpaceKeyCmd::Add {
                     space,

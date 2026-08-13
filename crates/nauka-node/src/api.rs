@@ -566,21 +566,75 @@ const REGISTRY_LAG_GRACE: std::time::Duration = std::time::Duration::from_secs(3
 async fn delete_file(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if !state.app.app_state().manifests.contains_key(&hash) {
         return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
     }
-    let resp = state
+    // Ownership decides the rules. A file referenced by spaces belongs
+    // to them: deletion is a SIGNED release of one space's reference
+    // (the file itself only dies with its last reference). An unowned
+    // legacy file keeps the open pre-tenant behavior.
+    let auth = verify_space_write(&state, &headers, "DELETE", &format!("/f/{hash}"))?;
+    let refs: Vec<String> = state
         .app
-        .write(nauka_raft::types::AppCommand::UnregisterManifest {
-            file_hash: hash.clone(),
-        })
-        .await
-        .context("deleting from the registry")?;
-    if !resp.ok {
-        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
+        .app_state()
+        .file_refs
+        .get(&hash)
+        .map(|r| r.iter().cloned().collect())
+        .unwrap_or_default();
+    match auth {
+        Some(auth) => {
+            if !refs.contains(&auth.space) {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    format!("{} does not reference this file", auth.space),
+                )
+                    .into_response());
+            }
+            let resp = state
+                .app
+                .write(nauka_raft::types::AppCommand::RemoveFileRef {
+                    file_hash: hash.clone(),
+                    space: auth.space.clone(),
+                })
+                .await
+                .context("releasing the reference")?;
+            if !resp.ok {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    resp.info.unwrap_or_else(|| "the cluster refused".into()),
+                )
+                    .into_response());
+            }
+            Ok((StatusCode::NO_CONTENT, ()).into_response())
+        }
+        None => {
+            if !refs.is_empty() {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "this file belongs to {} — deletion must be signed by an \
+                         admin key of a referencing space (`nauka space sign --method \
+                         DELETE --path /f/{hash}`)",
+                        refs.join(", ")
+                    ),
+                )
+                    .into_response());
+            }
+            let resp = state
+                .app
+                .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                    file_hash: hash.clone(),
+                })
+                .await
+                .context("deleting from the registry")?;
+            if !resp.ok {
+                return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
+            }
+            Ok((StatusCode::NO_CONTENT, ()).into_response())
+        }
     }
-    Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
 /// Uniform HTTP error. Anything that is not deliberately classified is an
@@ -667,6 +721,9 @@ struct UploadResponse {
     /// Shards that could not be delivered to their owner (degraded write,
     /// completed later by the scrubber). 0 on a healthy cluster.
     degraded_shards: usize,
+    /// The space now referencing this file (signed uploads only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    space: Option<String>,
 }
 
 /// A write authenticated for a space (`X-Nauka-Space` was present and
@@ -878,15 +935,22 @@ async fn upload(
     // arbitrary bytes into the space within the timestamp window. The
     // file registered before we could hash it, so a lie is unregistered
     // again (the GC reclaims the shards).
+    // Discarding a rejected upload must never take down a live file: with
+    // global dedup, the rejected body can hash to something ANOTHER space
+    // legitimately references (or that pre-existed). Only an unreferenced
+    // hash is unregistered.
+    let discard_safe = |file_hash: &str| !state.app.app_state().file_refs.contains_key(file_hash);
     if let Some(auth) = &write_auth {
         if let Some(claimed) = &auth.claimed_hash {
             if !claimed.eq_ignore_ascii_case(&manifest.file_hash) {
-                let _ = state
-                    .app
-                    .write(nauka_raft::types::AppCommand::UnregisterManifest {
-                        file_hash: manifest.file_hash.clone(),
-                    })
-                    .await;
+                if discard_safe(&manifest.file_hash) {
+                    let _ = state
+                        .app
+                        .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                            file_hash: manifest.file_hash.clone(),
+                        })
+                        .await;
+                }
                 return Err(ApiError(
                     StatusCode::FORBIDDEN,
                     anyhow!(
@@ -899,6 +963,37 @@ async fn upload(
                 ));
             }
         }
+        // The signed upload's whole point: the space now REFERENCES the
+        // file. Same content already referenced elsewhere = same hash,
+        // zero new shards — the reference is the only thing written.
+        let resp = state
+            .app
+            .write(nauka_raft::types::AppCommand::AddFileRef {
+                file_hash: manifest.file_hash.clone(),
+                space: auth.space.clone(),
+            })
+            .await
+            .context("recording the space's reference")?;
+        if !resp.ok {
+            // The space vanished between the signature check and here
+            // (deleted mid-flight). Without a reference the upload must
+            // not survive as an orphan the space cannot manage.
+            if discard_safe(&manifest.file_hash) {
+                let _ = state
+                    .app
+                    .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                        file_hash: manifest.file_hash.clone(),
+                    })
+                    .await;
+            }
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                anyhow!(
+                    "the reference was refused ({}) — upload discarded",
+                    resp.info.unwrap_or_default()
+                ),
+            ));
+        }
     }
 
     Ok(Json(UploadResponse {
@@ -910,6 +1005,7 @@ async fn upload(
         parity_shards: manifest.config.parity_shards,
         link: format!("/f/{}", manifest.file_hash),
         degraded_shards,
+        space: write_auth.as_ref().map(|a| a.space.clone()),
     }))
 }
 
@@ -1936,6 +2032,8 @@ struct FileEntry {
     size: u64,
     name: Option<String>,
     link: String,
+    /// Spaces referencing this file; empty = pre-tenant legacy (unowned).
+    spaces: Vec<String>,
 }
 
 async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
@@ -1943,9 +2041,8 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let entries = state
-        .app
-        .app_state()
+    let s = state.app.app_state();
+    let entries = s
         .manifests
         .values()
         .filter(|m| m.expires_at.is_none_or(|e| e > now))
@@ -1954,6 +2051,11 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
             size: m.file_size,
             name: m.name.clone(),
             link: format!("/f/{}", m.file_hash),
+            spaces: s
+                .file_refs
+                .get(&m.file_hash)
+                .map(|r| r.iter().cloned().collect())
+                .unwrap_or_default(),
         })
         .collect();
     Json(entries)

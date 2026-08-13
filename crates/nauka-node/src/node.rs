@@ -1589,3 +1589,69 @@ pub fn space_sign(
     );
     Ok(())
 }
+
+// ── File references ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct FileRow {
+    hash: String,
+    size: u64,
+    name: Option<String>,
+    #[serde(default)]
+    spaces: Vec<String>,
+}
+
+/// `space files`: the files a space references, from any node's API.
+pub async fn space_files(peers: &[SocketAddr], space: &str) -> Result<()> {
+    split_space_path(space)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let mut rows: Option<Vec<FileRow>> = None;
+    for peer in peers {
+        let url = format!("http://{}:8080/api/files", peer.ip());
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(v) = resp.json::<Vec<FileRow>>().await {
+                rows = Some(v);
+                break;
+            }
+        }
+    }
+    let rows = rows.context("no node answered /api/files")?;
+    let mut total: u64 = 0;
+    let mut count = 0usize;
+    for f in rows.iter().filter(|f| f.spaces.iter().any(|s| s == space)) {
+        count += 1;
+        total += f.size;
+        println!(
+            "{}  {:>10}  {}",
+            &f.hash[..16],
+            human_bytes(f.size),
+            f.name.as_deref().unwrap_or("—")
+        );
+    }
+    if count == 0 {
+        println!("{space} references no files");
+    } else {
+        println!(
+            "{count} file(s), {} referenced by {space}",
+            human_bytes(total)
+        );
+    }
+    Ok(())
+}
+
+fn human_bytes(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.2} {}", UNITS[u])
+    }
+}
