@@ -610,12 +610,14 @@ async fn ref_add(
     Ok(Json(serde_json::json!({ "hash": hash, "space": p.to })).into_response())
 }
 
-/// The `?space=&exp=&sig=` triplet of a signed read link.
+/// The `?space=&exp=&sig=` triplet of a signed read link, plus the
+/// optional signed `rate` ceiling (bytes/s).
 #[derive(serde::Deserialize)]
 struct ReadLinkParams {
     space: Option<String>,
     exp: Option<u64>,
     sig: Option<String>,
+    rate: Option<u64>,
 }
 
 /// The read gate. Ownership decides the rules:
@@ -628,18 +630,41 @@ struct ReadLinkParams {
 ///   flip, once anonymous uploads are retired.
 ///
 /// Every check is local: replicated registry, no network.
-fn authorize_read(state: &ApiState, hash: &str, p: &ReadLinkParams) -> Result<(), Box<Response>> {
+fn authorize_read(
+    state: &ApiState,
+    hash: &str,
+    p: &ReadLinkParams,
+) -> Result<Option<u64>, Box<Response>> {
     let s = state.app.app_state();
     let Some(refs) = s.file_refs.get(hash).filter(|r| !r.is_empty()) else {
-        return Ok(()); // legacy, unowned
+        return Ok(None); // legacy, unowned — no policy applies
     };
     let active = |space: &str| {
         s.spaces
             .get(space)
             .is_some_and(|r| !r.suspended && s.orgs.get(&r.org).is_some_and(|o| !o.suspended))
     };
-    if refs.iter().any(|sp| active(sp) && s.spaces[sp].public_read) {
-        return Ok(()); // direct link via a public space
+    let public_grants: Vec<&str> = refs
+        .iter()
+        .filter(|sp| active(sp) && s.spaces[sp.as_str()].public_read)
+        .map(|sp| sp.as_str())
+        .collect();
+    if !public_grants.is_empty() {
+        // Served bare through whichever public space is most generous:
+        // a space with no rate_default imposes nothing; otherwise the
+        // highest configured ceiling wins.
+        let rate = if public_grants
+            .iter()
+            .any(|sp| s.spaces[*sp].rate_default.is_none())
+        {
+            None
+        } else {
+            public_grants
+                .iter()
+                .filter_map(|sp| s.spaces[*sp].rate_default)
+                .max()
+        };
+        return Ok(rate);
     }
     let deny = |msg: String| Err(Box::new((StatusCode::FORBIDDEN, msg).into_response()));
     let (Some(space), Some(exp), Some(sig)) = (&p.space, p.exp, &p.sig) else {
@@ -659,15 +684,19 @@ fn authorize_read(state: &ApiState, hash: &str, p: &ReadLinkParams) -> Result<()
     if exp <= crate::spaceauth::unix_now() {
         return deny("link expired — ask the issuer for a fresh one".into());
     }
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp, p.rate);
     let signed_by_space = s.space_keys.get(space).is_some_and(|keys| {
         keys.iter()
             .any(|k| crate::spaceauth::verify(&k.public_key, &canonical, sig))
     });
     if !signed_by_space {
-        return deny("invalid link signature".into());
+        return deny(
+            "invalid link signature (hash, space, exp and rate must match what was signed)".into(),
+        );
     }
-    Ok(())
+    // The issuer's decision, cryptographically bound: no rate in the
+    // link means the issuer chose not to throttle.
+    Ok(p.rate)
 }
 
 /// HEAD /f/{hash}: size without a body (the download page relies on it).
@@ -1887,9 +1916,10 @@ async fn download(
     if let Some(resp) = unavailable(&state, &hash) {
         return Ok(resp);
     }
-    if let Err(resp) = authorize_read(&state, &hash, &link) {
-        return Ok(*resp);
-    }
+    let rate = match authorize_read(&state, &hash, &link) {
+        Ok(rate) => rate,
+        Err(resp) => return Ok(*resp),
+    };
     // Manifest: local store (materialized), else the replicated registry.
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
@@ -1921,7 +1951,7 @@ async fn download(
             .into_response());
     }
     if let Some((start, end)) = range {
-        return serve_range(state, manifest, start, end).await;
+        return serve_range(state, manifest, start, end, rate).await;
     }
 
     // Streaming reconstruction: one stripe at a time towards the client.
@@ -1988,6 +2018,10 @@ async fn download(
         }
     });
 
+    let rx = match rate {
+        Some(r) if r > 0 => paced(rx, r),
+        _ => rx,
+    };
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
     // Egress is counted when the response is committed to — a client that
     // disconnects mid-download still spent its slice of budget.
@@ -2008,11 +2042,54 @@ async fn download(
 
 /// Serves a byte range: only the stripes that intersect it are fetched and
 /// decoded (the rest of the file is never touched).
+/// Wraps a byte stream in a pacing stage: cumulative bytes never run
+/// ahead of `rate` bytes/s. Chunks are re-cut to 64 KiB so the flow is
+/// smooth rather than stripe-sized bursts, and the bounded channel
+/// backpressures the producer — with the reconstruction pipeline behind
+/// it, throttling the client throttles the internal stripe fetches too,
+/// instead of buffering the file at full speed.
+fn paced(
+    mut rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>>,
+    rate: u64,
+) -> tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>> {
+    let (tx, out) = tokio::sync::mpsc::channel(2);
+    tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        let mut sent: u64 = 0;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+                Ok(chunk) => {
+                    let mut chunk = chunk;
+                    while !chunk.is_empty() {
+                        let piece = chunk.split_to(chunk.len().min(64 * 1024));
+                        sent += piece.len() as u64;
+                        let due =
+                            started + std::time::Duration::from_secs_f64(sent as f64 / rate as f64);
+                        let now = tokio::time::Instant::now();
+                        if due > now {
+                            tokio::time::sleep(due - now).await;
+                        }
+                        if tx.send(Ok(piece)).await.is_err() {
+                            return; // client gone
+                        }
+                    }
+                }
+            }
+        }
+    });
+    out
+}
+
 async fn serve_range(
     state: Arc<ApiState>,
     manifest: FileManifest,
     start: u64,
     end: u64,
+    rate: Option<u64>,
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
@@ -2057,6 +2134,10 @@ async fn serve_range(
         }
     });
 
+    let rx = match rate {
+        Some(r) if r > 0 => paced(rx, r),
+        _ => rx,
+    };
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
     state.egress.add(end - start + 1);
     Ok(Response::builder()

@@ -1659,16 +1659,26 @@ fn human_bytes(b: u64) -> String {
 /// Offline link minting: the read-side twin of [`space_sign`]. The URL
 /// is a capability — it carries its expiry and its proof, and any node
 /// verifies it locally.
-pub fn space_link(space: &str, hash: &str, secret: &str, ttl: u64, exp: Option<u64>) -> Result<()> {
+pub fn space_link(
+    space: &str,
+    hash: &str,
+    secret: &str,
+    ttl: u64,
+    exp: Option<u64>,
+    rate: Option<u64>,
+) -> Result<()> {
     split_space_path(space)?;
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("expected the file's FULL 64-hex BLAKE3 hash (links sign the exact hash)");
     }
     let sk = crate::spaceauth::parse_secret(secret)?;
     let exp = exp.unwrap_or_else(|| crate::spaceauth::unix_now() + ttl);
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp, rate);
     let sig = crate::spaceauth::sign(&sk, &canonical);
-    println!("/f/{hash}?space={space}&exp={exp}&sig={sig}");
+    match rate {
+        Some(r) => println!("/f/{hash}?space={space}&exp={exp}&rate={r}&sig={sig}"),
+        None => println!("/f/{hash}?space={space}&exp={exp}&sig={sig}"),
+    }
     eprintln!(
         "{}",
         style(format!(
@@ -1733,4 +1743,42 @@ pub async fn space_publish(
         bail!("{status}: {body}");
     }
     bail!("no node answered (tried {} peer(s))", peers.len());
+}
+
+/// `space set`: read-modify-write of a space's policies.
+pub async fn space_set(peers: &[SocketAddr], name: &str, rate_default: Option<&str>) -> Result<()> {
+    split_space_path(name)?;
+    let view = fetch_orgs(peers).await?;
+    let mut record = view
+        .spaces
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no space named {name}"))?;
+    let mut changed = false;
+    if let Some(rate) = rate_default {
+        record.rate_default = match rate {
+            "off" => None,
+            n => Some(
+                n.parse::<u64>()
+                    .context("rate-default is bytes/s (a number) or `off`")?,
+            ),
+        };
+        changed = true;
+    }
+    if !changed {
+        bail!("nothing to change (see --help for the available policies)");
+    }
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertSpace {
+            name: name.to_string(),
+            record: record.clone(),
+        },
+    )
+    .await?;
+    match record.rate_default {
+        Some(r) => println!("{name}: bare public reads capped at {r} B/s per connection"),
+        None => println!("{name}: no bare-read speed ceiling"),
+    }
+    Ok(())
 }

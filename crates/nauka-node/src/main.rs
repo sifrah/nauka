@@ -458,6 +458,21 @@ enum SpaceCmd {
         /// Absolute unix expiry — overrides --ttl (long-lived links).
         #[arg(long)]
         exp: Option<u64>,
+        /// Per-connection speed ceiling in bytes/s, cryptographically
+        /// bound into the link (the recipient cannot remove it).
+        #[arg(long)]
+        rate: Option<u64>,
+    },
+    /// Change a space's policies (read-modify-write, replicated).
+    Set {
+        /// The space, e.g. yogfile/uploads.
+        name: String,
+        /// Default per-connection speed for BARE public reads, bytes/s —
+        /// or `off` to remove the ceiling. Signed links carry their own.
+        #[arg(long)]
+        rate_default: Option<String>,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
     },
     /// Sign a write request offline with a space's private key; prints
     /// the headers to attach (and a ready-to-paste curl). No network, no
@@ -1887,7 +1902,13 @@ async fn main() -> Result<()> {
                 key,
                 ttl,
                 exp,
-            } => node::space_link(&space, &hash, &key, ttl, exp)?,
+                rate,
+            } => node::space_link(&space, &hash, &key, ttl, exp, rate)?,
+            SpaceCmd::Set {
+                name,
+                rate_default,
+                peers,
+            } => node::space_set(&peers, &name, rate_default.as_deref()).await?,
             SpaceCmd::Publish {
                 space,
                 hash,

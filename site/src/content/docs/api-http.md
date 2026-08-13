@@ -91,9 +91,11 @@ one — the second uploader rarely means "unname it".
 Reads follow [ownership](/multi-tenant/#signed-read-links-owned-files-are-private).
 A file referenced by an active **public-read** space is served bare. A
 file referenced by private spaces only takes a **signed link** —
-`?space=<org/space>&exp=<unix>&sig=<hex>`, Ed25519 over
-`nauka-link-v1\n{hash}\n{space}\n{exp}`, minted offline by the space's
-backend (or `nauka space link`). `403` otherwise, with the remedy.
+`?space=<org/space>&exp=<unix>&sig=<hex>` plus optional `&rate=`
+(bytes/s, signed: un-removable), Ed25519 over
+`nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate|-}`, minted offline by
+the space's backend (or `nauka space link`). Bare public reads obey
+the space's `rate_default`. `403` otherwise, with the remedy.
 Unowned pre-tenant files are still served bare during the transition.
 `HEAD` obeys the same gate.
 

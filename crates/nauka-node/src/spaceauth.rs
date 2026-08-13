@@ -48,11 +48,17 @@ pub fn canonical_write(
 }
 
 /// The canonical string a READ LINK signature covers (see
-/// `?space=&exp=&sig=` on `GET /f/<hash>`). `exp` is the unix second the
-/// link dies at — unlike writes there is no clock-skew window: the
-/// signer chooses the exact lifetime.
-pub fn canonical_link(file_hash: &str, space: &str, exp: u64) -> String {
-    format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}")
+/// `?space=&exp=&sig=&rate=` on `GET /f/<hash>`). `exp` is the unix
+/// second the link dies at — unlike writes there is no clock-skew
+/// window: the signer chooses the exact lifetime. `rate` is the
+/// per-connection ceiling in bytes/s ("-" = none): inside the signed
+/// string, so the recipient of a throttled link cannot un-throttle it
+/// by editing the URL.
+pub fn canonical_link(file_hash: &str, space: &str, exp: u64, rate: Option<u64>) -> String {
+    match rate {
+        Some(r) => format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}\n{r}"),
+        None => format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}\n-"),
+    }
 }
 
 /// Parses an `nsk_…` private key into a signing key.
@@ -169,7 +175,7 @@ mod tests {
         let sk = parse_secret(&secret).unwrap();
         // A link signature must not validate as any write, even one
         // crafted to mimic the link's field layout.
-        let link_sig = sign(&sk, &canonical_link("abcd", "yogfile/uploads", 999));
+        let link_sig = sign(&sk, &canonical_link("abcd", "yogfile/uploads", 999, None));
         let mimic = canonical_write("abcd", "yogfile/uploads", "999", 0, None);
         assert!(!verify(&public, &mimic, &link_sig));
         // And a write signature must not open a link.
@@ -179,8 +185,28 @@ mod tests {
         );
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999),
+            &canonical_link("abcd", "yogfile/uploads", 999, None),
             &write_sig
+        ));
+    }
+
+    #[test]
+    fn link_rate_is_bound_by_the_signature() {
+        let (secret, public) = generate();
+        let sk = parse_secret(&secret).unwrap();
+        let throttled = canonical_link("abcd", "yogfile/uploads", 999, Some(1_000_000));
+        let sig = sign(&sk, &throttled);
+        assert!(verify(&public, &throttled, &sig));
+        // Stripping or editing the rate invalidates the signature.
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999, None),
+            &sig
+        ));
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(8_000_000)),
+            &sig
         ));
     }
 

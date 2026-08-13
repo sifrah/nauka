@@ -154,8 +154,16 @@ takes a signed link:
 The signature is Ed25519 over:
 
 ```text
-nauka-link-v1\n{hash}\n{space}\n{exp}
+nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate or "-"}
 ```
+
+`rate` is an optional per-connection speed ceiling in **bytes/s**,
+carried as `&rate=` in the URL and **inside the signed string**: the
+recipient of a throttled link cannot remove or raise it by editing the
+URL. This is the freemium primitive — your backend signs `rate=1048576`
+for free users and omits it for premium, and the serving node paces the
+stream (backpressure keeps the internal stripe fetches at the same
+speed; no buffering at full speed behind the scenes).
 
 Your backend mints links **offline** — check your own database (does
 *this user* get *this file*, for how long?), then sign; no call to
@@ -165,7 +173,8 @@ roles may sign links — that is exactly what `signer` keys are for.
 
 Any node verifies locally, four questions against the replicated
 registry: does the space reference this file? space and org active?
-not expired? signature valid under one of the space's keys? A link
+not expired? signature (including the rate) valid under one of the
+space's keys? A link
 dies at its `exp`, with its key (`space key rm`), or with its space
 (`space suspend`) — the last two cluster-wide in one round-trip.
 

@@ -75,7 +75,8 @@ requests.
 | `space key add <org>/<name> --role admin\|signer` | generates a keypair locally, registers the public half; prints the private key ONCE. `--name` for rotation handles, `--public-key <hex>` to register an externally-generated key |
 | `space key ls` / `space key rm <space> <name-or-prefix>` | list keys / revoke one — its signatures die cluster-wide |
 | `space sign <space> --key nsk_…` | signs a write offline and prints the `X-Nauka-*` headers plus a ready-to-paste curl. `--method`, `--path`, `--content-hash` to bind the exact bytes |
-| `space link <space> <hash> --key nsk_…` | mints a signed READ link offline (`--ttl` seconds or absolute `--exp`); works with `signer` and `admin` keys |
+| `space link <space> <hash> --key nsk_…` | mints a signed READ link offline (`--ttl` seconds or absolute `--exp`, `--rate` bytes/s bound into the signature); works with `signer` and `admin` keys |
+| `space set <space> --rate-default <bytes/s\|off>` | per-connection speed ceiling for BARE public reads of the space |
 | `space publish <space> <hash> [--to <space>] --key nsk_…` | references an existing file from another space of the same org (no re-upload) — publish to a public space, or adopt an unowned legacy file without `--to` |
 
 ## Moderation
