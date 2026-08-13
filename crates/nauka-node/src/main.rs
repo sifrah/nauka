@@ -369,6 +369,21 @@ enum OrgCmd {
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
+    /// Change an organisation's policies.
+    Set {
+        name: String,
+        /// Cap on the SUM of its spaces' logical bytes — or `off`.
+        #[arg(long)]
+        quota: Option<String>,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Storage consumption of every space of the organisation.
+    Usage {
+        name: String,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -471,6 +486,20 @@ enum SpaceCmd {
         /// or `off` to remove the ceiling. Signed links carry their own.
         #[arg(long)]
         rate_default: Option<String>,
+        /// Storage cap in logical bytes (sum of referenced file sizes) —
+        /// or `off`. Uploads and publishes past it are refused.
+        #[arg(long)]
+        quota: Option<String>,
+        /// Monthly egress cap in bytes — or `off`. Past it, reads slow
+        /// to a crawl instead of dying.
+        #[arg(long)]
+        egress_quota: Option<String>,
+        #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
+        peers: Vec<SocketAddr>,
+    },
+    /// Storage and egress consumption of a space, against its quotas.
+    Usage {
+        name: String,
         #[arg(long, value_delimiter = ',', default_value = "127.0.0.1:7311")]
         peers: Vec<SocketAddr>,
     },
@@ -1246,6 +1275,7 @@ async fn main() -> Result<()> {
                     store: store.clone(),
                     app: app.clone(),
                     self_id: self_id.clone(),
+                    space_egress_local: Arc::new(Default::default()),
                     config: ErasureConfig::default(),
                     tmp_dir,
                     health: health.clone(),
@@ -1329,6 +1359,7 @@ async fn main() -> Result<()> {
                 let cache_bg = api_state.cache.clone();
                 let staged_bg = api_state.staged_bytes.clone();
                 let claimed_bg = claimed_shards.clone();
+                let space_egress_bg = api_state.space_egress_local.clone();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(interval);
                     let mut declared_capacity: Option<u64> = None;
@@ -1442,6 +1473,47 @@ async fn main() -> Result<()> {
                                     }
                                     Err(e) => eprintln!("egress declaration failed: {e:#}"),
                                 }
+                            }
+                        }
+                        // Fold this node's per-space egress deltas into
+                        // the replicated ledger (own row only, like the
+                        // node-level meter above). Base = the published
+                        // row when months match, else a fresh month.
+                        {
+                            let deltas: Vec<(String, String, u64)> = {
+                                match space_egress_bg.lock() {
+                                    Ok(mut m) => {
+                                        let out = m
+                                            .iter()
+                                            .filter(|(_, (_, b))| *b > 0)
+                                            .map(|(sp, (mo, b))| (sp.clone(), mo.clone(), *b))
+                                            .collect();
+                                        m.clear();
+                                        out
+                                    }
+                                    Err(_) => Vec::new(),
+                                }
+                            };
+                            for (space, month, bytes) in deltas {
+                                let base = app
+                                    .app_state()
+                                    .space_egress
+                                    .get(&space)
+                                    .and_then(|rows| rows.get(&self_id))
+                                    .filter(|e| e.month == month)
+                                    .map(|e| e.served_bytes)
+                                    .unwrap_or(0);
+                                let _ = app
+                                    .write(nauka_raft::types::AppCommand::UpdateSpaceEgress {
+                                        node_addr: self_id.clone(),
+                                        space,
+                                        egress: nauka_raft::types::NodeEgress {
+                                            month,
+                                            served_bytes: base + bytes,
+                                            quota_bytes: None,
+                                        },
+                                    })
+                                    .await;
                             }
                         }
                         // The replicated registry is the source of truth:
@@ -1849,6 +1921,10 @@ async fn main() -> Result<()> {
             OrgCmd::Suspend { name, peers } => node::org_set_suspended(&peers, &name, true).await?,
             OrgCmd::Resume { name, peers } => node::org_set_suspended(&peers, &name, false).await?,
             OrgCmd::Rm { name, peers } => node::org_delete(&peers, &name).await?,
+            OrgCmd::Set { name, quota, peers } => {
+                node::org_set(&peers, &name, quota.as_deref()).await?
+            }
+            OrgCmd::Usage { name, peers } => node::org_usage(&peers, &name).await?,
         },
         Cmd::Space(cmd) => match cmd {
             SpaceCmd::Create {
@@ -1907,8 +1983,20 @@ async fn main() -> Result<()> {
             SpaceCmd::Set {
                 name,
                 rate_default,
+                quota,
+                egress_quota,
                 peers,
-            } => node::space_set(&peers, &name, rate_default.as_deref()).await?,
+            } => {
+                node::space_set(
+                    &peers,
+                    &name,
+                    rate_default.as_deref(),
+                    quota.as_deref(),
+                    egress_quota.as_deref(),
+                )
+                .await?
+            }
+            SpaceCmd::Usage { name, peers } => node::space_usage(&peers, &name).await?,
             SpaceCmd::Publish {
                 space,
                 hash,

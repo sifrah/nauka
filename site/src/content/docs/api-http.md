@@ -43,7 +43,11 @@ key is required; `401`/`403` answers carry the reason and the remedy.
 A signed upload records the space's [reference](/multi-tenant/#files-belong-to-spaces-references)
 on the file (the response then carries `"space"`), and `GET /api/files`
 lists each file's `spaces` — same bytes uploaded by two spaces = one
-set of shards, two references.
+set of shards, two references. Past the space's (or org's)
+[storage quota](/multi-tenant/#quotas-storage-refused-egress-throttled),
+the upload is refused `403` with the numbers; past the space's monthly
+egress quota, reads slow to a crawl and carry
+`X-Nauka-Throttled: egress-quota`.
 
 `200` response:
 

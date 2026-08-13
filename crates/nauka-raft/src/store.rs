@@ -527,6 +527,22 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 }
                             }
                         }
+                        AppCommand::UpdateSpaceEgress {
+                            node_addr,
+                            space,
+                            egress,
+                        } => {
+                            inner
+                                .state
+                                .space_egress
+                                .entry(space)
+                                .or_default()
+                                .insert(node_addr, egress);
+                            AppResponse {
+                                ok: true,
+                                info: None,
+                            }
+                        }
                         AppCommand::RemoveFileRef { file_hash, space } => {
                             let removed = inner
                                 .state

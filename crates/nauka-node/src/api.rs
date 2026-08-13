@@ -49,6 +49,11 @@ pub struct ApiState {
     /// Bytes of locally-acked uploads not yet dispersed. Bounds the
     /// local-ack window: past a cap, uploads pay full dispersal again.
     pub staged_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Per-space egress served by THIS node, not yet published to the
+    /// replicated ledger (space → (month, bytes)). The maintenance pass
+    /// folds it into `AppState::space_egress` under this node's row.
+    pub space_egress_local:
+        Arc<std::sync::Mutex<std::collections::BTreeMap<String, (String, u64)>>>,
 }
 
 impl ApiState {
@@ -347,7 +352,26 @@ async fn orgs_view(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value
             )
         })
         .collect();
-    Json(serde_json::json!({ "orgs": s.orgs, "spaces": s.spaces, "space_keys": keys }))
+    let month = crate::egress::month_key(crate::spaceauth::unix_now());
+    let usage: std::collections::BTreeMap<&String, serde_json::Value> = s
+        .spaces
+        .keys()
+        .map(|name| {
+            (
+                name,
+                serde_json::json!({
+                    "storage_bytes": space_storage_bytes(&s, name),
+                    "egress_month_bytes": space_egress_month(&state, &s, name, &month),
+                }),
+            )
+        })
+        .collect();
+    Json(serde_json::json!({
+        "orgs": s.orgs,
+        "spaces": s.spaces,
+        "space_keys": keys,
+        "usage": usage,
+    }))
 }
 
 /// GET /api/removal-check?target=<addr> — would removing (or fully
@@ -504,6 +528,105 @@ async fn removal_check(
     })
 }
 
+/// Logical bytes a space accounts for: the sum of the sizes of the
+/// files it references. Dedup is physical, quotas are logical — two
+/// spaces referencing the same file each count it in full.
+fn space_storage_bytes(s: &nauka_raft::types::AppState, space: &str) -> u64 {
+    s.file_refs
+        .iter()
+        .filter(|(_, spaces)| spaces.contains(space))
+        .filter_map(|(hash, _)| s.manifests.get(hash).map(|m| m.file_size))
+        .sum()
+}
+
+/// A space's egress for `month`, replicated rows plus this node's
+/// unpublished local delta.
+fn space_egress_month(
+    state: &ApiState,
+    s: &nauka_raft::types::AppState,
+    space: &str,
+    month: &str,
+) -> u64 {
+    let replicated: u64 = s
+        .space_egress
+        .get(space)
+        .map(|rows| {
+            rows.values()
+                .filter(|e| e.month == month)
+                .map(|e| e.served_bytes)
+                .sum()
+        })
+        .unwrap_or(0);
+    let local = state
+        .space_egress_local
+        .lock()
+        .ok()
+        .and_then(|m| m.get(space).filter(|(mo, _)| mo == month).map(|(_, b)| *b))
+        .unwrap_or(0);
+    replicated + local
+}
+
+/// Records `bytes` of egress against the space whose grant served the
+/// read. Folded into the replicated ledger by the maintenance pass.
+fn record_space_egress(state: &ApiState, space: &str, bytes: u64) {
+    let month = crate::egress::month_key(crate::spaceauth::unix_now());
+    if let Ok(mut m) = state.space_egress_local.lock() {
+        let entry = m
+            .entry(space.to_string())
+            .or_insert_with(|| (month.clone(), 0));
+        if entry.0 != month {
+            *entry = (month, 0);
+        }
+        entry.1 += bytes;
+    }
+}
+
+/// Refuses a write that would push a space (or its organisation) past
+/// its storage quota. `incoming` is the file's logical size; counts
+/// only when the space does not already reference the hash.
+fn check_storage_quota(
+    s: &nauka_raft::types::AppState,
+    space: &str,
+    file_hash: &str,
+    incoming: u64,
+) -> Result<(), String> {
+    if s.file_refs
+        .get(file_hash)
+        .is_some_and(|r| r.contains(space))
+    {
+        return Ok(()); // already referenced: no logical growth
+    }
+    let record = match s.spaces.get(space) {
+        Some(r) => r,
+        None => return Ok(()), // upstream checks handle unknown spaces
+    };
+    if let Some(q) = record.quota_bytes {
+        let used = space_storage_bytes(s, space);
+        if used.saturating_add(incoming) > q {
+            return Err(format!(
+                "storage quota exceeded on {space}: {used} B used of {q} B, this file                  adds {incoming} B — raise the quota (`nauka space set {space} --quota …`)                  or release files"
+            ));
+        }
+    }
+    if let Some(org) = s.orgs.get(&record.org) {
+        if let Some(q) = org.quota_bytes {
+            let used: u64 = s
+                .spaces
+                .iter()
+                .filter(|(_, r)| r.org == record.org)
+                .map(|(name, _)| space_storage_bytes(s, name))
+                .sum();
+            if used.saturating_add(incoming) > q {
+                return Err(format!(
+                    "organisation {} is at its storage quota ({used} B of {q} B)",
+                    record.org
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct RefAddParams {
     /// Target space receiving the reference.
@@ -591,6 +714,10 @@ async fn ref_add(
         )
             .into_response());
     }
+    let incoming = s.manifests.get(&hash).map(|m| m.file_size).unwrap_or(0);
+    if let Err(msg) = check_storage_quota(&s, &p.to, &hash, incoming) {
+        return Ok((StatusCode::FORBIDDEN, msg).into_response());
+    }
     drop(s);
     let resp = state
         .app
@@ -634,10 +761,13 @@ fn authorize_read(
     state: &ApiState,
     hash: &str,
     p: &ReadLinkParams,
-) -> Result<Option<u64>, Box<Response>> {
+) -> Result<ReadGrant, Box<Response>> {
     let s = state.app.app_state();
     let Some(refs) = s.file_refs.get(hash).filter(|r| !r.is_empty()) else {
-        return Ok(None); // legacy, unowned — no policy applies
+        return Ok(ReadGrant {
+            rate: None,
+            billed_space: None,
+        }); // legacy, unowned — no policy applies
     };
     let active = |space: &str| {
         s.spaces
@@ -664,7 +794,20 @@ fn authorize_read(
                 .filter_map(|sp| s.spaces[*sp].rate_default)
                 .max()
         };
-        return Ok(rate);
+        // The most generous public space is also the one that pays.
+        let billed = public_grants
+            .iter()
+            .max_by_key(|sp| {
+                s.spaces[**sp]
+                    .rate_default
+                    .map(|r| (1, r))
+                    .unwrap_or((2, 0))
+            })
+            .map(|sp| sp.to_string());
+        return Ok(ReadGrant {
+            rate,
+            billed_space: billed,
+        });
     }
     let deny = |msg: String| Err(Box::new((StatusCode::FORBIDDEN, msg).into_response()));
     let (Some(space), Some(exp), Some(sig)) = (&p.space, p.exp, &p.sig) else {
@@ -696,7 +839,17 @@ fn authorize_read(
     }
     // The issuer's decision, cryptographically bound: no rate in the
     // link means the issuer chose not to throttle.
-    Ok(p.rate)
+    Ok(ReadGrant {
+        rate: p.rate,
+        billed_space: Some(space.clone()),
+    })
+}
+
+/// What a granted read carries: the applicable speed ceiling and the
+/// space whose egress ledger the bytes land on.
+struct ReadGrant {
+    rate: Option<u64>,
+    billed_space: Option<String>,
 }
 
 /// HEAD /f/{hash}: size without a body (the download page relies on it).
@@ -1165,6 +1318,25 @@ async fn upload(
                     ),
                 ));
             }
+        }
+        // Storage quota, checked at the earliest point where the size is
+        // known and before the reference lands. A refusal discards the
+        // upload (ref-guarded, like every rejection path here).
+        if let Err(msg) = check_storage_quota(
+            &state.app.app_state(),
+            &auth.space,
+            &manifest.file_hash,
+            manifest.file_size,
+        ) {
+            if discard_safe(&manifest.file_hash) {
+                let _ = state
+                    .app
+                    .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                        file_hash: manifest.file_hash.clone(),
+                    })
+                    .await;
+            }
+            return Err(ApiError(StatusCode::FORBIDDEN, anyhow!(msg)));
         }
         // The signed upload's whole point: the space now REFERENCES the
         // file. Same content already referenced elsewhere = same hash,
@@ -1916,10 +2088,25 @@ async fn download(
     if let Some(resp) = unavailable(&state, &hash) {
         return Ok(resp);
     }
-    let rate = match authorize_read(&state, &hash, &link) {
-        Ok(rate) => rate,
+    let grant = match authorize_read(&state, &hash, &link) {
+        Ok(g) => g,
         Err(resp) => return Ok(*resp),
     };
+    // Egress quota: past the space's monthly cap, reads slow to a crawl
+    // instead of dying — a throttled link hurts less than a dead one on
+    // someone's page. The X-Nauka-Throttled header says why.
+    let mut rate = grant.rate;
+    let mut throttled_by_quota = false;
+    if let Some(billed) = &grant.billed_space {
+        let s = state.app.app_state();
+        if let Some(q) = s.spaces.get(billed).and_then(|r| r.egress_quota_bytes) {
+            let month = crate::egress::month_key(crate::spaceauth::unix_now());
+            if space_egress_month(&state, &s, billed, &month) >= q {
+                rate = Some(rate.map_or(EGRESS_CRAWL, |r| r.min(EGRESS_CRAWL)));
+                throttled_by_quota = true;
+            }
+        }
+    }
     // Manifest: local store (materialized), else the replicated registry.
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
@@ -1951,7 +2138,10 @@ async fn download(
             .into_response());
     }
     if let Some((start, end)) = range {
-        return serve_range(state, manifest, start, end, rate).await;
+        if let Some(billed) = &grant.billed_space {
+            record_space_egress(&state, billed, end - start + 1);
+        }
+        return serve_range(state, manifest, start, end, rate, throttled_by_quota).await;
     }
 
     // Streaming reconstruction: one stripe at a time towards the client.
@@ -2026,10 +2216,16 @@ async fn download(
     // Egress is counted when the response is committed to — a client that
     // disconnects mid-download still spent its slice of budget.
     state.egress.add(manifest.file_size);
+    if let Some(billed) = &grant.billed_space {
+        record_space_egress(&state, billed, manifest.file_size);
+    }
     let mut response = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, manifest.file_size);
+    if throttled_by_quota {
+        response = response.header("X-Nauka-Throttled", "egress-quota");
+    }
     if let Some(name) = &manifest.name {
         let safe = name.replace(['"', '\r', '\n'], "_");
         response = response.header(
@@ -2090,6 +2286,7 @@ async fn serve_range(
     start: u64,
     end: u64,
     rate: Option<u64>,
+    throttled_by_quota: bool,
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
@@ -2140,7 +2337,12 @@ async fn serve_range(
     };
     let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
     state.egress.add(end - start + 1);
-    Ok(Response::builder()
+    let mut builder = Response::builder();
+    if throttled_by_quota {
+        builder = builder.header("X-Nauka-Throttled", "egress-quota");
+    }
+    let _ = &builder;
+    Ok(builder
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
@@ -2272,6 +2474,10 @@ pub(crate) fn describe_metrics() {
         "Peers written off for the remainder of a download after a failed or timed-out shard transfer. Per-request and independent of the cluster-wide liveness map."
     );
 }
+
+/// Read speed once a space is past its monthly egress quota: slow
+/// enough to stop the bleeding, alive enough not to break pages.
+const EGRESS_CRAWL: u64 = 64 * 1024;
 
 /// Delay past which a peer is considered unreachable.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);

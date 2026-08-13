@@ -180,6 +180,16 @@ pub enum AppCommand {
     /// the manifest in the same apply — an unowned file has no reason to
     /// exist, and the GC reclaims its shards on the following passes.
     RemoveFileRef { file_hash: String, space: String },
+    /// One node's egress ledger for one space and one month,
+    /// self-declared like [`AppCommand::UpdateNodeEgress`]: each node
+    /// only ever writes its own row, and the space's monthly total is
+    /// the sum over nodes. Feeds the per-space egress quota (over it,
+    /// reads are throttled hard — never cut) and, one day, the bill.
+    UpdateSpaceEgress {
+        node_addr: String,
+        space: String,
+        egress: NodeEgress,
+    },
 }
 
 /// What a space key is allowed to do. bincode is positional: new roles
@@ -329,6 +339,12 @@ pub struct AppState {
     /// until the private-by-default switch.
     #[serde(default)]
     pub file_refs: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Per-space egress ledgers: space → (node → month/served). Row
+    /// ownership is per node (self-declared, like [`Self::node_egress`]);
+    /// a space's monthly consumption is the sum of its rows for the
+    /// current month.
+    #[serde(default)]
+    pub space_egress: BTreeMap<String, BTreeMap<String, NodeEgress>>,
 }
 
 /// The AppState shape BEFORE `disabled` was appended — every field of
@@ -418,6 +434,33 @@ pub struct AppStateLegacyV3 {
     pub space_keys: BTreeMap<String, Vec<SpaceKey>>,
 }
 
+/// The AppState shape BEFORE `space_egress` was appended (file_refs
+/// present) — what the AUTH-3..6 builds persisted.
+#[derive(Deserialize)]
+pub struct AppStateLegacyV4 {
+    pub manifests: BTreeMap<String, FileManifest>,
+    #[serde(default)]
+    pub node_capacities: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub node_coords: BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+    #[serde(default)]
+    pub node_egress: BTreeMap<String, NodeEgress>,
+    #[serde(default)]
+    pub banned: BTreeMap<String, String>,
+    #[serde(default)]
+    pub s3: nauka_s3::S3State,
+    #[serde(default)]
+    pub disabled: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub orgs: BTreeMap<String, OrgRecord>,
+    #[serde(default)]
+    pub spaces: BTreeMap<String, SpaceRecord>,
+    #[serde(default)]
+    pub space_keys: BTreeMap<String, Vec<SpaceKey>>,
+    #[serde(default)]
+    pub file_refs: BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
 impl AppState {
     /// Deserialize a bincode snapshot, tolerating every previous shape:
     /// try the current one first, then each legacy shape from newest to
@@ -425,6 +468,22 @@ impl AppState {
     pub fn from_snapshot_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
         if let Ok(s) = bincode::deserialize::<AppState>(data) {
             return Ok(s);
+        }
+        if let Ok(v4) = bincode::deserialize::<AppStateLegacyV4>(data) {
+            return Ok(AppState {
+                manifests: v4.manifests,
+                node_capacities: v4.node_capacities,
+                node_coords: v4.node_coords,
+                node_egress: v4.node_egress,
+                banned: v4.banned,
+                s3: v4.s3,
+                disabled: v4.disabled,
+                orgs: v4.orgs,
+                spaces: v4.spaces,
+                space_keys: v4.space_keys,
+                file_refs: v4.file_refs,
+                space_egress: Default::default(),
+            });
         }
         if let Ok(v3) = bincode::deserialize::<AppStateLegacyV3>(data) {
             return Ok(AppState {
@@ -439,6 +498,7 @@ impl AppState {
                 spaces: v3.spaces,
                 space_keys: v3.space_keys,
                 file_refs: Default::default(),
+                space_egress: Default::default(),
             });
         }
         if let Ok(v2) = bincode::deserialize::<AppStateLegacyV2>(data) {
@@ -454,6 +514,7 @@ impl AppState {
                 spaces: v2.spaces,
                 space_keys: Default::default(),
                 file_refs: Default::default(),
+                space_egress: Default::default(),
             });
         }
         if let Ok(v1) = bincode::deserialize::<AppStateLegacyV1>(data) {
@@ -469,6 +530,7 @@ impl AppState {
                 spaces: Default::default(),
                 space_keys: Default::default(),
                 file_refs: Default::default(),
+                space_egress: Default::default(),
             });
         }
         let v0: AppStateLegacyV0 = bincode::deserialize(data)?;
@@ -484,6 +546,7 @@ impl AppState {
             spaces: Default::default(),
             space_keys: Default::default(),
             file_refs: Default::default(),
+            space_egress: Default::default(),
         })
     }
 }
@@ -567,6 +630,7 @@ mod snapshot_compat_tests {
             spaces: Default::default(),
             space_keys: Default::default(),
             file_refs: Default::default(),
+            space_egress: Default::default(),
         };
         // Truncate the trailing empty-BTreeSet length prefix to simulate a
         // snapshot that predates the field entirely.
@@ -803,6 +867,51 @@ mod snapshot_compat_tests {
         let back = AppState::from_snapshot_bytes(&bytes).unwrap();
         assert_eq!(back.file_refs["abcd"].len(), 2);
         assert!(back.file_refs["abcd"].contains("yogfile/backup"));
+    }
+
+    // A snapshot written by the AUTH-3..6 builds (file_refs present, no
+    // space_egress) must load with an empty ledger.
+    #[test]
+    fn v4_snapshot_loads_with_empty_space_egress() {
+        let mut s = AppState::default();
+        s.file_refs.insert(
+            "abcd".into(),
+            ["yogfile/uploads".to_string()].into_iter().collect(),
+        );
+        let v4_bytes = bincode::serialize(&LegacyBytesV4 {
+            manifests: &s.manifests,
+            node_capacities: &s.node_capacities,
+            node_coords: &s.node_coords,
+            node_egress: &s.node_egress,
+            banned: &s.banned,
+            s3: &s.s3,
+            disabled: &s.disabled,
+            orgs: &s.orgs,
+            spaces: &s.spaces,
+            space_keys: &s.space_keys,
+            file_refs: &s.file_refs,
+        })
+        .unwrap();
+        assert!(v4_bytes.len() < bincode::serialize(&s).unwrap().len());
+        let loaded = AppState::from_snapshot_bytes(&v4_bytes).unwrap();
+        assert!(loaded.file_refs.contains_key("abcd"));
+        assert!(loaded.space_egress.is_empty());
+    }
+
+    // Helper: the exact field set the AUTH-3..6 builds serialized.
+    #[derive(serde::Serialize)]
+    struct LegacyBytesV4<'a> {
+        manifests: &'a BTreeMap<String, FileManifest>,
+        node_capacities: &'a BTreeMap<String, u64>,
+        node_coords: &'a BTreeMap<String, nauka_cluster::vivaldi::Coord>,
+        node_egress: &'a BTreeMap<String, NodeEgress>,
+        banned: &'a BTreeMap<String, String>,
+        s3: &'a nauka_s3::S3State,
+        disabled: &'a std::collections::BTreeSet<String>,
+        orgs: &'a BTreeMap<String, OrgRecord>,
+        spaces: &'a BTreeMap<String, SpaceRecord>,
+        space_keys: &'a BTreeMap<String, Vec<SpaceKey>>,
+        file_refs: &'a BTreeMap<String, std::collections::BTreeSet<String>>,
     }
 
     // Helper: the exact field set the AUTH-2 build serialized.

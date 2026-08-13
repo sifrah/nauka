@@ -214,6 +214,30 @@ be claimed by the signing space itself (`space publish <space> <hash>
 --key …`, no `--to`) — the migration path that turns legacy files into
 owned ones before the final flip.
 
+## Quotas: storage refused, egress throttled
+
+Two caps per space, one per organisation — each enforced locally by
+whichever node takes the request, from the replicated registry:
+
+- **Storage** (`nauka space set <space> --quota <bytes>`, and
+  `nauka org set <org> --quota` for the sum of its spaces): an upload
+  or a publish that would push the space past its cap is **refused**
+  with the numbers and the remedy. Quotas count *logical* bytes — the
+  sum of the sizes a space references. Deduplication stays physical:
+  two spaces referencing the same file store it once but each counts
+  it in full, so sharing never becomes a quota loophole.
+- **Egress per month** (`--egress-quota <bytes>`): every served read
+  is attributed to the space whose grant allowed it (the link's space,
+  or the public space that served bare), accumulated per node and
+  folded into the replicated ledger. Past the cap, reads are **slowed
+  to a crawl, never cut** — a throttled link hurts less than a dead
+  one on someone's page. The response says why:
+  `X-Nauka-Throttled: egress-quota`. The month rolls over in UTC.
+
+`nauka space usage <space>` and `nauka org usage <org>` show
+consumption against the caps. This ledger is also the shape of the
+future bill.
+
 ## The transition, honestly
 
 Uploads **without** `X-Nauka-Space` are still accepted, and the files

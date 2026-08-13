@@ -1217,6 +1217,16 @@ fn split_space_path(name: &str) -> Result<(&str, &str)> {
 struct OrgsView {
     orgs: std::collections::BTreeMap<String, nauka_raft::types::OrgRecord>,
     spaces: std::collections::BTreeMap<String, nauka_raft::types::SpaceRecord>,
+    #[serde(default)]
+    usage: std::collections::BTreeMap<String, UsageRow>,
+}
+
+#[derive(serde::Deserialize, Default, Clone, Copy)]
+struct UsageRow {
+    #[serde(default)]
+    storage_bytes: u64,
+    #[serde(default)]
+    egress_month_bytes: u64,
 }
 
 /// Reads the replicated org/space registry from the first peer whose
@@ -1746,7 +1756,22 @@ pub async fn space_publish(
 }
 
 /// `space set`: read-modify-write of a space's policies.
-pub async fn space_set(peers: &[SocketAddr], name: &str, rate_default: Option<&str>) -> Result<()> {
+fn parse_cap(kind: &str, v: &str) -> Result<Option<u64>> {
+    match v {
+        "off" => Ok(None),
+        n => Ok(Some(n.parse::<u64>().with_context(|| {
+            format!("{kind} is a number of bytes, or `off`")
+        })?)),
+    }
+}
+
+pub async fn space_set(
+    peers: &[SocketAddr],
+    name: &str,
+    rate_default: Option<&str>,
+    quota: Option<&str>,
+    egress_quota: Option<&str>,
+) -> Result<()> {
     split_space_path(name)?;
     let view = fetch_orgs(peers).await?;
     let mut record = view
@@ -1756,13 +1781,15 @@ pub async fn space_set(peers: &[SocketAddr], name: &str, rate_default: Option<&s
         .with_context(|| format!("no space named {name}"))?;
     let mut changed = false;
     if let Some(rate) = rate_default {
-        record.rate_default = match rate {
-            "off" => None,
-            n => Some(
-                n.parse::<u64>()
-                    .context("rate-default is bytes/s (a number) or `off`")?,
-            ),
-        };
+        record.rate_default = parse_cap("rate-default", rate)?;
+        changed = true;
+    }
+    if let Some(q) = quota {
+        record.quota_bytes = parse_cap("quota", q)?;
+        changed = true;
+    }
+    if let Some(q) = egress_quota {
+        record.egress_quota_bytes = parse_cap("egress-quota", q)?;
         changed = true;
     }
     if !changed {
@@ -1776,9 +1803,95 @@ pub async fn space_set(peers: &[SocketAddr], name: &str, rate_default: Option<&s
         },
     )
     .await?;
-    match record.rate_default {
-        Some(r) => println!("{name}: bare public reads capped at {r} B/s per connection"),
-        None => println!("{name}: no bare-read speed ceiling"),
+    println!(
+        "{name}: quota {} · egress/month {} · bare-read rate {}",
+        record
+            .quota_bytes
+            .map(human_bytes)
+            .unwrap_or_else(|| "off".into()),
+        record
+            .egress_quota_bytes
+            .map(human_bytes)
+            .unwrap_or_else(|| "off".into()),
+        record
+            .rate_default
+            .map(|r| format!("{} /s", human_bytes(r)))
+            .unwrap_or_else(|| "off".into()),
+    );
+    Ok(())
+}
+
+fn cap_str(v: Option<u64>) -> String {
+    v.map(human_bytes).unwrap_or_else(|| "∞".into())
+}
+
+/// `space usage`: consumption against quotas, from any node.
+pub async fn space_usage(peers: &[SocketAddr], name: &str) -> Result<()> {
+    split_space_path(name)?;
+    let view = fetch_orgs(peers).await?;
+    let record = view
+        .spaces
+        .get(name)
+        .with_context(|| format!("no space named {name}"))?;
+    let u = view.usage.get(name).copied().unwrap_or_default();
+    println!(
+        "storage : {} / {}",
+        human_bytes(u.storage_bytes),
+        cap_str(record.quota_bytes)
+    );
+    println!(
+        "egress  : {} / {} this month",
+        human_bytes(u.egress_month_bytes),
+        cap_str(record.egress_quota_bytes)
+    );
+    Ok(())
+}
+
+/// `org set`: the organisation-level storage cap.
+pub async fn org_set(peers: &[SocketAddr], name: &str, quota: Option<&str>) -> Result<()> {
+    let view = fetch_orgs(peers).await?;
+    let mut record = view
+        .orgs
+        .get(name)
+        .cloned()
+        .with_context(|| format!("no organisation named {name}"))?;
+    let Some(q) = quota else {
+        bail!("nothing to change (--quota <bytes|off>)");
+    };
+    record.quota_bytes = parse_cap("quota", q)?;
+    write_command(
+        peers,
+        nauka_raft::types::AppCommand::UpsertOrg {
+            name: name.to_string(),
+            record: record.clone(),
+        },
+    )
+    .await?;
+    println!("{name}: quota {}", cap_str(record.quota_bytes));
+    Ok(())
+}
+
+/// `org usage`: every space of the org, plus the total against the cap.
+pub async fn org_usage(peers: &[SocketAddr], name: &str) -> Result<()> {
+    let view = fetch_orgs(peers).await?;
+    let org = view
+        .orgs
+        .get(name)
+        .with_context(|| format!("no organisation named {name}"))?;
+    let mut total: u64 = 0;
+    for (path, _) in view.spaces.iter().filter(|(_, r)| r.org == name) {
+        let u = view.usage.get(path).copied().unwrap_or_default();
+        total += u.storage_bytes;
+        println!(
+            "{path}  storage {}  egress {} this month",
+            human_bytes(u.storage_bytes),
+            human_bytes(u.egress_month_bytes)
+        );
     }
+    println!(
+        "total: {} / {}",
+        human_bytes(total),
+        cap_str(org.quota_bytes)
+    );
     Ok(())
 }
