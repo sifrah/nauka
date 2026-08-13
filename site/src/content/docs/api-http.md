@@ -86,7 +86,16 @@ one — the second uploader rarely means "unname it".
 `ttl=<seconds>` gives the file an expiry; see
 [expiry](#ttl--post-apiuploadttlseconds) below.
 
-## `GET /f/{hash}`
+## `GET /f/{hash}` — and who may call it
+
+Reads follow [ownership](/multi-tenant/#signed-read-links-owned-files-are-private).
+A file referenced by an active **public-read** space is served bare. A
+file referenced by private spaces only takes a **signed link** —
+`?space=<org/space>&exp=<unix>&sig=<hex>`, Ed25519 over
+`nauka-link-v1\n{hash}\n{space}\n{exp}`, minted offline by the space's
+backend (or `nauka space link`). `403` otherwise, with the remedy.
+Unowned pre-tenant files are still served bare during the transition.
+`HEAD` obeys the same gate.
 
 Reconstructs the file and serves it, **streaming** (one stripe in memory
 at a time), from the whole cluster: local shards first, then fetched from

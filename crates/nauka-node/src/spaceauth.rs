@@ -29,7 +29,11 @@ pub const MAX_CLOCK_SKEW: u64 = 300;
 /// once at generation, recognized by `nauka space sign`.
 pub const SECRET_PREFIX: &str = "nsk_";
 
-/// The canonical string both sides sign/verify.
+/// The canonical string a WRITE signature covers. The `nauka-write-v1`
+/// prefix is domain separation: a write signature can never be replayed
+/// as a read link nor vice versa, whatever creative values a signing
+/// oracle is fed — the two canonicals disagree on their first bytes by
+/// construction.
 pub fn canonical_write(
     method: &str,
     path: &str,
@@ -38,9 +42,17 @@ pub fn canonical_write(
     content_hash: Option<&str>,
 ) -> String {
     format!(
-        "{method}\n{path}\n{space}\n{timestamp}\n{}",
+        "nauka-write-v1\n{method}\n{path}\n{space}\n{timestamp}\n{}",
         content_hash.unwrap_or("-")
     )
+}
+
+/// The canonical string a READ LINK signature covers (see
+/// `?space=&exp=&sig=` on `GET /f/<hash>`). `exp` is the unix second the
+/// link dies at — unlike writes there is no clock-skew window: the
+/// signer chooses the exact lifetime.
+pub fn canonical_link(file_hash: &str, space: &str, exp: u64) -> String {
+    format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}")
 }
 
 /// Parses an `nsk_…` private key into a signing key.
@@ -149,6 +161,27 @@ mod tests {
         assert!(timestamp_fresh(1000, 1000 + MAX_CLOCK_SKEW));
         assert!(timestamp_fresh(1000 + MAX_CLOCK_SKEW, 1000));
         assert!(!timestamp_fresh(1000, 1001 + MAX_CLOCK_SKEW));
+    }
+
+    #[test]
+    fn write_and_link_domains_never_cross() {
+        let (secret, public) = generate();
+        let sk = parse_secret(&secret).unwrap();
+        // A link signature must not validate as any write, even one
+        // crafted to mimic the link's field layout.
+        let link_sig = sign(&sk, &canonical_link("abcd", "yogfile/uploads", 999));
+        let mimic = canonical_write("abcd", "yogfile/uploads", "999", 0, None);
+        assert!(!verify(&public, &mimic, &link_sig));
+        // And a write signature must not open a link.
+        let write_sig = sign(
+            &sk,
+            &canonical_write("GET", "/f/abcd", "yogfile/uploads", 999, None),
+        );
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999),
+            &write_sig
+        ));
     }
 
     #[test]

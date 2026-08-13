@@ -420,6 +420,25 @@ enum SpaceCmd {
     /// the public half.
     #[command(subcommand)]
     Key(SpaceKeyCmd),
+    /// Mint a signed READ link for a file the space references — offline,
+    /// no cluster round-trip. Works with `signer` and `admin` keys; the
+    /// link carries its own expiry and dies with it (or with the key, or
+    /// with the space).
+    Link {
+        /// The space, e.g. yogfile/uploads.
+        space: String,
+        /// The file's BLAKE3 hash (full).
+        hash: String,
+        /// The private key (`nsk_…`).
+        #[arg(long)]
+        key: String,
+        /// Lifetime in seconds from now (default 15 minutes).
+        #[arg(long, default_value_t = 900)]
+        ttl: u64,
+        /// Absolute unix expiry — overrides --ttl (long-lived links).
+        #[arg(long)]
+        exp: Option<u64>,
+    },
     /// Sign a write request offline with a space's private key; prints
     /// the headers to attach (and a ready-to-paste curl). No network, no
     /// cluster round-trip — signing IS the permission.
@@ -1842,6 +1861,13 @@ async fn main() -> Result<()> {
                 path,
                 content_hash,
             } => node::space_sign(&space, &key, &method, &path, content_hash.as_deref())?,
+            SpaceCmd::Link {
+                space,
+                hash,
+                key,
+                ttl,
+                exp,
+            } => node::space_link(&space, &hash, &key, ttl, exp)?,
         },
         Cmd::PutRemote {
             file,

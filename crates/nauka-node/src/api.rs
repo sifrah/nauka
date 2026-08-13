@@ -503,10 +503,77 @@ async fn removal_check(
     })
 }
 
+/// The `?space=&exp=&sig=` triplet of a signed read link.
+#[derive(serde::Deserialize)]
+struct ReadLinkParams {
+    space: Option<String>,
+    exp: Option<u64>,
+    sig: Option<String>,
+}
+
+/// The read gate. Ownership decides the rules:
+/// - a file referenced by an ACTIVE public-read space is served bare;
+/// - any other owned file requires a valid signed link — space in the
+///   query references the file, space and org active, not expired, and
+///   the Ed25519 signature checks out under ANY of the space's keys
+///   (`signer` keys exist exactly for this);
+/// - an unowned pre-tenant file keeps the open behavior until the final
+///   flip, once anonymous uploads are retired.
+///
+/// Every check is local: replicated registry, no network.
+fn authorize_read(state: &ApiState, hash: &str, p: &ReadLinkParams) -> Result<(), Box<Response>> {
+    let s = state.app.app_state();
+    let Some(refs) = s.file_refs.get(hash).filter(|r| !r.is_empty()) else {
+        return Ok(()); // legacy, unowned
+    };
+    let active = |space: &str| {
+        s.spaces
+            .get(space)
+            .is_some_and(|r| !r.suspended && s.orgs.get(&r.org).is_some_and(|o| !o.suspended))
+    };
+    if refs.iter().any(|sp| active(sp) && s.spaces[sp].public_read) {
+        return Ok(()); // direct link via a public space
+    }
+    let deny = |msg: String| Err(Box::new((StatusCode::FORBIDDEN, msg).into_response()));
+    let (Some(space), Some(exp), Some(sig)) = (&p.space, p.exp, &p.sig) else {
+        return deny(
+            "this file is private — it takes a signed link \
+             (?space=<org/space>&exp=<unix>&sig=<hex>, see `nauka space link`) or a \
+             public-read space referencing it"
+                .into(),
+        );
+    };
+    if !refs.contains(space) {
+        return deny(format!("{space} does not reference this file"));
+    }
+    if !active(space) {
+        return deny(format!("space {space} is suspended"));
+    }
+    if exp <= crate::spaceauth::unix_now() {
+        return deny("link expired — ask the issuer for a fresh one".into());
+    }
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp);
+    let signed_by_space = s.space_keys.get(space).is_some_and(|keys| {
+        keys.iter()
+            .any(|k| crate::spaceauth::verify(&k.public_key, &canonical, sig))
+    });
+    if !signed_by_space {
+        return deny("invalid link signature".into());
+    }
+    Ok(())
+}
+
 /// HEAD /f/{hash}: size without a body (the download page relies on it).
-async fn download_head(State(state): State<Arc<ApiState>>, Path(hash): Path<String>) -> Response {
+async fn download_head(
+    State(state): State<Arc<ApiState>>,
+    Path(hash): Path<String>,
+    Query(link): Query<ReadLinkParams>,
+) -> Response {
     if let Some(resp) = unavailable(&state, &hash) {
         return resp;
+    }
+    if let Err(resp) = authorize_read(&state, &hash, &link) {
+        return *resp;
     }
     let manifest = match state.store.get_manifest(&hash) {
         Ok(m) => m,
@@ -1707,10 +1774,14 @@ pub(crate) async fn reconstruct_stripe(
 async fn download(
     State(state): State<Arc<ApiState>>,
     Path(hash): Path<String>,
+    Query(link): Query<ReadLinkParams>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(resp) = unavailable(&state, &hash) {
         return Ok(resp);
+    }
+    if let Err(resp) = authorize_read(&state, &hash, &link) {
+        return Ok(*resp);
     }
     // Manifest: local store (materialized), else the replicated registry.
     let manifest = match state.store.get_manifest(&hash) {

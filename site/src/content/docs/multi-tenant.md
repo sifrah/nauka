@@ -79,8 +79,12 @@ nauka space key rm myapp/uploads backend     # by name, or public-key prefix
 An upload for a space carries four headers, an Ed25519 signature over:
 
 ```text
-{method}\n{path}\n{space}\n{timestamp}\n{content_hash or "-"}
+nauka-write-v1\n{method}\n{path}\n{space}\n{timestamp}\n{content_hash or "-"}
 ```
+
+(The `nauka-write-v1` prefix is domain separation: a write signature
+can never double as a read link, nor the reverse — the two canonical
+strings disagree on their first bytes by construction.)
 
 `timestamp` is unix seconds; nodes accept ±300 s, so a captured
 signature dies in minutes. Signing is **offline** — your backend holds
@@ -138,12 +142,52 @@ ownership model, and they compose with content addressing:
 `nauka space files <org>/<name>` lists what a space references;
 `GET /api/files` now carries each file's `spaces`.
 
+## Signed read links: owned files are private
+
+A file referenced by spaces is **no longer served bare**. Reading it
+takes a signed link:
+
+```text
+/f/<hash>?space=<org/space>&exp=<unix>&sig=<hex>
+```
+
+The signature is Ed25519 over:
+
+```text
+nauka-link-v1\n{hash}\n{space}\n{exp}
+```
+
+Your backend mints links **offline** — check your own database (does
+*this user* get *this file*, for how long?), then sign; no call to
+Nauka, microseconds, and the link is the capability. `nauka space link
+<space> <hash> --key nsk_… --ttl 900` does it from a shell. Both key
+roles may sign links — that is exactly what `signer` keys are for.
+
+Any node verifies locally, four questions against the replicated
+registry: does the space reference this file? space and org active?
+not expired? signature valid under one of the space's keys? A link
+dies at its `exp`, with its key (`space key rm`), or with its space
+(`space suspend`) — the last two cluster-wide in one round-trip.
+
+Who can read what, today:
+
+| The file is… | `GET /f/<hash>` bare | with a valid signed link |
+|---|---|---|
+| referenced by an active **public-read** space | ✅ served (direct link) | ✅ |
+| referenced by private spaces only | ❌ 403 | ✅ |
+| suspended (space or org) | ❌ 403 | ❌ 403 |
+| pre-tenant legacy (no references) | ✅ still open | — |
+
+Legacy stays open until anonymous uploads are retired — that final
+flip closes the era, and it will be its own explicit change.
+
 ## The transition, honestly
 
-Uploads **without** `X-Nauka-Space` are still accepted, and reads are
-still open (`GET /f/<hash>` serves anyone who knows the hash). This is
-deliberate: the engine is mid-transition to multi-tenant, and the
-switch to private-by-default will be its own explicit, documented flip
-— not a surprise buried in a minor release. Coming next, in order:
-signed read links, public spaces with revocable direct links, per-link
-rate limits, and per-space quotas.
+Uploads **without** `X-Nauka-Space` are still accepted, and the files
+they create (unowned, no references) are still served bare. Owned
+files, on the other hand, are now private: signed links or a
+public-read space. The remaining flip — retiring anonymous uploads and
+closing legacy reads — will be its own explicit, documented change,
+once the quickstart path is fully re-anchored on spaces. Coming next:
+public-space direct-link polish, per-link rate limits, and per-space
+quotas.

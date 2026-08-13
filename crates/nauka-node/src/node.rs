@@ -1655,3 +1655,27 @@ fn human_bytes(b: u64) -> String {
         format!("{v:.2} {}", UNITS[u])
     }
 }
+
+/// Offline link minting: the read-side twin of [`space_sign`]. The URL
+/// is a capability — it carries its expiry and its proof, and any node
+/// verifies it locally.
+pub fn space_link(space: &str, hash: &str, secret: &str, ttl: u64, exp: Option<u64>) -> Result<()> {
+    split_space_path(space)?;
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("expected the file's FULL 64-hex BLAKE3 hash (links sign the exact hash)");
+    }
+    let sk = crate::spaceauth::parse_secret(secret)?;
+    let exp = exp.unwrap_or_else(|| crate::spaceauth::unix_now() + ttl);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp);
+    let sig = crate::spaceauth::sign(&sk, &canonical);
+    println!("/f/{hash}?space={space}&exp={exp}&sig={sig}");
+    eprintln!(
+        "{}",
+        style(format!(
+            "# dies at {exp} (unix). Full URL: http://<node>:8080/f/{}…",
+            &hash[..8]
+        ))
+        .dim()
+    );
+    Ok(())
+}
