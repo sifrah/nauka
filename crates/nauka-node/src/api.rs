@@ -2111,9 +2111,13 @@ pub(crate) async fn fetch_stripe_slots(
     (slots, remote_used)
 }
 
-/// Peers further than this Vivaldi estimate are not neighbors: asking
-/// them for cached stripes would cost the very round-trips the
-/// cooperative cache exists to avoid.
+/// Peers whose Vivaldi POSITION is further than this are not neighbors.
+/// Deliberately `drift_from` (Euclidean plus the height DELTA), not
+/// `distance` (which ADDS both heights): a young same-datacenter pair
+/// carries two inflated heights and reads ~29 ms under `distance` while
+/// sitting at the same position — right on any sane threshold, so the
+/// neighbor flickered in and out. Position drift reads ~0 for them and
+/// stays huge across continents, which is exactly the question asked.
 const NEIGHBOR_MAX_MS: f64 = 30.0;
 /// Ceiling on one neighbor-cache lookup; past it, reconstruct as usual.
 const NEIGHBOR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -2639,7 +2643,7 @@ impl Fetcher {
                     .filter(|addr| **addr != self.state.self_id)
                     .filter_map(|addr| {
                         let c = coords.get(addr)?;
-                        let d = me.distance(c);
+                        let d = me.drift_from(c);
                         (d <= NEIGHBOR_MAX_MS).then_some((addr.clone(), d))
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1))
