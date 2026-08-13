@@ -1,151 +1,189 @@
+<div align="center">
+
 # Nauka
 
-**A distributed storage engine that heals itself — one binary, one key.**
+**Storage that heals itself. Links that carry their own permissions.**
 
-Nauka splits every file into Reed-Solomon shards scattered across the nodes
-of a cluster. As long as `k` shards per stripe survive somewhere, the file
-comes back **byte-for-byte identical** — dead node, rotting disk, entire
-region wiped out.
+[![Release](https://img.shields.io/github/v/release/sifrah/nauka)](https://github.com/sifrah/nauka/releases/latest)
+[![CI](https://github.com/sifrah/nauka/actions/workflows/ci.yml/badge.svg)](https://github.com/sifrah/nauka/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
-Nodes authenticate one another with mTLS, spread data according to disk
-capacity and network distance, and repair and rebalance themselves
-continuously. Membership is managed explicitly from the CLI — no central
-server, no side infrastructure, no discovery layer to depend on.
+[Documentation](https://getnauka.com) · [Quickstart](https://getnauka.com/quickstart/) · [Multi-tenant model](https://getnauka.com/multi-tenant/)
+
+</div>
+
+Nauka is a distributed storage engine for content delivery. It splits every
+file into Reed-Solomon shards scattered across the machines of a cluster:
+as long as `k` shards per stripe survive somewhere, the file comes back
+byte-for-byte identical after a dead node, a rotting disk, or a wiped
+region. On top of that storage core sits a complete multi-tenant layer:
+organisations, storage spaces, Ed25519 keys, and capability links that are
+signed offline and verified locally by any node, with no auth service
+anywhere.
+
+What sets it apart:
+
+- **Erasure coding, not replication.** 4+2 by default: any 2 of 6 shards
+  can vanish, for a 50% storage overhead where triple replication charges
+  200% for the same tolerance.
+- **Permissions are cryptography, not infrastructure.** A download link is
+  a capability: it carries its expiry, its speed ceiling and its Ed25519
+  proof. Your backend mints it offline in microseconds; any node verifies
+  it locally against the replicated registry. No token endpoint, no OAuth
+  dance, no single point of failure.
+- **No shared secrets, ever.** The cluster only holds public keys. A fully
+  compromised node can verify signatures; it can never mint one.
+- **It proves, it never trusts.** Redundancy is only released against
+  `blake3(nonce || bytes)` proofs of possession plus an ownership claim,
+  and peers are audited continuously by sampling. BLAKE3 integrity is
+  checked at every boundary: a corrupted shard is caught on read and
+  treated as lost, never served.
+- **One binary, one command per machine.** A cluster is founded by an
+  install script and grown with `nauka node add <ip>`. Membership goes
+  through Raft consensus: no discovery layer, no split-brain to guard
+  against.
+
+| | |
+|---|---|
+| **Storage** | Reed-Solomon 4+2 stripes, BLAKE3 content addressing, global deduplication, streaming uploads and range reads |
+| **Multi-tenancy** | Organisations and spaces replicated to every node; Ed25519 keys with signer/admin roles, rotation and instant revocation |
+| **Delivery** | Signed links with expiry and unforgeable per-link speed limits; revocable public direct links; per-space bare-read rate defaults |
+| **Quotas** | Logical storage caps per space and per organisation, refused at the door; monthly egress ledger per space, throttled past the cap, never cut |
+| **Cluster** | Raft consensus on a dedicated network plane, mTLS QUIC transport, capacity-weighted and topology-aware placement (Vivaldi coordinates, no GeoIP) |
+| **Operations** | `nauka top` live TUI with node control, reversible drains, a removal pre-flight that counts shards physically on disks before letting a machine leave, Prometheus metrics |
+| **API** | Native HTTP (signed uploads, capability reads); S3-compatible endpoint as an opt-in cargo feature |
+
+## Quick start
+
+First machine, as root on a systemd Linux:
 
 ```bash
-# First machine — installs nauka and founds a systemd-managed cluster:
 curl -sSfL https://sh.getnauka.com | sh
+```
 
-# Grow it from that machine — provisions the target over SSH and joins it:
+The installer places the binary and founds a systemd-managed single-node
+cluster. Grow it from that machine (provisions the target over SSH):
+
+```bash
 nauka node add <new-ip>:7311
 ```
 
-## What sets it apart
-
-|  | Nauka | Garage | MinIO | IPFS |
-|---|:---:|:---:|:---:|:---:|
-| Erasure coding (no ×3 replication) | ✅ | ❌ | ✅ | ❌ |
-| Self-healing | ✅ | partial | ✅ | ❌ |
-| Single binary | ✅ | ✅ | ~ | ~ |
-| Capacity-weighted placement | ✅ | ✅ | ❌ | ❌ |
-| Topology-aware placement | ✅ | ❌ | ❌ | ❌ |
-
-**Durability.** 4+2 by default: every stripe survives the loss of any 2
-shards out of 6, for a 50% storage overhead — where ×3 replication charges
-200% for the same tolerance. BLAKE3 integrity is checked at every boundary:
-a corrupted shard is caught on read and treated as lost, never served.
-
-**Explicit, race-free membership.** A node's identity is derived from its
-Ed25519 public key. The first `serve` on a blank data dir founds a
-single-node cluster; every other node is added deliberately with
-`nauka node add`, which provisions it over SSH and joins it to the Raft
-group. Membership changes go through consensus — there is no discovery
-layer and therefore no split-brain to guard against.
-
-**Smart placement.** Rendezvous hashing weighted by declared disk capacity:
-every node fills to the same percentage. And nodes learn their network
-positions from the round-trip times they measure (Vivaldi coordinates, no
-GeoIP database) in order to **pull the shards of a stripe apart** — a file
-survives the loss of a region, not merely of a machine.
-
-**Proofs, not claims.** A node can assert it still holds what it has
-quietly lost. Nauka demands `blake3(nonce ‖ bytes)` proofs of possession
-before it gives up any redundancy, and audits its peers continuously by
-sampling.
-
-## Getting started
+Create a space and its key (once, thirty seconds):
 
 ```bash
-curl -sSfL https://sh.getnauka.com | sh     # or a .deb / .rpm from the releases
+nauka org create myapp
+nauka space create myapp/files
+nauka space key add myapp/files --role admin --name main
+# prints the private key ONCE; the cluster only keeps the public half
 ```
 
-On a systemd Linux run as root, the installer finishes the job: `nauka init`
-creates a dedicated user, generates the cluster token, and enables a hardened
-systemd service — the node starts immediately, founds a single-node cluster,
-and comes back after every reboot. Anywhere else (laptop, non-root, no
-systemd) only the binary is installed; run `sudo nauka init` yourself when
-ready, or set `NAUKA_NO_INIT=1` to keep the installer to the binary alone.
-
-The service is configured in `/etc/nauka/nauka.env`, stores under
-`/var/lib/nauka`, and logs to `journalctl -u nauka`. To run a node by hand
-instead — no systemd, a terminal in the foreground:
+Store a file and hand out a link:
 
 ```bash
-NAUKA_TOKEN=$(nauka token) nauka serve --advertise <ip>:7311
+nauka space sign myapp/files --key nsk_...        # prints curl-ready headers
+curl -T report.pdf 'http://<node>:8080/api/upload' -H 'X-Nauka-Space: ...' ...
+
+nauka space link myapp/files <hash> --key nsk_... --ttl 3600 --rate 1000000
+# a URL that dies in an hour and cannot be downloaded faster than 1 MB/s,
+# both enforced by the signature, valid on any node
 ```
 
-From source:
+Packages (`.deb`, `.rpm`, tarballs) are on the
+[releases page](https://github.com/sifrah/nauka/releases). From source:
+`cargo build --release` (add `--features s3` for the S3 endpoint).
 
-```bash
-cargo build --release                   # the storage engine, no S3 endpoint
-cargo build --release --features s3     # add the S3-compatible endpoint
-cargo test --workspace
+## Tested by breaking it
+
+Every feature lands the same way: full local gate (fmt, clippy, tests),
+then validation on a real multi-node WAN cluster before the merge, with
+the failure modes exercised on purpose.
+
+- Integration tests kill processes mid-write, cut power to the whole
+  cluster, saturate the network, and corrupt shards on disk.
+- The bincode append-only discipline of the replicated state is guarded
+  by a five-generation snapshot compatibility chain with regression
+  tests; seven rolling upgrades shipped on live clusters without an
+  incident.
+- The garbage collector once lost 4 of a file's 6 shards to a
+  mutual-release race between nodes with crossed placement views. The
+  forensic is in the commit history, the fix makes mutual deletion
+  impossible by construction, and the race is replayed deterministically
+  in the test suite.
+- Speed limits, quotas and refusal paths in the docs show measured
+  numbers, not intentions: a 400 KB/s link measured at 370 KB/s, a
+  tampered rate answered by 403, a full space refusing an upload with
+  the exact byte counts.
+
+## Architecture
+
+Any node is a complete entry point. A client talks HTTP to whichever node
+it likes; that node encodes stripes, pushes shards to their owners over
+QUIC, and registers the file in the Raft-replicated registry. Reads
+reconstruct from any `k` shards, wherever they live.
+
+```mermaid
+flowchart LR
+    C[Client] -- "signed upload / capability link" --> N1[Any node :8080]
+    subgraph Cluster
+        N1 -- "shards over QUIC (mTLS)" --> N2[Node]
+        N1 -- QUIC --> N3[Node]
+        N1 -- QUIC --> N4[Node]
+        N1 <-. "Raft: registry, orgs, spaces,\nkeys, references, quotas" .-> N2
+        N2 <-.-> N3
+        N3 <-.-> N4
+    end
 ```
 
-The S3-compatible endpoint (SigV4, multipart, SSE-C) is an opt-in cargo
-feature: the default engine serves its native HTTP API and nothing more.
+The replicated state is deliberately small: manifests, organisations,
+spaces, public keys, references, quotas. Everything that scales with an
+application's user base lives in that application's own database; the
+engine never sees an end user. That boundary is what makes every
+permission check local to the node that receives the request.
 
-Nauka is the storage engine. It exposes an HTTP API (`POST /api/upload`,
-`GET /f/{hash}`, `GET /api/status`) and — with `--features s3` — an
-S3-compatible endpoint; a user-facing web application belongs in a product
-built on top, not in the engine.
+Placement is rendezvous hashing weighted by declared capacity, stretched
+by network distance so the shards of one stripe land far apart: a file
+survives the loss of a region, not merely of a machine. Scrubbers heal
+missing shards continuously; drained or removed nodes hand their data
+over with proof-gated transfers.
 
-## Egress budgets
+## Operating a cluster
 
-Storage placement balances a stock — bytes on disk against declared
-capacity. Egress budgets balance the matching flow: bytes served to
-clients against a declared monthly allowance, for nodes on metered links
-(a 20 TB/month dedicated server, a capped home connection).
+`nauka top` is a live htop-style view of the cluster (fill rates,
+migrations, convergence) and a control panel: select a node, drain it
+reversibly, or remove it behind a confirmation. Removal runs a safety
+pre-flight that counts shards physically present on the surviving disks
+and refuses to leave any file below `k`, naming the files at risk.
 
-```bash
-NAUKA_EGRESS_QUOTA=20TB nauka serve …      # or --egress-quota 20TB
-```
-
-Plain bytes and human sizes are accepted (`500GB`, `1.5TB`, `512MiB`).
-Under systemd, set the variable in `/etc/nauka/nauka.env` and
-`systemctl restart nauka`. Unset means unmetered. A node past its budget is **deprioritized, never
-refused**: serving the file always wins over saving a node's bandwidth, so
-an exhausted budget shifts load while alternatives exist and yields when
-they don't.
-
-## Per-node stripe cache
-
-Decoded stripes that crossed the cluster once are kept on local disk and
-served directly afterwards:
-
-```bash
-NAUKA_CACHE_SIZE=10GB nauka serve …        # or --cache-size 10GB
-```
-
-Same thing under systemd: the variable goes in `/etc/nauka/nauka.env`.
-Because content is addressed by BLAKE3, a cache entry can never go stale;
-entries of deleted content age out by LRU and are swept alongside the
-shard GC. Reconstruct once per region, serve many times locally.
+Nodes on metered links declare an egress budget
+(`NAUKA_EGRESS_QUOTA=20TB`): past it they are deprioritized for reads,
+never refused. A per-node stripe cache (`NAUKA_CACHE_SIZE=10GB`) serves
+repeat reads from local disk; content addressing means it can never go
+stale.
 
 ## Documentation
 
-The full documentation lives at **[getnauka.com](https://getnauka.com)**; its
-sources are in [`site/src/content/docs/`](site/src/content/docs/).
+Full documentation at [getnauka.com](https://getnauka.com), sources in
+[`site/src/content/docs/`](site/src/content/docs/).
 
 | Document | Contents |
 |---|---|
-| [Install](https://getnauka.com/install/) | Install script, packages, source build, provenance |
-| [Deploy a cluster](https://getnauka.com/deploy/) | Keys, ports, systemd, `node add`, cluster sizing |
-| [Architecture](https://getnauka.com/architecture/) | Crates, invariants, upload/download flows |
-| [Erasure coding and storage](https://getnauka.com/erasure-core/) | Reed-Solomon, stripes, integrity, storage |
-| [Transport](https://getnauka.com/transport/) | QUIC, inter-node protocol, throughput tuning |
-| [Consensus](https://getnauka.com/consensus/) | Durable Raft, dedicated network plane |
-| [Cluster](https://getnauka.com/cluster/) | Placement, healing, attestation, topology-aware placement |
-| [HTTP API](https://getnauka.com/api-http/) | Public API, deletion, expiry |
-| [Operations](https://getnauka.com/operations/) | Deployment, CLI, known limitations |
+| [Quickstart](https://getnauka.com/quickstart/) | A real cluster in five minutes, spaces included |
+| [Organisations & spaces](https://getnauka.com/multi-tenant/) | The multi-tenant model: keys, signed links, direct links, rate limits, quotas |
+| [HTTP API](https://getnauka.com/api-http/) | Endpoints, signatures, ranges, TTLs |
+| [Deploy a cluster](https://getnauka.com/deploy/) | Keys, ports, systemd, sizing |
+| [Growing and shrinking](https://getnauka.com/growing/) | Adding, draining and removing machines safely |
+| [Durability & consistency](https://getnauka.com/durability/) | Exactly what survives what |
+| [Architecture](https://getnauka.com/architecture/) | Crates, invariants, upload and download flows |
 | [Design decisions](https://getnauka.com/decisions/) | Structural choices and stress-test lessons |
 
 ## Status
 
-Young, but serious. The foundation is proven by integration tests that kill
-processes, cut power to the whole cluster, saturate the network and corrupt
-disks on purpose. What is still missing before production use — chiefly API
-authentication and NAT traversal — is spelled out without hedging in
+Young, but serious, and honest about it. The multi-tenant layer shipped in
+v0.6.0: uploads are signed, owned files are private by default, quotas are
+enforced. Still missing before calling it boring: NAT traversal for nodes
+behind home routers, multipart and resumable uploads, and the S3 endpoint
+predates the tenant model (it remains feature-gated until it is rewired to
+spaces). Known limitations are spelled out without hedging in
 [Operations](https://getnauka.com/operations/#known-limitations-v1).
 
 ## License
