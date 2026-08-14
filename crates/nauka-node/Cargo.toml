@@ -29,6 +29,7 @@ nauka-crypto = { path = "../nauka-crypto" }
 nauka-s3 = { path = "../nauka-s3" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 s3s = { version = "0.14", optional = true }
 async-trait = "0.1"
 md-5 = { version = "0.10", optional = true }

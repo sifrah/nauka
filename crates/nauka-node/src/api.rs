@@ -193,6 +193,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/f/{hash}/refs", axum::routing::post(ref_add))
         .with_state(state)
+        // The HTTP door is a public API and browsers are clients: a
+        // web product built on the engine has its users' browsers PUT
+        // uploads (signed X-Nauka-* headers → CORS preflight) and
+        // fetch() signed links directly at the nodes. Permissive by
+        // design — auth is signatures, never cookies, so there is no
+        // ambient credential for a foreign origin to ride.
+        .layer(tower_http::cors::CorsLayer::permissive())
 }
 
 #[derive(serde::Serialize)]
