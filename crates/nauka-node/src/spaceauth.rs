@@ -48,17 +48,34 @@ pub fn canonical_write(
 }
 
 /// The canonical string a READ LINK signature covers (see
-/// `?space=&exp=&sig=&rate=` on `GET /f/<hash>`). `exp` is the unix
-/// second the link dies at — unlike writes there is no clock-skew
+/// `?space=&exp=&sig=&rate=&conc=` on `GET /f/<hash>`). `exp` is the
+/// unix second the link dies at — unlike writes there is no clock-skew
 /// window: the signer chooses the exact lifetime. `rate` is the
-/// per-connection ceiling in bytes/s ("-" = none): inside the signed
-/// string, so the recipient of a throttled link cannot un-throttle it
-/// by editing the URL.
-pub fn canonical_link(file_hash: &str, space: &str, exp: u64, rate: Option<u64>) -> String {
-    match rate {
+/// per-connection ceiling in bytes/s ("-" = none) and `conc` the
+/// ceiling on SIMULTANEOUS connections: both live inside the signed
+/// string, so the recipient of a throttled link can neither
+/// un-throttle it nor multiply it by editing the URL.
+pub fn canonical_link(
+    file_hash: &str,
+    space: &str,
+    exp: u64,
+    rate: Option<u64>,
+    conc: Option<u32>,
+) -> String {
+    let mut canonical = match rate {
         Some(r) => format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}\n{r}"),
         None => format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}\n-"),
+    };
+    // `conc` (max simultaneous connections) joined the format after
+    // links were already in the wild: it is appended as a sixth line
+    // ONLY when set, so every link signed before it existed keeps
+    // verifying. No ambiguity is introduced — the query parameters
+    // determine the canonical exactly, and stripping `conc=` from a
+    // URL changes the string the signature was computed over.
+    if let Some(c) = conc {
+        canonical.push_str(&format!("\n{c}"));
     }
+    canonical
 }
 
 /// Parses an `nsk_…` private key into a signing key.
@@ -175,7 +192,10 @@ mod tests {
         let sk = parse_secret(&secret).unwrap();
         // A link signature must not validate as any write, even one
         // crafted to mimic the link's field layout.
-        let link_sig = sign(&sk, &canonical_link("abcd", "yogfile/uploads", 999, None));
+        let link_sig = sign(
+            &sk,
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
+        );
         let mimic = canonical_write("abcd", "yogfile/uploads", "999", 0, None);
         assert!(!verify(&public, &mimic, &link_sig));
         // And a write signature must not open a link.
@@ -185,7 +205,7 @@ mod tests {
         );
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, None),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
             &write_sig
         ));
     }
@@ -194,20 +214,52 @@ mod tests {
     fn link_rate_is_bound_by_the_signature() {
         let (secret, public) = generate();
         let sk = parse_secret(&secret).unwrap();
-        let throttled = canonical_link("abcd", "yogfile/uploads", 999, Some(1_000_000));
+        let throttled = canonical_link("abcd", "yogfile/uploads", 999, Some(1_000_000), None);
         let sig = sign(&sk, &throttled);
         assert!(verify(&public, &throttled, &sig));
         // Stripping or editing the rate invalidates the signature.
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, None),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
             &sig
         ));
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, Some(8_000_000)),
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(8_000_000), None),
             &sig
         ));
+    }
+
+    #[test]
+    fn link_conc_is_bound_by_the_signature() {
+        let (secret, public) = generate();
+        let sk = parse_secret(&secret).unwrap();
+        let capped = canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), Some(2));
+        let sig = sign(&sk, &capped);
+        assert!(verify(&public, &capped, &sig));
+        // Stripping conc (the aria2 gambit), raising it, or keeping it
+        // while dropping the rate all invalidate the signature.
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), None),
+            &sig
+        ));
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), Some(16)),
+            &sig
+        ));
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/uploads", 999, None, Some(2)),
+            &sig
+        ));
+        // And a pre-conc link still verifies: the canonical without conc
+        // is byte-identical to what v0.6.3 signed.
+        let legacy = canonical_link("abcd", "yogfile/uploads", 999, None, None);
+        assert_eq!(legacy.matches('\n').count(), 4, "five lines, no sixth");
+        let legacy_sig = sign(&sk, &legacy);
+        assert!(verify(&public, &legacy, &legacy_sig));
     }
 
     #[test]

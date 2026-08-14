@@ -154,7 +154,7 @@ takes a signed link:
 The signature is Ed25519 over:
 
 ```text
-nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate or "-"}
+nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate or "-"}[\n{conc}]
 ```
 
 `rate` is an optional per-connection speed ceiling in **bytes/s**,
@@ -165,6 +165,19 @@ for free users and omits it for premium, and the serving node paces the
 stream (backpressure keeps the internal stripe fetches at the same
 speed; no buffering at full speed behind the scenes).
 
+`conc` closes the loophole `rate` leaves open: download accelerators
+(aria2, IDM) split a file into N parallel range requests, each politely
+under its own `rate`. Sign `conc=2` and the node serves at most two
+simultaneous connections **for that link** — the real ceiling becomes
+`rate x conc` whatever the client does. It rides as `&conc=` in the URL
+and, when present, as a sixth line of the signed string (links signed
+before `conc` existed stay valid — and nobody can strip or edit the
+parameter without killing the signature). Past the cap the node answers
+`429` with `Retry-After`; a slot frees the instant its connection ends,
+clean or not. The count is **per node**: a client fanning out across
+the DNS answer can reach `conc x nodes-in-answer` — accounted, and
+still a hard wall against single-target accelerators.
+
 Your backend mints links **offline** — check your own database (does
 *this user* get *this file*, for how long?), then sign; no call to
 Nauka, microseconds, and the link is the capability. `nauka space link
@@ -173,8 +186,8 @@ roles may sign links — that is exactly what `signer` keys are for.
 
 Any node verifies locally, four questions against the replicated
 registry: does the space reference this file? space and org active?
-not expired? signature (including the rate) valid under one of the
-space's keys? A link
+not expired? signature (including rate and conc) valid under one of
+the space's keys? A link
 dies at its `exp`, with its key (`space key rm`), or with its space
 (`space suspend`) — the last two cluster-wide in one round-trip.
 

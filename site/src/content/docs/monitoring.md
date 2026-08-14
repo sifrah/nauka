@@ -77,6 +77,7 @@ The families that matter:
 | `nauka_peer_rtt_seconds` | Vivaldi-estimated distance to each peer — what placement and the cooperative cache decide on |
 | `nauka_read_hedges_total` | stripe reads where parity was raced against a slow or failed data fetch |
 | `nauka_partial_range_reads_total` | range windows served from covering shards alone, no reconstruction |
+| `nauka_link_conc_rejects_total` | reads refused with 429 because the link's signed connection cap was full |
 | `nauka_dns_queries_total` | queries answered by the built-in geo-DNS front door |
 
 ## The four alerts worth having

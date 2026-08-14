@@ -1676,19 +1676,27 @@ pub fn space_link(
     ttl: u64,
     exp: Option<u64>,
     rate: Option<u64>,
+    conc: Option<u32>,
 ) -> Result<()> {
     split_space_path(space)?;
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("expected the file's FULL 64-hex BLAKE3 hash (links sign the exact hash)");
     }
+    if conc == Some(0) {
+        bail!("--conc 0 would be a link nobody can open — use at least 1");
+    }
     let sk = crate::spaceauth::parse_secret(secret)?;
     let exp = exp.unwrap_or_else(|| crate::spaceauth::unix_now() + ttl);
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp, rate);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp, rate, conc);
     let sig = crate::spaceauth::sign(&sk, &canonical);
-    match rate {
-        Some(r) => println!("/f/{hash}?space={space}&exp={exp}&rate={r}&sig={sig}"),
-        None => println!("/f/{hash}?space={space}&exp={exp}&sig={sig}"),
+    let mut query = format!("space={space}&exp={exp}");
+    if let Some(r) = rate {
+        query.push_str(&format!("&rate={r}"));
     }
+    if let Some(c) = conc {
+        query.push_str(&format!("&conc={c}"));
+    }
+    println!("/f/{hash}?{query}&sig={sig}");
     eprintln!(
         "{}",
         style(format!(

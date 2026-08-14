@@ -61,6 +61,12 @@ pub struct ApiState {
     /// Partial-read counters feeding the hot-file warming signal
     /// (file hash → count within the current window).
     pub hot_reads: std::sync::Mutex<HashMap<String, (u32, std::time::Instant)>>,
+    /// Connections in flight per signed link (keyed by signature), for
+    /// links carrying a `conc=` cap. Per node by design: cheap, no
+    /// coordination; a client fanning out across the neighborhood gets
+    /// at most `conc x nodes-in-answer`, which already defeats
+    /// single-target download accelerators.
+    pub link_conc: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 }
 
 impl ApiState {
@@ -765,13 +771,15 @@ async fn ref_add(
 }
 
 /// The `?space=&exp=&sig=` triplet of a signed read link, plus the
-/// optional signed `rate` ceiling (bytes/s).
+/// optional signed ceilings: `rate` (bytes/s per connection) and
+/// `conc` (simultaneous connections on this node).
 #[derive(serde::Deserialize)]
 struct ReadLinkParams {
     space: Option<String>,
     exp: Option<u64>,
     sig: Option<String>,
     rate: Option<u64>,
+    conc: Option<u32>,
 }
 
 /// The read gate. Ownership decides the rules:
@@ -841,6 +849,7 @@ fn authorize_read(
             .map(|sp| sp.to_string());
         return Ok(ReadGrant {
             rate,
+            conc: None,
             billed_space: billed,
         });
     }
@@ -862,29 +871,83 @@ fn authorize_read(
     if exp <= crate::spaceauth::unix_now() {
         return deny("link expired — ask the issuer for a fresh one".into());
     }
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp, p.rate);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp, p.rate, p.conc);
     let signed_by_space = s.space_keys.get(space).is_some_and(|keys| {
         keys.iter()
             .any(|k| crate::spaceauth::verify(&k.public_key, &canonical, sig))
     });
     if !signed_by_space {
         return deny(
-            "invalid link signature (hash, space, exp and rate must match what was signed)".into(),
+            "invalid link signature (hash, space, exp, rate and conc must match what was signed)"
+                .into(),
         );
     }
     // The issuer's decision, cryptographically bound: no rate in the
-    // link means the issuer chose not to throttle.
+    // link means the issuer chose not to throttle, no conc means
+    // unlimited parallel connections.
     Ok(ReadGrant {
         rate: p.rate,
+        conc: p.conc,
         billed_space: Some(space.clone()),
     })
 }
 
-/// What a granted read carries: the applicable speed ceiling and the
-/// space whose egress ledger the bytes land on.
+/// What a granted read carries: the applicable speed ceiling, the
+/// signed cap on simultaneous connections, and the space whose egress
+/// ledger the bytes land on.
 struct ReadGrant {
     rate: Option<u64>,
+    conc: Option<u32>,
     billed_space: Option<String>,
+}
+
+/// One occupied slot of a link's signed concurrency budget, counted
+/// per node and keyed by the link's signature (one signed link = one
+/// budget, however many people it was shared with). The slot frees
+/// when the response stream drops — normal completion and mid-transfer
+/// disconnects alike — so it can never outlive its connection.
+struct ConcGuard {
+    map: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    key: String,
+}
+
+impl ConcGuard {
+    /// Takes a slot, or answers how many are configured when full.
+    fn acquire(
+        map: &Arc<std::sync::Mutex<HashMap<String, u32>>>,
+        key: &str,
+        cap: u32,
+    ) -> Option<ConcGuard> {
+        let mut m = map.lock().unwrap();
+        let count = m.entry(key.to_string()).or_insert(0);
+        if *count >= cap {
+            let stale = *count == 0;
+            if stale {
+                m.remove(key);
+            }
+            return None;
+        }
+        *count += 1;
+        Some(ConcGuard {
+            map: map.clone(),
+            key: key.to_string(),
+        })
+    }
+}
+
+impl Drop for ConcGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap();
+        if let Some(count) = m.get_mut(&self.key) {
+            if *count <= 1 {
+                // Last slot released: drop the entry entirely, the map
+                // only ever holds links with connections in flight.
+                m.remove(&self.key);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
 }
 
 /// HEAD /f/{hash}: size without a body (the download page relies on it).
@@ -2265,6 +2328,7 @@ async fn download(
     let grant = if peer.ip().is_loopback() {
         ReadGrant {
             rate: None,
+            conc: None,
             billed_space: None,
         }
     } else {
@@ -2272,6 +2336,28 @@ async fn download(
             Ok(g) => g,
             Err(resp) => return Ok(*resp),
         }
+    };
+    // The signed connection cap: take a slot for the whole life of the
+    // response stream, or refuse with 429 while the budget is full. The
+    // signature is the budget's key — the cap belongs to the LINK, not
+    // to whoever is holding it.
+    let conc_guard = match (grant.conc, &link.sig) {
+        (Some(cap), Some(sig)) => match ConcGuard::acquire(&state.link_conc, sig, cap) {
+            Some(g) => Some(g),
+            None => {
+                metrics::counter!("nauka_link_conc_rejects_total").increment(1);
+                return Ok((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, "1")],
+                    format!(
+                        "this link is limited to {cap} simultaneous connection(s) — \
+                         retry when one finishes"
+                    ),
+                )
+                    .into_response());
+            }
+        },
+        _ => None,
     };
     // Egress quota: past the space's monthly cap, reads slow to a crawl
     // instead of dying — a throttled link hurts less than a dead one on
@@ -2323,7 +2409,16 @@ async fn download(
             record_space_egress(&state, billed, end - start + 1);
         }
         note_hot_read(&state, &manifest.file_hash);
-        return serve_range(state, manifest, start, end, rate, throttled_by_quota).await;
+        return serve_range(
+            state,
+            manifest,
+            start,
+            end,
+            rate,
+            throttled_by_quota,
+            conc_guard,
+        )
+        .await;
     }
 
     // Streaming reconstruction: one stripe at a time towards the client.
@@ -2407,7 +2502,7 @@ async fn download(
         Some(r) if r > 0 => paced(rx, r),
         _ => rx,
     };
-    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    let body = body_holding_slot(rx, conc_guard);
     // Egress is counted when the response is committed to — a client that
     // disconnects mid-download still spent its slice of budget.
     state.egress.add(manifest.file_size);
@@ -2433,6 +2528,22 @@ async fn download(
 
 /// Serves a byte range: only the stripes that intersect it are fetched and
 /// decoded (the rest of the file is never touched).
+/// Builds the response body, tying an optional concurrency slot to the
+/// stream's lifetime: the slot frees exactly when the body is dropped,
+/// whether the download completed or the client vanished mid-transfer.
+fn body_holding_slot(
+    rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>>,
+    guard: Option<ConcGuard>,
+) -> Body {
+    use futures::StreamExt as _;
+    Body::from_stream(
+        tokio_stream::wrappers::ReceiverStream::new(rx).map(move |item| {
+            let _slot_held = &guard;
+            item
+        }),
+    )
+}
+
 /// Wraps a byte stream in a pacing stage: cumulative bytes never run
 /// ahead of `rate` bytes/s. Chunks are re-cut to 64 KiB so the flow is
 /// smooth rather than stripe-sized bursts, and the bounded channel
@@ -2621,6 +2732,7 @@ async fn serve_range(
     end: u64,
     rate: Option<u64>,
     throttled_by_quota: bool,
+    conc_guard: Option<ConcGuard>,
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
@@ -2672,7 +2784,7 @@ async fn serve_range(
         Some(r) if r > 0 => paced(rx, r),
         _ => rx,
     };
-    let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+    let body = body_holding_slot(rx, conc_guard);
     state.egress.add(end - start + 1);
     let mut builder = Response::builder();
     if throttled_by_quota {

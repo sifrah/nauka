@@ -491,6 +491,12 @@ enum SpaceCmd {
         /// bound into the link (the recipient cannot remove it).
         #[arg(long)]
         rate: Option<u64>,
+        /// Cap on SIMULTANEOUS connections per node, cryptographically
+        /// bound into the link — closes the parallel-connection hole of
+        /// --rate (download accelerators open N streams; with --conc N
+        /// the real ceiling is rate x conc, whatever the client does).
+        #[arg(long)]
+        conc: Option<u32>,
     },
     /// Change a space's policies (read-modify-write, replicated).
     Set {
@@ -1338,6 +1344,7 @@ async fn main() -> Result<()> {
                     app: app.clone(),
                     self_id: self_id.clone(),
                     space_egress_local: Arc::new(Default::default()),
+                    link_conc: Arc::new(Default::default()),
                     warm_tx: stripe_cache.as_ref().map(|_| warm_tx.clone()),
                     hot_reads: Default::default(),
                     config: ErasureConfig::default(),
@@ -2067,7 +2074,8 @@ async fn main() -> Result<()> {
                 ttl,
                 exp,
                 rate,
-            } => node::space_link(&space, &hash, &key, ttl, exp, rate)?,
+                conc,
+            } => node::space_link(&space, &hash, &key, ttl, exp, rate, conc)?,
             SpaceCmd::Set {
                 name,
                 rate_default,
