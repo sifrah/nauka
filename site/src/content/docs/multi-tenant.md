@@ -174,9 +174,16 @@ and, when present, as a sixth line of the signed string (links signed
 before `conc` existed stay valid — and nobody can strip or edit the
 parameter without killing the signature). Past the cap the node answers
 `429` with `Retry-After`; a slot frees the instant its connection ends,
-clean or not. The count is **per node**: a client fanning out across
-the DNS answer can reach `conc x nodes-in-answer` — accounted, and
-still a hard wall against single-target accelerators.
+clean or not. The count is **shared across the DNS neighborhood**: the
+nodes a resolver hands out together gossip their in-flight counts per
+link once a second, and each admission decision sums what it holds
+with what its neighbors last reported. A client fanning out its
+connections across the answer's nodes hits the same wall as one
+hammering a single node — within a second of gossip lag, which is the
+deliberate precision of the mechanism (an accelerator that wins one
+extra connection for one second has not won anything). Nodes outside
+each other's neighborhood do not share counts: a resolver never hands
+those out together in the first place.
 
 Your backend mints links **offline** — check your own database (does
 *this user* get *this file*, for how long?), then sign; no call to

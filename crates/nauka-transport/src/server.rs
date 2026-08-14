@@ -43,6 +43,13 @@ pub trait CacheView: Send + Sync {
     fn stripe(&self, file_hash: &str, stripe_idx: usize) -> Option<Vec<u8>>;
 }
 
+/// Extension point: where [`Request::LinkConcCounts`] gossip lands. The
+/// node folds a peer's in-flight per-link counts into its own admission
+/// decision for conc-capped signed links.
+pub trait ConcView: Send + Sync {
+    fn absorb(&self, from: &str, counts: Vec<(String, u32)>);
+}
+
 /// Starts the QUIC server and serves requests until the process stops.
 /// With consensus enabled, also opens the dedicated plane on port+1.
 pub async fn serve(
@@ -51,6 +58,7 @@ pub async fn serve(
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
     cache: Option<Arc<dyn CacheView>>,
+    conc: Option<Arc<dyn ConcView>>,
 ) -> Result<()> {
     match raft {
         Some(handler) => {
@@ -61,12 +69,12 @@ pub async fn serve(
                 consensus.local_addr()?
             );
             tokio::spawn(serve_consensus_endpoint(consensus, handler.clone()));
-            serve_endpoint_owned(store, data, Some(handler), ownership, cache).await
+            serve_endpoint_owned(store, data, Some(handler), ownership, cache, conc).await
         }
         None => {
             let endpoint = make_endpoint(listen)?;
             info!("node listening on {}", endpoint.local_addr()?);
-            serve_endpoint_owned(store, endpoint, None, ownership, cache).await
+            serve_endpoint_owned(store, endpoint, None, ownership, cache, conc).await
         }
     }
 }
@@ -79,7 +87,7 @@ pub async fn serve_endpoint(
     endpoint: quinn::Endpoint,
     raft: Option<Arc<dyn RaftHandler>>,
 ) -> Result<()> {
-    serve_endpoint_owned(store, endpoint, raft, None, None).await
+    serve_endpoint_owned(store, endpoint, raft, None, None, None).await
 }
 
 /// [`serve_endpoint`] with an [`OwnershipView`] answering the ownership
@@ -91,17 +99,19 @@ pub async fn serve_endpoint_owned(
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
     cache: Option<Arc<dyn CacheView>>,
+    conc: Option<Arc<dyn ConcView>>,
 ) -> Result<()> {
     while let Some(incoming) = endpoint.accept().await {
         let store = store.clone();
         let raft = raft.clone();
         let ownership = ownership.clone();
         let cache = cache.clone();
+        let conc = conc.clone();
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(Some(store), raft, ownership, cache, conn).await
+                    handle_connection(Some(store), raft, ownership, cache, conc, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -126,7 +136,7 @@ pub async fn serve_consensus_endpoint(
             match incoming.await {
                 Ok(conn) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::ACCEPTED);
-                    handle_connection(None, Some(handler), None, None, conn).await
+                    handle_connection(None, Some(handler), None, None, None, conn).await
                 }
                 Err(e) => {
                     telemetry::record_connection(telemetry::IN, telemetry::conn::REJECTED);
@@ -218,6 +228,7 @@ pub async fn handle_connection(
     raft: Option<Arc<dyn RaftHandler>>,
     ownership: Option<Arc<dyn OwnershipView>>,
     cache: Option<Arc<dyn CacheView>>,
+    conc: Option<Arc<dyn ConcView>>,
     conn: quinn::Connection,
 ) {
     debug!("connection from {}", conn.remote_address());
@@ -252,6 +263,7 @@ pub async fn handle_connection(
         let raft = raft.clone();
         let ownership = ownership.clone();
         let cache = cache.clone();
+        let conc = conc.clone();
         tokio::spawn(async move {
             let response = match read_message::<Request>(&mut recv).await {
                 Ok(Request::Raft(rpc)) => match &raft {
@@ -262,7 +274,13 @@ pub async fn handle_connection(
                     None => Response::Error("consensus is not enabled on this node".into()),
                 },
                 Ok(req) => match &store {
-                    Some(s) => handle_request(s, ownership.as_deref(), cache.as_deref(), req),
+                    Some(s) => handle_request(
+                        s,
+                        ownership.as_deref(),
+                        cache.as_deref(),
+                        conc.as_deref(),
+                        req,
+                    ),
                     None => {
                         Response::Error("consensus plane: only Raft RPCs are accepted here".into())
                     }
@@ -288,10 +306,11 @@ fn handle_request(
     store: &ShardStore,
     ownership: Option<&dyn OwnershipView>,
     cache: Option<&dyn CacheView>,
+    conc: Option<&dyn ConcView>,
     req: Request,
 ) -> Response {
     let op = telemetry::op(&req);
-    let response = dispatch(store, ownership, cache, req);
+    let response = dispatch(store, ownership, cache, conc, req);
     telemetry::record_request(
         telemetry::IN,
         op,
@@ -307,6 +326,7 @@ fn dispatch(
     store: &ShardStore,
     ownership: Option<&dyn OwnershipView>,
     cache: Option<&dyn CacheView>,
+    conc: Option<&dyn ConcView>,
     req: Request,
 ) -> Response {
     match req {
@@ -353,5 +373,13 @@ fn dispatch(
             file_hash,
             stripe_idx,
         } => Response::CachedStripe(cache.and_then(|c| c.stripe(&file_hash, stripe_idx as usize))),
+        // Fire-and-forget gossip; without a ConcView (tests, tools) the
+        // counts are simply dropped — admission stays per-node there.
+        Request::LinkConcCounts { from, counts } => {
+            if let Some(view) = conc {
+                view.absorb(&from, counts);
+            }
+            Response::LinkConcCountsOk
+        }
     }
 }

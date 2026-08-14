@@ -62,11 +62,45 @@ pub struct ApiState {
     /// (file hash → count within the current window).
     pub hot_reads: std::sync::Mutex<HashMap<String, (u32, std::time::Instant)>>,
     /// Connections in flight per signed link (keyed by signature), for
-    /// links carrying a `conc=` cap. Per node by design: cheap, no
-    /// coordination; a client fanning out across the neighborhood gets
-    /// at most `conc x nodes-in-answer`, which already defeats
-    /// single-target download accelerators.
+    /// links carrying a `conc=` cap. This map is the node's OWN truth;
+    /// it is also what the gossip loop pushes to the neighborhood once
+    /// a second while non-empty.
     pub link_conc: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    /// The neighborhood's view: per sending peer, its last pushed
+    /// per-link counts and when they arrived. Entries older than
+    /// [`REMOTE_CONC_TTL`] are ignored (a dead peer must not hold a
+    /// link's budget hostage). Admission sums local + fresh remote, so
+    /// a client fanning out across the DNS answer still hits the cap —
+    /// within a second of gossip lag rather than exactly, by design.
+    #[allow(clippy::type_complexity)]
+    pub link_conc_remote:
+        Arc<std::sync::Mutex<HashMap<String, (std::time::Instant, HashMap<String, u32>)>>>,
+}
+
+/// Remote conc gossip older than this is stale and ignored.
+pub const REMOTE_CONC_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The landing pad of [`nauka_transport::server::ConcView`] gossip,
+/// sharing the remote map with [`ApiState`].
+pub struct ConcAbsorber(
+    #[allow(clippy::type_complexity)]
+    pub  Arc<std::sync::Mutex<HashMap<String, (std::time::Instant, HashMap<String, u32>)>>>,
+);
+
+impl nauka_transport::server::ConcView for ConcAbsorber {
+    fn absorb(&self, from: &str, counts: Vec<(String, u32)>) {
+        let mut m = self.0.lock().unwrap();
+        if counts.is_empty() {
+            // "Nothing in flight anymore": drop the row now instead of
+            // letting it age out — frees the budget a second earlier.
+            m.remove(from);
+        } else {
+            m.insert(
+                from.to_string(),
+                (std::time::Instant::now(), counts.into_iter().collect()),
+            );
+        }
+    }
 }
 
 impl ApiState {
@@ -912,15 +946,22 @@ struct ConcGuard {
 }
 
 impl ConcGuard {
-    /// Takes a slot, or answers how many are configured when full.
-    fn acquire(
-        map: &Arc<std::sync::Mutex<HashMap<String, u32>>>,
-        key: &str,
-        cap: u32,
-    ) -> Option<ConcGuard> {
+    /// Takes a slot, or refuses when the budget is full. The budget is
+    /// local in-flight PLUS what the neighborhood gossiped within
+    /// [`REMOTE_CONC_TTL`]: the slot itself is only ever local — remote
+    /// counts are somebody else's slots, observed, never mutated.
+    fn acquire(state: &ApiState, key: &str, cap: u32) -> Option<ConcGuard> {
+        let remote: u32 = {
+            let m = state.link_conc_remote.lock().unwrap();
+            m.values()
+                .filter(|(at, _)| at.elapsed() < REMOTE_CONC_TTL)
+                .filter_map(|(_, counts)| counts.get(key))
+                .sum()
+        };
+        let map = &state.link_conc;
         let mut m = map.lock().unwrap();
         let count = m.entry(key.to_string()).or_insert(0);
-        if *count >= cap {
+        if (*count).saturating_add(remote) >= cap {
             let stale = *count == 0;
             if stale {
                 m.remove(key);
@@ -2342,7 +2383,7 @@ async fn download(
     // signature is the budget's key — the cap belongs to the LINK, not
     // to whoever is holding it.
     let conc_guard = match (grant.conc, &link.sig) {
-        (Some(cap), Some(sig)) => match ConcGuard::acquire(&state.link_conc, sig, cap) {
+        (Some(cap), Some(sig)) => match ConcGuard::acquire(&state, sig, cap) {
             Some(g) => Some(g),
             None => {
                 metrics::counter!("nauka_link_conc_rejects_total").increment(1);
@@ -2528,6 +2569,53 @@ async fn download(
 
 /// Serves a byte range: only the stripes that intersect it are fetched and
 /// decoded (the rest of the file is never touched).
+/// Pushes this node's in-flight conc counts to its DNS neighborhood
+/// once a second while any exist — plus one final EMPTY push when the
+/// last connection ends, so the peers release the shared budget now
+/// instead of waiting out the staleness TTL. Fire-and-forget: a peer
+/// missing a push keeps admitting on slightly stale numbers for a
+/// second, which is the accepted precision of the whole mechanism.
+pub async fn conc_gossip_loop(state: Arc<ApiState>, geo: Option<Arc<crate::dns::GeoDns>>) {
+    let mut was_empty = true;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let counts: Vec<(String, u32)> = {
+            let m = state.link_conc.lock().unwrap();
+            m.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        };
+        if counts.is_empty() && was_empty {
+            continue;
+        }
+        was_empty = counts.is_empty();
+        let targets: Vec<String> = geo
+            .as_ref()
+            .and_then(|g| g.neighborhood_of_self())
+            .unwrap_or_else(|| {
+                // No geography (DNS off, database not fetched yet):
+                // correctness over thrift, push to every living member.
+                let liveness = state.health.snapshot();
+                state
+                    .app
+                    .members()
+                    .values()
+                    .filter(|a| **a != state.self_id)
+                    .filter(|a| liveness.get(*a).copied().unwrap_or(true))
+                    .cloned()
+                    .collect()
+            });
+        for addr in targets {
+            let counts = counts.clone();
+            let from = state.self_id.clone();
+            tokio::spawn(async move {
+                let Ok(sock) = addr.parse() else { return };
+                if let Ok(client) = nauka_transport::PeerClient::connect(sock).await {
+                    let _ = client.link_conc_counts(&from, counts).await;
+                }
+            });
+        }
+    }
+}
+
 /// Builds the response body, tying an optional concurrency slot to the
 /// stream's lifetime: the slot frees exactly when the body is dropped,
 /// whether the download completed or the client vanished mid-transfer.

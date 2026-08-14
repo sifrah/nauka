@@ -35,6 +35,7 @@ async fn spawn_node() -> Node {
         None,
         Some(claims.clone() as Arc<dyn OwnershipView>),
         None,
+        None,
     ));
     Node {
         id,

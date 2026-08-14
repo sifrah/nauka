@@ -131,6 +131,32 @@ impl GeoDns {
     }
 }
 
+impl GeoDns {
+    /// The living members a client standing next to THIS node would
+    /// plausibly share a DNS answer with: within [`NEIGHBORHOOD_KM`]
+    /// of self, self excluded. `None` when geography is unavailable
+    /// (no database yet, or self unplaceable) — the caller falls back
+    /// to the whole membership.
+    pub fn neighborhood_of_self(&self) -> Option<Vec<String>> {
+        let (slat, slon) = self.member_position(&self.state.self_id)?;
+        let members = self.state.app.members();
+        let liveness = self.state.health.snapshot();
+        Some(
+            members
+                .values()
+                .filter(|a| **a != self.state.self_id)
+                .filter(|a| liveness.get(*a).copied().unwrap_or(true))
+                .filter(|a| {
+                    self.member_position(a).is_some_and(|(lat, lon)| {
+                        haversine_km(slat, slon, lat, lon) <= NEIGHBORHOOD_KM
+                    })
+                })
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
 /// Great-circle distance, kilometres. Precision is irrelevant here —
 /// only the ORDER of candidates matters.
 fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {

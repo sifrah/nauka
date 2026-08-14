@@ -60,6 +60,17 @@ pub enum Request {
         file_hash: String,
         stripe_idx: u32,
     },
+    /// Gossip of a peer's in-flight connections per conc-capped signed
+    /// link (link signature → count). Senders push their OWN local
+    /// counts only, once a second while any are non-zero, to the nodes
+    /// of their DNS neighborhood — the set a client's resolver fans out
+    /// over. The receiver folds the map into its admission decision so
+    /// a link's connection cap holds across the neighborhood, not just
+    /// per node. An empty `counts` says "nothing in flight anymore".
+    LinkConcCounts {
+        from: String,
+        counts: Vec<(String, u32)>,
+    },
 }
 
 /// Consensus RPCs, carried as-is; only the nauka-raft layer knows how to
@@ -102,6 +113,9 @@ pub enum Response {
     /// integrity (re-encode and match the manifest's shard hashes): the
     /// transport authenticates the peer, not the bytes.
     CachedStripe(Option<Vec<u8>>),
+    /// Acknowledges [`Request::LinkConcCounts`]. Nothing to carry: the
+    /// gossip is fire-and-forget, the ack only closes the exchange.
+    LinkConcCountsOk,
 }
 
 #[derive(Debug, thiserror::Error)]

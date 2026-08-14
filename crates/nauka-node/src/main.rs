@@ -1117,6 +1117,19 @@ async fn main() -> Result<()> {
                     }
                 }
             };
+            // The neighborhood's conc-gossip landing pad, shared between
+            // the ApiState (admission reads it) and the transport server
+            // (peer pushes land in it) — declared here because the two
+            // live in different scopes of this arm.
+            #[allow(clippy::type_complexity)]
+            let link_conc_remote: Arc<
+                std::sync::Mutex<
+                    std::collections::HashMap<
+                        String,
+                        (std::time::Instant, std::collections::HashMap<String, u32>),
+                    >,
+                >,
+            > = Arc::new(Default::default());
             let stripe_cache = match cache_budget {
                 Some(budget) => Some(Arc::new(
                     cache::StripeCache::open(cli.data_dir.join("cache"), budget)
@@ -1345,6 +1358,7 @@ async fn main() -> Result<()> {
                     self_id: self_id.clone(),
                     space_egress_local: Arc::new(Default::default()),
                     link_conc: Arc::new(Default::default()),
+                    link_conc_remote: link_conc_remote.clone(),
                     warm_tx: stripe_cache.as_ref().map(|_| warm_tx.clone()),
                     hot_reads: Default::default(),
                     config: ErasureConfig::default(),
@@ -1370,11 +1384,13 @@ async fn main() -> Result<()> {
                 }
                 let no_dns = no_dns
                     || std::env::var("NAUKA_NO_DNS").is_ok_and(|v| !v.is_empty() && v != "0");
+                let mut geodns_for_gossip: Option<Arc<dns::GeoDns>> = None;
                 if !no_dns {
                     // The geo-DNS front door: on by default, a bind
                     // failure only warns (nodes without the capability
                     // keep serving storage).
                     let geodns = dns::GeoDns::new(api_state.clone());
+                    geodns_for_gossip = Some(geodns.clone());
                     tokio::spawn(dns::mmdb_keeper(geodns.clone(), cli.data_dir.clone()));
                     let bind_ip = self_id
                         .split(':')
@@ -1383,6 +1399,7 @@ async fn main() -> Result<()> {
                         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                     tokio::spawn(dns::serve(geodns, bind_ip, 53));
                 }
+                tokio::spawn(api::conc_gossip_loop(api_state.clone(), geodns_for_gossip));
                 if let Some(domain) = https_domain.clone() {
                     // HTTPS with self-obtained certificates: the ACME
                     // challenges ride the cluster's own DNS.
@@ -1920,6 +1937,8 @@ async fn main() -> Result<()> {
                 stripe_cache
                     .clone()
                     .map(|c| c as Arc<dyn nauka_transport::server::CacheView>),
+                Some(Arc::new(api::ConcAbsorber(link_conc_remote.clone()))
+                    as Arc<dyn nauka_transport::server::ConcView>),
             )
             .await?;
         }

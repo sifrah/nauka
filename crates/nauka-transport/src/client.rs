@@ -207,6 +207,24 @@ impl PeerClient {
         }
     }
 
+    /// Pushes this node's in-flight per-link connection counts to a
+    /// neighborhood peer. An `Error` answer (a peer too old to know the
+    /// request during a rolling deploy) is fine: that peer just keeps
+    /// counting per-node until it is upgraded.
+    pub async fn link_conc_counts(&self, from: &str, counts: Vec<(String, u32)>) -> Result<()> {
+        match self
+            .call(Request::LinkConcCounts {
+                from: from.to_string(),
+                counts,
+            })
+            .await?
+        {
+            Response::LinkConcCountsOk => Ok(()),
+            Response::Error(_) => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub async fn put_manifest(&self, manifest: &FileManifest) -> Result<()> {
         match self.call(Request::PutManifest(manifest.clone())).await? {
             Response::PutManifestOk => Ok(()),

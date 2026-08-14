@@ -99,7 +99,9 @@ file referenced by private spaces only takes a **signed link** —
 signed and un-removable: Ed25519 over
 `nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate|-}[\n{conc}]`, minted
 offline by the space's backend (or `nauka space link`). Past the conc
-cap the node answers `429` + `Retry-After` until a connection ends.
+cap the node answers `429` + `Retry-After` until a connection ends —
+the cap is counted across the DNS neighborhood (the nodes gossip
+their in-flight counts), not just per node.
 Bare public reads obey the space's `rate_default`. `403` otherwise,
 with the remedy.
 Unowned files (pre-0.6 leftovers) are served to nobody until adopted.

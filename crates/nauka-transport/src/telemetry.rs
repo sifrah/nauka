@@ -77,6 +77,7 @@ pub fn op(req: &Request) -> &'static str {
         Request::Raft(_) => "raft",
         Request::ProveShardOwned { .. } => "prove_shard_owned",
         Request::GetCachedStripe { .. } => "get_cached_stripe",
+        Request::LinkConcCounts { .. } => "link_conc_counts",
     }
 }
 
@@ -215,6 +216,13 @@ mod tests {
                     stripe_idx: 0,
                 },
                 "get_cached_stripe",
+            ),
+            (
+                Request::LinkConcCounts {
+                    from: "1.2.3.4:7311".into(),
+                    counts: vec![("sig".into(), 2)],
+                },
+                "link_conc_counts",
             ),
         ];
         for (req, want) in cases {
