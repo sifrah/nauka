@@ -497,6 +497,12 @@ enum SpaceCmd {
         /// the real ceiling is rate x conc, whatever the client does).
         #[arg(long)]
         conc: Option<u32>,
+        /// Serve the file INLINE as this content type instead of as an
+        /// octet-stream attachment — the browser plays or displays it
+        /// in place. Signed like the rest, and restricted to the types
+        /// a browser cannot execute (no HTML, no SVG).
+        #[arg(long = "content-type")]
+        content_type: Option<String>,
     },
     /// Change a space's policies (read-modify-write, replicated).
     Set {
@@ -2094,7 +2100,17 @@ async fn main() -> Result<()> {
                 exp,
                 rate,
                 conc,
-            } => node::space_link(&space, &hash, &key, ttl, exp, rate, conc)?,
+                content_type,
+            } => node::space_link(
+                &space,
+                &hash,
+                &key,
+                ttl,
+                exp,
+                rate,
+                conc,
+                content_type.as_deref(),
+            )?,
             SpaceCmd::Set {
                 name,
                 rate_default,

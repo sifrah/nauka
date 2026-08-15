@@ -1669,6 +1669,7 @@ fn human_bytes(b: u64) -> String {
 /// Offline link minting: the read-side twin of [`space_sign`]. The URL
 /// is a capability — it carries its expiry and its proof, and any node
 /// verifies it locally.
+#[allow(clippy::too_many_arguments)]
 pub fn space_link(
     space: &str,
     hash: &str,
@@ -1677,6 +1678,7 @@ pub fn space_link(
     exp: Option<u64>,
     rate: Option<u64>,
     conc: Option<u32>,
+    content_type: Option<&str>,
 ) -> Result<()> {
     split_space_path(space)?;
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1685,9 +1687,19 @@ pub fn space_link(
     if conc == Some(0) {
         bail!("--conc 0 would be a link nobody can open — use at least 1");
     }
+    // Refused here rather than at read time: a link nobody can open is
+    // worse than a command that fails while you are still typing it.
+    if let Some(ct) = content_type {
+        if crate::spaceauth::inline_content_type(ct).is_none() {
+            bail!(
+                "{ct} cannot be served inline — omit --content-type and the file downloads \
+                 as an attachment"
+            );
+        }
+    }
     let sk = crate::spaceauth::parse_secret(secret)?;
     let exp = exp.unwrap_or_else(|| crate::spaceauth::unix_now() + ttl);
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp, rate, conc);
+    let canonical = crate::spaceauth::canonical_link(hash, space, exp, rate, conc, content_type);
     let sig = crate::spaceauth::sign(&sk, &canonical);
     let mut query = format!("space={space}&exp={exp}");
     if let Some(r) = rate {
@@ -1695,6 +1707,9 @@ pub fn space_link(
     }
     if let Some(c) = conc {
         query.push_str(&format!("&conc={c}"));
+    }
+    if let Some(ct) = content_type {
+        query.push_str(&format!("&ct={ct}"));
     }
     println!("/f/{hash}?{query}&sig={sig}");
     eprintln!(

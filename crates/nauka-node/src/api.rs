@@ -813,7 +813,8 @@ async fn ref_add(
 
 /// The `?space=&exp=&sig=` triplet of a signed read link, plus the
 /// optional signed ceilings: `rate` (bytes/s per connection) and
-/// `conc` (simultaneous connections on this node).
+/// `conc` (simultaneous connections on this node), plus `ct` — the
+/// content type the issuer wants served inline.
 #[derive(serde::Deserialize)]
 struct ReadLinkParams {
     space: Option<String>,
@@ -821,6 +822,7 @@ struct ReadLinkParams {
     sig: Option<String>,
     rate: Option<u64>,
     conc: Option<u32>,
+    ct: Option<String>,
 }
 
 /// The read gate. Ownership decides the rules:
@@ -891,6 +893,7 @@ fn authorize_read(
         return Ok(ReadGrant {
             rate,
             conc: None,
+            content_type: None,
             billed_space: billed,
         });
     }
@@ -912,14 +915,32 @@ fn authorize_read(
     if exp <= crate::spaceauth::unix_now() {
         return deny("link expired — ask the issuer for a fresh one".into());
     }
-    let canonical = crate::spaceauth::canonical_link(hash, space, exp, p.rate, p.conc);
+    // The type is checked BEFORE the signature is even considered: a
+    // space that signs something outside the table gets a plain refusal
+    // rather than a quiet downgrade to `attachment`, so the mistake
+    // surfaces in the issuer's tests instead of in production.
+    let content_type = match &p.ct {
+        Some(ct) => match crate::spaceauth::inline_content_type(ct) {
+            Some(served) => Some(served),
+            None => {
+                return deny(format!(
+                    "{ct} is not servable inline — drop the ct parameter and the file \
+                     downloads as an attachment"
+                ))
+            }
+        },
+        None => None,
+    };
+    let canonical =
+        crate::spaceauth::canonical_link(hash, space, exp, p.rate, p.conc, p.ct.as_deref());
     let signed_by_space = s.space_keys.get(space).is_some_and(|keys| {
         keys.iter()
             .any(|k| crate::spaceauth::verify(&k.public_key, &canonical, sig))
     });
     if !signed_by_space {
         return deny(
-            "invalid link signature (hash, space, exp, rate and conc must match what was signed)"
+            "invalid link signature (hash, space, exp, rate, conc and ct must match what was \
+             signed)"
                 .into(),
         );
     }
@@ -929,6 +950,7 @@ fn authorize_read(
     Ok(ReadGrant {
         rate: p.rate,
         conc: p.conc,
+        content_type,
         billed_space: Some(space.clone()),
     })
 }
@@ -939,7 +961,48 @@ fn authorize_read(
 struct ReadGrant {
     rate: Option<u64>,
     conc: Option<u32>,
+    /// The signed inline type, already resolved to the exact header
+    /// value through [`crate::spaceauth::inline_content_type`]. `None`
+    /// means the historical behavior: an octet-stream attachment.
+    content_type: Option<&'static str>,
     billed_space: Option<String>,
+}
+
+/// Applies a grant's presentation decision to a response: the signed
+/// inline type when there is one, the octet-stream attachment
+/// otherwise. `nosniff` rides along with every inline answer — the
+/// whole point of the allowlist is that the type served is the type
+/// signed, and sniffing is exactly what would undo that.
+fn present(
+    mut b: axum::http::response::Builder,
+    content_type: Option<&'static str>,
+    name: Option<&String>,
+) -> axum::http::response::Builder {
+    match content_type {
+        Some(ct) => {
+            b = b
+                .header(header::CONTENT_TYPE, ct)
+                .header("X-Content-Type-Options", "nosniff");
+            if let Some(name) = name {
+                let safe = name.replace(['"', '\r', '\n'], "_");
+                b = b.header(
+                    header::CONTENT_DISPOSITION,
+                    format!("inline; filename=\"{safe}\""),
+                );
+            }
+        }
+        None => {
+            b = b.header(header::CONTENT_TYPE, "application/octet-stream");
+            if let Some(name) = name {
+                let safe = name.replace(['"', '\r', '\n'], "_");
+                b = b.header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{safe}\""),
+                );
+            }
+        }
+    }
+    b
 }
 
 /// One occupied slot of a link's signed concurrency budget, counted
@@ -1008,9 +1071,13 @@ async fn download_head(
     if let Some(resp) = unavailable(&state, &hash) {
         return resp;
     }
+    // A media element probes with HEAD before it plays: this answer has
+    // to carry the same type the GET will, or the player gives up here.
+    let mut content_type = None;
     if !peer.ip().is_loopback() {
-        if let Err(resp) = authorize_read(&state, &hash, &link) {
-            return *resp;
+        match authorize_read(&state, &hash, &link) {
+            Ok(grant) => content_type = grant.content_type,
+            Err(resp) => return *resp,
         }
     }
     let manifest = match state.store.get_manifest(&hash) {
@@ -1020,8 +1087,7 @@ async fn download_head(
             None => return StatusCode::NOT_FOUND.into_response(),
         },
     };
-    Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+    present(Response::builder(), content_type, manifest.name.as_ref())
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, manifest.file_size)
         .body(Body::empty())
@@ -2377,6 +2443,7 @@ async fn download(
         ReadGrant {
             rate: None,
             conc: None,
+            content_type: None,
             billed_space: None,
         }
     } else {
@@ -2465,6 +2532,7 @@ async fn download(
             rate,
             throttled_by_quota,
             conc_guard,
+            grant.content_type,
         )
         .await;
     }
@@ -2557,19 +2625,15 @@ async fn download(
     if let Some(billed) = &grant.billed_space {
         record_space_egress(&state, billed, manifest.file_size);
     }
-    let mut response = Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CONTENT_LENGTH, manifest.file_size);
+    let mut response = present(
+        Response::builder(),
+        grant.content_type,
+        manifest.name.as_ref(),
+    )
+    .header(header::ACCEPT_RANGES, "bytes")
+    .header(header::CONTENT_LENGTH, manifest.file_size);
     if throttled_by_quota {
         response = response.header("X-Nauka-Throttled", "egress-quota");
-    }
-    if let Some(name) = &manifest.name {
-        let safe = name.replace(['"', '\r', '\n'], "_");
-        response = response.header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{safe}\""),
-        );
     }
     Ok(response.body(body).map_err(anyhow::Error::from)?)
 }
@@ -2820,6 +2884,7 @@ async fn read_stripe_window(
     Ok(d[from..to.min(d.len())].to_vec())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_range(
     state: Arc<ApiState>,
     manifest: FileManifest,
@@ -2828,6 +2893,7 @@ async fn serve_range(
     rate: Option<u64>,
     throttled_by_quota: bool,
     conc_guard: Option<ConcGuard>,
+    content_type: Option<&'static str>,
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
     let fetcher = Arc::new(Fetcher::new(state.clone()));
@@ -2881,14 +2947,13 @@ async fn serve_range(
     };
     let body = body_holding_slot(rx, conc_guard);
     state.egress.add(end - start + 1);
-    let mut builder = Response::builder();
+    let mut builder = present(Response::builder(), content_type, manifest.name.as_ref());
     if throttled_by_quota {
         builder = builder.header("X-Nauka-Throttled", "egress-quota");
     }
     let _ = &builder;
     Ok(builder
         .status(StatusCode::PARTIAL_CONTENT)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, end - start + 1)
         .header(

@@ -61,6 +61,7 @@ pub fn canonical_link(
     exp: u64,
     rate: Option<u64>,
     conc: Option<u32>,
+    ct: Option<&str>,
 ) -> String {
     let mut canonical = match rate {
         Some(r) => format!("nauka-link-v1\n{file_hash}\n{space}\n{exp}\n{r}"),
@@ -72,10 +73,59 @@ pub fn canonical_link(
     // verifying. No ambiguity is introduced — the query parameters
     // determine the canonical exactly, and stripping `conc=` from a
     // URL changes the string the signature was computed over.
-    if let Some(c) = conc {
-        canonical.push_str(&format!("\n{c}"));
+    //
+    // `ct` (the inline content type) came later still, as a seventh
+    // line. A seventh line cannot exist without a sixth, so a link that
+    // carries `ct` without `conc` spends a "-" on line six exactly like
+    // an unthrottled `rate` does: without it, (conc=None, ct=X) and
+    // (conc=X, ct=None) would collapse onto the same string.
+    if conc.is_some() || ct.is_some() {
+        match conc {
+            Some(c) => canonical.push_str(&format!("\n{c}")),
+            None => canonical.push_str("\n-"),
+        }
+    }
+    if let Some(t) = ct {
+        canonical.push_str(&format!("\n{t}"));
     }
     canonical
+}
+
+/// The content types a signed link may ask to be served INLINE, mapped
+/// to the exact header value the node emits.
+///
+/// Two rules make this table the whole of the policy. First, the node
+/// never echoes the caller's string — it serves the constant it looked
+/// up — so no header injection and no smuggled `charset` survive the
+/// round trip. Second, nothing that a browser executes in the origin's
+/// context is in the table: no `text/html`, no `image/svg+xml`, no
+/// XML. A tenant that could name those types would own a stored XSS on
+/// whatever domain serves the file, which on a shared node is every
+/// other tenant's domain too.
+///
+/// Everything absent from this table keeps being served as an
+/// `application/octet-stream` attachment, which is the safe default the
+/// node has always had.
+pub fn inline_content_type(ct: &str) -> Option<&'static str> {
+    Some(match ct {
+        "image/jpeg" => "image/jpeg",
+        "image/png" => "image/png",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        "image/avif" => "image/avif",
+        "video/mp4" => "video/mp4",
+        "video/webm" => "video/webm",
+        "audio/mpeg" => "audio/mpeg",
+        "audio/mp4" => "audio/mp4",
+        "audio/ogg" => "audio/ogg",
+        "audio/wav" => "audio/wav",
+        "application/pdf" => "application/pdf",
+        // Served with an explicit charset: a .txt full of markup is
+        // then displayed as the text it is, never sniffed into a
+        // document.
+        "text/plain" => "text/plain; charset=utf-8",
+        _ => return None,
+    })
 }
 
 /// Parses an `nsk_…` private key into a signing key.
@@ -194,7 +244,7 @@ mod tests {
         // crafted to mimic the link's field layout.
         let link_sig = sign(
             &sk,
-            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None, None),
         );
         let mimic = canonical_write("abcd", "yogfile/uploads", "999", 0, None);
         assert!(!verify(&public, &mimic, &link_sig));
@@ -205,7 +255,7 @@ mod tests {
         );
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None, None),
             &write_sig
         ));
     }
@@ -214,18 +264,18 @@ mod tests {
     fn link_rate_is_bound_by_the_signature() {
         let (secret, public) = generate();
         let sk = parse_secret(&secret).unwrap();
-        let throttled = canonical_link("abcd", "yogfile/uploads", 999, Some(1_000_000), None);
+        let throttled = canonical_link("abcd", "yogfile/uploads", 999, Some(1_000_000), None, None);
         let sig = sign(&sk, &throttled);
         assert!(verify(&public, &throttled, &sig));
         // Stripping or editing the rate invalidates the signature.
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, None, None),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, None, None),
             &sig
         ));
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, Some(8_000_000), None),
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(8_000_000), None, None),
             &sig
         ));
     }
@@ -234,32 +284,121 @@ mod tests {
     fn link_conc_is_bound_by_the_signature() {
         let (secret, public) = generate();
         let sk = parse_secret(&secret).unwrap();
-        let capped = canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), Some(2));
+        let capped = canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), Some(2), None);
         let sig = sign(&sk, &capped);
         assert!(verify(&public, &capped, &sig));
         // Stripping conc (the aria2 gambit), raising it, or keeping it
         // while dropping the rate all invalidate the signature.
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), None),
+            &canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), None, None),
             &sig
         ));
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, Some(500_000), Some(16)),
+            &canonical_link(
+                "abcd",
+                "yogfile/uploads",
+                999,
+                Some(500_000),
+                Some(16),
+                None
+            ),
             &sig
         ));
         assert!(!verify(
             &public,
-            &canonical_link("abcd", "yogfile/uploads", 999, None, Some(2)),
+            &canonical_link("abcd", "yogfile/uploads", 999, None, Some(2), None),
             &sig
         ));
         // And a pre-conc link still verifies: the canonical without conc
         // is byte-identical to what v0.6.3 signed.
-        let legacy = canonical_link("abcd", "yogfile/uploads", 999, None, None);
+        let legacy = canonical_link("abcd", "yogfile/uploads", 999, None, None, None);
         assert_eq!(legacy.matches('\n').count(), 4, "five lines, no sixth");
         let legacy_sig = sign(&sk, &legacy);
         assert!(verify(&public, &legacy, &legacy_sig));
+    }
+
+    #[test]
+    fn link_content_type_is_bound_by_the_signature() {
+        let (secret, public) = generate();
+        let sk = parse_secret(&secret).unwrap();
+        let inline = canonical_link(
+            "abcd",
+            "yogfile/files",
+            999,
+            Some(500_000),
+            Some(2),
+            Some("video/mp4"),
+        );
+        let sig = sign(&sk, &inline);
+        assert!(verify(&public, &inline, &sig));
+        // Dropping the type, or swapping it for another allowlisted
+        // one, breaks the signature: the holder of a link to a video
+        // cannot re-present the same bytes as a PDF.
+        assert!(!verify(
+            &public,
+            &canonical_link("abcd", "yogfile/files", 999, Some(500_000), Some(2), None),
+            &sig
+        ));
+        assert!(!verify(
+            &public,
+            &canonical_link(
+                "abcd",
+                "yogfile/files",
+                999,
+                Some(500_000),
+                Some(2),
+                Some("application/pdf")
+            ),
+            &sig
+        ));
+    }
+
+    #[test]
+    fn content_type_without_conc_still_spends_the_sixth_line() {
+        // The trap this guards: if `ct` slid up into the sixth line
+        // whenever `conc` was absent, then (conc=None, ct=X) and
+        // (conc=X, ct=None) would sign the same bytes. A placeholder
+        // keeps every field on the line it was born on.
+        let ct_only = canonical_link("abcd", "yogfile/files", 999, None, None, Some("video/mp4"));
+        let lines: Vec<&str> = ct_only.split('\n').collect();
+        assert_eq!(lines.len(), 7, "ct always lands on line seven");
+        assert_eq!(lines[4], "-", "no rate");
+        assert_eq!(lines[5], "-", "no conc, but the line is spent");
+        assert_eq!(lines[6], "video/mp4");
+        // And a link with neither is byte-identical to a pre-ct one.
+        let plain = canonical_link("abcd", "yogfile/files", 999, None, None, None);
+        assert_eq!(plain.matches('\n').count(), 4);
+    }
+
+    #[test]
+    fn only_inert_types_are_servable_inline() {
+        assert_eq!(inline_content_type("video/mp4"), Some("video/mp4"));
+        assert_eq!(inline_content_type("image/png"), Some("image/png"));
+        // Text is pinned to a charset so a .txt full of markup stays
+        // text on every browser.
+        assert_eq!(
+            inline_content_type("text/plain"),
+            Some("text/plain; charset=utf-8")
+        );
+        // Anything a browser would execute in the origin's context is
+        // refused — this is the whole security argument of the feature.
+        for executable in [
+            "text/html",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "application/xhtml+xml",
+            "application/javascript",
+        ] {
+            assert_eq!(inline_content_type(executable), None, "{executable}");
+        }
+        // No smuggling parameters past the table: the node serves the
+        // constant it looked up, and lookups are exact.
+        assert_eq!(inline_content_type("video/mp4; boundary=x"), None);
+        assert_eq!(inline_content_type("VIDEO/MP4"), None);
+        assert_eq!(inline_content_type("text/plain\r\nX-Evil: 1"), None);
     }
 
     #[test]

@@ -95,13 +95,25 @@ Reads follow [ownership](/multi-tenant/#signed-read-links-owned-files-are-privat
 A file referenced by an active **public-read** space is served bare. A
 file referenced by private spaces only takes a **signed link** —
 `?space=<org/space>&exp=<unix>&sig=<hex>` plus optional `&rate=`
-(bytes/s) and `&conc=` (max simultaneous connections per node), both
-signed and un-removable: Ed25519 over
-`nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate|-}[\n{conc}]`, minted
-offline by the space's backend (or `nauka space link`). Past the conc
-cap the node answers `429` + `Retry-After` until a connection ends —
-the cap is counted across the DNS neighborhood (the nodes gossip
-their in-flight counts), not just per node.
+(bytes/s), `&conc=` (max simultaneous connections per node) and `&ct=`
+(serve inline as this content type), all signed and un-removable:
+Ed25519 over
+`nauka-link-v1\n{hash}\n{space}\n{exp}\n{rate|-}[\n{conc|-}[\n{ct}]]`,
+minted offline by the space's backend (or `nauka space link`). Past
+the conc cap the node answers `429` + `Retry-After` until a connection
+ends — the cap is counted across the DNS neighborhood (the nodes
+gossip their in-flight counts), not just per node.
+
+Without `ct` a file downloads as an `application/octet-stream`
+attachment, which is the default. With it the node answers with that
+exact type, `Content-Disposition: inline` and `nosniff`, so a browser
+plays the video or displays the PDF in place — useful for a preview
+page that should not have to proxy the bytes. Only types a browser
+cannot execute are accepted (`image/jpeg`, `image/png`, `image/gif`,
+`image/webp`, `image/avif`, `video/mp4`, `video/webm`, `audio/mpeg`,
+`audio/mp4`, `audio/ogg`, `audio/wav`, `application/pdf`,
+`text/plain`); HTML, SVG and XML are refused with a `403`, at signing
+time by the CLI and at read time by the node.
 Bare public reads obey the space's `rate_default`. `403` otherwise,
 with the remedy.
 Unowned files (pre-0.6 leftovers) are served to nobody until adopted.
