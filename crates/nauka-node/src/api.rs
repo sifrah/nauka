@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use axum::body::Body;
@@ -30,6 +30,9 @@ pub struct ApiState {
     pub app: Arc<nauka_raft::RaftApp>,
     /// Advertised address of THIS node (its placement identity).
     pub self_id: String,
+    /// Public location of THIS node, resolved from the same city database
+    /// as the geo-DNS. `None` until that database is ready.
+    pub node_location: RwLock<Option<NodeLocation>>,
     pub config: ErasureConfig,
     /// Directory used to buffer in-flight uploads.
     pub tmp_dir: PathBuf,
@@ -75,6 +78,32 @@ pub struct ApiState {
     #[allow(clippy::type_complexity)]
     pub link_conc_remote:
         Arc<std::sync::Mutex<HashMap<String, (std::time::Instant, HashMap<String, u32>)>>>,
+}
+
+/// Minimal public identity of the node selected by geo-DNS. Deliberately
+/// excludes its address and every cluster detail: products only need a
+/// human-readable city and a flag.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct NodeLocation {
+    pub city: String,
+    pub country_code: String,
+}
+
+impl NodeLocation {
+    pub(crate) fn new(city: &str, country_code: &str) -> Option<Self> {
+        let city = city.trim();
+        let country_code = country_code.trim().to_ascii_uppercase();
+        if city.is_empty()
+            || country_code.len() != 2
+            || !country_code.bytes().all(|byte| byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        Some(Self {
+            city: city.to_string(),
+            country_code,
+        })
+    }
 }
 
 /// Remote conc gossip older than this is stale and ignored.
@@ -184,6 +213,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/upload", post(upload).put(upload))
         .route("/api/files", get(files))
         .route("/api/status", get(status))
+        .route("/api/location", get(location))
         .route("/api/removal-check", get(removal_check))
         .route("/api/shard-inventory", get(shard_inventory))
         .route("/api/orgs", get(orgs_view))
@@ -200,6 +230,18 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // design — auth is signatures, never cookies, so there is no
         // ambient credential for a foreign origin to ride.
         .layer(tower_http::cors::CorsLayer::permissive())
+}
+
+async fn location(State(state): State<Arc<ApiState>>) -> Response {
+    let value = state
+        .node_location
+        .read()
+        .ok()
+        .and_then(|location| location.clone());
+    match value {
+        Some(location) => ([(header::CACHE_CONTROL, "no-store")], Json(location)).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -3228,7 +3270,21 @@ fn uuid_ish() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_range, ApiError, DispatchError, StatusCode, NO_QUORUM};
+    use super::{parse_range, ApiError, DispatchError, NodeLocation, StatusCode, NO_QUORUM};
+
+    #[test]
+    fn node_location_only_accepts_a_city_and_iso_country_code() {
+        assert_eq!(
+            NodeLocation::new(" Helsinki ", "fi"),
+            Some(NodeLocation {
+                city: "Helsinki".to_string(),
+                country_code: "FI".to_string(),
+            })
+        );
+        assert_eq!(NodeLocation::new("", "FI"), None);
+        assert_eq!(NodeLocation::new("Helsinki", "FIN"), None);
+        assert_eq!(NodeLocation::new("Helsinki", "F1"), None);
+    }
 
     #[test]
     fn an_uncommittable_write_is_retryable_on_the_native_api() {

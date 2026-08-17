@@ -228,6 +228,21 @@ cluster identity needed, plain HTTP:
   probed yet reads alive.
 - `files` / `total_bytes` come from the replicated registry.
 
+## `GET /api/location`
+
+The city and ISO country code of the node answering the request:
+
+```json
+{ "city": "Helsinki", "country_code": "FI" }
+```
+
+Call it through the cluster's geo-DNS hostname to describe the storage
+node that was actually selected for the client. The answer deliberately
+contains no address or topology. It is derived from the same city
+database as geo-DNS, carries `Cache-Control: no-store`, and returns `503`
+while that database is unavailable. CORS is enabled, so a static web
+client can render it directly.
+
 ## `GET /api/files`
 
 The replicated registry (this node's local copy, possibly a few hundred

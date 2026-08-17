@@ -32,7 +32,7 @@ use hickory_server::proto::rr::{rdata, Name, RData, Record, RecordType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
 
-use crate::api::ApiState;
+use crate::api::{ApiState, NodeLocation};
 
 /// Answer TTL: short enough that a dead node leaves the world's caches
 /// within a minute, long enough that resolvers do the caching work.
@@ -68,6 +68,31 @@ impl GeoDns {
         let reader = guard.as_ref()?;
         let city: maxminddb::geoip2::City = reader.lookup(ip).ok()?.decode().ok()??;
         Some((city.location.latitude?, city.location.longitude?))
+    }
+
+    /// Publishes the location of THIS node for the public HTTP endpoint.
+    /// The data comes from the exact database used to place DNS clients,
+    /// so the UI describes the storage node it actually reached.
+    fn node_location(&self) -> Option<NodeLocation> {
+        let ip = self
+            .state
+            .self_id
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|addr| addr.ip())?;
+        let guard = self.db.read().ok()?;
+        let reader = guard.as_ref()?;
+        let city: maxminddb::geoip2::City = reader.lookup(ip).ok()?.decode().ok()??;
+        let name = city.city.names.english.or(city.city.names.french)?;
+        NodeLocation::new(name, city.country.iso_code?)
+    }
+
+    fn publish_node_location(&self) {
+        if let (Some(location), Ok(mut current)) =
+            (self.node_location(), self.state.node_location.write())
+        {
+            *current = Some(location);
+        }
     }
 
     /// A member's coordinates, cached — the member set is small and
@@ -321,6 +346,7 @@ pub async fn mmdb_keeper(dns: Arc<GeoDns>, data_dir: std::path::PathBuf) {
                     if let Ok(mut cache) = dns.positions.write() {
                         cache.clear();
                     }
+                    dns.publish_node_location();
                     eprintln!("geo-dns: database loaded");
                 }
                 Err(e) => eprintln!("geo-dns: unreadable database: {e}"),

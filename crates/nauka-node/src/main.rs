@@ -1362,6 +1362,7 @@ async fn main() -> Result<()> {
                     store: store.clone(),
                     app: app.clone(),
                     self_id: self_id.clone(),
+                    node_location: std::sync::RwLock::new(None),
                     space_egress_local: Arc::new(Default::default()),
                     link_conc: Arc::new(Default::default()),
                     link_conc_remote: link_conc_remote.clone(),
