@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.7"
+version = "0.6.8"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -29,3 +29,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # once by nauka-node. Without one the macros compile to no-ops.
 metrics = "0.24"
 reed-solomon-erasure = { version = "6", features = ["simd-accel"] }
+
+[patch.crates-io]
+# Le crate amont 6.0.0 n'est plus maintenu et dépend encore de lru 0.7.8.
+# Notre copie ne change aucun calcul Reed-Solomon ; elle remplace seulement
+# ce cache par lru 0.18.2, qui corrige RUSTSEC-2026-0253.
+reed-solomon-erasure = { path = "vendor/reed-solomon-erasure" }

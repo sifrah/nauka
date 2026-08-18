@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table};
 use ratatui::Frame;
