@@ -47,6 +47,23 @@ pub fn canonical_write(
     )
 }
 
+/// Canonical v2 réservé aux uploads délégués. Contrairement au format
+/// historique, il lie la signature aux octets, à leur longueur et à la
+/// query exacte (`name`/`ttl`). Rejouer le grant ne peut donc produire
+/// que le même objet et la même référence, ce qui est idempotent.
+pub fn canonical_upload(
+    path: &str,
+    query: &str,
+    space: &str,
+    timestamp: u64,
+    content_hash: &str,
+    content_length: u64,
+) -> String {
+    format!(
+        "nauka-upload-v2\nPUT\n{path}\n{query}\n{space}\n{timestamp}\n{content_hash}\n{content_length}"
+    )
+}
+
 /// The canonical string a READ LINK signature covers (see
 /// `?space=&exp=&sig=&rate=&conc=` on `GET /f/<hash>`). `exp` is the
 /// unix second the link dies at — unlike writes there is no clock-skew
@@ -218,6 +235,50 @@ mod tests {
             Some("abcd"),
         );
         assert!(!verify(&public, &c3, &sig));
+    }
+
+    #[test]
+    fn delegated_upload_binds_hash_size_and_query() {
+        let (secret, public) = generate();
+        let sk = parse_secret(&secret).unwrap();
+        let canonical = canonical_upload(
+            "/api/upload",
+            "name=report.pdf&ttl=3600",
+            "yogfile/files",
+            1_755_000_000,
+            "abcd",
+            42,
+        );
+        let signature = sign(&sk, &canonical);
+        assert!(verify(&public, &canonical, &signature));
+        for changed in [
+            canonical_upload(
+                "/api/upload",
+                "name=other.pdf&ttl=3600",
+                "yogfile/files",
+                1_755_000_000,
+                "abcd",
+                42,
+            ),
+            canonical_upload(
+                "/api/upload",
+                "name=report.pdf&ttl=3600",
+                "yogfile/files",
+                1_755_000_000,
+                "abcd",
+                43,
+            ),
+            canonical_upload(
+                "/api/upload",
+                "name=report.pdf&ttl=3600",
+                "yogfile/files",
+                1_755_000_000,
+                "dcba",
+                42,
+            ),
+        ] {
+            assert!(!verify(&public, &changed, &signature));
+        }
     }
 
     #[test]

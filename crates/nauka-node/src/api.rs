@@ -760,12 +760,13 @@ async fn ref_add(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     let signed_path = format!("/f/{hash}/refs?to={}", p.to);
-    let auth = verify_space_write(&state, &headers, "POST", &signed_path)?.ok_or_else(|| {
-        ApiError(
-            StatusCode::UNAUTHORIZED,
-            anyhow!("adding a reference requires an admin signature (X-Nauka-* headers)"),
-        )
-    })?;
+    let auth =
+        verify_space_write(&state, &headers, "POST", &signed_path, None)?.ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                anyhow!("adding a reference requires an admin signature (X-Nauka-* headers)"),
+            )
+        })?;
     let s = state.app.app_state();
     if !s.manifests.contains_key(&hash) {
         return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
@@ -1189,7 +1190,7 @@ async fn delete_file(
     // to them: deletion is a SIGNED release of one space's reference
     // (the file itself only dies with its last reference). An unowned
     // legacy file keeps the open pre-tenant behavior.
-    let auth = verify_space_write(&state, &headers, "DELETE", &format!("/f/{hash}"))?;
+    let auth = verify_space_write(&state, &headers, "DELETE", &format!("/f/{hash}"), None)?;
     let refs: Vec<String> = state
         .app
         .app_state()
@@ -1357,6 +1358,9 @@ struct SpaceWriteAuth {
     /// BLAKE3 the client bound into its signature, if any — verified
     /// against the actual upload once it is fully hashed.
     claimed_hash: Option<String>,
+    /// Taille liée par les grants d'upload v2. `None` pour les anciennes
+    /// signatures d'administration qui ne sont jamais remises à un tiers.
+    claimed_size: Option<u64>,
 }
 
 fn auth_header<'h>(headers: &'h axum::http::HeaderMap, name: &str) -> Option<&'h str> {
@@ -1373,6 +1377,7 @@ fn verify_space_write(
     headers: &axum::http::HeaderMap,
     method: &str,
     path: &str,
+    query: Option<&str>,
 ) -> Result<Option<SpaceWriteAuth>, ApiError> {
     let Some(space) = auth_header(headers, "x-nauka-space") else {
         return Ok(None);
@@ -1400,6 +1405,17 @@ fn verify_space_write(
         )
     })?;
     let claimed_hash = auth_header(headers, "x-nauka-content-hash").map(str::to_string);
+    let signature_version = auth_header(headers, "x-nauka-signature-version").unwrap_or("1");
+    let claimed_size = auth_header(headers, "x-nauka-content-length")
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                deny(
+                    StatusCode::UNAUTHORIZED,
+                    "signed upload: x-nauka-content-length must be an integer".into(),
+                )
+            })
+        })
+        .transpose()?;
 
     let s = state.app.app_state();
     let record = s.spaces.get(space).ok_or_else(|| {
@@ -1446,19 +1462,61 @@ fn verify_space_write(
             ),
         ));
     }
-    let canonical =
-        crate::spaceauth::canonical_write(method, path, space, timestamp, claimed_hash.as_deref());
+    let canonical = match signature_version {
+        "1" => crate::spaceauth::canonical_write(
+            method,
+            path,
+            space,
+            timestamp,
+            claimed_hash.as_deref(),
+        ),
+        "2" if method == "PUT" && path == "/api/upload" => {
+            let hash = claimed_hash.as_deref().ok_or_else(|| {
+                deny(
+                    StatusCode::UNAUTHORIZED,
+                    "delegated upload: x-nauka-content-hash is required".into(),
+                )
+            })?;
+            let size = claimed_size.ok_or_else(|| {
+                deny(
+                    StatusCode::UNAUTHORIZED,
+                    "delegated upload: x-nauka-content-length is required".into(),
+                )
+            })?;
+            crate::spaceauth::canonical_upload(
+                path,
+                query.unwrap_or_default(),
+                space,
+                timestamp,
+                hash,
+                size,
+            )
+        }
+        "2" => {
+            return Err(deny(
+                StatusCode::UNAUTHORIZED,
+                "upload signature v2 is valid only for PUT /api/upload".into(),
+            ))
+        }
+        _ => {
+            return Err(deny(
+                StatusCode::UNAUTHORIZED,
+                "unsupported x-nauka-signature-version".into(),
+            ))
+        }
+    };
     if !crate::spaceauth::verify(&key.public_key, &canonical, signature) {
         return Err(deny(
             StatusCode::UNAUTHORIZED,
-            "invalid signature (method, path, space, timestamp and content-hash must match \
-             what was signed)"
+            "invalid signature (method, path, query, space, timestamp, content-hash and \
+             content-length must match what was signed)"
                 .into(),
         ));
     }
     Ok(Some(SpaceWriteAuth {
         space: space.to_string(),
         claimed_hash,
+        claimed_size,
     }))
 }
 
@@ -1471,11 +1529,13 @@ async fn upload(
     // an unauthorized writer costs one signature check, not disk. Since
     // the 0.6 flip, EVERY upload belongs to a space — the anonymous era
     // is over, and the error is the onboarding.
+    let signed_query = request.uri().query().unwrap_or_default().to_string();
     let write_auth = verify_space_write(
         &state,
         request.headers(),
         request.method().as_str(),
         "/api/upload",
+        Some(&signed_query),
     )?
     .ok_or_else(|| {
         ApiError(
@@ -1546,6 +1606,20 @@ async fn upload(
             }
         };
         size += chunk.len() as u64;
+        if write_auth
+            .claimed_size
+            .is_some_and(|claimed| size > claimed)
+        {
+            // Ne pas attendre la fin pour constater le mensonge : sans
+            // cette garde, un porteur pouvait signer 1 octet puis remplir
+            // le spool avec un corps chunked sans limite avant le 403.
+            drop(tx);
+            let _ = dispatch.await;
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                anyhow!("request body exceeds the content length bound by its signature"),
+            ));
+        }
         if let Err(e) = tx.push(chunk).await {
             drop(tx);
             let _ = dispatch.await;
@@ -1598,6 +1672,28 @@ async fn upload(
                         auth.space,
                         claimed,
                         manifest.file_hash
+                    ),
+                ));
+            }
+        }
+        if let Some(claimed) = auth.claimed_size {
+            if claimed != manifest.file_size {
+                if discard_safe(&manifest.file_hash) {
+                    let _ = state
+                        .app
+                        .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                            file_hash: manifest.file_hash.clone(),
+                        })
+                        .await;
+                }
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    anyhow!(
+                        "content length mismatch for space {}: the signature binds {}, the body \
+                         contains {} bytes — upload discarded",
+                        auth.space,
+                        claimed,
+                        manifest.file_size
                     ),
                 ));
             }
