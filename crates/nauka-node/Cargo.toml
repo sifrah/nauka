@@ -17,7 +17,7 @@ path = "src/main.rs"
 # S3 state (buckets, credentials) stays unconditional — it is just data,
 # and gating it would fork the wire format.
 default = []
-s3 = ["dep:s3s", "dep:md-5", "dep:data-encoding", "dep:percent-encoding", "dep:hmac"]
+s3 = ["dep:s3s", "dep:md-5", "dep:data-encoding", "dep:percent-encoding"]
 
 [dependencies]
 nauka-erasure = { path = "../nauka-erasure" }
@@ -54,7 +54,7 @@ console = "0.15"
 # owns the terminal (raw mode, alternate screen, key events).
 ratatui = "0.30.2"
 crossterm = "0.28"
-hmac = { version = "0.12", optional = true }
+hmac = "0.12"
 anyhow.workspace = true
 axum = "0.8"
 blake3.workspace = true

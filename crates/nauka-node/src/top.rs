@@ -309,8 +309,9 @@ async fn safety_check(seed_api: &str, target: &str) -> Option<(bool, String)> {
         "{}/api/removal-check?target={target}",
         seed_api.trim_end_matches('/')
     );
-    let r: Resp = reqwest::Client::new()
-        .get(&url)
+    let client = reqwest::Client::new();
+    let r: Resp = crate::operator_auth::signed_get(&client, &url)
+        .ok()?
         .timeout(Duration::from_secs(8))
         .send()
         .await
@@ -342,22 +343,28 @@ async fn poll(app: &mut App) {
         .build()
         .expect("client");
     let seed = format!("{}/api/status", app.seed_api.trim_end_matches('/'));
-    let status: ApiStatus = match client.get(&seed).send().await {
-        Ok(r) => match r.error_for_status() {
-            Ok(r) => match r.json().await {
-                Ok(s) => s,
+    let status: ApiStatus = match crate::operator_auth::signed_get(&client, &seed) {
+        Ok(request) => match request.send().await {
+            Ok(r) => match r.error_for_status() {
+                Ok(r) => match r.json().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        app.seed_error = Some(format!("bad status payload: {e}"));
+                        return;
+                    }
+                },
                 Err(e) => {
-                    app.seed_error = Some(format!("bad status payload: {e}"));
+                    app.seed_error = Some(e.to_string());
                     return;
                 }
             },
             Err(e) => {
-                app.seed_error = Some(e.to_string());
+                app.seed_error = Some(format!("no node answering at {seed}: {e}"));
                 return;
             }
         },
         Err(e) => {
-            app.seed_error = Some(format!("no node answering at {seed}: {e}"));
+            app.seed_error = Some(format!("cannot sign operator request: {e}"));
             return;
         }
     };
@@ -375,8 +382,11 @@ async fn poll(app: &mut App) {
         let url = format!("http://{ip}:8080/api/status");
         let client = client.clone();
         fetches.push(async move {
-            let got: Option<ApiStatus> = match client.get(&url).send().await {
-                Ok(r) => r.json().await.ok(),
+            let got: Option<ApiStatus> = match crate::operator_auth::signed_get(&client, &url) {
+                Ok(request) => match request.send().await {
+                    Ok(r) => r.json().await.ok(),
+                    Err(_) => None,
+                },
                 Err(_) => None,
             };
             (url, got)
@@ -427,12 +437,11 @@ async fn poll(app: &mut App) {
 
 async fn poll_files(app: &mut App) {
     let url = format!("{}/api/files", app.seed_api.trim_end_matches('/'));
-    if let Ok(r) = reqwest::Client::new()
-        .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-    {
+    let client = reqwest::Client::new();
+    if let Ok(request) = crate::operator_auth::signed_get(&client, &url) {
+        let Ok(r) = request.timeout(Duration::from_secs(5)).send().await else {
+            return;
+        };
         if let Ok(files) = r.json::<Vec<ApiFile>>().await {
             app.files = files;
         }

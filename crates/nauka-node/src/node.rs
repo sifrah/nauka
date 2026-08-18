@@ -465,16 +465,18 @@ pub async fn add(o: AddOpts) -> Result<()> {
     .await?;
     step.done();
 
-    // 7. Wait for it to be up, and read its Raft id from its own HTTP
-    //    status — no cluster identity needed for that query, unlike
-    //    shelling `node-info`, which would need the token in the remote
-    //    environment.
+    // 7. Wait for it to be up, and read its Raft id from its protected
+    //    operator status with the identity already held by this command.
     let step = ui.step(&format!("waiting for {ip} to come up"));
     let status_url = format!("http://{}:8080/api/status", o.target.ip());
+    let status_client = reqwest::Client::new();
     let mut node_id: Option<u64> = None;
     for _ in 0..15 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let Ok(resp) = reqwest::get(&status_url).await else {
+        let Ok(request) = crate::operator_auth::signed_get(&status_client, &status_url) else {
+            continue;
+        };
+        let Ok(resp) = request.send().await else {
             continue;
         };
         let Ok(body) = resp.json::<serde_json::Value>().await else {
@@ -630,12 +632,10 @@ pub async fn removal_safety(peers: &[SocketAddr], target: SocketAddr) -> Option<
             peer.ip(),
             target
         );
-        if let Ok(resp) = client
-            .get(&url)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
+        if let Ok(request) = crate::operator_auth::signed_get(&client, &url) {
+            let Ok(resp) = request.timeout(Duration::from_secs(10)).send().await else {
+                continue;
+            };
             if let Ok(v) = resp.json::<RemovalSafety>().await {
                 return Some(v);
             }
@@ -792,9 +792,9 @@ pub async fn remove(o: RemoveOpts) -> Result<()> {
     }
 }
 
-/// `nauka status` — the cluster as one node's HTTP API reports it. Plain
-/// HTTP on purpose: works from anywhere that can reach a node, without
-/// the cluster identity, which is exactly what a quick health check needs.
+/// `nauka status` — the cluster as one node's protected operator API
+/// reports it. Loopback needs no proof; remote reads are signed from the
+/// cluster identity without sending that identity over HTTP.
 pub async fn status(api: &str, json: bool) -> Result<()> {
     #[derive(serde::Deserialize)]
     struct Node {
@@ -818,8 +818,8 @@ pub async fn status(api: &str, json: bool) -> Result<()> {
     }
 
     let url = format!("{}/api/status", api.trim_end_matches('/'));
-    let body = reqwest::Client::new()
-        .get(&url)
+    let client = reqwest::Client::new();
+    let body = crate::operator_auth::signed_get(&client, &url)?
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -1237,7 +1237,10 @@ async fn fetch_orgs(peers: &[SocketAddr]) -> Result<OrgsView> {
         .build()?;
     for peer in peers {
         let url = format!("http://{}:8080/api/orgs", peer.ip());
-        if let Ok(resp) = client.get(&url).send().await {
+        let Ok(request) = crate::operator_auth::signed_get(&client, &url) else {
+            continue;
+        };
+        if let Ok(resp) = request.send().await {
             if let Ok(view) = resp.json::<OrgsView>().await {
                 return Ok(view);
             }
@@ -1449,7 +1452,10 @@ async fn fetch_space_keys(
         .build()?;
     for peer in peers {
         let url = format!("http://{}:8080/api/orgs", peer.ip());
-        if let Ok(resp) = client.get(&url).send().await {
+        let Ok(request) = crate::operator_auth::signed_get(&client, &url) else {
+            continue;
+        };
+        if let Ok(resp) = request.send().await {
             if let Ok(view) = resp.json::<OrgsKeysView>().await {
                 return Ok(view.space_keys);
             }
@@ -1620,7 +1626,10 @@ pub async fn space_files(peers: &[SocketAddr], space: &str) -> Result<()> {
     let mut rows: Option<Vec<FileRow>> = None;
     for peer in peers {
         let url = format!("http://{}:8080/api/files", peer.ip());
-        if let Ok(resp) = client.get(&url).send().await {
+        let Ok(request) = crate::operator_auth::signed_get(&client, &url) else {
+            continue;
+        };
+        if let Ok(resp) = request.send().await {
             if let Ok(v) = resp.json::<Vec<FileRow>>().await {
                 rows = Some(v);
                 break;

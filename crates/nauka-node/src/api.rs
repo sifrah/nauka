@@ -6,7 +6,7 @@
 //!   records the manifest in the Raft registry.
 //! - `GET /f/{hash}`: rebuilds the file, streaming, from the cluster
 //!   (k shards are enough, wherever they live), integrity verified.
-//! - `GET /api/files`: the replicated registry.
+//! - `GET /api/files`: the replicated registry, restricted to the operator.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,6 +17,7 @@ use anyhow::{anyhow, Context, Result};
 use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -30,6 +31,9 @@ pub struct ApiState {
     pub app: Arc<nauka_raft::RaftApp>,
     /// Advertised address of THIS node (its placement identity).
     pub self_id: String,
+    /// Clé dérivée de l'identité privée du cluster. Elle protège les vues
+    /// opérateur sans jamais envoyer le token ou la CA privée sur le fil.
+    pub operator_key: [u8; 32],
     /// Public location of THIS node, resolved from the same city database
     /// as the geo-DNS. `None` until that database is ready.
     pub node_location: RwLock<Option<NodeLocation>>,
@@ -206,22 +210,26 @@ pub fn router(state: Arc<ApiState>) -> Router {
     // Nauka is the storage engine: it serves its HTTP API and nothing
     // more. A user-facing web interface belongs to a product built on top,
     // not in the engine.
+    let operator = Router::new()
+        .route("/api/files", get(files))
+        .route("/api/status", get(status))
+        .route("/api/removal-check", get(removal_check))
+        .route("/api/shard-inventory", get(shard_inventory))
+        .route("/api/orgs", get(orgs_view))
+        .route_layer(middleware::from_fn_with_state(state.clone(), operator_gate));
     Router::new()
         // PUT as well as POST: `curl -T file` — the streaming upload every
         // doc example recommends — sends PUT, and answering it with a 405
         // was the first thing a reader following the docs would hit.
         .route("/api/upload", post(upload).put(upload))
-        .route("/api/files", get(files))
-        .route("/api/status", get(status))
+        .route("/api/space-files", get(space_files))
         .route("/api/location", get(location))
-        .route("/api/removal-check", get(removal_check))
-        .route("/api/shard-inventory", get(shard_inventory))
-        .route("/api/orgs", get(orgs_view))
         .route(
             "/f/{hash}",
             get(download).head(download_head).delete(delete_file),
         )
         .route("/f/{hash}/refs", axum::routing::post(ref_add))
+        .merge(operator)
         .with_state(state)
         // The HTTP door is a public API and browsers are clients: a
         // web product built on the engine has its users' browsers PUT
@@ -230,6 +238,32 @@ pub fn router(state: Arc<ApiState>) -> Router {
         // design — auth is signatures, never cookies, so there is no
         // ambient credential for a foreign origin to ride.
         .layer(tower_http::cors::CorsLayer::permissive())
+}
+
+/// La face opérateur répond depuis le loopback de la node, ou avec une
+/// preuve liée à l'identité du cluster. Refus en 404 : Internet n'a pas à
+/// apprendre quelles routes d'inventaire existent.
+async fn operator_gate(
+    State(state): State<Arc<ApiState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let local = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .is_some_and(|peer| peer.ip().is_loopback());
+    if local
+        || crate::operator_auth::verify(
+            &state.operator_key,
+            request.headers(),
+            request.method(),
+            request.uri(),
+        )
+    {
+        next.run(request).await
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn location(State(state): State<Arc<ApiState>>) -> Response {
@@ -249,8 +283,7 @@ struct NodeStatus {
     addr: String,
     /// Raft id of the member at this address, None for an address present
     /// in the placement view but not (yet) in the consensus membership.
-    /// This is what `node remove <id>` takes — exposed here so the id can
-    /// be read over plain HTTP (`nauka status`) without a cluster identity.
+    /// This is what `node remove <id>` takes.
     id: Option<u64>,
     capacity_bytes: u64,
     is_leader: bool,
@@ -270,9 +303,8 @@ struct NodeStatus {
 #[derive(serde::Serialize)]
 struct ClusterStatusResponse {
     self_addr: String,
-    /// This node's Raft id. Exposed so `node add` can learn a freshly
-    /// provisioned node's id over plain HTTP — no cluster identity needed
-    /// for the query — instead of shelling `node-info` on the target.
+    /// This node's Raft id. `node add` learns it through the signed operator
+    /// request instead of shelling `node-info` on the target.
     self_node_id: u64,
     leader: Option<String>,
     nodes: Vec<NodeStatus>,
@@ -529,12 +561,12 @@ async fn removal_check(
             state.store.list_shards().ok()
         } else {
             let ip = addr.split(':').next().unwrap_or_default();
-            match client
-                .get(format!("http://{ip}:8080/api/shard-inventory"))
-                .send()
-                .await
-            {
-                Ok(r) => r.json().await.ok(),
+            let url = format!("http://{ip}:8080/api/shard-inventory");
+            match crate::operator_auth::signed_get(&client, &url) {
+                Ok(request) => match request.send().await {
+                    Ok(r) => r.json().await.ok(),
+                    Err(_) => None,
+                },
                 Err(_) => None,
             }
         };
@@ -3351,6 +3383,56 @@ async fn files(State(state): State<Arc<ApiState>>) -> Json<Vec<FileEntry>> {
         })
         .collect();
     Json(entries)
+}
+
+#[derive(serde::Deserialize)]
+struct SpaceFilesParams {
+    space: String,
+}
+
+/// Inventaire borné à UN espace, pour les backends qui doivent retrouver
+/// leurs propres objets (restauration, réconciliation). La clé admin de
+/// l'espace signe le GET ; même un contenu dédupliqué ne révèle pas les
+/// autres espaces qui le référencent.
+async fn space_files(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<SpaceFilesParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<FileEntry>>, ApiError> {
+    let auth = verify_space_write(&state, &headers, "GET", "/api/space-files", None)?.ok_or_else(
+        || {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                anyhow!("signed space key required"),
+            )
+        },
+    )?;
+    if auth.space != params.space {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            anyhow!("the signed space does not match the requested inventory"),
+        ));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let s = state.app.app_state();
+    let entries = s
+        .file_refs
+        .iter()
+        .filter(|(_, refs)| refs.contains(&auth.space))
+        .filter_map(|(hash, _)| s.manifests.get(hash))
+        .filter(|manifest| manifest.expires_at.is_none_or(|expires| expires > now))
+        .map(|manifest| FileEntry {
+            hash: manifest.file_hash.clone(),
+            size: manifest.file_size,
+            name: manifest.name.clone(),
+            link: format!("/f/{}", manifest.file_hash),
+            spaces: vec![auth.space.clone()],
+        })
+        .collect();
+    Ok(Json(entries))
 }
 
 /// Unique temporary file identifier (no need for real cryptography here,

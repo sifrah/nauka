@@ -183,8 +183,9 @@ accepted from the node's loopback, `401` from anywhere else.
 
 ## `GET /api/status`
 
-The cluster as this node sees it. This is what `nauka status` reads — no
-cluster identity needed, plain HTTP:
+The cluster as this node sees it. This operator endpoint accepts the node's
+own loopback or a short request proof derived from the cluster identity.
+`nauka status` creates that proof automatically:
 
 ```json
 {
@@ -215,7 +216,7 @@ cluster identity needed, plain HTTP:
 ```
 
 - `id` is the member's Raft id — the value `nauka node remove <id>`
-  takes. It is exposed here precisely so it can be read over plain HTTP.
+  takes.
   There is one row **per member**, not per address: two members can share
   an address (a replaced machine whose stale identity lingers), and rows
   keyed by address would collapse them into an indistinguishable
@@ -245,8 +246,9 @@ client can render it directly.
 
 ## `GET /api/files`
 
-The replicated registry (this node's local copy, possibly a few hundred
-ms behind the leader). Expired files are filtered out:
+The operator's replicated registry (this node's local copy, possibly a few
+hundred ms behind the leader). It has the same loopback-or-proof gate as
+`/api/status`. Expired files are filtered out:
 
 ```json
 [
@@ -254,6 +256,11 @@ ms behind the leader). Expired files are filtered out:
     "name": "video.mp4", "link": "/f/988f6e61…" }
 ]
 ```
+
+Backends that own a space must use `GET /api/space-files?space=<name>`
+instead. That endpoint requires the space's admin signature and returns
+only its objects; it never reveals other spaces that reference deduplicated
+content.
 
 ## Expiry and banning
 
@@ -295,7 +302,7 @@ signed `DELETE /f/{hash}` of that reference.
 
 ## `GET /api/orgs`
 
-The replicated [organisation/space registry](/multi-tenant/): orgs,
+The operator-only replicated [organisation/space registry](/multi-tenant/): orgs,
 spaces and their policies, and each space's **public** keys (hex, with
 role and name — private halves never exist server-side). This is what
 `nauka org list` and `nauka space key ls` read.

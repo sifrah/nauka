@@ -84,9 +84,10 @@ loudly with nothing written to the data dir. On a blank data dir the first
 - `nauka status [--api http://<node>:8080]`: has a leader been elected?
   are all members present and alive (●)? It also warns when two members
   share an address — the signature of a stale identity left behind by a
-  reinstalled machine. Plain HTTP, no cluster identity needed; `--json`
-  passes through the raw [`/api/status`](/api-http/#get-apistatus)
-  document for scripts and monitoring.
+  reinstalled machine. Remote reads require the inherited cluster identity;
+  `--json` passes through the raw [`/api/status`](/api-http/#get-apistatus)
+  document for scripts and monitoring. Loopback remains available for local
+  health checks.
 - Prometheus metrics on `127.0.0.1:9100` (unless moved): scrub results,
   shard fetch sources, degraded writes, egress ledgers.
 - Node logs (`journalctl -u nauka`): `scrub: X checked, Y regenerated, Z
@@ -95,8 +96,8 @@ loudly with nothing written to the data dir. On a blank data dir the first
   `peer … unreachable` warnings.
 - `verify <hash>`: can the file be rebuilt — from the local store if it is
   here, otherwise served by the cluster and hash-checked end-to-end?
-- `/api/files` must return the same list on every node (give or take a few
-  hundred ms of replication lag).
+- Authenticated `/api/files` must return the same list on every node (give
+  or take a few hundred ms of replication lag).
 
 ## Backup and restore
 

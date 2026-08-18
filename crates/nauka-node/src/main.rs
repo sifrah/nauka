@@ -12,6 +12,7 @@ mod e2e;
 mod egress;
 mod ingest;
 mod node;
+mod operator_auth;
 #[cfg(feature = "s3")]
 mod s3;
 mod spaceauth;
@@ -103,8 +104,8 @@ enum Cmd {
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         api: String,
     },
-    /// List the cluster's files (hash, size, name). --local lists this
-    /// machine's own store instead.
+    /// List the cluster's files (hash, size, name). Requires the cluster
+    /// identity; --local reads only this machine and needs none.
     List {
         /// List the local store (./nauka-data) rather than the cluster.
         #[arg(long)]
@@ -291,7 +292,7 @@ enum Cmd {
     },
     /// Live, full-screen cluster view (htop-style): per-node fill and
     /// migration rates, sparklines, the registry one keypress away.
-    /// Read-only. Plain HTTP — no cluster identity needed.
+    /// The inventory is operator-only and requires the cluster identity.
     Top {
         /// HTTP API of any node (the rest are discovered from it).
         #[arg(long, default_value = "http://127.0.0.1:8080")]
@@ -301,8 +302,8 @@ enum Cmd {
         interval: u64,
     },
     /// Show the cluster as this node sees it: members, leader, health,
-    /// capacities, stored bytes. Reads the HTTP API — no cluster identity
-    /// needed.
+    /// capacities, stored bytes. Requires the cluster identity unless the
+    /// API is reached over the node's own loopback.
     Status {
         /// HTTP API address of any node.
         #[arg(long, default_value = "http://127.0.0.1:8080")]
@@ -676,9 +677,9 @@ async fn main() -> Result<()> {
         })
         .await;
     }
-    // Which commands actually speak the cluster's mTLS. Everything else —
-    // status (plain HTTP), local store ops, keygen, update — must neither
-    // require an identity nor leave derived key material behind.
+    // Commands that speak mTLS or read the protected operator HTTP face.
+    // Public data operations and strictly local store operations need no
+    // cluster identity.
     let needs_cluster_identity = match &cli.cmd {
         Cmd::Serve { .. }
         | Cmd::NodeInfo
@@ -688,19 +689,15 @@ async fn main() -> Result<()> {
         | Cmd::Ban { .. }
         | Cmd::Unban { .. }
         | Cmd::PutRemote { .. }
-        | Cmd::GetRemote { .. } => true,
+        | Cmd::GetRemote { .. }
+        | Cmd::Status { .. }
+        | Cmd::Top { .. }
+        | Cmd::List { local: false, .. } => true,
         #[cfg(feature = "s3")]
         Cmd::S3KeyCreate { .. } | Cmd::S3KeyList { .. } | Cmd::S3KeyDelete { .. } => true,
         _ => false,
     };
-    // `nauka top` speaks plain HTTP to READ, but its interactive actions
-    // (disable/enable/remove) need the cluster's mTLS. So it WANTS the
-    // identity if one is around — inherited from an initialized machine or
-    // passed explicitly — but never REQUIRES it: absent, top runs
-    // read-only and says so. The load below is fatal only for the commands
-    // that truly need it.
-    let is_top = matches!(&cli.cmd, Cmd::Top { .. });
-    let wants_identity = needs_cluster_identity || is_top;
+    let wants_identity = needs_cluster_identity;
     if wants_identity && cli.token.is_none() && cli.keys.is_none() {
         // `nauka init` leaves the cluster identity in /etc/nauka/nauka.env;
         // speaking to the cluster from an initialized machine must not
@@ -745,6 +742,7 @@ async fn main() -> Result<()> {
         };
         match nauka_transport::load_cluster_tls(keys_dir, identity.as_deref()) {
             Ok(tls) => {
+                operator_auth::install(operator_auth::key_from_dir(keys_dir)?)?;
                 let info = (tls.node_id, tls.fingerprint.clone());
                 nauka_transport::set_cluster_tls(tls);
                 top_can_admin = true;
@@ -1362,6 +1360,8 @@ async fn main() -> Result<()> {
                     store: store.clone(),
                     app: app.clone(),
                     self_id: self_id.clone(),
+                    operator_key: operator_auth::installed()
+                        .context("cluster operator authentication is not installed")?,
                     node_location: std::sync::RwLock::new(None),
                     space_egress_local: Arc::new(Default::default()),
                     link_conc: Arc::new(Default::default()),
@@ -2452,8 +2452,9 @@ async fn resolve_hash(prefix: &str, store: Option<&ShardStore>, api: &str) -> Re
 
 /// The cluster's registry, as any node's HTTP API reports it.
 async fn cluster_files(api: &str) -> Result<Vec<ClusterFile>> {
-    Ok(reqwest::Client::new()
-        .get(format!("{}/api/files", api.trim_end_matches('/')))
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/files", api.trim_end_matches('/'));
+    Ok(operator_auth::signed_get(&client, &url)?
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await?
