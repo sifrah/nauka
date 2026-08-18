@@ -19,8 +19,9 @@ cluster — 3 nodes, 3 alive · 353 files, 3.34 GiB stored · 117.79 GiB capacit
   ● 51.158.64.90:7311               7.98 GiB  6618550476704767285
 ```
 
-Plain HTTP against the local node's API — no cluster identity needed, works
-from anywhere that can reach a node (`--api http://<node>:8080`). For a
+The operator view is authenticated. On a cluster machine, the CLI inherits
+the identity from `/etc/nauka/nauka.env`; elsewhere, pass `--token` or
+`--keys`. Direct HTTP is admitted only from the node's own loopback. For a
 LIVE view — a node joining, a drain, a healing pass — `nauka top` is the
 full-screen version: per-node fill with sparklines and migration rates,
 a "quiet for Xs" convergence marker, and the registry on the `2` key.
@@ -36,15 +37,14 @@ node, `Enter` opens its menu, `d`/`e`/`r` drain, re-enable or remove it
 — always behind a `y/n` confirmation, with the footer showing what is
 available for the selected node. Removal runs the same
 [safety pre-flight](/growing/) as the CLI and an unsafe removal is
-simply refused there — the interactive path never forces. Actions need
-the cluster identity (run it on a member); without it, `top` is
-read-only.
+simply refused there — the interactive path never forces. Actions and reads
+need the cluster identity.
 
 ## For scripts: `--json` and the API
 
 ```bash
 nauka status --json          # the node's raw report, passed through
-curl -s http://<node>:8080/api/status
+ssh <node> curl -s http://127.0.0.1:8080/api/status
 ```
 
 Fields worth acting on: `leader` (null = unavailable for writes),

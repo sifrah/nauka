@@ -81,9 +81,10 @@ The systemd unit reads it, and so do CLI commands run on that machine:
 identity automatically** — no `--token` or `--keys` to repeat. From
 anywhere else, pass `--token` (or set `NAUKA_TOKEN`) explicitly.
 
-`nauka status` is the deliberate exception: it reads the plain HTTP API
-and needs no identity at all — it also warns when two members share an
-address, the visible symptom of a stale identity waiting to be evicted.
+`nauka status` also requires the cluster identity when it reads a remote
+node. The CLI signs a short request proof; the private identity itself is
+never sent over HTTP. The node's own loopback remains available to local
+health checks.
 
 ## Membership in short
 
@@ -92,7 +93,7 @@ address, the visible symptom of a stale identity waiting to be evicted.
 | Found a cluster | first `serve` on a blank data dir | node.key generated, cert signed by the CA |
 | Add a machine | `nauka node add ip:7311` | provisions over SSH, joins as learner, promotes to voter; evicts a stale same-address id |
 | Remove a machine | `nauka node remove id` | drains — the node serves while others re-replicate, then you shut it down |
-| Inspect | `nauka status` / `nauka node-info` | none / local key |
+| Inspect | `nauka status` / `nauka node-info` | cluster identity / local key |
 
 Admission is mTLS, end of story: no certificate signed by this cluster's
 CA, no membership — whatever the network can see.
