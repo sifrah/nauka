@@ -79,6 +79,7 @@ The families that matter:
 | `nauka_partial_range_reads_total` | range windows served from covering shards alone, no reconstruction |
 | `nauka_link_conc_rejects_total` | reads refused with 429 because the link's signed connection cap was full |
 | `nauka_dns_queries_total` | queries answered by the built-in geo-DNS front door |
+| `nauka_dns_refused_total` | queries rejected because their name is outside every configured authoritative zone |
 
 ## The four alerts worth having
 

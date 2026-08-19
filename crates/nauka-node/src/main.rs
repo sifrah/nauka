@@ -255,11 +255,15 @@ enum Cmd {
         #[arg(long)]
         no_metrics: bool,
         /// Disable the built-in geo-DNS front door (env
-        /// NAUKA_NO_DNS=true|false). On by default: delegate a name to a
-        /// few nodes and the cluster answers with the closest living
-        /// members.
+        /// NAUKA_NO_DNS=true|false). It starts when at least one
+        /// authoritative zone is configured.
         #[arg(long, env = "NAUKA_NO_DNS")]
         no_dns: bool,
+        /// DNS zones served authoritatively by the built-in geo-DNS.
+        /// Outside names are refused. DNS stays disabled when this and
+        /// NAUKA_HTTPS_DOMAIN are both absent.
+        #[arg(long = "dns-zone", env = "NAUKA_DNS_ZONES", value_delimiter = ',')]
+        dns_zones: Vec<String>,
         /// Serve the API over TLS on :443 for this domain, with a
         /// Let's Encrypt certificate the node obtains and renews by
         /// itself through the cluster's own DNS. Unset = HTTP only.
@@ -1075,6 +1079,7 @@ async fn main() -> Result<()> {
             metrics: metrics_addr,
             no_metrics,
             no_dns,
+            mut dns_zones,
             https_domain,
             join,
         } => {
@@ -1392,11 +1397,23 @@ async fn main() -> Result<()> {
                 let no_dns = no_dns
                     || std::env::var("NAUKA_NO_DNS").is_ok_and(|v| !v.is_empty() && v != "0");
                 let mut geodns_for_gossip: Option<Arc<dns::GeoDns>> = None;
-                if !no_dns {
-                    // The geo-DNS front door: on by default, a bind
-                    // failure only warns (nodes without the capability
-                    // keep serving storage).
-                    let geodns = dns::GeoDns::new(api_state.clone());
+                if let Some(domain) = &https_domain {
+                    if !dns_zones
+                        .iter()
+                        .any(|zone| zone.eq_ignore_ascii_case(domain))
+                    {
+                        dns_zones.push(domain.clone());
+                    }
+                }
+                if !no_dns && dns_zones.is_empty() {
+                    eprintln!(
+                        "geo-dns: disabled because no authoritative zone is configured; \
+                         set --dns-zone / NAUKA_DNS_ZONES before delegating DNS"
+                    );
+                } else if !no_dns {
+                    // A bind failure only warns: nodes without the
+                    // capability keep serving storage.
+                    let geodns = dns::GeoDns::new(api_state.clone(), &dns_zones)?;
                     geodns_for_gossip = Some(geodns.clone());
                     tokio::spawn(dns::mmdb_keeper(geodns.clone(), cli.data_dir.clone()));
                     let bind_ip = self_id
