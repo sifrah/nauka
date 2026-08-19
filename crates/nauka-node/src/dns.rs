@@ -1,8 +1,9 @@
 //! The built-in geo-DNS front door.
 //!
-//! Every node answers authoritative DNS on :53 (opt out with --no-dns /
-//! NAUKA_NO_DNS=true): delegate any name to a few nodes (NS + glue at your
-//! registrar, nothing else) and the cluster becomes its own GeoDNS —
+//! Every node answers authoritative DNS on :53 for the explicitly configured
+//! zones (opt out with --no-dns / NAUKA_NO_DNS=true): delegate one of those
+//! names to a few nodes (NS + glue at your registrar, nothing else) and the
+//! cluster becomes its own GeoDNS —
 //! queries are answered with the closest ALIVE nodes to the asker,
 //! straight from the live membership. No zone file, no region buckets,
 //! no third-party API: the map IS the cluster.
@@ -19,8 +20,9 @@
 //!
 //! The responder is deliberately minimal: A (the point), NS and SOA
 //! (synthesized, so delegation checks pass), empty NOERROR for the
-//! rest. No recursion, no zone transfers, tiny responses — the
-//! amplification surface of an authoritative-only server.
+//! rest. Names outside the configured zones are REFUSED. No recursion, no
+//! zone transfers, tiny responses — the amplification surface of an
+//! authoritative-only server.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -49,18 +51,44 @@ const MMDB_MAX_AGE_DAYS: u64 = 40;
 
 pub struct GeoDns {
     state: Arc<ApiState>,
+    /// Longest suffix first, so overlapping delegated zones select the
+    /// most specific authority.
+    zones: Vec<Name>,
     db: RwLock<Option<maxminddb::Reader<Vec<u8>>>>,
     /// Member IP → coordinates, resolved lazily against the database.
     positions: RwLock<HashMap<String, Option<(f64, f64)>>>,
 }
 
 impl GeoDns {
-    pub fn new(state: Arc<ApiState>) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(state: Arc<ApiState>, raw_zones: &[String]) -> anyhow::Result<Arc<Self>> {
+        let mut zones = raw_zones
+            .iter()
+            .map(|raw| {
+                let zone = Name::from_utf8(raw.trim())
+                    .map_err(|e| anyhow::anyhow!("invalid DNS zone {raw:?}: {e}"))?;
+                anyhow::ensure!(
+                    !zone.is_root(),
+                    "the DNS root cannot be an authoritative zone"
+                );
+                Ok(zone)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        zones.sort_by_key(|zone| std::cmp::Reverse(zone.num_labels()));
+        zones.dedup_by(|a, b| a.eq_case(b) || a == b);
+        anyhow::ensure!(
+            !zones.is_empty(),
+            "geo-DNS requires at least one --dns-zone / NAUKA_DNS_ZONES value"
+        );
+        Ok(Arc::new(Self {
             state,
+            zones,
             db: RwLock::new(None),
             positions: RwLock::new(HashMap::new()),
-        })
+        }))
+    }
+
+    fn authoritative_zone(&self, name: &Name) -> Option<&Name> {
+        self.zones.iter().find(|zone| zone.zone_of(name))
     }
 
     fn lookup(&self, ip: IpAddr) -> Option<(f64, f64)> {
@@ -232,6 +260,19 @@ impl RequestHandler for GeoDns {
         };
         let name: Name = query.name().into();
         metrics::counter!("nauka_dns_queries_total").increment(1);
+        let Some(zone) = self.authoritative_zone(&name).cloned() else {
+            metadata.authoritative = false;
+            metadata.response_code = ResponseCode::Refused;
+            metrics::counter!("nauka_dns_refused_total").increment(1);
+            let resp = builder.build_no_records(metadata);
+            return match response_handle.send_response(resp).await {
+                Ok(info) => info,
+                Err(_) => ResponseInfo::from(Header {
+                    metadata,
+                    counts: HeaderCounts::default(),
+                }),
+            };
+        };
 
         let records: Vec<Record> = match query.query_type() {
             RecordType::A => {
@@ -252,29 +293,37 @@ impl RequestHandler for GeoDns {
                 // Synthesized: ns1..ns3.<name> — the glue at the parent
                 // decides which nodes those are; answering keeps
                 // delegation checks happy.
-                (1..=3u8)
-                    .filter_map(|i| {
-                        let ns = Name::from_utf8(format!("ns{i}.{name}")).ok()?;
-                        Some(Record::from_rdata(
-                            name.clone(),
-                            DNS_TTL,
-                            RData::NS(rdata::NS(ns)),
-                        ))
-                    })
-                    .collect()
+                if name == zone {
+                    (1..=3u8)
+                        .filter_map(|i| {
+                            let ns = Name::from_utf8(format!("ns{i}.{zone}")).ok()?;
+                            Some(Record::from_rdata(
+                                zone.clone(),
+                                DNS_TTL,
+                                RData::NS(rdata::NS(ns)),
+                            ))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
             RecordType::SOA => {
-                let serial = (crate::spaceauth::unix_now() / 60) as u32;
-                match (
-                    Name::from_utf8(format!("ns1.{name}")),
-                    Name::from_utf8(format!("hostmaster.{name}")),
-                ) {
-                    (Ok(mname), Ok(rname)) => vec![Record::from_rdata(
-                        name.clone(),
-                        DNS_TTL,
-                        RData::SOA(rdata::SOA::new(mname, rname, serial, 3600, 600, 86400, 60)),
-                    )],
-                    _ => Vec::new(),
+                if name != zone {
+                    Vec::new()
+                } else {
+                    let serial = (crate::spaceauth::unix_now() / 60) as u32;
+                    match (
+                        Name::from_utf8(format!("ns1.{zone}")),
+                        Name::from_utf8(format!("hostmaster.{zone}")),
+                    ) {
+                        (Ok(mname), Ok(rname)) => vec![Record::from_rdata(
+                            zone.clone(),
+                            DNS_TTL,
+                            RData::SOA(rdata::SOA::new(mname, rname, serial, 3600, 600, 86400, 60)),
+                        )],
+                        _ => Vec::new(),
+                    }
                 }
             }
             RecordType::TXT => {
@@ -411,7 +460,7 @@ fn year_month(unix: i64) -> (i32, u32) {
 }
 
 /// Binds :53 (UDP + TCP) and serves until shutdown. A bind failure is a
-/// WARNING, not a crash: default-on must never take down a node that
+/// WARNING, not a crash: enabling DNS must never take down a node that
 /// lacks the capability — the operator either grants
 /// CAP_NET_BIND_SERVICE or sets NAUKA_NO_DNS=1 to silence this.
 pub async fn serve(dns: Arc<GeoDns>, bind_ip: IpAddr, port: u16) {
@@ -465,6 +514,22 @@ impl RequestHandler for ArcHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zones_accept_only_the_apex_and_its_children() {
+        let zones = [Name::from_utf8("cdn.getnauka.com").unwrap()];
+        let authoritative = |raw: &str| {
+            let name = Name::from_utf8(raw).unwrap();
+            zones.iter().any(|zone| zone.zone_of(&name))
+        };
+        assert!(authoritative("cdn.getnauka.com"));
+        assert!(authoritative("CDN.GETNAUKA.COM."));
+        assert!(authoritative("_acme-challenge.cdn.getnauka.com"));
+        assert!(authoritative("ns1.cdn.getnauka.com"));
+        assert!(!authoritative("example.net"));
+        assert!(!authoritative("notcdn.getnauka.com"));
+        assert!(!authoritative("cdn.getnauka.com.example.net"));
+    }
 
     #[test]
     fn haversine_orders_the_world_correctly() {
