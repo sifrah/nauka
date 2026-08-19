@@ -74,7 +74,7 @@ impl GeoDns {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         zones.sort_by_key(|zone| std::cmp::Reverse(zone.num_labels()));
-        zones.dedup_by(|a, b| a.eq_case(b) || a == b);
+        zones.dedup_by(|a, b| a.eq_ignore_root(b));
         anyhow::ensure!(
             !zones.is_empty(),
             "geo-DNS requires at least one --dns-zone / NAUKA_DNS_ZONES value"
@@ -293,7 +293,7 @@ impl RequestHandler for GeoDns {
                 // Synthesized: ns1..ns3.<name> — the glue at the parent
                 // decides which nodes those are; answering keeps
                 // delegation checks happy.
-                if name == zone {
+                if name.eq_ignore_root(&zone) {
                     (1..=3u8)
                         .filter_map(|i| {
                             let ns = Name::from_utf8(format!("ns{i}.{zone}")).ok()?;
@@ -309,7 +309,7 @@ impl RequestHandler for GeoDns {
                 }
             }
             RecordType::SOA => {
-                if name != zone {
+                if !name.eq_ignore_root(&zone) {
                     Vec::new()
                 } else {
                     let serial = (crate::spaceauth::unix_now() / 60) as u32;
@@ -529,6 +529,15 @@ mod tests {
         assert!(!authoritative("example.net"));
         assert!(!authoritative("notcdn.getnauka.com"));
         assert!(!authoritative("cdn.getnauka.com.example.net"));
+    }
+
+    #[test]
+    fn zone_apex_matching_ignores_case_and_the_root_label() {
+        let configured = Name::from_utf8("cdn.getnauka.com").unwrap();
+        let wire_name = Name::from_utf8("CDN.GETNAUKA.COM.").unwrap();
+
+        assert!(configured.eq_ignore_root(&wire_name));
+        assert_ne!(configured, wire_name);
     }
 
     #[test]
