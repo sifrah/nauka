@@ -339,8 +339,9 @@ impl IngestWriter {
             inner.finished = true;
         }
         self.shared.readable.notify_one();
-        // Bypass the Drop abort marker.
-        std::mem::forget(self);
+        // Drop voit `finished` et ne marque donc pas le flux comme avorte.
+        // Conserver volontairement ce writer garderait aussi `Shared`, le
+        // descripteur du spool et son RamLease en vie pour toujours.
     }
 }
 
@@ -564,6 +565,24 @@ mod tests {
         producer.await.unwrap();
         assert_eq!(got, total, "byte count through {name}");
         assert_eq!(hasher.finalize(), want_hash, "integrity through {name}");
+    }
+
+    #[tokio::test]
+    async fn finish_libere_le_spool_et_le_budget_ram() {
+        let path = tmp("finish-releases-resources");
+        let _ = std::fs::remove_file(&path);
+        let pool = RamPool::with_capacity(1);
+        let (mut tx, mut rx) = channel(&pool, 1, path.clone(), u64::MAX);
+
+        tx.push(Bytes::from_static(b"ab")).await.unwrap();
+        tx.finish();
+        assert_eq!(rx.next_exact(2).await.unwrap(), Bytes::from_static(b"ab"));
+        assert!(rx.next(1).await.unwrap().is_empty());
+        assert!(path.exists());
+
+        drop(rx);
+        assert!(!path.exists());
+        assert_eq!(pool.available.load(Ordering::Acquire), pool.capacity());
     }
 
     #[tokio::test]
