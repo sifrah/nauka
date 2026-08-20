@@ -254,9 +254,6 @@ pub fn encode_file(
     cfg: &ErasureConfig,
 ) -> Result<(FileManifest, Vec<Vec<Shard>>), ErasureError> {
     cfg.validate()?;
-    if data.is_empty() {
-        return Err(ErasureError::InvalidConfig("empty file".into()));
-    }
 
     let mut stripes_meta = Vec::new();
     let mut stripes_shards = Vec::new();
@@ -376,6 +373,21 @@ mod tests {
         let (manifest, stripes) = encode_file(&data, &cfg).unwrap();
         let slots = stripes.iter().map(|s| to_slots(s)).collect();
         assert_eq!(decode_file(&manifest, slots).unwrap(), data);
+    }
+
+    #[test]
+    fn roundtrip_empty_is_a_manifest_without_shards() {
+        let cfg = cfg_small();
+        let (manifest, stripes) = encode_file(&[], &cfg).unwrap();
+
+        assert_eq!(manifest.file_hash, hash_bytes(&[]));
+        assert_eq!(manifest.file_size, 0);
+        assert!(manifest.stripes.is_empty());
+        assert!(stripes.is_empty());
+        assert_eq!(
+            decode_file(&manifest, Vec::new()).unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     #[test]

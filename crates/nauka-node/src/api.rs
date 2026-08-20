@@ -1659,16 +1659,6 @@ async fn upload(
         }
     }
     tx.finish();
-    // An empty body is a client mistake (a typoed curl, a missing file),
-    // not a server failure — 4xx, not the 500 the encoder's "empty file"
-    // error would surface as.
-    if size == 0 {
-        let _ = dispatch.await;
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            anyhow!("empty upload — the request body must be the file's bytes"),
-        ));
-    }
     let (manifest, degraded_shards) = dispatch
         .await
         .map_err(|e| ApiError::from(anyhow!("dispatch task: {e}")))??;
@@ -1975,9 +1965,6 @@ async fn dispatch_core(
             data_len: stripe.len(),
             shard_hashes: shards.iter().map(|s| s.hash.clone()).collect(),
         });
-    }
-    if size == 0 {
-        return Err(anyhow!("empty file").into());
     }
     let file_hash = hasher.finalize().to_hex().to_string();
 
