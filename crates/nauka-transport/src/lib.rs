@@ -24,6 +24,9 @@ pub use tls::{
 
 use std::sync::Arc;
 
+static SOCKET_BUFFER_WARNING_EMITTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Largest UDP datagram we send or accept: a standard jumbo frame.
 pub(crate) const JUMBO_MTU: u16 = 9000;
 
@@ -104,7 +107,9 @@ pub(crate) fn make_socket(
     }
     let received = socket.recv_buffer_size()?;
     let sent = socket.send_buffer_size()?;
-    if received < buf_size || sent < buf_size {
+    if (received < buf_size || sent < buf_size)
+        && !SOCKET_BUFFER_WARNING_EMITTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
         tracing::warn!(
             requested = buf_size,
             effective_receive = received,
