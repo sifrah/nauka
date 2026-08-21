@@ -1931,6 +1931,51 @@ async fn upload_local_ack(
         ));
     }
 
+    // A content-addressed retry or a zero-byte file is often already fully
+    // dispersed. Attach the new space reference without publishing another
+    // staging copy or running Reed-Solomon again. We still consumed and
+    // verified the signed body above: deduplication must not turn the upload
+    // endpoint into a hash-existence oracle.
+    if let Some(manifest) = state.app.app_state().manifests.get(&claimed_hash).cloned() {
+        let response = state
+            .app
+            .write(nauka_raft::types::AppCommand::AddFileRef {
+                file_hash: claimed_hash.clone(),
+                space: auth.space.clone(),
+            })
+            .await
+            .context("recording the deduplicated space reference")?;
+        if response.ok {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            metrics::counter!("nauka_native_local_ack_uploads_total").increment(1);
+            return Ok(Json(UploadResponse {
+                hash: claimed_hash.clone(),
+                size,
+                name,
+                stripes: manifest.stripes.len(),
+                data_shards: manifest.config.data_shards,
+                parity_shards: manifest.config.parity_shards,
+                link: format!("/f/{claimed_hash}"),
+                degraded_shards: 0,
+                space: Some(auth.space),
+                dispersing: false,
+            }));
+        }
+        // The manifest may have disappeared between the snapshot and the
+        // replicated AddFileRef. In that one race, the verified temporary
+        // file is still available and the ordinary staging path is safe.
+        if state.app.app_state().manifests.contains_key(&claimed_hash) {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                anyhow!(
+                    "the deduplicated reference was refused ({})",
+                    response.info.unwrap_or_default()
+                ),
+            ));
+        }
+    }
+
     let final_path = staged_path(&state, &claimed_hash);
     let created = match tokio::fs::hard_link(&temporary, &final_path).await {
         Ok(()) => true,
@@ -2655,6 +2700,28 @@ pub(crate) fn spawn_staged_drain(
                     tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 }
                 Err(DispatchError::Failed(error)) => {
+                    // Removing the last reference is allowed to delete the
+                    // staging source while a drain is opening it. That is a
+                    // cancellation, not data loss. A concurrent upload may
+                    // also have recreated the same content-addressed path;
+                    // retry that fresh copy instead of pinning the hash in
+                    // `staged_drains` forever.
+                    if native_staging && staged_source_was_removed(&error) {
+                        let app = state.app.app_state();
+                        let no_reference = !app.file_refs.contains_key(&hash);
+                        let already_dispersed = app.manifests.contains_key(&hash);
+                        drop(app);
+                        if no_reference || already_dispersed {
+                            let _ = tokio::fs::remove_file(&path).await;
+                            let _ =
+                                tokio::fs::remove_file(staged_metadata_path(&state, &hash)).await;
+                            let _ = sync_directory(state.tmp_dir.clone()).await;
+                            break;
+                        }
+                        if tokio::fs::metadata(&path).await.is_ok() {
+                            continue;
+                        }
+                    }
                     // A permanent failure needs operator attention. Keep both
                     // the bytes in the backlog gauge and the in-flight key:
                     // admitting another encoder would duplicate work and
@@ -2675,6 +2742,14 @@ pub(crate) fn spawn_staged_drain(
             .unwrap_or_else(|error| error.into_inner())
             .remove(&hash);
     });
+}
+
+fn staged_source_was_removed(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 /// Finish the dispersal of uploads this node acked but had not dispersed
@@ -3977,8 +4052,8 @@ fn uuid_ish() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_range, release_staged, reserve_staged_counter, ApiError, DispatchError, NodeLocation,
-        StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
+        parse_range, release_staged, reserve_staged_counter, staged_source_was_removed, ApiError,
+        DispatchError, NodeLocation, StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
     };
     use std::sync::{atomic::AtomicU64, Arc};
 
@@ -3998,6 +4073,16 @@ mod tests {
         );
         release_staged(&counter, STAGED_BACKLOG_MAX);
         assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn deleting_a_staging_source_is_a_recognized_cancellation() {
+        let missing = anyhow::anyhow!(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .context("opening the staged upload");
+        assert!(staged_source_was_removed(&missing));
+        assert!(!staged_source_was_removed(&anyhow::anyhow!(
+            "corrupt shard"
+        )));
     }
 
     #[test]
