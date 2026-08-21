@@ -52,7 +52,8 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/nauka" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
-          cp packaging/nauka.service packaging/nauka.env.example "dist/$name/" 2>/dev/null || true
+          cp packaging/nauka.service packaging/nauka.env.example \
+            packaging/99-nauka-transport.conf "dist/$name/" 2>/dev/null || true
           tar -C dist -czf "dist/${name}.tar.gz" "$name"
           rm -rf "dist/$name"
 
