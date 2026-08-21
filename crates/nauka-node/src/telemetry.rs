@@ -172,6 +172,46 @@ fn describe_node() {
         "nauka_cache_misses_total",
         "Stripe-cache lookups that required shard reads, local or remote. A miss whose backing file lost a race with eviction counts here too."
     );
+    metrics::describe_gauge!(
+        "nauka_extent_cache_entries",
+        "Verified shards and stripes currently resident in the bounded Range RAM cache."
+    );
+    metrics::describe_gauge!(
+        "nauka_extent_cache_bytes",
+        "Payload bytes resident in the verified Range RAM cache."
+    );
+    metrics::describe_gauge!(
+        "nauka_extent_cache_accounted_bytes",
+        "Payload, key and conservative per-entry overhead charged to the verified Range RAM-cache budget."
+    );
+    metrics::describe_gauge!(
+        "nauka_extent_cache_budget_bytes",
+        "Configured Range RAM cache budget (NAUKA_EXTENT_CACHE_SIZE)."
+    );
+    metrics::describe_gauge!(
+        "nauka_extent_inflight",
+        "Unique verified extents currently loading; duplicate clients wait on the same load."
+    );
+    metrics::describe_counter!(
+        "nauka_extent_cache_hits_total",
+        "Verified extent requests served from RAM without disk, hash, Reed-Solomon, or network work."
+    );
+    metrics::describe_counter!(
+        "nauka_extent_cache_misses_total",
+        "Unique verified extent loads started after a RAM miss."
+    );
+    metrics::describe_counter!(
+        "nauka_extent_cache_evictions_total",
+        "Verified extents evicted by the bounded LRU."
+    );
+    metrics::describe_counter!(
+        "nauka_extent_singleflight_waiters_total",
+        "Duplicate extent requests fused behind an already in-flight load."
+    );
+    metrics::describe_counter!(
+        "nauka_cache_corrupt_entries_total",
+        "Decoded disk-cache stripes rejected after re-encoding did not match the manifest shard hashes."
+    );
     metrics::describe_counter!(
         "nauka_remote_corrupt_shards_total",
         "Remote shard responses rejected because their BLAKE3 did not match the requested content hash."

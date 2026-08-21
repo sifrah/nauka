@@ -85,6 +85,42 @@ publish left the node serving the bare URL at 1.25 GB/s before the
 first visitor; three 1 MB range reads turned the next full GET into
 888 MB/s of local disk.
 
+## Verified Range extent cache
+
+Small and random Range reads have a different access pattern. Reading 4 KiB
+cannot safely trust only those 4 KiB with the current manifest format: the
+manifest contains one BLAKE3 hash per shard, not a Merkle tree of smaller
+blocks. Nauka therefore reads and verifies the complete covering shard once,
+keeps that verified extent in a bounded RAM LRU, and returns the exact byte
+slice requested. Concurrent cold reads of the same shard or stripe are fused
+into one load. On a single-node cluster this still avoids repeated disk reads
+and BLAKE3 work; on a distributed cluster it also avoids duplicate transfers
+and Reed-Solomon reconstructions.
+
+The RAM cache is independent from the decoded-stripe disk cache above. It is
+enabled by default with a 128 MB budget:
+
+```bash
+NAUKA_EXTENT_CACHE_SIZE=512MiB nauka serve …  # or --extent-cache-size 512MiB
+NAUKA_EXTENT_CACHE_SIZE=0 nauka serve …       # disable the RAM cache
+```
+
+Plain bytes and human sizes are accepted. The default keeps the working set
+bounded: payloads, keys and a conservative allocation overhead are charged to
+the budget, the table is capped at 4,096 entries, and at most 32 distinct cold
+loads may run concurrently. Eviction never affects correctness because shards,
+manifests and Reed-Solomon remain the source of truth. Monitor
+`nauka_extent_cache_bytes`, `nauka_extent_cache_accounted_bytes`,
+`nauka_extent_cache_hits_total`,
+`nauka_extent_singleflight_waiters_total`, and compare
+`nauka_range_backend_bytes_total` with `nauka_range_requested_bytes_total`
+to see the real backend amplification.
+
+S3 customer-key encryption is the exception to windowed reconstruction: Nauka
+must authenticate and decrypt the encrypted segments before slicing the
+plaintext response. Those reads keep the full-download path and do not pollute
+the optimized Range-cache amplification counters.
+
 ## Using both together
 
 A metered node with a cache is the intended combination: the cache slashes

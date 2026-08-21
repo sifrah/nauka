@@ -2369,6 +2369,7 @@ impl S3 for NaukaS3 {
                 None
             }
         };
+        let read_plan = object_read_plan(partial, customer_key.is_some());
 
         let body = match &v.content {
             None => StreamingBlob::from(Body::from(Vec::<u8>::new())),
@@ -2401,14 +2402,10 @@ impl S3 for NaukaS3 {
                             // The stored bytes are ciphertext: reconstruct all
                             // of it, decrypt stream by stream, then serve the
                             // requested window of the plaintext.
-                            let ct = reconstruct_range(
-                                &self.state,
-                                &manifest,
-                                0,
-                                manifest.file_size.saturating_sub(1),
-                            )
-                            .await
-                            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+                            debug_assert_eq!(read_plan, ObjectReadPlan::Full);
+                            let ct = reconstruct_full(&self.state, &manifest)
+                                .await
+                                .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
                             let plain = decrypt_segments(key, &ct, &info.segments)?;
                             let window = plain
                                 .get(
@@ -2420,9 +2417,15 @@ impl S3 for NaukaS3 {
                             StreamingBlob::from(Body::from(window))
                         }
                         _ => {
-                            let bytes = reconstruct_range(&self.state, &manifest, start, end)
-                                .await
-                                .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
+                            let bytes = match read_plan {
+                                ObjectReadPlan::Full => {
+                                    reconstruct_full(&self.state, &manifest).await
+                                }
+                                ObjectReadPlan::Windowed => {
+                                    reconstruct_range(&self.state, &manifest, start, end).await
+                                }
+                            }
+                            .map_err(|e| s3_error!(InternalError, "{e:#}"))?;
                             StreamingBlob::from(Body::from(bytes))
                         }
                     },
@@ -5190,15 +5193,50 @@ fn resolve_range(range: &Range, size: u64) -> S3Result<(u64, u64)> {
     Ok((start, end))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectReadPlan {
+    Full,
+    Windowed,
+}
+
+fn object_read_plan(partial: bool, customer_encrypted: bool) -> ObjectReadPlan {
+    if partial && !customer_encrypted {
+        ObjectReadPlan::Windowed
+    } else {
+        // SSE-C authentifie et déchiffre des segments du ciphertext complet
+        // dans le chemin historique; il ne peut pas découper les shards du
+        // plaintext avant ce déchiffrement.
+        ObjectReadPlan::Full
+    }
+}
+
+/// Reconstruit un objet entier avec le Fetcher historique: ni cache RAM des
+/// Range, ni compteurs de Range. Ce chemin reste volontairement distinct du
+/// lecteur fenêtré afin qu'un GET S3 sans header Range ne change pas de coût.
+async fn reconstruct_full(
+    state: &Arc<ApiState>,
+    manifest: &nauka_erasure::FileManifest,
+) -> anyhow::Result<Vec<u8>> {
+    let fetcher = Arc::new(crate::api::Fetcher::new(state.clone()));
+    let mut out = Vec::with_capacity(manifest.file_size as usize);
+    for (stripe_idx, stripe) in manifest.stripes.iter().enumerate() {
+        out.extend(crate::api::reconstruct_stripe(&fetcher, stripe, stripe_idx, manifest).await?);
+    }
+    Ok(out)
+}
+
 /// Rebuilds `[start, end]` of an object, fetching only the stripes that
-/// cover it — a range read of a 1 GB object touches a few megabytes.
+/// cover it and, inside those stripes, only the data shards intersecting the
+/// requested window. A 4 KiB read within one healthy shard charge donc un
+/// seul shard froid, pas les k shards de la stripe.
 async fn reconstruct_range(
     state: &Arc<ApiState>,
     manifest: &nauka_erasure::FileManifest,
     start: u64,
     end: u64,
 ) -> anyhow::Result<Vec<u8>> {
-    let fetcher = Arc::new(crate::api::Fetcher::new(state.clone()));
+    metrics::counter!("nauka_range_requested_bytes_total").increment(end - start + 1);
+    let fetcher = Arc::new(crate::api::Fetcher::new_range(state.clone()));
     let mut out = Vec::with_capacity((end - start + 1) as usize);
     let mut offset = 0u64;
     for (stripe_idx, stripe) in manifest.stripes.iter().enumerate() {
@@ -5211,10 +5249,10 @@ async fn reconstruct_range(
         if offset > end {
             break;
         }
-        let data = crate::api::reconstruct_stripe(&fetcher, stripe, stripe_idx, manifest).await?;
-        let from = start.saturating_sub(offset) as usize;
-        let to = (end.min(stripe_end) - offset) as usize;
-        out.extend_from_slice(&data[from..=to]);
+        out.extend(
+            crate::api::read_stripe_window(&fetcher, manifest, stripe_idx, offset, start, end)
+                .await?,
+        );
         offset += len;
     }
     Ok(out)
@@ -5239,6 +5277,13 @@ fn multipart_content_hash(parts: &[nauka_s3::UploadedPart]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plaintext_range_requests_use_the_windowed_fetcher() {
+        assert_eq!(object_read_plan(false, false), ObjectReadPlan::Full);
+        assert_eq!(object_read_plan(true, false), ObjectReadPlan::Windowed);
+        assert_eq!(object_read_plan(true, true), ObjectReadPlan::Full);
+    }
 
     fn stored() -> BTreeMap<String, String> {
         BTreeMap::from([

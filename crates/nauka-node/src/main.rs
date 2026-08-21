@@ -228,6 +228,12 @@ enum Cmd {
         /// 1GB and capped at 50GB. `0` disables the cache entirely.
         #[arg(long, env = "NAUKA_CACHE_SIZE")]
         cache_size: Option<String>,
+        /// RAM budget for verified shards/stripes used by Range reads.
+        /// Human sizes are accepted. This cache fuses concurrent reads
+        /// and avoids repeated local reads and BLAKE3 verification.
+        /// `0` disables it; default: 128MB.
+        #[arg(long, env = "NAUKA_EXTENT_CACHE_SIZE", default_value = "128MB")]
+        extent_cache_size: String,
         /// Address of the public HTTP API (upload/download).
         #[arg(long, default_value = "0.0.0.0:8080")]
         http: SocketAddr,
@@ -1070,6 +1076,7 @@ async fn main() -> Result<()> {
             capacity,
             egress_quota,
             cache_size,
+            extent_cache_size,
             http,
             #[cfg(feature = "s3")]
                 s3: s3_addr,
@@ -1126,6 +1133,11 @@ async fn main() -> Result<()> {
                     }
                 }
             };
+            let extent_cache_budget = egress::parse_size(&extent_cache_size).with_context(|| {
+                format!(
+                    "unreadable extent cache size {extent_cache_size:?} (try \"128MB\", \"512MiB\", \"0\")"
+                )
+            })?;
             // The neighborhood's conc-gossip landing pad, shared between
             // the ApiState (admission reads it) and the transport server
             // (peer pushes land in it) — declared here because the two
@@ -1379,6 +1391,7 @@ async fn main() -> Result<()> {
                     health: health.clone(),
                     egress: Arc::new(egress::EgressMeter::new(egress_quota, now_secs)),
                     cache: stripe_cache.clone(),
+                    extent_cache: cache::VerifiedExtentCache::new(extent_cache_budget),
                     // An eighth of the machine for upload buffering,
                     // decided now: what uploads may hold in RAM must not
                     // depend on what happens to be free later.

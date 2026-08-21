@@ -49,6 +49,10 @@ pub struct ApiState {
     /// Opt-in stripe cache (`NAUKA_CACHE_SIZE`): decoded stripes that
     /// crossed the cluster once are served from local disk after.
     pub cache: Option<Arc<crate::cache::StripeCache>>,
+    /// Cache RAM des shards/stripes déjà authentifiés et registre
+    /// singleflight. Toujours actif, y compris sur un cluster mono-node:
+    /// une Range chaude ne relit ni ne rehache le shard local.
+    pub extent_cache: Arc<crate::cache::VerifiedExtentCache>,
     /// Global admission budget for upload RAM windows — sized once at
     /// startup so concurrent uploads share a fixed fraction of the machine
     /// instead of racing for "what is left".
@@ -3095,34 +3099,118 @@ pub(crate) async fn reconstruct_stripe(
     stripe_idx: usize,
     m: &FileManifest,
 ) -> Result<Vec<u8>> {
-    // The cache first: a decoded stripe under a content-addressed key can
-    // never be stale, only absent.
+    // Le GET séquentiel conserve son chemin zéro-copie par shard. Le cache
+    // d'extents vise les Range; l'y faire passer ajouterait une copie de
+    // chaque shard puis de chaque stripe au téléchargement complet.
+    if !fetcher.range_read {
+        return reconstruct_stripe_uncached(fetcher, stripe, stripe_idx, m, false).await;
+    }
+    let key = stripe_extent_key(m, stripe, stripe_idx);
+    let extent_cache = fetcher.state.extent_cache.clone();
+    let fetcher = fetcher.clone();
+    let stripe = stripe.clone();
+    let manifest = m.clone();
+    let result = extent_cache
+        .get_or_load(key, async move {
+            reconstruct_stripe_uncached(&fetcher, &stripe, stripe_idx, &manifest, true)
+                .await
+                .map(Arc::<[u8]>::from)
+                .map_err(|error| Arc::<str>::from(format!("{error:#}")))
+        })
+        .await;
+    result
+        .map(|data| data.as_ref().to_vec())
+        .map_err(|error| anyhow!(error.to_string()))
+}
+
+async fn reconstruct_stripe_uncached(
+    fetcher: &Arc<Fetcher>,
+    stripe: &StripeMeta,
+    stripe_idx: usize,
+    manifest: &FileManifest,
+    verify_disk_cache: bool,
+) -> Result<Vec<u8>> {
     if let Some(cache) = &fetcher.state.cache {
-        if let Some(data) = cache.get(&m.file_hash, stripe_idx) {
-            return Ok(data);
+        if let Some(data) = cache.get(&manifest.file_hash, stripe_idx) {
+            if fetcher.range_read {
+                metrics::counter!("nauka_range_backend_bytes_total").increment(data.len() as u64);
+            }
+            if !verify_disk_cache {
+                return Ok(data);
+            }
+            let candidate = data.clone();
+            let expected = stripe.clone();
+            let config = manifest.config;
+            let genuine = tokio::task::spawn_blocking(move || {
+                decoded_stripe_matches(&candidate, &expected, &config)
+            })
+            .await
+            .unwrap_or(false);
+            if genuine {
+                return Ok(data);
+            }
+            cache.invalidate(&manifest.file_hash, stripe_idx);
+            metrics::counter!("nauka_cache_corrupt_entries_total").increment(1);
         }
     }
-    // Then the neighbor's cache: one local transfer beats k far ones.
-    if let Some(data) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
+    if let Some(data) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, manifest).await {
+        if fetcher.range_read {
+            metrics::counter!("nauka_range_backend_bytes_total").increment(data.len() as u64);
+        }
         if let Some(cache) = &fetcher.state.cache {
-            let _ = cache.put(&m.file_hash, stripe_idx, &data);
+            let _ = cache.put(&manifest.file_hash, stripe_idx, &data);
         }
         return Ok(data);
     }
-    let (slots, remote_used) = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
-    let stripe = stripe.clone();
-    let config = m.config;
-    let data = tokio::task::spawn_blocking(move || decode_stripe(slots, &stripe, &config))
+    let (slots, remote_used) = fetch_stripe_slots(fetcher, stripe, stripe_idx, manifest).await;
+    let decoded_stripe = stripe.clone();
+    let config = manifest.config;
+    let data = tokio::task::spawn_blocking(move || decode_stripe(slots, &decoded_stripe, &config))
         .await
         .context("joining stripe reconstruction")??;
-    // Only worth keeping when the bytes crossed the cluster: stripes that
-    // decode from local shards are already free.
-    if remote_used {
+    // Une Range garde aussi les stripes locales: sur une mono-node, cela
+    // évite k relectures et k BLAKE3 au prochain accès.
+    if verify_disk_cache || remote_used {
         if let Some(cache) = &fetcher.state.cache {
-            let _ = cache.put(&m.file_hash, stripe_idx, &data);
+            let _ = cache.put(&manifest.file_hash, stripe_idx, &data);
         }
     }
     Ok(data)
+}
+
+fn decoded_stripe_matches(data: &[u8], expected: &StripeMeta, config: &ErasureConfig) -> bool {
+    // Le padding Reed-Solomon rend les zéros terminaux invisibles aux hashes
+    // de shards. La longueur du manifest fait donc partie de la preuve: sans
+    // elle, une entrée tronquée ou allongée uniquement de zéros serait admise.
+    data.len() == expected.data_len
+        && encode_stripe(data, config).is_ok_and(|encoded| {
+            encoded.len() == expected.shard_hashes.len()
+                && encoded
+                    .iter()
+                    .zip(&expected.shard_hashes)
+                    .all(|(actual, hash)| actual.hash == *hash)
+        })
+}
+
+/// Identité d'une stripe encodée, et non seulement du contenu complet. Le
+/// registre autorise le remplacement d'un manifest sous le même `file_hash`;
+/// une évolution des paramètres d'encodage ne doit jamais réutiliser la RAM
+/// vérifiée sous l'ancien découpage.
+fn stripe_extent_key(manifest: &FileManifest, stripe: &StripeMeta, stripe_idx: usize) -> String {
+    let mut identity = blake3::Hasher::new();
+    identity.update(&(manifest.config.data_shards as u64).to_le_bytes());
+    identity.update(&(manifest.config.parity_shards as u64).to_le_bytes());
+    identity.update(&(manifest.config.shard_size as u64).to_le_bytes());
+    identity.update(&(stripe.data_len as u64).to_le_bytes());
+    for hash in &stripe.shard_hashes {
+        identity.update(&(hash.len() as u64).to_le_bytes());
+        identity.update(hash.as_bytes());
+    }
+    format!(
+        "stripe:{}:{stripe_idx}:{}",
+        manifest.file_hash,
+        identity.finalize().to_hex()
+    )
 }
 
 async fn download(
@@ -3564,12 +3652,12 @@ fn note_hot_read(state: &ApiState, hash: &str) {
 }
 
 /// One stripe's byte window for a range read, by the cheapest honest
-/// route: local cache slice → neighbor's cached stripe → PARTIAL fetch
-/// of only the covering data shards (the layout is contiguous, so a
+/// route: RAM cache of verified shards → PARTIAL fetch of only the
+/// covering data shards (the layout is contiguous, so a
 /// small seek lives in one or two shards — no reason to move k MiB for
-/// 100 KiB) → full reconstruction. Every partial shard is BLAKE3-checked
-/// against the manifest before a byte is believed.
-async fn read_stripe_window(
+/// 100 KiB) → full stripe cache/reconstruction. Every cold partial shard
+/// is BLAKE3-checked against the manifest before a byte is believed.
+pub(crate) async fn read_stripe_window(
     fetcher: &Arc<Fetcher>,
     m: &FileManifest,
     stripe_idx: usize,
@@ -3578,36 +3666,46 @@ async fn read_stripe_window(
     end: u64,
 ) -> Result<Vec<u8>> {
     let stripe = &m.stripes[stripe_idx];
-    let stripe_len = stripe.data_len as u64;
-    let from = start.saturating_sub(off) as usize;
-    let to = ((end - off + 1).min(stripe_len)) as usize;
-    if from >= to {
+    let Some((from, to)) = stripe_window_bounds(off, stripe.data_len as u64, start, end) else {
         return Ok(Vec::new());
-    }
-    if let Some(cache) = &fetcher.state.cache {
-        if let Some(d) = cache.get(&m.file_hash, stripe_idx) {
-            if to <= d.len() {
-                return Ok(d[from..to].to_vec());
-            }
-        }
-    }
-    if let Some(d) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
-        if let Some(cache) = &fetcher.state.cache {
-            let _ = cache.put(&m.file_hash, stripe_idx, &d);
-        }
-        if to <= d.len() {
-            return Ok(d[from..to].to_vec());
-        }
-    }
+    };
     let ssz = m.config.shard_size;
-    let s0 = from / ssz;
-    let s1 = (to - 1) / ssz;
-    if ssz > 0 && s1 < m.config.data_shards && s1 - s0 + 1 < m.config.data_shards {
+    if ssz == 0 {
+        let data = reconstruct_stripe(fetcher, stripe, stripe_idx, m).await?;
+        return Ok(data[from..to.min(data.len())].to_vec());
+    }
+    let Some((s0, s1)) = covering_data_shards(from, to, ssz, m.config.data_shards) else {
+        let data = reconstruct_stripe(fetcher, stripe, stripe_idx, m).await?;
+        return Ok(data[from..to.min(data.len())].to_vec());
+    };
+    if s1 - s0 + 1 < m.config.data_shards {
+        if s0 == s1 {
+            if let Some(data) = fetcher
+                .clone()
+                .fetch_extent(stripe.shard_hashes[s0].clone(), None)
+                .await
+            {
+                let a = from - s0 * ssz;
+                let len = to - from;
+                if a + len <= data.len() {
+                    metrics::counter!("nauka_partial_range_reads_total").increment(1);
+                    return Ok(data[a..a + len].to_vec());
+                }
+            }
+            // Le shard couvrant manque ou est tronqué: Reed-Solomon est
+            // l'unique repli sûr.
+            let d = reconstruct_stripe(fetcher, stripe, stripe_idx, m).await?;
+            return Ok(d[from..to.min(d.len())].to_vec());
+        }
         let mut span: Vec<u8> = Vec::with_capacity((s1 - s0 + 1) * ssz);
         let mut complete = true;
         for i in s0..=s1 {
-            match fetcher.clone().fetch(stripe.shard_hashes[i].clone()).await {
-                Some((d, _)) => span.extend_from_slice(&d),
+            match fetcher
+                .clone()
+                .fetch_extent(stripe.shard_hashes[i].clone(), None)
+                .await
+            {
+                Some(d) => span.extend_from_slice(&d),
                 _ => {
                     complete = false;
                     break;
@@ -3626,6 +3724,39 @@ async fn read_stripe_window(
     Ok(d[from..to.min(d.len())].to_vec())
 }
 
+fn covering_data_shards(
+    from: usize,
+    to: usize,
+    shard_size: usize,
+    data_shards: usize,
+) -> Option<(usize, usize)> {
+    if shard_size == 0 || from >= to {
+        return None;
+    }
+    let first = from / shard_size;
+    let last = (to - 1) / shard_size;
+    (last < data_shards).then_some((first, last))
+}
+
+/// Fenêtre exacte, en indices `[from, to)` dans une stripe, d'une Range
+/// HTTP inclusive. Isolée pour verrouiller les cas 4 KiB/1 MiB sans I/O.
+fn stripe_window_bounds(
+    stripe_offset: u64,
+    stripe_len: u64,
+    start: u64,
+    end: u64,
+) -> Option<(usize, usize)> {
+    if end < stripe_offset || start >= stripe_offset.saturating_add(stripe_len) {
+        return None;
+    }
+    let from = start.saturating_sub(stripe_offset) as usize;
+    let to = end
+        .saturating_sub(stripe_offset)
+        .saturating_add(1)
+        .min(stripe_len) as usize;
+    (from < to).then_some((from, to))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn serve_range(
     state: Arc<ApiState>,
@@ -3638,7 +3769,8 @@ async fn serve_range(
     content_type: Option<&'static str>,
 ) -> Result<Response, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(4);
-    let fetcher = Arc::new(Fetcher::new(state.clone()));
+    metrics::counter!("nauka_range_requested_bytes_total").increment(end - start + 1);
+    let fetcher = Arc::new(Fetcher::new_range(state.clone()));
     let m = Arc::new(manifest.clone());
     tokio::spawn(async move {
         use futures::StreamExt as _;
@@ -3721,10 +3853,21 @@ pub(crate) struct Fetcher {
     /// hedge timer: what "abnormally slow" means is learned per
     /// download, not configured.
     fetch_ewma_us: std::sync::atomic::AtomicU64,
+    /// Les octets réellement lus en dessous d'une requête Range sont
+    /// comptés séparément afin de mesurer l'amplification backend.
+    range_read: bool,
 }
 
 impl Fetcher {
     pub(crate) fn new(state: Arc<ApiState>) -> Self {
+        Self::with_range_mode(state, false)
+    }
+
+    pub(crate) fn new_range(state: Arc<ApiState>) -> Self {
+        Self::with_range_mode(state, true)
+    }
+
+    fn with_range_mode(state: Arc<ApiState>, range_read: bool) -> Self {
         let view = state.view();
         Self {
             state,
@@ -3732,6 +3875,7 @@ impl Fetcher {
             clients: tokio::sync::Mutex::new(HashMap::new()),
             neighbor: tokio::sync::OnceCell::new(),
             fetch_ewma_us: std::sync::atomic::AtomicU64::new(0),
+            range_read,
         }
     }
 
@@ -3829,17 +3973,47 @@ impl Fetcher {
         self.clients.lock().await.insert(node.to_string(), None);
     }
 
-    /// Looks for a shard: locally first, then on every reachable member.
-    /// The flag says whether the bytes crossed the network — what decides
-    /// if the decoded stripe is worth caching.
-    pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<(Vec<u8>, bool)> {
-        self.fetch_preferred(hash, None).await
-    }
-
     /// Same lookup with the placement owner first. Membership drift can
     /// make the prediction stale, so every other live member remains a
     /// correctness-preserving fallback.
     async fn fetch_preferred(
+        self: Arc<Self>,
+        hash: String,
+        preferred: Option<String>,
+    ) -> Option<(Vec<u8>, bool)> {
+        if self.range_read {
+            return self
+                .fetch_extent(hash, preferred)
+                .await
+                .map(|data| (data.as_ref().to_vec(), false));
+        }
+        self.fetch_preferred_uncached(hash, preferred).await
+    }
+
+    /// Plus petite unité authentifiable des manifests actuels: un shard
+    /// complet. Le cache et le singleflight sont indexés par son BLAKE3;
+    /// deux petites Range concurrentes ne relisent donc pas le même shard.
+    async fn fetch_extent(
+        self: Arc<Self>,
+        hash: String,
+        preferred: Option<String>,
+    ) -> Option<Arc<[u8]>> {
+        let key = format!("shard:{hash}");
+        let this = self.clone();
+        let result = self
+            .state
+            .extent_cache
+            .get_or_load(key, async move {
+                this.fetch_preferred_uncached(hash, preferred)
+                    .await
+                    .map(|(data, _)| Arc::<[u8]>::from(data))
+                    .ok_or_else(|| Arc::<str>::from("shard indisponible"))
+            })
+            .await;
+        result.ok()
+    }
+
+    async fn fetch_preferred_uncached(
         self: Arc<Self>,
         hash: String,
         preferred: Option<String>,
@@ -3850,6 +4024,9 @@ impl Fetcher {
             tokio::task::spawn_blocking(move || store.get_shard(&local_hash)).await
         {
             record_shard_fetch(SHARD_LOCAL);
+            if self.range_read {
+                metrics::counter!("nauka_range_backend_bytes_total").increment(data.len() as u64);
+            }
             return Some((data, false));
         }
         let mut peers = Vec::with_capacity(self.view.len());
@@ -3873,6 +4050,10 @@ impl Fetcher {
                 Ok(Ok(Some(data))) => {
                     if nauka_erasure::hash_bytes(&data) == hash {
                         record_shard_fetch(SHARD_REMOTE);
+                        if self.range_read {
+                            metrics::counter!("nauka_range_backend_bytes_total")
+                                .increment(data.len() as u64);
+                        }
                         return Some((data, true));
                     }
                     metrics::counter!("nauka_remote_corrupt_shards_total").increment(1);
@@ -3911,6 +4092,14 @@ pub(crate) fn describe_metrics() {
     metrics::describe_counter!(
         "nauka_read_peer_writeoffs_total",
         "Peers written off for the remainder of a download after a failed or timed-out shard transfer. Per-request and independent of the cluster-wide liveness map."
+    );
+    metrics::describe_counter!(
+        "nauka_range_requested_bytes_total",
+        "Bytes explicitly requested by HTTP and S3 Range clients. Compare with nauka_range_backend_bytes_total to measure cold-read amplification."
+    );
+    metrics::describe_counter!(
+        "nauka_range_backend_bytes_total",
+        "Verified shard bytes actually read from local storage or peers for Range requests. Cache hits add zero; ratio over requested bytes is backend amplification."
     );
 }
 
@@ -4052,8 +4241,9 @@ fn uuid_ish() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_range, release_staged, reserve_staged_counter, staged_source_was_removed, ApiError,
-        DispatchError, NodeLocation, StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
+        covering_data_shards, decoded_stripe_matches, parse_range, release_staged,
+        reserve_staged_counter, staged_source_was_removed, stripe_extent_key, stripe_window_bounds,
+        ApiError, DispatchError, NodeLocation, StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
     };
     use std::sync::{atomic::AtomicU64, Arc};
 
@@ -4083,6 +4273,136 @@ mod tests {
         assert!(!staged_source_was_removed(&anyhow::anyhow!(
             "corrupt shard"
         )));
+    }
+
+    #[test]
+    fn stripe_windows_slice_4k_and_1m_ranges_exactly() {
+        let mib = 1024 * 1024;
+        let stripe_offset = 4 * mib;
+        assert_eq!(
+            stripe_window_bounds(
+                stripe_offset,
+                4 * mib,
+                stripe_offset + 123,
+                stripe_offset + 4218
+            ),
+            Some((123, 4219)),
+            "4 KiB inclusive on the wire becomes [from,to) internally"
+        );
+        assert_eq!(
+            stripe_window_bounds(
+                stripe_offset,
+                4 * mib,
+                stripe_offset + mib,
+                stripe_offset + 2 * mib - 1,
+            ),
+            Some((mib as usize, (2 * mib) as usize))
+        );
+        assert_eq!(
+            stripe_window_bounds(stripe_offset, 4 * mib, 0, stripe_offset - 1),
+            None
+        );
+        assert_eq!(
+            covering_data_shards(123, 4219, mib as usize, 4),
+            Some((0, 0)),
+            "une Range 4 KiB intérieure ne charge qu'un shard"
+        );
+        assert_eq!(
+            covering_data_shards(mib as usize - 1, mib as usize + 1, mib as usize, 4),
+            Some((0, 1)),
+            "une Range traversant une frontière charge exactement deux shards"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_decoded_cache_stripe_never_matches_the_manifest() {
+        let config = nauka_erasure::ErasureConfig {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 1024,
+        };
+        let data = vec![0x5a; 3073];
+        let encoded = nauka_erasure::encode_stripe(&data, &config).unwrap();
+        let expected = nauka_erasure::StripeMeta {
+            data_len: data.len(),
+            shard_hashes: encoded.into_iter().map(|shard| shard.hash).collect(),
+        };
+        assert!(decoded_stripe_matches(&data, &expected, &config));
+        let mut corrupt = data;
+        corrupt[2000] ^= 1;
+        assert!(!decoded_stripe_matches(&corrupt, &expected, &config));
+    }
+
+    #[test]
+    fn decoded_cache_verification_includes_the_exact_data_length() {
+        let config = nauka_erasure::ErasureConfig {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 1024,
+        };
+        let data = vec![0; 3073];
+        let encoded = nauka_erasure::encode_stripe(&data, &config).unwrap();
+        let expected = nauka_erasure::StripeMeta {
+            data_len: data.len(),
+            shard_hashes: encoded.into_iter().map(|shard| shard.hash).collect(),
+        };
+        assert!(decoded_stripe_matches(&data, &expected, &config));
+        assert!(
+            !decoded_stripe_matches(&data[..3072], &expected, &config),
+            "retirer un zéro terminal conserve les shards paddés mais pas data_len"
+        );
+        let mut extended = data.clone();
+        extended.push(0);
+        assert!(
+            !decoded_stripe_matches(&extended, &expected, &config),
+            "ajouter un zéro terminal ne doit pas être accepté non plus"
+        );
+    }
+
+    #[test]
+    fn stripe_extent_identity_changes_with_the_encoding_manifest() {
+        let data = vec![0x41; 4096];
+        let config_a = nauka_erasure::ErasureConfig {
+            data_shards: 4,
+            parity_shards: 2,
+            shard_size: 1024,
+        };
+        let config_b = nauka_erasure::ErasureConfig {
+            data_shards: 2,
+            parity_shards: 1,
+            shard_size: 2048,
+        };
+        let stripe_a = nauka_erasure::encode_stripe(&data, &config_a).unwrap();
+        let stripe_b = nauka_erasure::encode_stripe(&data, &config_b).unwrap();
+        let meta_a = nauka_erasure::StripeMeta {
+            data_len: data.len(),
+            shard_hashes: stripe_a.into_iter().map(|shard| shard.hash).collect(),
+        };
+        let meta_b = nauka_erasure::StripeMeta {
+            data_len: data.len(),
+            shard_hashes: stripe_b.into_iter().map(|shard| shard.hash).collect(),
+        };
+        let file_hash = nauka_erasure::hash_bytes(&data);
+        let manifest_a = nauka_erasure::FileManifest {
+            file_hash: file_hash.clone(),
+            file_size: data.len() as u64,
+            name: None,
+            expires_at: None,
+            config: config_a,
+            stripes: vec![meta_a.clone()],
+        };
+        let manifest_b = nauka_erasure::FileManifest {
+            file_hash,
+            file_size: data.len() as u64,
+            name: None,
+            expires_at: None,
+            config: config_b,
+            stripes: vec![meta_b.clone()],
+        };
+        assert_ne!(
+            stripe_extent_key(&manifest_a, &meta_a, 0),
+            stripe_extent_key(&manifest_b, &meta_b, 0)
+        );
     }
 
     #[test]
