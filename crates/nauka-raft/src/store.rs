@@ -527,6 +527,30 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
                                 }
                             }
                         }
+                        AppCommand::AddPendingFileRef { file_hash, space } => {
+                            if !inner.state.spaces.contains_key(&space) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some(format!("no space named {space}")),
+                                }
+                            } else if inner.state.banned.contains_key(&file_hash) {
+                                AppResponse {
+                                    ok: false,
+                                    info: Some("banned".into()),
+                                }
+                            } else {
+                                inner
+                                    .state
+                                    .file_refs
+                                    .entry(file_hash)
+                                    .or_default()
+                                    .insert(space);
+                                AppResponse {
+                                    ok: true,
+                                    info: Some("staged".into()),
+                                }
+                            }
+                        }
                         AppCommand::UpdateSpaceEgress {
                             node_addr,
                             space,

@@ -96,8 +96,22 @@ pub(crate) fn make_socket(
 ) -> std::io::Result<std::net::UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    let _ = socket.set_recv_buffer_size(buf_size);
-    let _ = socket.set_send_buffer_size(buf_size);
+    if let Err(error) = socket.set_recv_buffer_size(buf_size) {
+        tracing::warn!(requested = buf_size, %error, "could not size the QUIC receive buffer");
+    }
+    if let Err(error) = socket.set_send_buffer_size(buf_size) {
+        tracing::warn!(requested = buf_size, %error, "could not size the QUIC send buffer");
+    }
+    let received = socket.recv_buffer_size()?;
+    let sent = socket.send_buffer_size()?;
+    if received < buf_size || sent < buf_size {
+        tracing::warn!(
+            requested = buf_size,
+            effective_receive = received,
+            effective_send = sent,
+            "kernel socket maxima clamp Nauka's QUIC buffers; raise net.core.rmem_max and net.core.wmem_max"
+        );
+    }
     socket.bind(&addr.into())?;
     Ok(socket.into())
 }

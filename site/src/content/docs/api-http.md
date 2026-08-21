@@ -17,7 +17,7 @@ required for access control any more. Content confidentiality is a
 separate, already-solved problem: [end-to-end encryption](/encryption/)
 keeps the nodes blind to what they store.
 
-## `POST /api/upload?name=<name>&ttl=<seconds>`
+## `POST /api/upload?name=<name>&ttl=<seconds>&ack=<encoded|local>`
 
 Body: the file's raw bytes. With curl use `-T <file>`:
 
@@ -31,6 +31,14 @@ kills the client on a small machine before the server sees anything. The
 server side is streaming either way: the node encodes stripe by stripe as
 the body arrives and pushes each shard to its owner (itself included),
 memory bounded to a few stripes whatever the file's size.
+
+`ack=local` is available to delegated v2 grants that bind both BLAKE3 and
+content length. The node writes the raw body once, verifies it, fsyncs it,
+commits the space reference and answers with `"dispersing": true`.
+Reed-Solomon dispersion continues in the background; GET and HEAD already
+serve the durable staged copy, and restart recovery resumes an interrupted
+drain. Without `ack=local`, the historical encoded acknowledgement remains:
+the response waits for shard placement and reports `degraded_shards`.
 
 Uploads REQUIRE the four signature headers of a space
 (`X-Nauka-Space`, `X-Nauka-Key`, `X-Nauka-Timestamp`,
@@ -59,7 +67,8 @@ egress quota, reads slow to a crawl and carry
   "data_shards": 4,
   "parity_shards": 2,
   "link": "/f/988f6e61…",
-  "degraded_shards": 0
+  "degraded_shards": 0,
+  "dispersing": false
 }
 ```
 

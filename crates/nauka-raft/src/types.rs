@@ -203,6 +203,14 @@ pub enum AppCommand {
     },
     /// Clears a node's challenge row once its certificate is issued.
     ClearAcmeTxt { name: String, node_addr: String },
+    /// A space claims bytes fsynced in the ingress node's staging area.
+    /// This short-lived reference makes a native local-ack upload readable
+    /// while Reed-Solomon dispersion finishes in the background. The
+    /// ordinary manifest registration later closes that window.
+    ///
+    /// Keep this at the physical end of the enum: bincode persists the
+    /// variant index in the Raft log.
+    AddPendingFileRef { file_hash: String, space: String },
 }
 
 /// What a space key is allowed to do. bincode is positional: new roles
@@ -666,6 +674,39 @@ pub enum AdminResponse {
 #[cfg(test)]
 mod snapshot_compat_tests {
     use super::*;
+
+    #[test]
+    fn command_variant_indices_are_append_only() {
+        fn variant_index(command: AppCommand) -> u32 {
+            let bytes = bincode::serialize(&command).unwrap();
+            u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        }
+
+        // These exact indices are persisted in the Raft log. In particular,
+        // adding local-ack support must not reinterpret an existing delete
+        // or ACME entry when a production node replays its log after upgrade.
+        assert_eq!(
+            variant_index(AppCommand::RemoveFileRef {
+                file_hash: "hash".into(),
+                space: "org/space".into(),
+            }),
+            29
+        );
+        assert_eq!(
+            variant_index(AppCommand::ClearAcmeTxt {
+                name: "_acme.example".into(),
+                node_addr: "127.0.0.1:7311".into(),
+            }),
+            32
+        );
+        assert_eq!(
+            variant_index(AppCommand::AddPendingFileRef {
+                file_hash: "hash".into(),
+                space: "org/space".into(),
+            }),
+            33
+        );
+    }
 
     // A snapshot written by a PRE-`disabled` binary must load into the
     // current AppState — the exact failure that crash-looped a live

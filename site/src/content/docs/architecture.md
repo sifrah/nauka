@@ -73,6 +73,12 @@ client ──POST /api/upload──▶ node N (any of them)
      degraded_shards = 0 means every shard reached its owner
 ```
 
+For `ack=local`, steps 1–5 become: sequential staging write, BLAKE3 check,
+fsync, pending reference committed through Raft, response. The same encoder
+then runs in the background from that staging file. Reads use the staged
+copy until the final manifest exists, and recovery resumes the drain after
+a crash.
+
 ## Download flow (`GET /f/{hash}` on any node)
 
 ```
