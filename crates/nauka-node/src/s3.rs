@@ -890,6 +890,7 @@ impl S3 for NaukaS3 {
                     size,
                     Some(input.key.clone()),
                     None,
+                    None,
                 );
                 Some(file_hash)
             };

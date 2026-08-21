@@ -1641,8 +1641,24 @@ async fn upload(
             anyhow!("ack must be 'local' when present"),
         ));
     }
-    if params.ack.as_deref() == Some("local") && staged_window_open(&state) {
-        return upload_local_ack(state, request, write_auth, params.name, expires_at).await;
+    if params.ack.as_deref() == Some("local") {
+        let claimed_size = write_auth.claimed_size.ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                anyhow!("local acknowledgement requires a length-bound v2 upload grant"),
+            )
+        })?;
+        if let Some(reservation) = reserve_staged(&state, claimed_size) {
+            return upload_local_ack(
+                state,
+                request,
+                write_auth,
+                params.name,
+                expires_at,
+                reservation,
+            )
+            .await;
+        }
     }
     let spool_path = state.tmp_dir.join(format!("ingest-{}", uuid_ish()));
     // The spool only engages for a ZERO RAM grant (pool dry under heavy
@@ -1833,6 +1849,7 @@ async fn upload_local_ack(
     auth: SpaceWriteAuth,
     name: Option<String>,
     expires_at: Option<u64>,
+    reservation: StagedReservation,
 ) -> Result<Json<UploadResponse>, ApiError> {
     use tokio::io::AsyncWriteExt;
     use tokio_stream::StreamExt;
@@ -1975,7 +1992,14 @@ async fn upload_local_ack(
         ));
     }
 
-    spawn_staged_drain(state.clone(), final_path, size, name.clone(), expires_at);
+    spawn_staged_drain(
+        state.clone(),
+        final_path,
+        size,
+        name.clone(),
+        expires_at,
+        Some(reservation),
+    );
     metrics::counter!("nauka_native_local_ack_uploads_total").increment(1);
     Ok(Json(UploadResponse {
         hash: claimed_hash.clone(),
@@ -2281,6 +2305,66 @@ pub(crate) const STAGED_PREFIX: &str = "staged-";
 /// full dispersal again.
 const STAGED_BACKLOG_MAX: u64 = 4 << 30;
 
+pub(crate) struct StagedReservation {
+    counter: Arc<std::sync::atomic::AtomicU64>,
+    size: u64,
+    handed_off: bool,
+}
+
+impl StagedReservation {
+    fn hand_off(mut self) {
+        self.handed_off = true;
+    }
+}
+
+impl Drop for StagedReservation {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            release_staged(&self.counter, self.size);
+        }
+    }
+}
+
+fn release_staged(counter: &std::sync::atomic::AtomicU64, size: u64) {
+    let left = counter
+        .fetch_sub(size, std::sync::atomic::Ordering::AcqRel)
+        .saturating_sub(size);
+    metrics::gauge!("nauka_staged_bytes").set(left as f64);
+}
+
+fn reserve_staged_counter(
+    counter: Arc<std::sync::atomic::AtomicU64>,
+    size: u64,
+) -> Option<StagedReservation> {
+    let mut current = counter.load(std::sync::atomic::Ordering::Acquire);
+    loop {
+        let next = current.checked_add(size)?;
+        if next > STAGED_BACKLOG_MAX {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            next,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                metrics::gauge!("nauka_staged_bytes").set(next as f64);
+                return Some(StagedReservation {
+                    counter,
+                    size,
+                    handed_off: false,
+                });
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn reserve_staged(state: &Arc<ApiState>, size: u64) -> Option<StagedReservation> {
+    reserve_staged_counter(state.staged_bytes.clone(), size)
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct StagedMetadata {
     name: Option<String>,
@@ -2458,7 +2542,9 @@ async fn serve_staged(
 
 /// Whether a new local-ack upload may be admitted.
 ///
-/// Both native grants and S3 bucket policy use the same bounded window.
+/// S3 uses this as a coarse preflight before receiving the body. Native
+/// grants reserve their signed byte length atomically with `reserve_staged`.
+#[cfg(feature = "s3")]
 pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
     state
         .staged_bytes
@@ -2477,6 +2563,7 @@ pub(crate) fn spawn_staged_drain(
     size: u64,
     name: Option<String>,
     expires_at: Option<u64>,
+    reservation: Option<StagedReservation>,
 ) {
     let Some(hash) = path
         .file_name()
@@ -2496,10 +2583,21 @@ pub(crate) fn spawn_staged_drain(
     {
         return;
     }
-    let now = state
-        .staged_bytes
-        .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
-        + size;
+    let now = match reservation {
+        Some(reservation) => {
+            debug_assert_eq!(reservation.size, size);
+            reservation.hand_off();
+            state
+                .staged_bytes
+                .load(std::sync::atomic::Ordering::Acquire)
+        }
+        None => {
+            state
+                .staged_bytes
+                .fetch_add(size, std::sync::atomic::Ordering::AcqRel)
+                + size
+        }
+    };
     // Published here rather than only on the maintenance tick: the window
     // is often shorter than the tick interval, so a 30 s gauge reads 0
     // through the whole of it — telling an operator nothing is staged at
@@ -2570,11 +2668,7 @@ pub(crate) fn spawn_staged_drain(
                 }
             }
         }
-        let left = state
-            .staged_bytes
-            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(size);
-        metrics::gauge!("nauka_staged_bytes").set(left as f64);
+        release_staged(&state.staged_bytes, size);
         state
             .staged_drains
             .lock()
@@ -2626,6 +2720,7 @@ pub(crate) async fn recover_staged_uploads(state: Arc<ApiState>) {
             size,
             metadata.as_ref().and_then(|value| value.name.clone()),
             metadata.and_then(|value| value.expires_at),
+            None,
         );
         resumed += 1;
     }
@@ -3881,7 +3976,29 @@ fn uuid_ish() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_range, ApiError, DispatchError, NodeLocation, StatusCode, NO_QUORUM};
+    use super::{
+        parse_range, release_staged, reserve_staged_counter, ApiError, DispatchError, NodeLocation,
+        StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
+    };
+    use std::sync::{atomic::AtomicU64, Arc};
+
+    #[test]
+    fn staging_capacity_is_reserved_atomically_and_released_on_drop() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let first = reserve_staged_counter(counter.clone(), STAGED_BACKLOG_MAX - 1).unwrap();
+        assert!(reserve_staged_counter(counter.clone(), 2).is_none());
+        drop(first);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        let full = reserve_staged_counter(counter.clone(), STAGED_BACKLOG_MAX).unwrap();
+        full.hand_off();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Acquire),
+            STAGED_BACKLOG_MAX
+        );
+        release_staged(&counter, STAGED_BACKLOG_MAX);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
 
     #[test]
     fn node_location_only_accepts_a_city_and_iso_country_code() {
