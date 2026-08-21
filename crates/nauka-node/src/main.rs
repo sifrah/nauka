@@ -1373,6 +1373,7 @@ async fn main() -> Result<()> {
                     link_conc_remote: link_conc_remote.clone(),
                     warm_tx: stripe_cache.as_ref().map(|_| warm_tx.clone()),
                     hot_reads: Default::default(),
+                    warm_pending: Default::default(),
                     config: ErasureConfig::default(),
                     tmp_dir,
                     health: health.clone(),
@@ -1383,6 +1384,7 @@ async fn main() -> Result<()> {
                     // depend on what happens to be free later.
                     ingest_pool: ingest::RamPool::sized_from_system(8),
                     staged_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                    staged_drains: Arc::new(Default::default()),
                 });
                 // Uploads this node acked locally but had not finished
                 // dispersing when it stopped: finish them before serving.

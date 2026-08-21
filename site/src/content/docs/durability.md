@@ -8,9 +8,10 @@ each claim states the mechanism that enforces it and the way it was tested.
 
 ## What a write means
 
-`POST /api/upload` answers when every stripe is encoded and its shards are
-on their owner nodes — the response's `degraded_shards` field is the honest
-count of shards that could NOT be delivered (a dead peer mid-upload):
+By default, `POST /api/upload` answers when every stripe is encoded and its
+shards are on their owner nodes. The response's `degraded_shards` field is
+the honest count of shards that could NOT be delivered (a dead peer
+mid-upload):
 
 - **`degraded_shards: 0`** — the file is fully replicated: any 2 shards per
   stripe can vanish right now and the file survives.
@@ -23,6 +24,14 @@ file either appears whole or not at all. A truncated upload never becomes an
 object. If the cluster cannot commit the registry write — no leader, no
 quorum — the upload is refused immediately with a retryable error rather
 than left hanging.
+
+With a content-bound v2 grant, `ack=local` chooses a different explicit
+contract: the response follows one sequential write, BLAKE3 verification,
+fsync and a quorum-committed pending space reference. During this short
+window the object has single-node durability and is readable from staging;
+background dispersion replaces it with the ordinary 4+2 representation.
+The staging file and metadata survive a restart, and a bounded backlog
+automatically sends later uploads back through encoded acknowledgement.
 
 ## What a read guarantees
 

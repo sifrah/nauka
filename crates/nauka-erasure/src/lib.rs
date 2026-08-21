@@ -224,11 +224,36 @@ pub fn decode_stripe(
         });
     }
 
+    // Healthy reads overwhelmingly arrive with all k data shards. They
+    // were verified in the loop above, so rebuilding the absent parity
+    // shards and hashing the same data a second time adds no integrity and
+    // no recoverability. Concatenate the verified data directly.
+    if shards.iter().take(cfg.data_shards).all(Option::is_some) {
+        let mut out = Vec::with_capacity(meta.data_len);
+        for slot in shards.into_iter().take(cfg.data_shards) {
+            out.extend_from_slice(&slot.expect("all data shards checked above"));
+        }
+        out.truncate(meta.data_len);
+        return Ok(out);
+    }
+
+    // Remember which data slots genuinely need reconstruction. Present
+    // shards have already passed BLAKE3 and must not be hashed twice.
+    let reconstructed: Vec<bool> = shards
+        .iter()
+        .take(cfg.data_shards)
+        .map(Option::is_none)
+        .collect();
+
     let rs = ReedSolomon::new(cfg.data_shards, cfg.parity_shards)?;
     rs.reconstruct(&mut shards)?;
 
-    // Check the reconstructed shards really do match the manifest.
+    // Check only reconstructed data shards against the manifest. Shards
+    // that survived the first validation are already trusted.
     for (i, slot) in shards.iter().enumerate().take(cfg.data_shards) {
+        if !reconstructed[i] {
+            continue;
+        }
         let data = slot
             .as_ref()
             .expect("reconstruct guarantees the data shards");

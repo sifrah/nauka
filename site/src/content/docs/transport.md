@@ -106,6 +106,19 @@ The tuning, in the order each bottleneck was found:
    congestion no longer dies quietly; failures are loud and the
    idempotent retries take over.
 
+On Linux, install `packaging/99-nauka-transport.conf` in
+`/etc/sysctl.d/99-nauka-transport.conf`, then run
+`sysctl --system`. Linux accounts roughly twice the requested socket
+buffer, so Nauka's 8 MiB data-plane request needs 16 MiB ceilings:
+
+```ini
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+```
+
+At startup Nauka reads the effective socket buffers and emits a warning if
+the kernel still clamps either one below the requested size.
+
 Measured on a 3-node Scaleway×2 + Hetzner cluster: a 1 GiB WAN upload in
 36 s (~30 MB/s, 256 stripes, `degraded_shards: 0`), read back in 38 s
 byte-identical, and a degraded read with one node down in 24 s —

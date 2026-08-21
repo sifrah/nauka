@@ -8,7 +8,7 @@
 //!   (k shards are enough, wherever they live), integrity verified.
 //! - `GET /api/files`: the replicated registry, restricted to the operator.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -56,6 +56,10 @@ pub struct ApiState {
     /// Bytes of locally-acked uploads not yet dispersed. Bounds the
     /// local-ack window: past a cap, uploads pay full dispersal again.
     pub staged_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Content hashes whose durable staging file is currently being
+    /// dispersed. Prevents concurrent identical uploads and crash recovery
+    /// from launching duplicate encoders for the same object.
+    pub staged_drains: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-space egress served by THIS node, not yet published to the
     /// replicated ledger (space → (month, bytes)). The maintenance pass
     /// folds it into `AppState::space_egress` under this node's row.
@@ -68,6 +72,9 @@ pub struct ApiState {
     /// Partial-read counters feeding the hot-file warming signal
     /// (file hash → count within the current window).
     pub hot_reads: std::sync::Mutex<HashMap<String, (u32, std::time::Instant)>>,
+    /// Files already queued or actively warming. A hot file may receive
+    /// many adjacent Range requests; one reconstruction is enough.
+    pub warm_pending: std::sync::Mutex<HashSet<String>>,
     /// Connections in flight per signed link (keyed by signature), for
     /// links carrying a `conc=` cap. This map is the node's OWN truth;
     /// it is also what the gossip loop pushes to the neighborhood once
@@ -1159,7 +1166,21 @@ async fn download_head(
         Ok(m) => m,
         Err(_) => match state.app.app_state().manifests.get(&hash) {
             Some(m) => m.clone(),
-            None => return StatusCode::NOT_FOUND.into_response(),
+            None => match staged_len(&state, &hash).await {
+                Some(len) => {
+                    let metadata = read_staged_metadata(&state, &hash).await;
+                    return present(
+                        Response::builder(),
+                        content_type,
+                        metadata.as_ref().and_then(|value| value.name.as_ref()),
+                    )
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::CONTENT_LENGTH, len)
+                    .body(Body::empty())
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                }
+                None => return StatusCode::NOT_FOUND.into_response(),
+            },
         },
     };
     present(Response::builder(), content_type, manifest.name.as_ref())
@@ -1215,7 +1236,8 @@ async fn delete_file(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
-    if !state.app.app_state().manifests.contains_key(&hash) {
+    let app = state.app.app_state();
+    if !app.manifests.contains_key(&hash) && !app.file_refs.contains_key(&hash) {
         return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
     }
     // Ownership decides the rules. A file referenced by spaces belongs
@@ -1364,6 +1386,10 @@ struct UploadParams {
     name: Option<String>,
     /// Time to live in seconds: past that, the file is purged from the cluster.
     ttl: Option<u64>,
+    /// `local` acknowledges after one durable sequential write, then
+    /// disperses Reed-Solomon shards in the background. It is accepted only
+    /// for v2 grants that bind both the complete BLAKE3 and byte length.
+    ack: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1381,6 +1407,9 @@ struct UploadResponse {
     /// The space now referencing this file (signed uploads only).
     #[serde(skip_serializing_if = "Option::is_none")]
     space: Option<String>,
+    /// True only during the short local-ack window. Reads are already
+    /// available from the fsynced staging file.
+    dispersing: bool,
 }
 
 /// A write authenticated for a space (`X-Nauka-Space` was present and
@@ -1606,6 +1635,31 @@ async fn upload(
             .as_secs()
             + ttl
     });
+    if params.ack.as_deref().is_some_and(|ack| ack != "local") {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("ack must be 'local' when present"),
+        ));
+    }
+    if params.ack.as_deref() == Some("local") {
+        let claimed_size = write_auth.claimed_size.ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_REQUEST,
+                anyhow!("local acknowledgement requires a length-bound v2 upload grant"),
+            )
+        })?;
+        if let Some(reservation) = reserve_staged(&state, claimed_size) {
+            return upload_local_ack(
+                state,
+                request,
+                write_auth,
+                params.name,
+                expires_at,
+                reservation,
+            )
+            .await;
+        }
+    }
     let spool_path = state.tmp_dir.join(format!("ingest-{}", uuid_ish()));
     // The spool only engages for a ZERO RAM grant (pool dry under heavy
     // concurrency): with a window, the ring at capacity backpressures the
@@ -1782,6 +1836,182 @@ async fn upload(
         link: format!("/f/{}", manifest.file_hash),
         degraded_shards,
         space: Some(write_auth.space.clone()),
+        dispersing: false,
+    }))
+}
+
+/// Fast native ingest: one sequential write, BLAKE3 verification and fsync
+/// before the acknowledgement. The distributed representation is built by
+/// [`spawn_staged_drain`] after the space reference is committed.
+async fn upload_local_ack(
+    state: Arc<ApiState>,
+    request: Request,
+    auth: SpaceWriteAuth,
+    name: Option<String>,
+    expires_at: Option<u64>,
+    reservation: StagedReservation,
+) -> Result<Json<UploadResponse>, ApiError> {
+    use tokio::io::AsyncWriteExt;
+    use tokio_stream::StreamExt;
+
+    let claimed_hash = auth.claimed_hash.clone().ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("local acknowledgement requires a content-bound v2 upload grant"),
+        )
+    })?;
+    let claimed_size = auth.claimed_size.ok_or_else(|| {
+        ApiError(
+            StatusCode::BAD_REQUEST,
+            anyhow!("local acknowledgement requires a length-bound v2 upload grant"),
+        )
+    })?;
+    {
+        let app = state.app.app_state();
+        if app.banned.contains_key(&claimed_hash) {
+            return Err(ApiError(
+                StatusCode::GONE,
+                anyhow!("content removed: this hash is banned"),
+            ));
+        }
+        check_storage_quota(&app, &auth.space, &claimed_hash, claimed_size)
+            .map_err(|message| ApiError(StatusCode::FORBIDDEN, anyhow!(message)))?;
+    }
+
+    let temporary = state.tmp_dir.join(format!("local-ack-{}.tmp", uuid_ish()));
+    let receive = async {
+        let mut output = tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .await
+            .context("creating the local-ack staging file")?;
+        let mut hasher = blake3::Hasher::new();
+        let mut size = 0u64;
+        let mut body = request.into_body().into_data_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.context("reading the request body")?;
+            size = size.saturating_add(chunk.len() as u64);
+            if size > claimed_size {
+                return Err(anyhow!(
+                    "request body exceeds the content length bound by its signature"
+                ));
+            }
+            hasher.update(&chunk);
+            output.write_all(&chunk).await?;
+        }
+        output.flush().await?;
+        output.sync_all().await?;
+        drop(output);
+        Ok::<_, anyhow::Error>((size, hasher.finalize().to_hex().to_string()))
+    }
+    .await;
+    let (size, actual_hash) = match receive {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            let status = if error
+                .to_string()
+                .contains("exceeds the content length bound")
+            {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return Err(ApiError(status, error));
+        }
+    };
+    if size != claimed_size || !actual_hash.eq_ignore_ascii_case(&claimed_hash) {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            anyhow!(
+                "upload does not match its signed hash/length: expected {claimed_hash}/{claimed_size}, got {actual_hash}/{size}"
+            ),
+        ));
+    }
+
+    let final_path = staged_path(&state, &claimed_hash);
+    let created = match tokio::fs::hard_link(&temporary, &final_path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(ApiError::from(anyhow!("publishing staged upload: {error}")));
+        }
+    };
+    let _ = tokio::fs::remove_file(&temporary).await;
+    if let Err(error) = write_staged_metadata(&state, &claimed_hash, name.clone(), expires_at).await
+    {
+        if created {
+            let _ = tokio::fs::remove_file(&final_path).await;
+            let _ = tokio::fs::remove_file(staged_metadata_path(&state, &claimed_hash)).await;
+        }
+        return Err(error);
+    }
+    if let Err(error) = sync_directory(state.tmp_dir.clone()).await {
+        if created {
+            let _ = tokio::fs::remove_file(&final_path).await;
+            let _ = tokio::fs::remove_file(staged_metadata_path(&state, &claimed_hash)).await;
+        }
+        return Err(error);
+    }
+
+    let response = match state
+        .app
+        .write(nauka_raft::types::AppCommand::AddPendingFileRef {
+            file_hash: claimed_hash.clone(),
+            space: auth.space.clone(),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if created {
+                let _ = tokio::fs::remove_file(&final_path).await;
+                let _ = tokio::fs::remove_file(staged_metadata_path(&state, &claimed_hash)).await;
+                let _ = sync_directory(state.tmp_dir.clone()).await;
+            }
+            return Err(ApiError::from(anyhow!(
+                "recording the staged space reference: {error}"
+            )));
+        }
+    };
+    if !response.ok {
+        if created {
+            let _ = tokio::fs::remove_file(&final_path).await;
+            let _ = tokio::fs::remove_file(staged_metadata_path(&state, &claimed_hash)).await;
+            let _ = sync_directory(state.tmp_dir.clone()).await;
+        }
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            anyhow!(
+                "the staged reference was refused ({})",
+                response.info.unwrap_or_default()
+            ),
+        ));
+    }
+
+    spawn_staged_drain(
+        state.clone(),
+        final_path,
+        size,
+        name.clone(),
+        expires_at,
+        Some(reservation),
+    );
+    metrics::counter!("nauka_native_local_ack_uploads_total").increment(1);
+    Ok(Json(UploadResponse {
+        hash: claimed_hash.clone(),
+        size,
+        name,
+        stripes: 0,
+        data_shards: state.config.data_shards,
+        parity_shards: state.config.parity_shards,
+        link: format!("/f/{claimed_hash}"),
+        degraded_shards: 0,
+        space: Some(auth.space),
+        dispersing: true,
     }))
 }
 
@@ -2073,11 +2303,135 @@ pub(crate) const STAGED_PREFIX: &str = "staged-";
 /// premise quietly becomes false while clients keep being told 200. The
 /// cap is what keeps the promise honest; past it, uploads simply pay the
 /// full dispersal again.
-#[cfg(feature = "s3")]
 const STAGED_BACKLOG_MAX: u64 = 4 << 30;
+
+pub(crate) struct StagedReservation {
+    counter: Arc<std::sync::atomic::AtomicU64>,
+    size: u64,
+    handed_off: bool,
+}
+
+impl StagedReservation {
+    fn hand_off(mut self) {
+        self.handed_off = true;
+    }
+}
+
+impl Drop for StagedReservation {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            release_staged(&self.counter, self.size);
+        }
+    }
+}
+
+fn release_staged(counter: &std::sync::atomic::AtomicU64, size: u64) {
+    let left = counter
+        .fetch_sub(size, std::sync::atomic::Ordering::AcqRel)
+        .saturating_sub(size);
+    metrics::gauge!("nauka_staged_bytes").set(left as f64);
+}
+
+fn reserve_staged_counter(
+    counter: Arc<std::sync::atomic::AtomicU64>,
+    size: u64,
+) -> Option<StagedReservation> {
+    let mut current = counter.load(std::sync::atomic::Ordering::Acquire);
+    loop {
+        let next = current.checked_add(size)?;
+        if next > STAGED_BACKLOG_MAX {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            next,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                metrics::gauge!("nauka_staged_bytes").set(next as f64);
+                return Some(StagedReservation {
+                    counter,
+                    size,
+                    handed_off: false,
+                });
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn reserve_staged(state: &Arc<ApiState>, size: u64) -> Option<StagedReservation> {
+    reserve_staged_counter(state.staged_bytes.clone(), size)
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct StagedMetadata {
+    name: Option<String>,
+    expires_at: Option<u64>,
+}
 
 pub(crate) fn staged_path(state: &Arc<ApiState>, hash: &str) -> PathBuf {
     state.tmp_dir.join(format!("{STAGED_PREFIX}{hash}.bin"))
+}
+
+fn staged_metadata_path(state: &Arc<ApiState>, hash: &str) -> PathBuf {
+    state.tmp_dir.join(format!("{STAGED_PREFIX}{hash}.json"))
+}
+
+async fn sync_directory(path: PathBuf) -> Result<(), ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let directory = std::fs::File::open(path)?;
+        directory.sync_all()
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("joining directory fsync: {error}")))??;
+    Ok(())
+}
+
+async fn write_staged_metadata(
+    state: &Arc<ApiState>,
+    hash: &str,
+    name: Option<String>,
+    expires_at: Option<u64>,
+) -> Result<(), ApiError> {
+    use tokio::io::AsyncWriteExt;
+    let destination = staged_metadata_path(state, hash);
+    if tokio::fs::metadata(&destination).await.is_ok() {
+        return Ok(());
+    }
+    let temporary = state
+        .tmp_dir
+        .join(format!("{STAGED_PREFIX}{hash}-{}.json.tmp", uuid_ish()));
+    let bytes = serde_json::to_vec(&StagedMetadata { name, expires_at })?;
+    let mut output = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .await?;
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+    output.sync_all().await?;
+    drop(output);
+    match tokio::fs::hard_link(&temporary, &destination).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return Err(ApiError::from(anyhow!(
+                "publishing staged metadata: {error}"
+            )));
+        }
+    }
+    let _ = tokio::fs::remove_file(&temporary).await;
+    Ok(())
+}
+
+async fn read_staged_metadata(state: &Arc<ApiState>, hash: &str) -> Option<StagedMetadata> {
+    let bytes = tokio::fs::read(staged_metadata_path(state, hash))
+        .await
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Length of the staged copy this node holds for `hash`, if any.
@@ -2088,14 +2442,9 @@ pub(crate) async fn staged_len(state: &Arc<ApiState>, hash: &str) -> Option<u64>
         .map(|m| m.len())
 }
 
-/// Bytes `[start, end]` of a locally-staged upload.
-///
-/// A locally-acked object is readable from the moment it is acked, because
-/// the bytes are right here: local disk, no erasure decode, no cluster
-/// round-trip — strictly faster than the dispersed read that replaces it.
-/// Without this, the drain window would be a window of 404s on objects the
-/// registry already acknowledges, which is the one thing the ack promised
-/// would not happen.
+/// Byte window used by the S3 door while a locally acknowledged object is
+/// still dispersing. The native HTTP door streams the same file directly.
+#[cfg(feature = "s3")]
 pub(crate) async fn staged_range(
     state: &Arc<ApiState>,
     hash: &str,
@@ -2110,24 +2459,30 @@ pub(crate) async fn staged_range(
     }
     let end = end.min(len.saturating_sub(1));
     let want = end.saturating_sub(start).saturating_add(1) as usize;
-    let mut f = tokio::fs::File::open(&path).await.ok()?;
-    f.seek(std::io::SeekFrom::Start(start)).await.ok()?;
-    let mut buf = vec![0u8; want];
-    f.read_exact(&mut buf).await.ok()?;
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    let mut bytes = vec![0u8; want];
+    file.read_exact(&mut bytes).await.ok()?;
     metrics::counter!("nauka_staged_reads_total").increment(1);
-    Some(buf)
+    Some(bytes)
 }
 
 /// Serves a staged upload over the native door, ranges included.
 ///
-/// Deliberately plain: no erasure decode, no cluster fetch, just the file
-/// this node fsynced before it answered 200.
+/// The file is streamed from disk rather than materialized in RAM: the
+/// local-ack path also supports multi-gigabyte uploads.
+#[allow(clippy::too_many_arguments)]
 async fn serve_staged(
     state: &Arc<ApiState>,
     hash: &str,
     len: u64,
     headers: &axum::http::HeaderMap,
+    rate: Option<u64>,
+    throttled_by_quota: bool,
+    conc_guard: Option<ConcGuard>,
+    content_type: Option<&'static str>,
 ) -> Result<Response, ApiError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let range = parse_range(
         headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
         len,
@@ -2140,35 +2495,55 @@ async fn serve_staged(
             .into_response());
     }
     let (start, end) = range.unwrap_or((0, len.saturating_sub(1)));
-    let Some(bytes) = staged_range(state, hash, start, end).await else {
-        return Ok((StatusCode::NOT_FOUND, "unknown file").into_response());
+    let want = end.saturating_sub(start).saturating_add(1);
+    let mut file = match tokio::fs::File::open(staged_path(state, hash)).await {
+        Ok(file) => file,
+        Err(_) => return Ok((StatusCode::NOT_FOUND, "unknown file").into_response()),
     };
-    state.egress.add(bytes.len() as u64);
-    let mut resp = (
-        if range.is_some() {
-            StatusCode::PARTIAL_CONTENT
-        } else {
-            StatusCode::OK
-        },
-        bytes,
-    )
-        .into_response();
-    let h = resp.headers_mut();
-    h.insert(header::ACCEPT_RANGES, "bytes".parse().expect("static"));
-    if range.is_some() {
-        if let Ok(v) = format!("bytes {start}-{end}/{len}").parse() {
-            h.insert(header::CONTENT_RANGE, v);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut reader = tokio_util::io::ReaderStream::new(file.take(want));
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        use futures::StreamExt as _;
+        while let Some(chunk) = reader.next().await {
+            if tx.send(chunk).await.is_err() {
+                return;
+            }
         }
+    });
+    let rx = match rate {
+        Some(value) if value > 0 => paced(rx, value),
+        _ => rx,
+    };
+    let body = body_holding_slot(rx, conc_guard);
+    state.egress.add(want);
+    metrics::counter!("nauka_staged_reads_total").increment(1);
+    let metadata = read_staged_metadata(state, hash).await;
+    let mut builder = present(
+        Response::builder(),
+        content_type,
+        metadata.as_ref().and_then(|value| value.name.as_ref()),
+    )
+    .status(if range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    })
+    .header(header::ACCEPT_RANGES, "bytes")
+    .header(header::CONTENT_LENGTH, want);
+    if range.is_some() {
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
     }
-    Ok(resp)
+    if throttled_by_quota {
+        builder = builder.header("X-Nauka-Throttled", "egress-quota");
+    }
+    Ok(builder.body(body).map_err(anyhow::Error::from)?)
 }
 
 /// Whether a new local-ack upload may be admitted.
 ///
-/// Only the S3 door consumes this today: the local-ack opt-in rides a
-/// bucket tag. Re-exposing the mode on the native door is a planned
-/// follow-up; the machinery below it — staged files, recovery sweep,
-/// drain — is door-agnostic and stays live.
+/// S3 uses this as a coarse preflight before receiving the body. Native
+/// grants reserve their signed byte length atomically with `reserve_staged`.
 #[cfg(feature = "s3")]
 pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
     state
@@ -2180,18 +2555,49 @@ pub(crate) fn staged_window_open(state: &Arc<ApiState>) -> bool {
 /// Disperse a staged upload in the background, then drop the staged copy.
 ///
 /// Failure here is not silent data loss: the staged file stays on disk and
-/// its content hash is already in the registry, so the next restart's
-/// recovery sweep picks it up again.
+/// its content hash is already in the registry. Availability failures retry
+/// with bounded backoff; a restart also resumes any interrupted drain.
 pub(crate) fn spawn_staged_drain(
     state: Arc<ApiState>,
     path: PathBuf,
     size: u64,
     name: Option<String>,
+    expires_at: Option<u64>,
+    reservation: Option<StagedReservation>,
 ) {
-    let now = state
-        .staged_bytes
-        .fetch_add(size, std::sync::atomic::Ordering::Relaxed)
-        + size;
+    let Some(hash) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(STAGED_PREFIX))
+        .and_then(|name| name.strip_suffix(".bin"))
+        .map(str::to_string)
+    else {
+        tracing::error!(path = %path.display(), "refusing a malformed staged path");
+        return;
+    };
+    if !state
+        .staged_drains
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(hash.clone())
+    {
+        return;
+    }
+    let now = match reservation {
+        Some(reservation) => {
+            debug_assert_eq!(reservation.size, size);
+            reservation.hand_off();
+            state
+                .staged_bytes
+                .load(std::sync::atomic::Ordering::Acquire)
+        }
+        None => {
+            state
+                .staged_bytes
+                .fetch_add(size, std::sync::atomic::Ordering::AcqRel)
+                + size
+        }
+    };
     // Published here rather than only on the maintenance tick: the window
     // is often shorter than the tick interval, so a 30 s gauge reads 0
     // through the whole of it — telling an operator nothing is staged at
@@ -2199,32 +2605,75 @@ pub(crate) fn spawn_staged_drain(
     metrics::gauge!("nauka_staged_bytes").set(now as f64);
     metrics::counter!("nauka_local_ack_uploads_total").increment(1);
     tokio::spawn(async move {
-        match dispatch_file(&state, &path, name, None).await {
-            Ok((manifest, degraded)) => {
-                tracing::info!(
-                    file = %manifest.file_hash, degraded,
-                    "locally-acked upload dispersed"
-                );
+        let native_staging = tokio::fs::metadata(staged_metadata_path(&state, &hash))
+            .await
+            .is_ok();
+        let mut unavailable_attempt = 0u32;
+        loop {
+            if native_staging && !state.app.app_state().file_refs.contains_key(&hash) {
                 let _ = tokio::fs::remove_file(&path).await;
+                let _ = tokio::fs::remove_file(staged_metadata_path(&state, &hash)).await;
+                let _ = sync_directory(state.tmp_dir.clone()).await;
+                break;
             }
-            Err(e) => {
-                // Left on disk on purpose: the recovery sweep is the
-                // retry, and the object is unreadable-but-known until it
-                // succeeds — never silently absent.
-                tracing::error!(
-                    path = %path.display(),
-                    "dispersing a locally-acked upload failed, left staged: {}",
-                    match &e { DispatchError::Unavailable(r) => (*r).to_string(),
-                               DispatchError::Failed(e) => format!("{e:#}") }
-                );
-                metrics::counter!("nauka_local_ack_drain_failures_total").increment(1);
+            match dispatch_file(&state, &path, name.clone(), expires_at).await {
+                Ok((manifest, degraded)) => {
+                    // A native object may be deleted while its background
+                    // dispersion is running. Never resurrect it if the last
+                    // reference disappeared just before registration.
+                    if native_staging
+                        && !state
+                            .app
+                            .app_state()
+                            .file_refs
+                            .contains_key(&manifest.file_hash)
+                    {
+                        let _ = state
+                            .app
+                            .write(nauka_raft::types::AppCommand::UnregisterManifest {
+                                file_hash: manifest.file_hash.clone(),
+                            })
+                            .await;
+                    }
+                    tracing::info!(
+                        file = %manifest.file_hash, degraded,
+                        "locally-acked upload dispersed"
+                    );
+                    let _ = tokio::fs::remove_file(&path).await;
+                    let _ = tokio::fs::remove_file(staged_metadata_path(&state, &hash)).await;
+                    let _ = sync_directory(state.tmp_dir.clone()).await;
+                    break;
+                }
+                Err(DispatchError::Unavailable(reason)) => {
+                    unavailable_attempt = unavailable_attempt.saturating_add(1);
+                    metrics::counter!("nauka_local_ack_drain_failures_total").increment(1);
+                    let delay = 1u64 << unavailable_attempt.min(8);
+                    tracing::warn!(
+                        path = %path.display(), reason, retry_in_seconds = delay,
+                        "staged dispersal unavailable; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+                Err(DispatchError::Failed(error)) => {
+                    // A permanent failure needs operator attention. Keep both
+                    // the bytes in the backlog gauge and the in-flight key:
+                    // admitting another encoder would duplicate work and
+                    // falsely claim that the single-node window had closed.
+                    tracing::error!(
+                        path = %path.display(),
+                        "staged dispersal failed permanently, bytes retained: {error:#}"
+                    );
+                    metrics::counter!("nauka_local_ack_drain_failures_total").increment(1);
+                    return;
+                }
             }
         }
-        let left = state
-            .staged_bytes
-            .fetch_sub(size, std::sync::atomic::Ordering::Relaxed)
-            .saturating_sub(size);
-        metrics::gauge!("nauka_staged_bytes").set(left as f64);
+        release_staged(&state.staged_bytes, size);
+        state
+            .staged_drains
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&hash);
     });
 }
 
@@ -2252,13 +2701,27 @@ pub(crate) async fn recover_staged_uploads(state: Arc<ApiState>) {
         else {
             continue;
         };
-        if state.store.get_manifest(hash).is_ok() {
+        // Only the replicated registry proves that dispersion committed.
+        // A crash can happen after `put_manifest` wrote the local copy but
+        // before the Raft proposal; treating that local file as completion
+        // would discard the only durable ingress copy without publishing
+        // the object cluster-wide.
+        if state.app.app_state().manifests.contains_key(hash) {
             let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::remove_file(staged_metadata_path(&state, hash)).await;
             continue;
         }
         let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+        let metadata = read_staged_metadata(&state, hash).await;
         tracing::warn!(file = %hash, "resuming a locally-acked upload left undispersed");
-        spawn_staged_drain(state.clone(), path, size, None);
+        spawn_staged_drain(
+            state.clone(),
+            path,
+            size,
+            metadata.as_ref().and_then(|value| value.name.clone()),
+            metadata.and_then(|value| value.expires_at),
+            None,
+        );
         resumed += 1;
     }
     if resumed > 0 {
@@ -2451,9 +2914,10 @@ pub(crate) async fn fetch_stripe_slots(
         let spawn_fetch = |i: usize| {
             let f = fetcher.clone();
             let h = stripe.shard_hashes[i].clone();
+            let preferred = holders.get(i).map(|holder| (*holder).to_string());
             async move {
                 let t0 = std::time::Instant::now();
-                let out = f.clone().fetch(h).await;
+                let out = f.clone().fetch_preferred(h, preferred).await;
                 if out.is_some() {
                     f.note_fetch_latency(t0.elapsed());
                 }
@@ -2566,17 +3030,21 @@ pub(crate) async fn reconstruct_stripe(
     // Then the neighbor's cache: one local transfer beats k far ones.
     if let Some(data) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
         if let Some(cache) = &fetcher.state.cache {
-            cache.put(&m.file_hash, stripe_idx, &data);
+            let _ = cache.put(&m.file_hash, stripe_idx, &data);
         }
         return Ok(data);
     }
     let (slots, remote_used) = fetch_stripe_slots(fetcher, stripe, stripe_idx, m).await;
-    let data = decode_stripe(slots, stripe, &m.config)?;
+    let stripe = stripe.clone();
+    let config = m.config;
+    let data = tokio::task::spawn_blocking(move || decode_stripe(slots, &stripe, &config))
+        .await
+        .context("joining stripe reconstruction")??;
     // Only worth keeping when the bytes crossed the cluster: stripes that
     // decode from local shards are already free.
     if remote_used {
         if let Some(cache) = &fetcher.state.cache {
-            cache.put(&m.file_hash, stripe_idx, &data);
+            let _ = cache.put(&m.file_hash, stripe_idx, &data);
         }
     }
     Ok(data)
@@ -2654,7 +3122,33 @@ async fn download(
             // Same fallback as the S3 door: a locally-acked upload still
             // dispersing is readable from its staged copy on this disk.
             None => match staged_len(&state, &hash).await {
-                Some(len) => return serve_staged(&state, &hash, len, &headers).await,
+                Some(len) => {
+                    let range_header = headers
+                        .get(header::RANGE)
+                        .and_then(|value| value.to_str().ok());
+                    let parsed_range = parse_range(range_header, len);
+                    let served = match parsed_range {
+                        Some((start, end)) => end - start + 1,
+                        None if range_header.is_some() => 0,
+                        None => len,
+                    };
+                    if served > 0 {
+                        if let Some(billed) = &grant.billed_space {
+                            record_space_egress(&state, billed, served);
+                        }
+                    }
+                    return serve_staged(
+                        &state,
+                        &hash,
+                        len,
+                        &headers,
+                        rate,
+                        throttled_by_quota,
+                        conc_guard,
+                        grant.content_type,
+                    )
+                    .await;
+                }
                 None => return Ok((StatusCode::NOT_FOUND, "unknown file").into_response()),
             },
         },
@@ -2918,34 +3412,41 @@ const WARM_CONCURRENCY: usize = 2;
 /// big to fit without evicting half the LRU.
 pub(crate) async fn warmer_loop(state: Arc<ApiState>, mut rx: tokio::sync::mpsc::Receiver<String>) {
     while let Some(file_hash) = rx.recv().await {
-        let Some(manifest) = state.app.app_state().manifests.get(&file_hash).cloned() else {
-            continue;
-        };
-        let Some(cache) = &state.cache else { continue };
-        // A single file may not monopolize the cache: past a quarter of
-        // the budget, warming it whole would evict more value than it
-        // adds.
-        if manifest.file_size > cache.budget() / 4 {
-            continue;
-        }
-        use futures::StreamExt as _;
-        let fetcher = Arc::new(Fetcher::new(state.clone()));
-        let m = Arc::new(manifest);
-        let warmed = futures::stream::iter((0..m.stripes.len()).map(|i| {
-            let fetcher = fetcher.clone();
-            let m = m.clone();
-            async move {
-                reconstruct_stripe(&fetcher, &m.stripes[i], i, &m)
-                    .await
-                    .is_ok()
+        let warmed = match (
+            state.app.app_state().manifests.get(&file_hash).cloned(),
+            state.cache.clone(),
+        ) {
+            (Some(manifest), Some(cache)) if manifest.file_size <= cache.budget() / 4 => {
+                use futures::StreamExt as _;
+                let fetcher = Arc::new(Fetcher::new(state.clone()));
+                let m = Arc::new(manifest);
+                futures::stream::iter((0..m.stripes.len()).map(|i| {
+                    let fetcher = fetcher.clone();
+                    let cache = cache.clone();
+                    let m = m.clone();
+                    async move {
+                        match reconstruct_stripe(&fetcher, &m.stripes[i], i, &m).await {
+                            Ok(data) => cache.put(&m.file_hash, i, &data),
+                            Err(_) => false,
+                        }
+                    }
+                }))
+                .buffered(WARM_CONCURRENCY)
+                .filter(|inserted| std::future::ready(*inserted))
+                .count()
+                .await
             }
-        }))
-        .buffered(WARM_CONCURRENCY)
-        .filter(|ok| std::future::ready(*ok))
-        .count()
-        .await;
-        metrics::counter!("nauka_warm_files_total").increment(1);
-        metrics::counter!("nauka_warm_stripes_total").increment(warmed as u64);
+            _ => 0,
+        };
+        if warmed > 0 {
+            metrics::counter!("nauka_warm_files_total").increment(1);
+            metrics::counter!("nauka_warm_stripes_total").increment(warmed as u64);
+        }
+        state
+            .warm_pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&file_hash);
     }
 }
 
@@ -2971,7 +3472,18 @@ fn note_hot_read(state: &ApiState, hash: &str) {
     }
     entry.0 += 1;
     if entry.0 >= HOT_THRESHOLD {
-        let _ = tx.try_send(hash.to_string());
+        let queued = state
+            .warm_pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(hash.to_string());
+        if queued && tx.try_send(hash.to_string()).is_err() {
+            state
+                .warm_pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(hash);
+        }
         hot.remove(hash);
     }
 }
@@ -3006,7 +3518,7 @@ async fn read_stripe_window(
     }
     if let Some(d) = neighbor_cached_stripe(fetcher, stripe, stripe_idx, m).await {
         if let Some(cache) = &fetcher.state.cache {
-            cache.put(&m.file_hash, stripe_idx, &d);
+            let _ = cache.put(&m.file_hash, stripe_idx, &d);
         }
         if to <= d.len() {
             return Ok(d[from..to].to_vec());
@@ -3020,9 +3532,7 @@ async fn read_stripe_window(
         let mut complete = true;
         for i in s0..=s1 {
             match fetcher.clone().fetch(stripe.shard_hashes[i].clone()).await {
-                Some((d, _)) if nauka_erasure::hash_bytes(&d) == stripe.shard_hashes[i] => {
-                    span.extend_from_slice(&d)
-                }
+                Some((d, _)) => span.extend_from_slice(&d),
                 _ => {
                     complete = false;
                     break;
@@ -3248,23 +3758,54 @@ impl Fetcher {
     /// The flag says whether the bytes crossed the network — what decides
     /// if the decoded stripe is worth caching.
     pub(crate) async fn fetch(self: Arc<Self>, hash: String) -> Option<(Vec<u8>, bool)> {
-        if let Ok(data) = self.state.store.get_shard(&hash) {
+        self.fetch_preferred(hash, None).await
+    }
+
+    /// Same lookup with the placement owner first. Membership drift can
+    /// make the prediction stale, so every other live member remains a
+    /// correctness-preserving fallback.
+    async fn fetch_preferred(
+        self: Arc<Self>,
+        hash: String,
+        preferred: Option<String>,
+    ) -> Option<(Vec<u8>, bool)> {
+        let store = self.state.store.clone();
+        let local_hash = hash.clone();
+        if let Ok(Ok(data)) =
+            tokio::task::spawn_blocking(move || store.get_shard(&local_hash)).await
+        {
             record_shard_fetch(SHARD_LOCAL);
             return Some((data, false));
         }
-        for (node, _) in self.view.iter().filter(|(n, _)| *n != self.state.self_id) {
-            let Some(client) = self.client_for(node).await else {
+        let mut peers = Vec::with_capacity(self.view.len());
+        if let Some(owner) = preferred.filter(|owner| *owner != self.state.self_id) {
+            peers.push(owner);
+        }
+        for (node, _) in self
+            .view
+            .iter()
+            .filter(|(node, _)| *node != self.state.self_id)
+        {
+            if !peers.contains(node) {
+                peers.push(node.clone());
+            }
+        }
+        for node in peers {
+            let Some(client) = self.client_for(&node).await else {
                 continue;
             };
             match tokio::time::timeout(SHARD_TIMEOUT, client.get_shard(&hash)).await {
                 Ok(Ok(Some(data))) => {
-                    record_shard_fetch(SHARD_REMOTE);
-                    return Some((data, true));
+                    if nauka_erasure::hash_bytes(&data) == hash {
+                        record_shard_fetch(SHARD_REMOTE);
+                        return Some((data, true));
+                    }
+                    metrics::counter!("nauka_remote_corrupt_shards_total").increment(1);
                 }
                 Ok(Ok(None)) => {}
                 // Error or timeout: the connection is suspect, we write it
                 // off for the rest of the request.
-                _ => self.mark_dead(node).await,
+                _ => self.mark_dead(&node).await,
             }
         }
         record_shard_fetch(SHARD_MISSING);
@@ -3435,7 +3976,29 @@ fn uuid_ish() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_range, ApiError, DispatchError, NodeLocation, StatusCode, NO_QUORUM};
+    use super::{
+        parse_range, release_staged, reserve_staged_counter, ApiError, DispatchError, NodeLocation,
+        StatusCode, NO_QUORUM, STAGED_BACKLOG_MAX,
+    };
+    use std::sync::{atomic::AtomicU64, Arc};
+
+    #[test]
+    fn staging_capacity_is_reserved_atomically_and_released_on_drop() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let first = reserve_staged_counter(counter.clone(), STAGED_BACKLOG_MAX - 1).unwrap();
+        assert!(reserve_staged_counter(counter.clone(), 2).is_none());
+        drop(first);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        let full = reserve_staged_counter(counter.clone(), STAGED_BACKLOG_MAX).unwrap();
+        full.hand_off();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Acquire),
+            STAGED_BACKLOG_MAX
+        );
+        release_staged(&counter, STAGED_BACKLOG_MAX);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
 
     #[test]
     fn node_location_only_accepts_a_city_and_iso_country_code() {

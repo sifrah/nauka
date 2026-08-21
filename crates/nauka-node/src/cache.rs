@@ -138,17 +138,17 @@ impl StripeCache {
     /// Stores a decoded stripe, then evicts least-recently-used entries
     /// until the cache fits its budget. A stripe larger than the whole
     /// budget is simply not cached.
-    pub fn put(&self, file_hash: &str, stripe_idx: usize, data: &[u8]) {
+    pub fn put(&self, file_hash: &str, stripe_idx: usize, data: &[u8]) -> bool {
         let len = data.len() as u64;
         if len > self.budget {
-            return;
+            return false;
         }
         let key = entry_key(file_hash, stripe_idx);
         if self.lock().entries.contains_key(&key) {
-            return;
+            return false;
         }
         if std::fs::write(self.dir.join(&key), data).is_err() {
-            return;
+            return false;
         }
         {
             let mut inner = self.lock();
@@ -169,6 +169,7 @@ impl StripeCache {
             }
         }
         self.evict_to_budget();
+        true
     }
 
     fn evict_to_budget(&self) {

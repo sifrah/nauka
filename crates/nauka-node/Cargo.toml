@@ -93,6 +93,7 @@ section = "utils"
 priority = "optional"
 assets = [
     ["../../target/release/nauka", "usr/bin/", "755"],
+    ["../../packaging/99-nauka-transport.conf", "usr/lib/sysctl.d/", "644"],
     ["../../packaging/nauka.env.example", "usr/share/doc/nauka/", "644"],
     ["../../README.md", "usr/share/doc/nauka/", "644"],
 ]
@@ -106,6 +107,7 @@ license = "AGPL-3.0"
 summary = "Distributed storage engine that heals itself"
 assets = [
     { source = "../../target/release/nauka", dest = "/usr/bin/nauka", mode = "755" },
+    { source = "../../packaging/99-nauka-transport.conf", dest = "/usr/lib/sysctl.d/99-nauka-transport.conf", mode = "644" },
     { source = "../../packaging/nauka.service", dest = "/usr/lib/systemd/system/nauka.service", mode = "644" },
     { source = "../../packaging/nauka.env.example", dest = "/usr/share/doc/nauka/nauka.env.example", mode = "644" },
     { source = "../../README.md", dest = "/usr/share/doc/nauka/README.md", mode = "644" },

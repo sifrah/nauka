@@ -133,6 +133,10 @@ fn describe_node() {
         "Uploads acked after a local fsync, before cluster dispersal. Each one opens a window where the object lives on this node alone."
     );
     metrics::describe_counter!(
+        "nauka_native_local_ack_uploads_total",
+        "Content-bound native uploads accepted through the durable local-ack path."
+    );
+    metrics::describe_counter!(
         "nauka_local_ack_drain_failures_total",
         "Locally-acked uploads whose background dispersal failed. The staged copy stays on disk and the next restart retries it; a climbing counter means objects are sitting at single-node redundancy."
     );
@@ -166,7 +170,11 @@ fn describe_node() {
     );
     metrics::describe_counter!(
         "nauka_cache_misses_total",
-        "Stripe-cache lookups that had to cross the cluster. A miss whose backing file lost a race with eviction counts here too — the caller pays the same fetch."
+        "Stripe-cache lookups that required shard reads, local or remote. A miss whose backing file lost a race with eviction counts here too."
+    );
+    metrics::describe_counter!(
+        "nauka_remote_corrupt_shards_total",
+        "Remote shard responses rejected because their BLAKE3 did not match the requested content hash."
     );
 }
 
