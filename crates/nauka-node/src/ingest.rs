@@ -485,6 +485,8 @@ pub fn fs_available(path: &std::path::Path) -> u64 {
         if let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
             let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
             if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
+                // statvfs field widths differ across Unix targets.
+                #[allow(clippy::unnecessary_cast)]
                 return (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
             }
         }
