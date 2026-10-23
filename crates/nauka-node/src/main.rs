@@ -10,6 +10,7 @@ mod cache;
 mod dns;
 mod e2e;
 mod egress;
+mod http_server;
 mod ingest;
 mod node;
 mod operator_auth;

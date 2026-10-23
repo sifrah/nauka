@@ -206,11 +206,9 @@ pub async fn serve_http(listen: SocketAddr, state: Arc<ApiState>) -> Result<()> 
     let router = router(state);
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!("HTTP API on http://{listen}");
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    crate::http_server::with_timeouts(axum_server::Server::from_listener(listener))
+        .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await?;
     Ok(())
 }
 
