@@ -10,6 +10,7 @@ mod cache;
 mod dns;
 mod e2e;
 mod egress;
+mod http_server;
 mod ingest;
 mod node;
 mod operator_auth;
@@ -2383,6 +2384,8 @@ fn filesystem_capacity(path: &std::path::Path) -> u64 {
         };
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
+            // statvfs field widths differ across Unix targets.
+            #[allow(clippy::unnecessary_cast)]
             return (stat.f_blocks as u64).saturating_mul(stat.f_frsize as u64);
         }
     }

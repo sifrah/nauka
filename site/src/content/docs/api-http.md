@@ -17,6 +17,25 @@ required for access control any more. Content confidentiality is a
 separate, already-solved problem: [end-to-end encryption](/encryption/)
 keeps the nodes blind to what they store.
 
+## Connection timeouts
+
+The native HTTP and HTTPS listeners allow 30 seconds to identify the
+protocol on a new connection, then 30 seconds to receive complete HTTP/1
+request headers. The first deadline also closes connections that send
+nothing or only part of the HTTP/2 preface. Sending one byte at a time
+does not reset either deadline.
+
+After an HTTP/1 response and its request body have finished, the next
+request's headers must arrive within 30 seconds. Clients can reuse the
+connection during that interval and reconnect after it expires. The
+optional S3 listener applies the same HTTP/1 header deadline.
+
+These limits do not cap upload or download duration, server-side
+processing, or intentional bandwidth throttling. HTTP/2 sends a protocol
+ping after 30 seconds without activity and closes the connection if the
+peer does not acknowledge it within another 30 seconds. Responsive
+HTTP/2 connections can remain idle and be reused.
+
 ## `POST /api/upload?name=<name>&ttl=<seconds>&ack=<encoded|local>`
 
 Body: the file's raw bytes. With curl use `-T <file>`:

@@ -110,15 +110,17 @@ pub async fn run(state: Arc<ApiState>, domain: String, data_dir: PathBuf) {
                         tokio::spawn(async move {
                             eprintln!("https: serving on :443");
                             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 443));
-                            if let Err(e) = axum_server::bind_rustls(addr, cfg2)
+                            if let Err(e) = crate::http_server::with_timeouts(
+                                axum_server::bind_rustls(addr, cfg2),
+                            )
                             .serve(
                                 router
                                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
                             )
                             .await
-                        {
-                            eprintln!("https: server stopped: {e}");
-                        }
+                            {
+                                eprintln!("https: server stopped: {e}");
+                            }
                         });
                         rustls_config = Some(cfg);
                         serving = true;

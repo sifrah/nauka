@@ -3974,6 +3974,8 @@ pub async fn serve(listen: std::net::SocketAddr, state: Arc<ApiState>) -> anyhow
         tokio::spawn(async move {
             let io = hyper_util::rt::TokioIo::new(stream);
             if let Err(e) = hyper::server::conn::http1::Builder::new()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(crate::http_server::HEADER_READ_TIMEOUT)
                 .serve_connection(io, svc)
                 .await
             {

@@ -37,7 +37,7 @@ data-encoding = { version = "2", optional = true }
 time = "0.3"
 percent-encoding = { version = "2", optional = true }
 futures = "0.3"
-hyper-util = { version = "0.1", features = ["server", "tokio"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -78,6 +78,11 @@ hickory-proto = "0.26.1"
 instant-acme = "0.8.5"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+[dev-dependencies]
+hyper = { version = "1", features = ["client", "http2"] }
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 
 # ── Debian package (cargo-deb) ────────────────────────────────────────────
 [package.metadata.deb]

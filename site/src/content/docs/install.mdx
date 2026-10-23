@@ -72,6 +72,14 @@ version until it restarts — on a systemd deployment, follow with
 `systemctl restart nauka`. If the binary lives in a root-owned directory,
 run `sudo nauka update`.
 
+Before updating a service, retain a copy of its current binary and
+configuration for rollback. `nauka update` does not create a backup or
+roll back automatically. Keep the existing data directory, cluster
+identity and `node.key`; an update does not require `init` or a membership
+change. Update one node at a time, preserving a voting majority, and check
+its version, cluster status and a known file after each restart. A
+single-node cluster is briefly unavailable during its restart.
+
 Re-running the install script performs the same upgrade; `nauka update` is
 the same thing without a shell pipeline, usable from cron or a fleet
 runner.

@@ -16,6 +16,8 @@ use crate::telemetry;
 /// the Raft RPCs coming in over the transport.
 #[async_trait::async_trait]
 pub trait RaftHandler: Send + Sync {
+    // async_trait adds #[must_use] to the already must-use boxed Future.
+    #[allow(clippy::double_must_use)]
     async fn handle(&self, rpc: RaftRpc) -> Result<Vec<u8>, String>;
 }
 
